@@ -35,6 +35,16 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
+# Make the Odysseus repo importable (core.constants / core.database)
+# regardless of invocation cwd or where this file is deployed.
+# Default assumes the in-repo location scripts/vault_heartbeat.py;
+# override with ODYSSEUS_ROOT when deployed elsewhere.
+_ODYSSEUS_ROOT = Path(
+    os.environ.get("ODYSSEUS_ROOT", Path(__file__).resolve().parents[1])
+).expanduser()
+if str(_ODYSSEUS_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ODYSSEUS_ROOT))
+
 HEARTBEAT_SCHEMA_VERSION = 1
 HEARTBEAT_REPORT_KIND = "odysseus-heartbeat"
 ACTIONS_YAML_RELATIVE_PATH = "automation/config/odysseus_actions.yaml"
