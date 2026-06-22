@@ -1,8 +1,10 @@
 """Background scheduler for ScheduledTask execution."""
 
 import asyncio
+import contextlib
 import json
 import logging
+import os
 import re
 import time
 import uuid
@@ -10,6 +12,14 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable, Dict, Tuple
 
 logger = logging.getLogger(__name__)
+
+
+def _model_task_timeout_seconds() -> int:
+    try:
+        value = int(os.environ.get("ODYSSEUS_MODEL_TASK_TIMEOUT_SECONDS", "3600"))
+    except ValueError:
+        value = 3600
+    return max(300, value)
 
 
 def _utcnow() -> datetime:
@@ -273,6 +283,19 @@ class TaskScheduler:
                 db.close()
         except Exception:
             logger.debug("Task progress update failed", exc_info=True)
+
+    async def _emit_run_liveness(self, run_id: str, task_name: str, interval_seconds: float | None = None):
+        """Persist a bounded progress heartbeat until the owning task cancels this coroutine."""
+        if interval_seconds is None:
+            try:
+                interval_seconds = float(os.environ.get("ODYSSEUS_TASK_LIVENESS_SECONDS", "300"))
+            except ValueError:
+                interval_seconds = 300.0
+        interval_seconds = max(0.01, interval_seconds)
+        while True:
+            await asyncio.sleep(interval_seconds)
+            stamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            self._set_run_progress(run_id, f"Running {task_name}; liveness {stamp}")
 
     def _mark_run_aborted(self, task_id: str, run_id: str | None = None, message: str = "Stopped by user") -> bool:
         """Mark an active run as aborted. Used by stop/cancel paths."""
@@ -667,6 +690,7 @@ class TaskScheduler:
         from core.database import SessionLocal, ScheduledTask, TaskRun
 
         db = SessionLocal()
+        liveness_task = None
         try:
             task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
             if not task or task.status != "active":
@@ -702,6 +726,8 @@ class TaskScheduler:
                 db.add(run)
                 db.commit()
 
+            liveness_task = asyncio.create_task(self._emit_run_liveness(run_id, task.name or task.id))
+
             task_type = task.task_type or "llm"
 
             from src.builtin_actions import TaskDeferred, TaskNoop
@@ -718,12 +744,18 @@ class TaskScheduler:
                     if not success:
                         run.error = result
                 elif task_type == "research":
-                    result = await self._execute_research_task(task, db)
+                    result = await asyncio.wait_for(
+                        self._execute_research_task(task, db),
+                        timeout=_model_task_timeout_seconds(),
+                    )
                     run.status = "success"
                     run.result = result
                 else:
                     # LLM task — use agent loop for tool access
-                    result = await self._execute_llm_task(task, db)
+                    result = await asyncio.wait_for(
+                        self._execute_llm_task(task, db),
+                        timeout=_model_task_timeout_seconds(),
+                    )
                     run.status = "success"
                     run.result = result
                 # Record which model actually ran (resolved inside the executor).
@@ -935,6 +967,10 @@ class TaskScheduler:
             except Exception:
                 logger.exception("Task %s error-path failed unexpectedly", task_id)
         finally:
+            if liveness_task is not None:
+                liveness_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await liveness_task
             db.close()
             handle = self._task_handles.get(task_id)
             if handle is asyncio.current_task():
@@ -1014,6 +1050,12 @@ class TaskScheduler:
         action_fn = BUILTIN_ACTIONS.get(task.action)
         if not action_fn:
             return f"Unknown action: {task.action}", False
+
+        if task.action in ("run_local", "run_script", "ssh_command"):
+            from src.drm_runtime_guard import check_drm_runtime_guard
+            allowed, reason = check_drm_runtime_guard(task.name)
+            if not allowed:
+                return f"DRM runtime guard refused actuation: {reason}", False
 
         from src.builtin_actions import TaskNoop
         try:
