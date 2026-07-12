@@ -2,8 +2,8 @@
 
 Covers:
 - _is_ollama_openai_compat_url: URL classification (local host + /v1 path)
-- think: false is injected into the payload for Ollama /v1 thinking models
-- think: false is NOT injected for non-thinking models or non-Ollama /v1 endpoints
+- reasoning_effort: none is injected for Ollama /v1 thinking models
+- reasoning_effort is NOT injected for non-thinking models or non-Ollama /v1 endpoints
 """
 import asyncio
 import json
@@ -49,6 +49,23 @@ class _FakeClient:
         return _FakeStreamCtx(self.captured_payload)
 
 
+class _PostResp:
+    is_success = True
+    status_code = 200
+
+    def json(self):
+        return {"choices": [{"message": {"content": "ok"}}]}
+
+
+class _PostClient:
+    def __init__(self):
+        self.captured_payload = {}
+
+    async def post(self, url, **kwargs):
+        self.captured_payload = kwargs.get("json") or {}
+        return _PostResp()
+
+
 def _capture_payload(monkeypatch, url, model):
     """Run stream_llm, intercept the HTTP payload, and return it."""
     client = _FakeClient()
@@ -64,6 +81,23 @@ def _capture_payload(monkeypatch, url, model):
         )]
 
     asyncio.run(run())
+    return client.captured_payload
+
+
+def _capture_nonstream_payload(monkeypatch, url, model):
+    client = _PostClient()
+    monkeypatch.setattr(llm_core, "_get_http_client", lambda: client)
+    monkeypatch.setattr(llm_core, "_is_host_dead", lambda value: False)
+    monkeypatch.setattr(llm_core, "note_model_activity", lambda *args, **kwargs: None)
+    monkeypatch.setattr(llm_core, "_clear_host_dead", lambda *args, **kwargs: None)
+
+    asyncio.run(llm_core.llm_call_async(
+        url,
+        model,
+        [{"role": "user", "content": "hi"}],
+        max_retries=1,
+        allow_reasoning_fallback=False,
+    ))
     return client.captured_payload
 
 
@@ -127,39 +161,47 @@ class TestIsOllamaOpenAICompatUrl:
 
 
 # ---------------------------------------------------------------------------
-# Payload injection — think: false only when both conditions hold
+# Payload injection — reasoning effort only when both conditions hold
 # ---------------------------------------------------------------------------
 
 class TestThinkSuppression:
-    """Assert think:false is present/absent in the outgoing HTTP payload."""
+    """Assert reasoning_effort:none is scoped to Ollama thinking models."""
 
-    def test_think_false_for_ollama_v1_thinking_model(self, monkeypatch):
-        """think:false must be set for qwen3 on Ollama /v1."""
+    def test_no_reasoning_for_ollama_v1_thinking_model(self, monkeypatch):
+        """reasoning_effort:none must be set for qwen3 on Ollama /v1."""
         payload = _capture_payload(
             monkeypatch, "http://127.0.0.1:11434/v1/chat/completions", "qwen3:14b"
         )
-        assert payload.get("think") is False
+        assert payload.get("reasoning_effort") == "none"
+        assert "think" not in payload
 
-    def test_no_think_for_ollama_v1_non_thinking_model(self, monkeypatch):
-        """think must NOT be set for a plain (non-thinking) model on Ollama /v1."""
+    def test_nonstream_uses_documented_reasoning_effort(self, monkeypatch):
+        payload = _capture_nonstream_payload(
+            monkeypatch, "http://127.0.0.1:11436/v1/chat/completions", "qwen3:8b"
+        )
+        assert payload.get("reasoning_effort") == "none"
+        assert "think" not in payload
+
+    def test_no_reasoning_field_for_ollama_v1_non_thinking_model(self, monkeypatch):
+        """Suppression is unnecessary for plain models."""
         payload = _capture_payload(
             monkeypatch, "http://127.0.0.1:11434/v1/chat/completions", "llama3.2:3b"
         )
-        assert "think" not in payload
+        assert "reasoning_effort" not in payload
 
-    def test_no_think_for_openai_endpoint_with_thinking_model_name(self, monkeypatch):
-        """think must NOT leak to a real OpenAI endpoint even if the model name
+    def test_no_reasoning_field_for_openai_endpoint_with_thinking_model_name(self, monkeypatch):
+        """Ollama suppression must not leak to OpenAI even if the model name
         matches a thinking pattern — the URL guard is what matters."""
         payload = _capture_payload(
             monkeypatch, "https://api.openai.com/v1/chat/completions", "qwen3:14b"
         )
-        assert "think" not in payload
+        assert "reasoning_effort" not in payload
 
-    def test_think_false_for_non_default_port_thinking_model(self, monkeypatch):
+    def test_no_reasoning_for_non_default_port_thinking_model(self, monkeypatch):
         """Custom-port localhost Ollama (e.g. OLLAMA_HOST=0.0.0.0:11435) must
-        also receive think:false — this is the regression guarded by the
+        also receive reasoning_effort:none — this is the regression guarded by the
         host-set check added in this fix."""
         payload = _capture_payload(
             monkeypatch, "http://127.0.0.1:11435/v1/chat/completions", "qwen3:14b"
         )
-        assert payload.get("think") is False
+        assert payload.get("reasoning_effort") == "none"

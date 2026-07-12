@@ -99,8 +99,9 @@ def test_plan_consults_named_then_intent_and_records_linked_handoffs(tmp_path, m
     assert body["text"] == "Synthesized plan."
     assert body["capsule_id"]
     assert len(body["handoff_ids"]) == 2
-    assert [call[1]["max_tokens"] for call in calls] == [240, 240, 700]
-    assert [call[1]["timeout"] for call in calls] == [10, 10, 25]
+    assert [call[1]["max_tokens"] for call in calls] == [180, 180, 500]
+    assert [call[1]["timeout"] for call in calls] == [8, 8, 30]
+    assert [call[1]["max_retries"] for call in calls] == [1, 1, 1]
     capsules, _ = memory.capsules()
     handoffs, _ = memory.handoffs()
     assert capsules[0]["id"] == body["capsule_id"]

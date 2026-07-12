@@ -128,6 +128,30 @@ def test_high_confidence_model_decision_can_capture_an_implicit_stable_fact(tmp_
     assert result["memory"]["status"] == "saved"
 
 
+def test_high_confidence_request_description_is_not_promoted_to_memory(tmp_path):
+    manager = MemoryManager(str(tmp_path))
+    result = asyncio.run(misumi_routes._apply_retention(
+        prompt="Create a Markdown checklist for testing persona memory",
+        turn={
+            "memory": {
+                "text": "User requested a Markdown checklist.",
+                "category": "fact",
+                "confidence": 0.99,
+            },
+            "artifact": None,
+        },
+        retention_mode="auto",
+        owner="owner",
+        session_id=None,
+        memory_manager=manager,
+        memory_vector=None,
+        session_manager=None,
+    ))
+
+    assert result["memory"]["status"] == "none"
+    assert manager.load(owner="owner") == []
+
+
 def test_structured_model_none_is_not_overridden_by_keyword_fallback():
     turn = misumi_routes._parse_model_turn(
         '{"answer":"Understood.","memory":null,"artifact":null}',
@@ -136,6 +160,15 @@ def test_structured_model_none_is_not_overridden_by_keyword_fallback():
 
     assert turn["retention_decided"] is True
     assert turn["memory"] is None
+    assert turn["artifact"] is None
+
+
+def test_unstructured_fallback_never_creates_a_document_from_the_answer():
+    turn = misumi_routes._parse_model_turn(
+        "The backend returned an ordinary answer.",
+        "Create a document with a testing checklist",
+    )
+
     assert turn["artifact"] is None
 
 
