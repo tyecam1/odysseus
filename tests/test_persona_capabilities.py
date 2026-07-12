@@ -1,6 +1,11 @@
 from pathlib import Path
 
-from src.persona_capabilities import capability_summary, consult_edges, routing_intents
+from src.persona_capabilities import (
+    capability_summary,
+    consult_edges,
+    repository_capabilities,
+    routing_intents,
+)
 
 
 PERSONAS = """\
@@ -31,6 +36,10 @@ def _root(tmp_path: Path, monkeypatch, content: str = PERSONAS) -> Path:
     path.write_text(content, encoding="utf-8")
     monkeypatch.setattr("src.persona_capabilities._resolve_seed_root", lambda: root)
     return root
+
+
+def _registry(root: Path, content: str) -> None:
+    (root / "config" / "capabilities.yaml").write_text(content, encoding="utf-8")
 
 
 def test_capability_summary_returns_none_when_file_missing(tmp_path, monkeypatch):
@@ -93,3 +102,59 @@ def test_consult_edges_returns_none_when_missing_or_malformed(tmp_path, monkeypa
         encoding="utf-8",
     )
     assert consult_edges("aoteru") is None
+
+
+def test_repository_capabilities_project_owner_consult_and_external(tmp_path, monkeypatch):
+    root = _root(tmp_path, monkeypatch)
+    _registry(
+        root,
+        """\
+groups:
+  - id: household-tools
+    owner: sanji
+    consults: [aoteru]
+external_patterns:
+  - id: langgraph-state-machine
+    owner: aoteru
+    consults: [sanji]
+    disposition: adopted_pattern
+""",
+    )
+
+    assert repository_capabilities("sanji") == {
+        "groups": ["household-tools (owner)"],
+        "external_patterns": ["langgraph-state-machine (adopted_pattern)"],
+    }
+    assert repository_capabilities("aoteru") == {
+        "groups": ["household-tools (consult)"],
+        "external_patterns": ["langgraph-state-machine (adopted_pattern)"],
+    }
+
+    summary = capability_summary("sanji")
+    assert "Capability stewardship: household-tools (owner)" in summary
+    assert "External patterns: langgraph-state-machine (adopted_pattern)" in summary
+    assert "context, not tool authority" in summary
+    assert len(summary.splitlines()) <= 13
+
+
+def test_missing_or_malformed_registry_degrades_without_losing_persona(tmp_path, monkeypatch):
+    root = _root(tmp_path, monkeypatch)
+    assert repository_capabilities("sanji") is None
+    assert "Role: chef" in capability_summary("sanji")
+
+    _registry(root, "groups: bad\nexternal_patterns: []\n")
+    assert repository_capabilities("sanji") is None
+    assert "Capability stewardship:" not in capability_summary("sanji")
+
+
+def test_repository_capabilities_bound_long_group_lists(tmp_path, monkeypatch):
+    root = _root(tmp_path, monkeypatch)
+    groups = "\n".join(
+        f"  - id: group-{index}\n    owner: sanji\n    consults: []" for index in range(6)
+    )
+    _registry(root, f"groups:\n{groups}\nexternal_patterns: []\n")
+
+    projected = repository_capabilities("sanji")
+    assert projected is not None
+    assert projected["groups"][-1] == "+2 more"
+    assert len(projected["groups"]) == 5

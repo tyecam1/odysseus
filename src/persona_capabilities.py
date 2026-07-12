@@ -18,6 +18,7 @@ except ImportError:  # PyYAML is optional at runtime; capability context degrade
 logger = logging.getLogger(__name__)
 
 _CAPABILITY_FILE = Path("config/personas.yaml")
+_REGISTRY_FILE = Path("config/capabilities.yaml")
 _PANELS = {
     "sanji": ("food", "PANTRY"),
     "jin": ("records", "RECORDS"),
@@ -25,6 +26,7 @@ _PANELS = {
     "misato": ("cleaning", "ROTA"),
 }
 _CACHE: dict[Path, tuple[tuple[int, int], Mapping[str, Any] | None]] = {}
+_REGISTRY_CACHE: dict[Path, tuple[tuple[int, int], Mapping[str, Any] | None]] = {}
 
 
 def _load_personas(path: Path) -> Mapping[str, Any] | None:
@@ -48,6 +50,25 @@ def _load_personas(path: Path) -> Mapping[str, Any] | None:
         return personas
     except Exception as exc:
         logger.debug("Misumi persona capabilities unavailable: %s", exc, exc_info=True)
+        return None
+
+
+def _load_registry(path: Path) -> Mapping[str, Any] | None:
+    """Load and mtime-cache the capability registry without propagating failures."""
+    if yaml is None:
+        return None
+    try:
+        stat = path.stat()
+        signature = (stat.st_mtime_ns, stat.st_size)
+        cached = _REGISTRY_CACHE.get(path)
+        if cached and cached[0] == signature:
+            return cached[1]
+        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+        registry = raw if isinstance(raw, Mapping) else None
+        _REGISTRY_CACHE[path] = (signature, registry)
+        return registry
+    except Exception as exc:
+        logger.debug("Misumi capability registry unavailable: %s", exc, exc_info=True)
         return None
 
 
@@ -80,6 +101,13 @@ def _line(label: str, value: Any) -> str | None:
     if items is None:
         return None
     return f"{label}: {', '.join(items) if items else 'none specified'}"
+
+
+def _bounded(items: list[str], limit: int = 4) -> list[str]:
+    ordered = sorted(items)
+    if len(ordered) <= limit:
+        return ordered
+    return ordered[:limit] + [f"+{len(ordered) - limit} more"]
 
 
 def _persona_record(persona_id: object) -> Mapping[str, Any] | None:
@@ -133,6 +161,53 @@ def routing_intents(persona_id: object) -> list[str] | None:
         return None
 
 
+def repository_capabilities(persona_id: object) -> Mapping[str, list[str]] | None:
+    """Return bounded repository capability stewardship for one persona."""
+    try:
+        root = _resolve_seed_root()
+        if root is None:
+            return None
+        path = (root / _REGISTRY_FILE).resolve()
+        try:
+            path.relative_to(root)
+        except ValueError:
+            return None
+        registry = _load_registry(path)
+        if registry is None:
+            return None
+
+        persona = str(persona_id or "").strip().lower()
+        groups: list[str] = []
+        patterns: list[str] = []
+        raw_groups = registry.get("groups")
+        raw_patterns = registry.get("external_patterns")
+        if not isinstance(raw_groups, list) or not isinstance(raw_patterns, list):
+            return None
+        for group in raw_groups:
+            if not isinstance(group, Mapping) or not isinstance(group.get("id"), str):
+                return None
+            consults = group.get("consults")
+            if not isinstance(consults, list):
+                return None
+            if group.get("owner") == persona:
+                groups.append(f"{group['id']} (owner)")
+            elif persona in consults:
+                groups.append(f"{group['id']} (consult)")
+        for pattern in raw_patterns:
+            if not isinstance(pattern, Mapping) or not isinstance(pattern.get("id"), str):
+                return None
+            consults = pattern.get("consults")
+            disposition = pattern.get("disposition")
+            if not isinstance(consults, list) or not isinstance(disposition, str):
+                return None
+            if pattern.get("owner") == persona or persona in consults:
+                patterns.append(f"{pattern['id']} ({disposition})")
+        return {"groups": _bounded(groups), "external_patterns": _bounded(patterns)}
+    except Exception as exc:
+        logger.debug("Misumi repository capabilities unavailable: %s", exc, exc_info=True)
+        return None
+
+
 def capability_summary(persona_id: object) -> str | None:
     """Return a bounded persona capability block, or ``None`` if unavailable."""
     try:
@@ -165,6 +240,15 @@ def capability_summary(persona_id: object) -> str | None:
             f"Role: {' '.join(role.split())}",
             *(line for line in field_lines if line is not None),
         ]
+        repository = repository_capabilities(persona)
+        if repository:
+            groups_line = _line("Capability stewardship", repository.get("groups"))
+            patterns_line = _line("External patterns", repository.get("external_patterns"))
+            if groups_line:
+                lines.append(groups_line)
+            if patterns_line:
+                lines.append(patterns_line)
+            lines.append("Capability stewardship is context, not tool authority.")
         if persona in _PANELS:
             domain, panel = _PANELS[persona]
             lines.append(
