@@ -53,6 +53,8 @@ _ARTIFACT_REQUEST = re.compile(
     r"\b(create|make|write|save|draft|document)\b",
     re.IGNORECASE,
 )
+_INTERACTIVE_SEED_LIMIT = 6000
+_INTERACTIVE_SEED_SECTION_EXCERPT = 320
 
 
 class MisumiRespondRequest(BaseModel):
@@ -129,6 +131,30 @@ def _short_text(value: object, limit: int = 420) -> str:
     text = re.sub(r"<think>.*?</think>", "", str(value or ""), flags=re.I | re.S)
     text = re.sub(r"\s+", " ", text).strip()
     return text[:limit].rstrip()
+
+
+def _interactive_seed_context() -> Optional[str]:
+    """Keep Seed Order governance representative but small enough to answer."""
+    from src.seed_order_context import build_seed_order_context
+
+    seed = build_seed_order_context()
+    if not seed or len(seed) <= _INTERACTIVE_SEED_LIMIT:
+        return seed
+
+    parts = seed.split("\n\n---\n\n")
+    preamble = _short_text(parts[0], 1400)
+    excerpts = []
+    for section in parts[1:]:
+        lines = section.splitlines()
+        heading = lines[0].strip() if lines else "### Seed Order section"
+        body = _short_text("\n".join(lines[1:]), _INTERACTIVE_SEED_SECTION_EXCERPT)
+        excerpts.append(f"{heading}\n{body}".rstrip())
+    compact = (
+        preamble
+        + "\n\nInteractive bounded excerpts follow; consult the canonical repository for full text.\n\n"
+        + "\n\n---\n\n".join(excerpts)
+    )
+    return compact[:_INTERACTIVE_SEED_LIMIT].rstrip()
 
 
 def _consultation_enabled() -> bool:
@@ -219,7 +245,6 @@ async def _consult_persona(
 ) -> str:
     from src.llm_core import llm_call_async
     from src.persona_capabilities import capability_summary
-    from src.seed_order_context import build_seed_order_context
 
     record = persona_record(persona)
     system = (
@@ -231,7 +256,7 @@ async def _consult_persona(
     if capabilities:
         system += f"\n\n{capabilities}"
     system += f"\n{_RATIFICATION_CONSTRAINT}"
-    seed = build_seed_order_context()
+    seed = _interactive_seed_context()
     messages = []
     if seed:
         messages.append({"role": "system", "content": seed})
@@ -342,7 +367,6 @@ async def _model_turn(
     try:
         from src.llm_core import llm_call_async
         from src.persona_capabilities import capability_summary
-        from src.seed_order_context import build_seed_order_context
 
         record = persona_record(persona)
         system = (
@@ -362,7 +386,7 @@ async def _model_turn(
         system += f"\n{_RATIFICATION_CONSTRAINT}"
         messages = list(context_messages or [])
         if not messages:
-            seed = build_seed_order_context()
+            seed = _interactive_seed_context()
             if seed:
                 messages.append({"role": "system", "content": seed})
         messages.append({"role": "system", "content": system})
@@ -402,7 +426,6 @@ async def _model_reply(prompt: str, persona: str) -> tuple[str, Optional[str], O
     try:
         from src.llm_core import llm_call_async
         from src.persona_capabilities import capability_summary
-        from src.seed_order_context import build_seed_order_context
 
         backend, model = _resolve_model_endpoint()
         record = persona_record(persona)
@@ -412,7 +435,7 @@ async def _model_reply(prompt: str, persona: str) -> tuple[str, Optional[str], O
             system += f"\n\n{capabilities}"
         system += f"\n{_RATIFICATION_CONSTRAINT}"
         messages = []
-        seed = build_seed_order_context()
+        seed = _interactive_seed_context()
         if seed:
             messages.append({"role": "system", "content": seed})
         messages.extend((

@@ -7,7 +7,7 @@ from core.models import Session
 from routes import misumi_routes
 from services.memory.skills import SkillsManager
 from src.agent_tools.document_tools import CreateDocumentTool
-from src import endpoint_resolver, llm_core
+from src import endpoint_resolver, llm_core, seed_order_context
 from src.memory import MemoryManager
 
 
@@ -110,6 +110,22 @@ def test_complete_misumi_environment_pin_precedes_global_default(monkeypatch):
         "http://127.0.0.1:11434/v1/chat/completions",
         "qwen3:8b",
     )
+
+
+def test_interactive_seed_context_is_bounded_and_representative(monkeypatch):
+    sections = [
+        f"### docs/section-{index}.md\n" + (f"section-{index} guidance " * 100)
+        for index in range(11)
+    ]
+    oversized = ("governance preamble " * 120) + "\n\n---\n\n" + "\n\n---\n\n".join(sections)
+    monkeypatch.setattr(seed_order_context, "build_seed_order_context", lambda: oversized)
+
+    compact = misumi_routes._interactive_seed_context()
+
+    assert len(compact) <= misumi_routes._INTERACTIVE_SEED_LIMIT
+    assert "Interactive bounded excerpts" in compact
+    assert "### docs/section-0.md" in compact
+    assert "### docs/section-10.md" in compact
 
 
 def test_failed_model_turn_reports_degraded_source_not_backend_url(tmp_path, monkeypatch):
