@@ -4,7 +4,10 @@ import json
 from pathlib import Path
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
+from routes.misumi_operator_runtime_routes import setup_misumi_operator_runtime_routes
 from src.misumi_operator_runtime import HeartbeatRuntime, OperatorConferenceStore
 
 
@@ -90,3 +93,23 @@ def test_heartbeat_rejects_unknown_loop(tmp_path: Path):
     heartbeat = HeartbeatRuntime(tmp_path)
     with pytest.raises(KeyError):
         heartbeat.run_once("free_running_self_mutation_loop")
+
+
+def test_operator_runtime_routes_are_mounted_and_read_only(tmp_path: Path):
+    app = FastAPI()
+    app.include_router(setup_misumi_operator_runtime_routes(tmp_path))
+    client = TestClient(app)
+
+    status = client.get("/misumi/heartbeat/status")
+    assert status.status_code == 200
+    assert status.json()["writes_allowed"] is False
+
+    conferences = client.get("/misumi/operator-conferences")
+    assert conferences.status_code == 200
+    assert conferences.json()["writes_allowed"] is False
+
+
+def test_main_app_registers_operator_runtime_router():
+    app_text = (Path(__file__).parents[1] / "app.py").read_text(encoding="utf-8")
+    assert "from routes.misumi_operator_runtime_routes import" in app_text
+    assert "app.include_router(setup_misumi_operator_runtime_routes())" in app_text

@@ -776,6 +776,11 @@ app.include_router(setup_misumi_routes(
     memory_vector=memory_vector,
 ))
 
+# Misumi operator-conference + bounded heartbeat runtime (durable, proposal-only).
+# Separate module so the large misumi_routes compatibility surface is not rewritten.
+from routes.misumi_operator_runtime_routes import setup_misumi_operator_runtime_routes
+app.include_router(setup_misumi_operator_runtime_routes())
+
 # Calendar (CalDAV)
 from routes.calendar_routes import setup_calendar_routes
 calendar_router = setup_calendar_routes(upload_handler=upload_handler)
