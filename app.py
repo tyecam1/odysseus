@@ -774,6 +774,9 @@ app.include_router(setup_misumi_routes(
     skills_manager,
     task_scheduler=task_scheduler,
     memory_vector=memory_vector,
+    memory_manager=memory_manager,
+    session_manager=session_manager,
+    chat_processor=chat_processor,
 ))
 
 # Misumi operator-conference + bounded heartbeat runtime (durable, proposal-only).

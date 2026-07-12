@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 import os
 import re
 import time
+import uuid
 from pathlib import Path
-from typing import Dict, List, Optional, Union
+from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -28,7 +31,23 @@ _HONESTY_CONSTRAINTS = (
     "Phase A household access is read-only."
 )
 _RATIFICATION_CONSTRAINT = "Household changes go through proposals that the user ratifies."
-_NEUTRAL_HANDOFF_ACTION = "review the plan and contribute next steps"
+_SENSITIVE_TEXT = re.compile(
+    r"\b(password|passphrase|api[ _-]?key|access[ _-]?token|secret|private[ _-]?key|seed phrase)\b|"
+    r"\b(?:sk[-_]|ody_)[A-Za-z0-9_-]{12,}\b|-----BEGIN [A-Z ]+PRIVATE KEY-----",
+    re.IGNORECASE,
+)
+_DURABLE_MEMORY = re.compile(
+    r"\b(remember|memor(?:ise|ize)|we decided|decided to|i prefer|i like|i dislike|"
+    r"my favou?rite|always use|never use|still need to|next step|blocked by|my name is)\b",
+    re.IGNORECASE,
+)
+_ARTIFACT_REQUEST = re.compile(
+    r"\b(create|make|write|save|draft|document|turn)\b.{0,48}"
+    r"\b(file|document|note|plan|checklist|spec(?:ification)?|recipe|list|brief|report)\b|"
+    r"\b(file|document|note|plan|checklist|spec(?:ification)?|recipe|list|brief|report)\b.{0,32}"
+    r"\b(create|make|write|save|draft|document)\b",
+    re.IGNORECASE,
+)
 
 
 class MisumiRespondRequest(BaseModel):
@@ -38,6 +57,9 @@ class MisumiRespondRequest(BaseModel):
     mood: str = "focused"
     context: Union[Dict[str, object], str] = Field(default_factory=dict)
     persona: str = "aoteru"
+    session_id: Optional[str] = Field(default=None, max_length=120)
+    retention_mode: Literal["auto", "off"] = "auto"
+    persist_turn: bool = True
 
 
 class MisumiTaskRequest(BaseModel):
@@ -147,25 +169,38 @@ def _consultation_plan(prompt: str, primary_reply: str, persona: str) -> List[st
         for item in policy_order
         if item in allowed
     }
-    candidates = list(dict.fromkeys(edges + [item for item in policy_order if intent_scores.get(item, 0)]))
+    mention_text = f"{prompt}\n{primary_reply}"
+    mentioned = []
+    for item in policy_order:
+        if item not in allowed:
+            continue
+        record = persona_record(item)
+        terms = list(dict.fromkeys((item, str(record.get("display_name") or item))))
+        if _term_positions(mention_text, terms):
+            mentioned.append(item)
+    # Consultation is work, not ambient theatre. Only invoke a specialist when
+    # the user names one or the request matches that persona's routing intents.
+    candidates = list(dict.fromkeys(
+        mentioned + [item for item in policy_order if intent_scores.get(item, 0)]
+    ))
 
     def rank(item: str) -> tuple[int, int, int, int]:
         record = persona_record(item)
         terms = list(dict.fromkeys((item, str(record.get("display_name") or item))))
-        mentions = _term_positions(primary_reply, terms)
+        mentions = _term_positions(mention_text, terms)
         if mentions:
             return (0, min(mentions), 0, policy_order.index(item))
         score = intent_scores.get(item, 0)
         if score:
             return (1, 0, -score, policy_order.index(item))
-        return (2, edges.index(item), 0, policy_order.index(item))
+        edge_index = edges.index(item) if item in edges else len(edges)
+        return (2, edge_index, 0, policy_order.index(item))
 
     return sorted(candidates, key=rank)[:2]
 
 
 async def _consult_persona(
     prompt: str,
-    primary_reply: str,
     persona: str,
     backend: str,
     model: str,
@@ -176,8 +211,9 @@ async def _consult_persona(
 
     record = persona_record(persona)
     system = (
-        f"You are {persona}, the Misumi {record.get('role')}. Review Aoteru's plan and contribute "
-        f"concise, practical critique or next steps. {_HONESTY_CONSTRAINTS}"
+        f"You are {persona}, the Misumi {record.get('role')}. Analyze the user's request from your "
+        f"specialist role and give Aoteru concise, practical evidence, critique, or next steps. "
+        f"Do not address the user directly. {_HONESTY_CONSTRAINTS}"
     )
     capabilities = capability_summary(persona)
     if capabilities:
@@ -191,10 +227,7 @@ async def _consult_persona(
         {"role": "system", "content": system},
         {
             "role": "user",
-            "content": (
-                f"User prompt:\n{prompt[:4000]}\n\n"
-                f"Aoteru's plan under discussion:\n{_short_text(primary_reply, 600)}"
-            ),
+            "content": f"User request for internal consultation:\n{prompt[:4000]}",
         },
     ))
     text = await llm_call_async(
@@ -202,7 +235,7 @@ async def _consult_persona(
         model,
         messages,
         max_tokens=240,
-        timeout=20,
+        timeout=10,
         allow_reasoning_fallback=False,
     )
     contribution = _short_text(text, 1200)
@@ -211,61 +244,376 @@ async def _consult_persona(
     return contribution
 
 
-def _handoff_action(contribution: str) -> str:
-    sentence = re.split(r"(?<=[.!?])\s+", contribution, maxsplit=1)[0]
-    return _short_text(sentence, 200)
-
-
-async def _model_reply(prompt: str, persona: str) -> tuple[str, Optional[str], Optional[str]]:
-    """Return text, backend, model; degrade honestly when no endpoint works."""
+def _resolve_model_endpoint() -> Tuple[str, str]:
     fallback_url = (os.getenv("MISUMI_MODEL_URL") or os.getenv("MISUMI_OLLAMA_URL") or "").strip()
     fallback_model = (os.getenv("MISUMI_MODEL") or "").strip()
+    from src.endpoint_resolver import resolve_endpoint
+
+    url, model, _headers = resolve_endpoint(
+        "default",
+        fallback_url=fallback_url or None,
+        fallback_model=fallback_model or None,
+        owner=None,
+    )
+    if not url or not model:
+        raise RuntimeError("no model endpoint configured")
+    return str(url), str(model)
+
+
+def _json_object(text: str) -> Optional[Dict[str, Any]]:
+    clean = re.sub(r"<think>.*?</think>", "", str(text or ""), flags=re.I | re.S).strip()
+    clean = re.sub(r"^```(?:json)?\s*|\s*```$", "", clean, flags=re.I | re.S).strip()
     try:
-        from src.endpoint_resolver import resolve_endpoint
+        value = json.loads(clean)
+    except (json.JSONDecodeError, TypeError):
+        start, end = clean.find("{"), clean.rfind("}")
+        if start < 0 or end <= start:
+            return None
+        try:
+            value = json.loads(clean[start:end + 1])
+        except (json.JSONDecodeError, TypeError):
+            return None
+    return value if isinstance(value, dict) else None
+
+
+def _fallback_retention(prompt: str, answer: str) -> Dict[str, Optional[Dict[str, str]]]:
+    memory_plan = None
+    artifact_plan = None
+    if _DURABLE_MEMORY.search(prompt) and not _SENSITIVE_TEXT.search(prompt):
+        memory_plan = {
+            "text": _short_text(prompt, 600),
+            "category": "preference" if re.search(r"\b(prefer|like|favou?rite)\b", prompt, re.I) else "fact",
+            "reason": "durable cue in the user's wording",
+        }
+    if _ARTIFACT_REQUEST.search(prompt) and not _SENSITIVE_TEXT.search(prompt):
+        title_words = re.findall(r"[A-Za-z0-9][A-Za-z0-9_-]*", prompt)[:8]
+        artifact_plan = {
+            "title": " ".join(title_words).strip() or "Misumi conversation draft",
+            "content": answer,
+            "reason": "the user requested a reusable written artifact",
+        }
+    return {"memory": memory_plan, "artifact": artifact_plan}
+
+
+def _parse_model_turn(raw: str, prompt: str) -> Dict[str, Any]:
+    parsed = _json_object(raw)
+    if not parsed or not isinstance(parsed.get("answer"), str):
+        answer = _short_text(raw, 4000)
+        return {"answer": answer, **_fallback_retention(prompt, answer), "retention_decided": True}
+    answer = _short_text(parsed.get("answer"), 4000)
+    memory_plan = parsed.get("memory") if isinstance(parsed.get("memory"), dict) else None
+    artifact_plan = parsed.get("artifact") if isinstance(parsed.get("artifact"), dict) else None
+    return {
+        "answer": answer,
+        "memory": memory_plan,
+        "artifact": artifact_plan,
+        "retention_decided": True,
+    }
+
+
+async def _model_turn(
+    prompt: str,
+    persona: str,
+    *,
+    backend: str,
+    model: str,
+    context_messages: Optional[List[Dict[str, str]]] = None,
+    contributions: Optional[List[Tuple[str, str]]] = None,
+) -> Dict[str, Any]:
+    """Generate one synthesized answer plus bounded retention decisions."""
+    try:
         from src.llm_core import llm_call_async
         from src.persona_capabilities import capability_summary
         from src.seed_order_context import build_seed_order_context
 
-        url, model, headers = resolve_endpoint(
-            "default",
-            fallback_url=fallback_url or None,
-            fallback_model=fallback_model or None,
-            owner=None,
+        record = persona_record(persona)
+        system = (
+            f"You are {persona}, the Misumi {record.get('role')}. {_HONESTY_CONSTRAINTS}\n"
+            "Return ONLY one JSON object with keys answer, memory, artifact. answer is the complete user-facing "
+            "response. memory is null or {text, category, reason, confidence}; retain only stable user facts, "
+            "preferences, "
+            "explicit decisions, or open loops likely to matter later. artifact is null or {title, content, reason}; "
+            "create a reusable Markdown draft only when the user requests a file/document/note or clearly forms a "
+            "substantive reusable plan. Never retain credentials, secrets, transient small talk, guesses, or raw "
+            "specialist chatter. If specialist input is supplied, silently reconcile it into answer rather than "
+            "appending disconnected persona comments."
         )
-        if not url or not model:
-            raise RuntimeError("no model endpoint configured")
+        capabilities = capability_summary(persona)
+        if capabilities:
+            system += f"\n\n{capabilities}"
+        system += f"\n{_RATIFICATION_CONSTRAINT}"
+        messages = list(context_messages or [])
+        if not messages:
+            seed = build_seed_order_context()
+            if seed:
+                messages.append({"role": "system", "content": seed})
+        messages.append({"role": "system", "content": system})
+        consultation_text = ""
+        if contributions:
+            lines = [
+                f"- {persona_record(name).get('display_name')}: {text}"
+                for name, text in contributions
+            ]
+            consultation_text = "\n\nInternal specialist input to reconcile:\n" + "\n".join(lines)
+        messages.append({"role": "user", "content": prompt[:4000] + consultation_text})
+        raw = await llm_call_async(
+            backend,
+            model,
+            messages,
+            max_tokens=700,
+            timeout=25,
+            allow_reasoning_fallback=False,
+        )
+        turn = _parse_model_turn(str(raw or ""), prompt)
+        if not turn.get("answer"):
+            raise RuntimeError("model returned empty content (reasoning-only)")
+        return turn
+    except Exception as exc:
+        logger.exception("Misumi model reply failed: %s", exc)
+        return {
+            "answer": "Odysseus is available, but the configured model did not complete this request.",
+            "memory": None,
+            "artifact": None,
+            "error": type(exc).__name__,
+        }
+
+
+async def _model_reply(prompt: str, persona: str) -> tuple[str, Optional[str], Optional[str]]:
+    """Compatibility helper for callers that still need an unstructured reply."""
+    try:
+        from src.llm_core import llm_call_async
+        from src.persona_capabilities import capability_summary
+        from src.seed_order_context import build_seed_order_context
+
+        backend, model = _resolve_model_endpoint()
         record = persona_record(persona)
         system = f"You are {persona}, the Misumi {record.get('role')}. {_HONESTY_CONSTRAINTS}"
         capabilities = capability_summary(persona)
         if capabilities:
             system += f"\n\n{capabilities}"
         system += f"\n{_RATIFICATION_CONSTRAINT}"
-        seed = build_seed_order_context()
         messages = []
+        seed = build_seed_order_context()
         if seed:
             messages.append({"role": "system", "content": seed})
         messages.extend((
             {"role": "system", "content": system},
             {"role": "user", "content": prompt[:4000]},
         ))
-        text = await llm_call_async(
-            url,
+        raw = await llm_call_async(
+            backend,
             model,
             messages,
             max_tokens=480,
             timeout=25,
             allow_reasoning_fallback=False,
         )
-        reply = _short_text(text)
+        reply = _short_text(raw, 4000)
         if not reply:
             raise RuntimeError("model returned empty content (reasoning-only)")
-        return reply, str(url), str(model)
+        return reply, backend, model
     except Exception as exc:
         logger.exception("Misumi model reply failed: %s", exc)
         return "Odysseus is available, but no working model backend is configured for this request.", None, None
 
 
-def setup_misumi_routes(skills_manager, task_scheduler=None, memory_vector=None, memory_root=None) -> APIRouter:
+def _ensure_session(session_manager, requested_id: Optional[str], owner: Optional[str], backend: str, model: str):
+    if session_manager is None:
+        return None, None
+    session_id = (requested_id or "").strip() or f"misumi-{uuid.uuid4()}"
+    try:
+        session = session_manager.get_session(session_id)
+    except Exception:
+        session = None
+    if session is not None:
+        if owner is not None and getattr(session, "owner", None) != owner:
+            raise HTTPException(403, "Conversation belongs to another user")
+        return session_id, session
+    session = session_manager.create_session(
+        session_id,
+        "Misumi interface",
+        backend,
+        model,
+        rag=True,
+        owner=owner,
+    )
+    return session_id, session
+
+
+def _conversation_context(chat_processor, session, prompt: str, owner: Optional[str]) -> List[Dict[str, str]]:
+    if chat_processor is None or session is None:
+        return []
+    preface, _rag_sources, _web_sources = chat_processor.build_context_preface(
+        prompt,
+        session,
+        use_web=False,
+        use_rag=True,
+        use_memory=True,
+        owner=owner,
+        agent_mode=False,
+        incognito=False,
+    )
+    history = []
+    for item in session.get_context_messages()[-12:]:
+        if isinstance(item, dict) and isinstance(item.get("content"), str):
+            history.append({"role": str(item.get("role") or "user"), "content": item["content"]})
+    return [*preface, *history]
+
+
+def _persist_conversation_turn(
+    session_manager,
+    session_id: Optional[str],
+    prompt: str,
+    answer: str,
+    persona: str,
+) -> None:
+    if session_manager is None or not session_id:
+        return
+    from core.models import ChatMessage
+
+    session_manager.add_message(session_id, ChatMessage(
+        "user", prompt, {"source": "misumi-interface", "persona": persona},
+    ))
+    session_manager.add_message(session_id, ChatMessage(
+        "assistant", answer, {"source": "misumi-interface", "persona": persona},
+    ))
+
+
+def _safe_plan_text(plan: Optional[Dict[str, Any]], key: str, limit: int) -> str:
+    if not isinstance(plan, dict):
+        return ""
+    return _short_text(plan.get(key), limit)
+
+
+def _existing_document(title: str, content: str, owner: Optional[str]) -> Optional[Dict[str, str]]:
+    """Return an exact active draft match from Odysseus's existing library."""
+    try:
+        from src.database import Document, SessionLocal
+
+        db = SessionLocal()
+        try:
+            query = db.query(Document).filter(
+                Document.title == title,
+                Document.current_content == content,
+                Document.is_active == True,
+            )
+            query = (
+                query.filter(Document.owner == owner)
+                if owner is not None
+                else query.filter(Document.owner.is_(None))
+            )
+            document = query.order_by(Document.updated_at.desc()).first()
+            if document:
+                return {"doc_id": str(document.id), "title": str(document.title)}
+        finally:
+            db.close()
+    except Exception as exc:
+        logger.warning("Misumi document deduplication check failed: %s", exc)
+    return None
+
+
+async def _apply_retention(
+    *,
+    prompt: str,
+    turn: Dict[str, Any],
+    retention_mode: str,
+    owner: Optional[str],
+    session_id: Optional[str],
+    memory_manager,
+    memory_vector,
+    session_manager,
+) -> Dict[str, Dict[str, Any]]:
+    result: Dict[str, Dict[str, Any]] = {
+        "memory": {"status": "none"},
+        "artifact": {"status": "none"},
+    }
+    if retention_mode == "off" or re.search(r"\b(do not|don't|dont) (remember|save|store)\b", prompt, re.I):
+        result["memory"] = {"status": "disabled"}
+        result["artifact"] = {"status": "disabled"}
+        return result
+
+    memory_plan = turn.get("memory") if isinstance(turn.get("memory"), dict) else None
+    memory_text = _safe_plan_text(memory_plan, "text", 700)
+    category = _safe_plan_text(memory_plan, "category", 40).lower()
+    if category not in {"fact", "identity", "preference", "decision", "open_loop"}:
+        category = "fact"
+    try:
+        confidence = float((memory_plan or {}).get("confidence") or 0.0)
+    except (TypeError, ValueError):
+        confidence = 0.0
+    memory_gate = bool(_DURABLE_MEMORY.search(prompt)) or confidence >= 0.85
+    if memory_text and memory_gate:
+        if _SENSITIVE_TEXT.search(prompt) or _SENSITIVE_TEXT.search(memory_text):
+            result["memory"] = {"status": "blocked", "reason": "sensitive-content"}
+        elif memory_manager is None:
+            result["memory"] = {"status": "unavailable"}
+        else:
+            existing = memory_manager.load(owner=owner)
+            if memory_manager.find_duplicates(memory_text, existing):
+                result["memory"] = {"status": "duplicate"}
+            else:
+                entry = memory_manager.add_entry(
+                    memory_text,
+                    source="misumi-auto",
+                    category=category,
+                    owner=owner,
+                )
+                all_entries = memory_manager.load_all()
+                all_entries.append(entry)
+                memory_manager.save(all_entries)
+                if memory_vector and getattr(memory_vector, "healthy", False):
+                    memory_vector.add(entry["id"], memory_text)
+                result["memory"] = {
+                    "status": "saved",
+                    "id": entry["id"],
+                    "category": category,
+                }
+
+    artifact_plan = turn.get("artifact") if isinstance(turn.get("artifact"), dict) else None
+    title = _safe_plan_text(artifact_plan, "title", 120)
+    content = str((artifact_plan or {}).get("content") or "").strip()[:16000]
+    artifact_gate = bool(_ARTIFACT_REQUEST.search(prompt)) or (
+        bool(re.search(r"\bwe decided\b", prompt, re.I)) and len(prompt) >= 120
+    )
+    if title and content and artifact_gate:
+        if _SENSITIVE_TEXT.search(prompt) or _SENSITIVE_TEXT.search(content):
+            result["artifact"] = {"status": "blocked", "reason": "sensitive-content"}
+        elif session_manager is None or not session_id:
+            result["artifact"] = {"status": "unavailable"}
+        else:
+            from src.agent_tools.document_tools import CreateDocumentTool
+
+            existing = _existing_document(title, content, owner)
+            if existing:
+                result["artifact"] = {"status": "duplicate", **existing}
+                return result
+            created = await CreateDocumentTool().execute(
+                f"{title}\nmarkdown\n{content}",
+                {"session_id": session_id, "owner": owner},
+            )
+            if created.get("doc_id"):
+                result["artifact"] = {
+                    "status": "created",
+                    "doc_id": created["doc_id"],
+                    "title": created.get("title") or title,
+                }
+            else:
+                result["artifact"] = {
+                    "status": "failed",
+                    "reason": _short_text(created.get("error"), 160) or "document-tool-failed",
+                }
+    return result
+
+
+def setup_misumi_routes(
+    skills_manager,
+    task_scheduler=None,
+    memory_vector=None,
+    memory_root=None,
+    memory_manager=None,
+    session_manager=None,
+    chat_processor=None,
+) -> APIRouter:
     router = APIRouter(prefix="/misumi", tags=["misumi"])
     adapter = HouseholdReadOnlyAdapter()
     task_router = MisumiTaskRouter(adapter)
@@ -296,16 +644,24 @@ def setup_misumi_routes(skills_manager, task_scheduler=None, memory_vector=None,
     @router.post("/respond")
     async def respond(request: Request, body: MisumiRespondRequest):
         _require_api_scope(request, "misumi:read")
+        if body.retention_mode == "auto" and body.persist_turn:
+            _require_api_scope(request, "misumi:execute")
         started = time.monotonic()
         request_id = events.request_id()
         persona = normalize_persona(body.persona)
         interface_context = body.context if isinstance(body.context, str) else ""
         prompt = (body.prompt or interface_context or body.intent or "status").strip()
+        owner = _owner(request)
         domain = infer_household_domain(prompt)
         sources = adapter.search(prompt, domain=domain, limit=4) if adapter.reachable else []
         if not domain:
             sources = [item for item in sources if int(item.get("score", 0)) >= 2]
         backend = model = None
+        turn: Dict[str, Any] = {"memory": None, "artifact": None}
+        consulted: List[Dict[str, str]] = []
+        contributions: List[Tuple[str, str]] = []
+        capsule_id = None
+        handoff_ids: List[str] = []
         if sources:
             lead = sources[0]
             text = _short_text(f"From {lead['path']} line {lead['line']}: {lead['snippet']}")
@@ -318,74 +674,127 @@ def setup_misumi_routes(skills_manager, task_scheduler=None, memory_vector=None,
                 text = f"The canonical household repository has no {domain} data surface yet."
             backend = "household-read-only"
         else:
-            text, backend, model = await _model_reply(prompt, persona)
-        outcome = "grounded" if sources else "absent" if domain else "model" if backend else "degraded"
+            try:
+                backend, model = _resolve_model_endpoint()
+            except Exception as exc:
+                logger.warning("Misumi model endpoint unavailable: %s", exc)
+                text = "Odysseus is available, but no working model backend is configured for this request."
+            else:
+                targets = _consultation_plan(prompt, "", persona)
 
-        consulted = []
-        capsule_id = None
-        handoff_ids = []
-        if outcome == "model" and backend and model:
-            primary_reply = text
-            targets = _consultation_plan(prompt, primary_reply, persona)
-            contributions = []
-            for target in targets:
-                try:
-                    contribution = await _consult_persona(
-                        prompt, primary_reply, target, backend, model
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        "Misumi consultation failed for %s: %s", target, exc,
-                        exc_info=True,
-                    )
-                    continue
-                contributions.append((target, contribution))
-                consulted.append({"persona": target})
-                text += f"\n\n— {persona_record(target).get('display_name')}: {contribution}"
-
-            if targets:
-                capsule_type = (
-                    "decision"
-                    if re.search(r"\b(plan|planning|decide|deciding|decision)\b", prompt, re.I)
-                    else "observation"
-                )
-                try:
-                    capsule = memory.capture(
-                        f"{prompt}\n\nAoteru's plan: {_short_text(primary_reply, 600)}",
-                        source="consultation",
-                        capsule_type=capsule_type,
-                        persona="aoteru",
-                    )
-                    capsule_id = str(capsule["id"])
-                except Exception as exc:
-                    logger.warning("Misumi consultation capsule failed: %s", exc, exc_info=True)
-
-                for target, contribution in (contributions if capsule_id else []):
-                    action = _handoff_action(contribution)
+                async def consult(target: str):
                     try:
-                        try:
-                            handoff = memory.create_handoff(
-                                "aoteru", target, action, capsule_id
-                            )
-                        except ValueError as exc:
-                            logger.warning(
-                                "Misumi consultation handoff action rejected for %s: %s; using neutral action",
-                                target, exc,
-                            )
-                            handoff = memory.create_handoff(
-                                "aoteru", target, _NEUTRAL_HANDOFF_ACTION, capsule_id
-                            )
-                        handoff_ids.append(str(handoff["id"]))
+                        return target, await _consult_persona(prompt, target, backend, model)
                     except Exception as exc:
                         logger.warning(
-                            "Misumi consultation handoff failed for %s: %s", target, exc,
+                            "Misumi consultation failed for %s: %s", target, exc,
                             exc_info=True,
                         )
+                        return target, None
+
+                rows = await asyncio.gather(*(consult(target) for target in targets))
+                contributions = [
+                    (target, contribution)
+                    for target, contribution in rows
+                    if contribution
+                ]
+                consulted = [
+                    {"persona": target, "contribution": contribution}
+                    for target, contribution in contributions
+                ]
+
+        should_persist = body.persist_turn and body.retention_mode == "auto"
+        if should_persist:
+            session_id, session = _ensure_session(
+                session_manager,
+                body.session_id,
+                owner,
+                backend or "unavailable",
+                model or "none",
+            )
+        else:
+            session_id, session = body.session_id, None
+        if not sources and not domain and backend and model:
+            turn = await _model_turn(
+                prompt,
+                persona,
+                backend=backend,
+                model=model,
+                context_messages=_conversation_context(chat_processor, session, prompt, owner),
+                contributions=contributions,
+            )
+            text = str(turn["answer"])
+
+        outcome = (
+            "grounded" if sources else
+            "absent" if domain else
+            "degraded" if not backend or not model or turn.get("error") else
+            "model"
+        )
+
+        if contributions:
+            capsule_type = (
+                "decision"
+                if re.search(r"\b(plan|planning|decide|deciding|decision)\b", prompt, re.I)
+                else "observation"
+            )
+            try:
+                capsule = memory.capture(
+                    prompt,
+                    source="consultation",
+                    capsule_type=capsule_type,
+                    persona="aoteru",
+                    meta={
+                        "contributions": [
+                            {"persona": target, "text": contribution}
+                            for target, contribution in contributions
+                        ],
+                        "synthesized_answer": _short_text(text, 1200),
+                    },
+                )
+                capsule_id = str(capsule["id"])
+            except Exception as exc:
+                logger.warning("Misumi consultation capsule failed: %s", exc, exc_info=True)
+
+            for target, _contribution in (contributions if capsule_id else []):
+                try:
+                    handoff = memory.create_handoff(
+                        "aoteru",
+                        target,
+                        f"analyze the request from the {persona_record(target).get('role')} perspective",
+                        capsule_id,
+                    )
+                    memory.resolve_handoff(str(handoff["id"]))
+                    handoff_ids.append(str(handoff["id"]))
+                except Exception as exc:
+                    logger.warning(
+                        "Misumi consultation handoff failed for %s: %s", target, exc,
+                        exc_info=True,
+                    )
+
+        if not turn.get("retention_decided"):
+            turn.update(_fallback_retention(prompt, text))
+        retention = await _apply_retention(
+            prompt=prompt,
+            turn=turn,
+            retention_mode=body.retention_mode if body.persist_turn else "off",
+            owner=owner,
+            session_id=session_id,
+            memory_manager=memory_manager,
+            memory_vector=memory_vector,
+            session_manager=session_manager,
+        )
+        if should_persist:
+            _persist_conversation_turn(session_manager, session_id, prompt, text, persona)
+
+        files_changed = []
+        if retention["artifact"].get("status") == "created":
+            files_changed.append(f"document:{retention['artifact']['doc_id']}")
         events.emit({
             "request_id": request_id,
             "persona": persona,
             "files_read": sorted({item["path"] for item in sources}),
-            "files_changed": [],
+            "files_changed": files_changed,
             "model": model,
             "backend": backend,
             "latency_ms": int((time.monotonic() - started) * 1000),
@@ -396,7 +805,8 @@ def setup_misumi_routes(skills_manager, task_scheduler=None, memory_vector=None,
             "text": text,
             "state": "speaking",
             "mood": body.mood or "focused",
-            "source": "odysseus",
+            "source": "model" if outcome == "model" else backend or "degraded",
+            "node": "odysseus",
             "persona": persona,
             "who": persona_record(persona).get("display_name"),
             "audio_url": None,
@@ -404,6 +814,8 @@ def setup_misumi_routes(skills_manager, task_scheduler=None, memory_vector=None,
             "tts_provider": None,
             "request_id": request_id,
             "sources": sources,
+            "session_id": session_id,
+            "retention": retention,
         }
         if _consultation_enabled():
             response.update({
