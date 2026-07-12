@@ -82,6 +82,9 @@ def test_interface_session_history_reaches_the_next_model_turn(tmp_path, monkeyp
 
 
 def test_model_endpoint_normalizes_ollama_api_roots(monkeypatch):
+    monkeypatch.delenv("MISUMI_MODEL_URL", raising=False)
+    monkeypatch.delenv("MISUMI_OLLAMA_URL", raising=False)
+    monkeypatch.delenv("MISUMI_MODEL", raising=False)
     resolved = iter((
         ("http://127.0.0.1:11434/v1", "qwen3:8b", {}),
         ("http://127.0.0.1:11434/api", "qwen3:8b", {}),
@@ -94,7 +97,25 @@ def test_model_endpoint_normalizes_ollama_api_roots(monkeypatch):
     assert misumi_routes._resolve_model_endpoint()[0] == "http://127.0.0.1:11434/v1/chat/completions"
 
 
+def test_complete_misumi_environment_pin_precedes_global_default(monkeypatch):
+    monkeypatch.setenv("MISUMI_MODEL_URL", "http://127.0.0.1:11434/v1")
+    monkeypatch.setenv("MISUMI_MODEL", "qwen3:8b")
+    monkeypatch.setattr(
+        endpoint_resolver,
+        "resolve_endpoint",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("global default must not resolve")),
+    )
+
+    assert misumi_routes._resolve_model_endpoint() == (
+        "http://127.0.0.1:11434/v1/chat/completions",
+        "qwen3:8b",
+    )
+
+
 def test_failed_model_turn_reports_degraded_source_not_backend_url(tmp_path, monkeypatch):
+    monkeypatch.delenv("MISUMI_MODEL_URL", raising=False)
+    monkeypatch.delenv("MISUMI_OLLAMA_URL", raising=False)
+    monkeypatch.delenv("MISUMI_MODEL", raising=False)
     household = tmp_path / "household"
     household.mkdir()
     monkeypatch.setenv("MISUMI_HOUSEHOLD_ROOT", str(household))
