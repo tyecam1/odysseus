@@ -81,6 +81,45 @@ def test_interface_session_history_reaches_the_next_model_turn(tmp_path, monkeyp
     assert not any(message.get("content") == "first turn" for message in calls[2])
 
 
+def test_model_endpoint_normalizes_ollama_api_roots(monkeypatch):
+    resolved = iter((
+        ("http://127.0.0.1:11434/v1", "qwen3:8b", {}),
+        ("http://127.0.0.1:11434/api", "qwen3:8b", {}),
+        ("http://127.0.0.1:11434/v1/chat/completions", "qwen3:8b", {}),
+    ))
+    monkeypatch.setattr(endpoint_resolver, "resolve_endpoint", lambda *args, **kwargs: next(resolved))
+
+    assert misumi_routes._resolve_model_endpoint()[0] == "http://127.0.0.1:11434/v1/chat/completions"
+    assert misumi_routes._resolve_model_endpoint()[0] == "http://127.0.0.1:11434/api/chat"
+    assert misumi_routes._resolve_model_endpoint()[0] == "http://127.0.0.1:11434/v1/chat/completions"
+
+
+def test_failed_model_turn_reports_degraded_source_not_backend_url(tmp_path, monkeypatch):
+    household = tmp_path / "household"
+    household.mkdir()
+    monkeypatch.setenv("MISUMI_HOUSEHOLD_ROOT", str(household))
+    monkeypatch.setattr(
+        endpoint_resolver,
+        "resolve_endpoint",
+        lambda *args, **kwargs: ("http://model.test/v1", "model", {}),
+    )
+
+    async def failed_call(*args, **kwargs):
+        raise RuntimeError("model unavailable")
+
+    monkeypatch.setattr(llm_core, "llm_call_async", failed_call)
+    app = FastAPI()
+    app.include_router(misumi_routes.setup_misumi_routes(
+        SkillsManager(str(tmp_path / "skills")), memory_root=tmp_path / "memory"
+    ))
+    body = TestClient(app).post("/misumi/respond", json={
+        "prompt": "Reply briefly", "persona": "aoteru", "retention_mode": "off",
+    }).json()
+
+    assert body["source"] == "degraded"
+    assert body["node"] == "odysseus"
+
+
 def test_durable_memory_is_saved_to_native_memory_and_deduplicated(tmp_path):
     manager = MemoryManager(str(tmp_path))
     turn = {

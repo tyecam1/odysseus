@@ -260,7 +260,7 @@ async def _consult_persona(
 def _resolve_model_endpoint() -> Tuple[str, str]:
     fallback_url = (os.getenv("MISUMI_MODEL_URL") or os.getenv("MISUMI_OLLAMA_URL") or "").strip()
     fallback_model = (os.getenv("MISUMI_MODEL") or "").strip()
-    from src.endpoint_resolver import resolve_endpoint
+    from src.endpoint_resolver import build_chat_url, normalize_base, resolve_endpoint
 
     url, model, _headers = resolve_endpoint(
         "default",
@@ -270,7 +270,12 @@ def _resolve_model_endpoint() -> Tuple[str, str]:
     )
     if not url or not model:
         raise RuntimeError("no model endpoint configured")
-    return str(url), str(model)
+    # Environment fallbacks are allowed to be either API roots or complete
+    # chat endpoints. resolve_endpoint() normalizes database-backed endpoints,
+    # but intentionally returns raw fallback URLs, so normalize that final
+    # boundary here before dispatching to llm_core.
+    chat_url = build_chat_url(normalize_base(str(url)))
+    return chat_url, str(model)
 
 
 def _json_object(text: str) -> Optional[Dict[str, Any]]:
@@ -832,7 +837,11 @@ def setup_misumi_routes(
             "text": text,
             "state": "speaking",
             "mood": body.mood or "focused",
-            "source": "model" if outcome == "model" else backend or "degraded",
+            "source": (
+                "model" if outcome == "model" else
+                "household-read-only" if outcome in {"grounded", "absent"} else
+                "degraded"
+            ),
             "node": "odysseus",
             "persona": persona,
             "who": persona_record(persona).get("display_name"),
