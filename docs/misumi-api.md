@@ -83,6 +83,11 @@ POST /misumi/personas/kurisu/skills/audit
 
 Skill lists are filtered by the versioned persona policy. Audits are admin-only and do not publish external skills.
 
+Persona prompt context also reads `config/capabilities.yaml` from the assigned
+household seed root when present. It exposes capability-group stewardship and
+reviewed external patterns as bounded context only. Missing or malformed data
+degrades safely, and the projection never grants tool authority or write access.
+
 ## External skill intake
 
 ```http
