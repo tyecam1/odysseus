@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 from core.models import Session
 from routes import misumi_routes
 from services.memory.skills import SkillsManager
+from src.agent_tools.document_tools import CreateDocumentTool
 from src import endpoint_resolver, llm_core
 from src.memory import MemoryManager
 
@@ -200,10 +201,7 @@ def test_requested_artifact_uses_existing_document_tool(tmp_path, monkeypatch):
         calls.append((content, ctx))
         return {"doc_id": "doc-1", "title": "Cleaning plan"}
 
-    monkeypatch.setattr(
-        "src.agent_tools.document_tools.CreateDocumentTool.execute",
-        create_document,
-    )
+    monkeypatch.setattr(CreateDocumentTool, "execute", create_document)
     monkeypatch.setattr(misumi_routes, "_existing_document", lambda *args: None)
     result = asyncio.run(misumi_routes._apply_retention(
         prompt="Create a document with our cleaning plan",
