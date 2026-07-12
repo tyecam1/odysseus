@@ -262,12 +262,18 @@ def _resolve_model_endpoint() -> Tuple[str, str]:
     fallback_model = (os.getenv("MISUMI_MODEL") or "").strip()
     from src.endpoint_resolver import build_chat_url, normalize_base, resolve_endpoint
 
-    url, model, _headers = resolve_endpoint(
-        "default",
-        fallback_url=fallback_url or None,
-        fallback_model=fallback_model or None,
-        owner=None,
-    )
+    if fallback_url and fallback_model:
+        # A dedicated deployment may pin Misumi to a known-local model even
+        # when the broader Odysseus UI has a different (or stale) default.
+        # Treat the complete environment pair as an operational override.
+        url, model = fallback_url, fallback_model
+    else:
+        url, model, _headers = resolve_endpoint(
+            "default",
+            fallback_url=fallback_url or None,
+            fallback_model=fallback_model or None,
+            owner=None,
+        )
     if not url or not model:
         raise RuntimeError("no model endpoint configured")
     # Environment fallbacks are allowed to be either API roots or complete
