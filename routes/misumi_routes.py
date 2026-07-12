@@ -759,7 +759,7 @@ def setup_misumi_routes(
             "model"
         )
 
-        if contributions:
+        if contributions and should_persist:
             capsule_type = (
                 "decision"
                 if re.search(r"\b(plan|planning|decide|deciding|decision)\b", prompt, re.I)
