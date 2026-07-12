@@ -75,7 +75,21 @@ The default environment value is safe:
 MISUMI_HEARTBEAT_ENABLED=0
 ```
 
-Setting it to `1`, `true`, `yes`, or `on` only marks loops enabled in status. It does not grant production write authority.
+Setting it to `1`, `true`, `yes`, or `on` marks loops enabled in status and allows the daemon to run due loops. It does not grant production write authority.
+
+## Continuous daemon
+
+`scripts/misumi_heartbeat_daemon.py` is the executable continuous heartbeat. It checks enabled loops, respects each loop interval, writes lock files while running, and emits JSON log lines. It never edits canonical files.
+
+```bash
+# one safe pass through due loops
+MISUMI_HEARTBEAT_ENABLED=1 python scripts/misumi_heartbeat_daemon.py --once
+
+# continuous proposal-only heartbeat, minimum 60-second wake interval
+MISUMI_HEARTBEAT_ENABLED=1 python scripts/misumi_heartbeat_daemon.py --poll-seconds 60
+```
+
+For host deployment, wrap this in the existing Windows scheduled-task/service convention rather than inventing a second process manager.
 
 ## ASI/backend provider boundary
 
@@ -159,4 +173,4 @@ The runtime enforces or records:
 
 ## Known limitation
 
-The connector-created branch adds the module, route surface, CLI, tests, and docs. The route include in `app.py` still needs to be applied in a checked-out working tree or by a small follow-up patch because connector-only whole-file rewrites of `app.py` are too risky for this large orchestrator file.
+The connector-created branch adds the module, route surface, CLI, daemon, tests, and docs. The route include in `app.py` still needs to be applied in a checked-out working tree or by a small follow-up patch because connector-only whole-file rewrites of `app.py` are too risky for this large orchestrator file.
