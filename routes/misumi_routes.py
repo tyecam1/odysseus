@@ -41,6 +41,11 @@ _DURABLE_MEMORY = re.compile(
     r"my favou?rite|always use|never use|still need to|next step|blocked by|my name is)\b",
     re.IGNORECASE,
 )
+_IMPLICIT_STABLE_FACT = re.compile(
+    r"\bmy\s+[A-Za-z0-9 _'-]{1,48}\s+(?:is|are|was|were|has|have)\b|"
+    r"\bi\s+(?:am|have|own|live|work|study)\b",
+    re.IGNORECASE,
+)
 _ARTIFACT_REQUEST = re.compile(
     r"\b(create|make|write|save|draft|document|turn)\b.{0,48}"
     r"\b(file|document|note|plan|checklist|spec(?:ification)?|recipe|list|brief|report)\b|"
@@ -180,9 +185,16 @@ def _consultation_plan(prompt: str, primary_reply: str, persona: str) -> List[st
             mentioned.append(item)
     # Consultation is work, not ambient theatre. Only invoke a specialist when
     # the user names one or the request matches that persona's routing intents.
-    candidates = list(dict.fromkeys(
-        mentioned + [item for item in policy_order if intent_scores.get(item, 0)]
+    complex_request = bool(re.search(
+        r"\b(plan|planning|decide|decision|compare|review|risk|coordinate|approach|strategy|trade-?off)\b",
+        prompt,
+        re.IGNORECASE,
     ))
+    intent_candidates = (
+        [item for item in policy_order if intent_scores.get(item, 0)]
+        if complex_request else []
+    )
+    candidates = list(dict.fromkeys(mentioned + intent_candidates))
 
     def rank(item: str) -> tuple[int, int, int, int]:
         record = persona_record(item)
@@ -234,8 +246,9 @@ async def _consult_persona(
         backend,
         model,
         messages,
-        max_tokens=240,
-        timeout=10,
+        max_tokens=180,
+        timeout=8,
+        max_retries=1,
         allow_reasoning_fallback=False,
     )
     contribution = _short_text(text, 1200)
@@ -278,21 +291,15 @@ def _json_object(text: str) -> Optional[Dict[str, Any]]:
 
 def _fallback_retention(prompt: str, answer: str) -> Dict[str, Optional[Dict[str, str]]]:
     memory_plan = None
-    artifact_plan = None
     if _DURABLE_MEMORY.search(prompt) and not _SENSITIVE_TEXT.search(prompt):
         memory_plan = {
             "text": _short_text(prompt, 600),
             "category": "preference" if re.search(r"\b(prefer|like|favou?rite)\b", prompt, re.I) else "fact",
             "reason": "durable cue in the user's wording",
         }
-    if _ARTIFACT_REQUEST.search(prompt) and not _SENSITIVE_TEXT.search(prompt):
-        title_words = re.findall(r"[A-Za-z0-9][A-Za-z0-9_-]*", prompt)[:8]
-        artifact_plan = {
-            "title": " ".join(title_words).strip() or "Misumi conversation draft",
-            "content": answer,
-            "reason": "the user requested a reusable written artifact",
-        }
-    return {"memory": memory_plan, "artifact": artifact_plan}
+    # A degraded or non-JSON answer is insufficient evidence for a useful file.
+    # Fail closed instead of turning an error or unrelated search snippet into a draft.
+    return {"memory": memory_plan, "artifact": None}
 
 
 def _parse_model_turn(raw: str, prompt: str) -> Dict[str, Any]:
@@ -360,8 +367,9 @@ async def _model_turn(
             backend,
             model,
             messages,
-            max_tokens=700,
-            timeout=25,
+            max_tokens=500,
+            timeout=30,
+            max_retries=1,
             allow_reasoning_fallback=False,
         )
         turn = _parse_model_turn(str(raw or ""), prompt)
@@ -541,7 +549,11 @@ async def _apply_retention(
         confidence = float((memory_plan or {}).get("confidence") or 0.0)
     except (TypeError, ValueError):
         confidence = 0.0
-    memory_gate = bool(_DURABLE_MEMORY.search(prompt)) or confidence >= 0.85
+    model_stable = confidence >= 0.85 and (
+        category in {"preference", "identity"}
+        or (category == "fact" and bool(_IMPLICIT_STABLE_FACT.search(prompt)))
+    )
+    memory_gate = bool(_DURABLE_MEMORY.search(prompt)) or model_stable
     if memory_text and memory_gate:
         if _SENSITIVE_TEXT.search(prompt) or _SENSITIVE_TEXT.search(memory_text):
             result["memory"] = {"status": "blocked", "reason": "sensitive-content"}
@@ -655,18 +667,21 @@ def setup_misumi_routes(
         domain = infer_household_domain(prompt)
         sources = adapter.search(prompt, domain=domain, limit=4) if adapter.reachable else []
         if not domain:
-            sources = [item for item in sources if int(item.get("score", 0)) >= 2]
+            # General chat belongs to the normal model/RAG path. Lexical matches
+            # against task/docs files are too weak to replace a conversational answer.
+            sources = []
+        model_required = not domain or bool(_ARTIFACT_REQUEST.search(prompt))
         backend = model = None
         turn: Dict[str, Any] = {"memory": None, "artifact": None}
         consulted: List[Dict[str, str]] = []
         contributions: List[Tuple[str, str]] = []
         capsule_id = None
         handoff_ids: List[str] = []
-        if sources:
+        if sources and not model_required:
             lead = sources[0]
             text = _short_text(f"From {lead['path']} line {lead['line']}: {lead['snippet']}")
             backend = "household-read-only"
-        elif domain:
+        elif domain and not model_required:
             present = any(item["id"] == domain and item["present"] for item in adapter.domains())
             if present:
                 text = f"No matching {domain} fact was found in the canonical household repository."
@@ -714,20 +729,32 @@ def setup_misumi_routes(
             )
         else:
             session_id, session = body.session_id, None
-        if not sources and not domain and backend and model:
+        if model_required and backend and model:
+            context_messages = _conversation_context(chat_processor, session, prompt, owner)
+            if sources:
+                from src.prompt_security import untrusted_context_message
+
+                source_text = "\n".join(
+                    f"- {item['path']} line {item['line']}: {item['snippet']}"
+                    for item in sources
+                )
+                context_messages.append(untrusted_context_message(
+                    "read-only household repository search",
+                    source_text,
+                ))
             turn = await _model_turn(
                 prompt,
                 persona,
                 backend=backend,
                 model=model,
-                context_messages=_conversation_context(chat_processor, session, prompt, owner),
+                context_messages=context_messages,
                 contributions=contributions,
             )
             text = str(turn["answer"])
 
         outcome = (
-            "grounded" if sources else
-            "absent" if domain else
+            "grounded" if sources and not model_required else
+            "absent" if domain and not model_required else
             "degraded" if not backend or not model or turn.get("error") else
             "model"
         )

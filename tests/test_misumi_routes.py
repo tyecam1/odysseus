@@ -79,6 +79,23 @@ def test_general_chat_ignores_weak_single_term_repository_hits(tmp_path, monkeyp
     assert response.json()["sources"] == []
 
 
+def test_general_artifact_request_is_not_replaced_by_repository_search_snippet(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+
+    response = client.post(
+        "/misumi/respond",
+        json={
+            "prompt": "Create a Markdown document with a persona memory checklist",
+            "persona": "aoteru",
+            "retention_mode": "off",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["sources"] == []
+    assert response.json()["source"] != "household-read-only"
+
+
 def test_domain_request_reports_absent_data_without_model_fallback(tmp_path, monkeypatch):
     client = _client(tmp_path, monkeypatch)
     body = client.post(
