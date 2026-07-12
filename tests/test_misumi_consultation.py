@@ -213,6 +213,28 @@ def test_contribution_text_is_not_executed_as_a_handoff_action(tmp_path, monkeyp
     assert {item["status"] for item in handoffs} == {"resolved"}
 
 
+def test_no_retention_consultation_synthesizes_without_writing_internal_memory(tmp_path, monkeypatch):
+    async def llm_call(url, model, messages, **kwargs):
+        if not _is_consult(messages):
+            return '{"answer":"Synthesized without retention.","memory":null,"artifact":null}'
+        return "Review the deployment boundary."
+
+    client, memory = _client(tmp_path, monkeypatch, llm_call)
+    body = client.post("/misumi/respond", json={
+        "prompt": "Kurisu and Lelouch: review the deployment boundary",
+        "persona": "aoteru",
+        "retention_mode": "off",
+        "persist_turn": False,
+    }).json()
+
+    assert [item["persona"] for item in body["consulted"]] == ["kurisu", "lelouch"]
+    assert body["text"] == "Synthesized without retention."
+    assert body["capsule_id"] is None
+    assert body["handoff_ids"] == []
+    assert memory.capsules() == ([], 0)
+    assert memory.handoffs() == ([], 0)
+
+
 def test_consultation_keeps_all_legacy_response_fields(tmp_path, monkeypatch):
     async def llm_call(url, model, messages, **kwargs):
         return '{"answer":"Primary reply.","memory":null,"artifact":null}' if not _is_consult(messages) else "Review the plan."
