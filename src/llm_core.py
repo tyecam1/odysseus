@@ -1441,9 +1441,10 @@ async def llm_call_async(
         if max_tokens and max_tokens > 0:
             tok_key = "max_completion_tokens" if _uses_max_completion_tokens(model) else "max_tokens"
             payload[tok_key] = max_tokens
-        # Suppress thinking for qwen3/gemma4 on Ollama /v1 — same as stream_llm.
+        # Ollama's OpenAI-compatible API documents reasoning_effort="none".
+        # The native `think` field is ignored by some /v1 implementations.
         if _is_ollama_openai_compat_url(url) and _supports_thinking(model):
-            payload["think"] = False
+            payload["reasoning_effort"] = "none"
         _apply_local_cache_affinity(payload, url, session_id)
 
     if _is_host_dead(target_url):
@@ -1564,11 +1565,10 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
             payload[tok_key] = max_tokens
         if tools:
             payload["tools"] = tools
-        # For Ollama's OpenAI-compat /v1 endpoint with thinking models (qwen3,
-        # gemma4, etc.), suppress thinking so tool calls aren't swallowed inside
-        # <think> blocks. Ollama /v1 accepts "think": false as a top-level param.
+        # Use Ollama's documented OpenAI-compatible field so tool calls and final
+        # content are not consumed by the reasoning budget.
         if _is_ollama_openai_compat_url(url) and _supports_thinking(model):
-            payload["think"] = False
+            payload["reasoning_effort"] = "none"
         _apply_local_cache_affinity(payload, url, session_id)
         h = _provider_headers(provider, headers)
         if provider == "copilot":
