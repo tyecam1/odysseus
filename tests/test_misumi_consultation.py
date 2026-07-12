@@ -71,7 +71,7 @@ def _client(tmp_path: Path, monkeypatch, llm_call, *, consult="true"):
 
 
 def _is_consult(messages):
-    return any("Review Aoteru's plan" in str(message.get("content")) for message in messages)
+    return any("internal consultation" in str(message.get("content")) for message in messages)
 
 
 def _consult_persona(messages):
@@ -85,20 +85,22 @@ def test_plan_consults_named_then_intent_and_records_linked_handoffs(tmp_path, m
     async def llm_call(url, model, messages, **kwargs):
         calls.append((messages, kwargs))
         if not _is_consult(messages):
-            return "Kurisu should preserve the evidence before rollout."
+            joined = " ".join(str(message.get("content")) for message in messages)
+            assert "Record the assumptions" in joined
+            assert "Stage the implementation" in joined
+            return '{"answer":"Synthesized plan.","memory":null,"artifact":null}'
         persona = _consult_persona(messages)
         return {"kurisu": "Record the assumptions. Then review evidence.", "lelouch": "Stage the implementation. Then verify it."}[persona]
 
     client, memory = _client(tmp_path, monkeypatch, llm_call)
-    body = client.post("/misumi/respond", json={"prompt": "Plan the deployment approach", "persona": "aoteru"}).json()
+    body = client.post("/misumi/respond", json={"prompt": "Ask Kurisu and Lelouch to plan the deployment approach", "persona": "aoteru"}).json()
 
-    assert body["consulted"] == [{"persona": "kurisu"}, {"persona": "lelouch"}]
-    assert "\n\n— Kurisu: Record the assumptions." in body["text"]
-    assert "\n\n— Lelouch: Stage the implementation." in body["text"]
+    assert [item["persona"] for item in body["consulted"]] == ["kurisu", "lelouch"]
+    assert body["text"] == "Synthesized plan."
     assert body["capsule_id"]
     assert len(body["handoff_ids"]) == 2
-    assert [call[1]["max_tokens"] for call in calls] == [480, 240, 240]
-    assert [call[1]["timeout"] for call in calls] == [25, 20, 20]
+    assert [call[1]["max_tokens"] for call in calls] == [240, 240, 700]
+    assert [call[1]["timeout"] for call in calls] == [10, 10, 25]
     capsules, _ = memory.capsules()
     handoffs, _ = memory.handoffs()
     assert capsules[0]["id"] == body["capsule_id"]
@@ -106,7 +108,8 @@ def test_plan_consults_named_then_intent_and_records_linked_handoffs(tmp_path, m
     assert capsules[0]["source"] == "consultation"
     assert capsules[0]["persona_primary"] == "aoteru"
     assert {item["capsule_id"] for item in handoffs} == {body["capsule_id"]}
-    assert {item["action"] for item in handoffs} == {"Record the assumptions.", "Stage the implementation."}
+    assert {item["status"] for item in handoffs} == {"resolved"}
+    assert {item["to_persona"] for item in handoffs} == {"kurisu", "lelouch"}
 
 
 def test_five_named_candidates_are_capped_at_two(tmp_path, monkeypatch):
@@ -114,16 +117,16 @@ def test_five_named_candidates_are_capped_at_two(tmp_path, monkeypatch):
 
     async def llm_call(url, model, messages, **kwargs):
         if not _is_consult(messages):
-            return "Kurisu, Misato, Ichigo, Giorno, and Erwin should review this."
+            return '{"answer":"Synthesized.","memory":null,"artifact":null}'
         persona = _consult_persona(messages)
         consulted.append(persona)
         return "Review the proposal."
 
     client, _ = _client(tmp_path, monkeypatch, llm_call)
-    body = client.post("/misumi/respond", json={"prompt": "Consider the approach", "persona": "aoteru"}).json()
+    body = client.post("/misumi/respond", json={"prompt": "Kurisu, Misato, Ichigo, Giorno, and Erwin: consider the approach", "persona": "aoteru"}).json()
 
     assert consulted == ["kurisu", "misato"]
-    assert body["consulted"] == [{"persona": "kurisu"}, {"persona": "misato"}]
+    assert [item["persona"] for item in body["consulted"]] == ["kurisu", "misato"]
 
 
 def test_non_aoteru_never_consults(tmp_path, monkeypatch):
@@ -132,7 +135,7 @@ def test_non_aoteru_never_consults(tmp_path, monkeypatch):
     async def llm_call(url, model, messages, **kwargs):
         nonlocal calls
         calls += 1
-        return "Primary reply."
+        return '{"answer":"Primary reply.","memory":null,"artifact":null}'
 
     client, memory = _client(tmp_path, monkeypatch, llm_call)
     body = client.post("/misumi/respond", json={"prompt": "Plan the deployment approach", "persona": "lelouch"}).json()
@@ -145,18 +148,17 @@ def test_non_aoteru_never_consults(tmp_path, monkeypatch):
 
 def test_kill_switch_preserves_legacy_response_and_writes_nothing(tmp_path, monkeypatch):
     async def llm_call(url, model, messages, **kwargs):
-        return "Legacy reply."
+        return '{"answer":"Legacy reply.","memory":null,"artifact":null}'
 
     monkeypatch.setattr(misumi_routes.MisumiEventLog, "request_id", lambda self: "request-1")
     client, memory = _client(tmp_path, monkeypatch, llm_call, consult="false")
     body = client.post("/misumi/respond", json={"prompt": "Plan deployment", "persona": "aoteru"}).json()
 
-    assert body == {
-        "text": "Legacy reply.", "state": "speaking", "mood": "focused",
-        "source": "odysseus", "persona": "aoteru", "who": "Aoteru",
-        "audio_url": None, "voice": None, "tts_provider": None,
-        "request_id": "request-1", "sources": [],
-    }
+    assert body["text"] == "Legacy reply."
+    assert body["source"] == "model"
+    assert body["node"] == "odysseus"
+    assert body["retention"] == {"memory": {"status": "none"}, "artifact": {"status": "none"}}
+    assert "consulted" not in body
     assert memory.capsules() == ([], 0)
     assert memory.handoffs() == ([], 0)
 
@@ -164,17 +166,17 @@ def test_kill_switch_preserves_legacy_response_and_writes_nothing(tmp_path, monk
 def test_failed_consult_is_logged_and_has_no_handoff(tmp_path, monkeypatch, caplog):
     async def llm_call(url, model, messages, **kwargs):
         if not _is_consult(messages):
-            return "Kurisu should review the deployment."
+            return '{"answer":"Synthesized deployment.","memory":null,"artifact":null}'
         if _consult_persona(messages) == "kurisu":
             raise RuntimeError("consult unavailable")
         return "Stage the implementation."
 
     client, memory = _client(tmp_path, monkeypatch, llm_call)
     with caplog.at_level(logging.WARNING, logger=misumi_routes.__name__):
-        body = client.post("/misumi/respond", json={"prompt": "Plan deployment", "persona": "aoteru"}).json()
+        body = client.post("/misumi/respond", json={"prompt": "Kurisu and Lelouch: plan deployment", "persona": "aoteru"}).json()
 
-    assert body["consulted"] == [{"persona": "lelouch"}]
-    assert "— Kurisu:" not in body["text"]
+    assert [item["persona"] for item in body["consulted"]] == ["lelouch"]
+    assert body["text"] == "Synthesized deployment."
     assert "consult unavailable" in caplog.text
     handoffs, _ = memory.handoffs()
     assert len(handoffs) == 1
@@ -187,34 +189,32 @@ def test_degraded_primary_reply_never_consults(tmp_path, monkeypatch):
 
     client, memory = _client(tmp_path, monkeypatch, unused_call)
 
-    async def degraded(prompt, persona):
-        return "Backend unavailable.", None, None
-
-    monkeypatch.setattr(misumi_routes, "_model_reply", degraded)
+    monkeypatch.setattr(misumi_routes, "_resolve_model_endpoint", lambda: (_ for _ in ()).throw(RuntimeError("offline")))
     body = client.post("/misumi/respond", json={"prompt": "Plan deployment", "persona": "aoteru"}).json()
 
-    assert body["text"] == "Backend unavailable."
+    assert "no working model backend" in body["text"]
     assert body["consulted"] == []
     assert memory.capsules() == ([], 0)
 
 
-def test_forbidden_contribution_uses_neutral_handoff_action(tmp_path, monkeypatch):
+def test_contribution_text_is_not_executed_as_a_handoff_action(tmp_path, monkeypatch):
     async def llm_call(url, model, messages, **kwargs):
         if not _is_consult(messages):
-            return "Kurisu should review this."
+            return '{"answer":"Do not send anything.","memory":null,"artifact":null}'
         return "Email the landlord with the plan. Then wait."
 
     client, memory = _client(tmp_path, monkeypatch, llm_call)
-    body = client.post("/misumi/respond", json={"prompt": "Plan the approach", "persona": "aoteru"}).json()
+    body = client.post("/misumi/respond", json={"prompt": "Kurisu and Lelouch: plan the approach", "persona": "aoteru"}).json()
 
     assert len(body["handoff_ids"]) == 2
     handoffs, _ = memory.handoffs()
-    assert {item["action"] for item in handoffs} == {"review the plan and contribute next steps"}
+    assert all("email" not in item["action"].lower() for item in handoffs)
+    assert {item["status"] for item in handoffs} == {"resolved"}
 
 
 def test_consultation_keeps_all_legacy_response_fields(tmp_path, monkeypatch):
     async def llm_call(url, model, messages, **kwargs):
-        return "Primary reply." if not _is_consult(messages) else "Review the plan."
+        return '{"answer":"Primary reply.","memory":null,"artifact":null}' if not _is_consult(messages) else "Review the plan."
 
     client, _ = _client(tmp_path, monkeypatch, llm_call)
     body = client.post("/misumi/respond", json={"prompt": "Plan deployment", "persona": "aoteru", "mood": "steady"}).json()
@@ -225,4 +225,5 @@ def test_consultation_keeps_all_legacy_response_fields(tmp_path, monkeypatch):
     }.issubset(body)
     assert body["state"] == "speaking"
     assert body["mood"] == "steady"
-    assert body["source"] == "odysseus"
+    assert body["source"] == "model"
+    assert body["node"] == "odysseus"

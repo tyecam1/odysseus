@@ -35,7 +35,8 @@ def test_health_and_grounded_respond(tmp_path, monkeypatch):
     response = client.post("/misumi/respond", json={"prompt": "what is on the shopping list?", "persona": "sanji"})
     assert response.status_code == 200
     body = response.json()
-    assert body["source"] == "odysseus"
+    assert body["source"] == "household-read-only"
+    assert body["node"] == "odysseus"
     assert body["persona"] == "sanji"
     assert body["sources"]
     assert "shopping-list.md" in body["sources"][0]["path"]
