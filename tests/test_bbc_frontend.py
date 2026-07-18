@@ -44,7 +44,7 @@ def test_colour_encodes_only_difficulty_and_state_uses_shape():
 def test_bbc_router_is_registered_additively_in_the_application():
     app_source = (ROOT / "app.py").read_text(encoding="utf-8")
     assert "from routes.bbc_routes import setup_bbc_routes" in app_source
-    assert "app.include_router(setup_bbc_routes())" in app_source
+    assert "app.include_router(setup_bbc_routes(registry=bbc_registry))" in app_source
 
 
 def test_event_telemetry_uses_the_unpaged_latest_sequence_contract():

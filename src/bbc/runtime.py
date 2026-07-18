@@ -12,6 +12,7 @@ from typing import Any, Dict
 
 from .adapters import RepositoryAdapterRegistry, RepositorySnapshot
 from .capabilities import CapabilityRegistry, build_capability_registry
+from .registry import UniversalRegistry, build_universal_registry
 from .models import (
     DOMAIN_MODELS,
     API_VERSION,
@@ -167,10 +168,12 @@ class BBCRuntime:
         store: BBCStateStore,
         adapters: RepositoryAdapterRegistry,
         capabilities: CapabilityRegistry | None = None,
+        registry: UniversalRegistry | None = None,
     ):
         self.store = store
         self.adapters = adapters
         self.capabilities = capabilities or build_capability_registry(adapters)
+        self.registry = registry
         self._ship = authored_ship()
         if self.store.get_entity("ship", self._ship.id) is None:
             self.store.upsert_entity("ship", self._ship.id, self._ship.model_dump(mode="json"), event_type="ship.initialised")
@@ -240,7 +243,17 @@ class BBCRuntime:
             and all(canonical.values())
         )
         unavailable = [system.id for system in systems if not system.reachable]
-        status = "healthy" if db_ok and not unavailable else "degraded" if db_ok else "unavailable"
+        registry_status = self.registry.status() if self.registry is not None else {
+            "ok": False,
+            "entry_count": 0,
+            "counts": {},
+            "source_errors": {"registry": "Universal registry is not configured."},
+        }
+        registry_ok = registry_status["ok"] if self.registry is not None else True
+        status = (
+            "healthy" if db_ok and not unavailable and registry_ok
+            else "degraded" if db_ok else "unavailable"
+        )
         capability_health = [summary.health for summary in self.capabilities.search(limit=100)]
         capabilities_ok = bool(capability_health) and all(
             health.state == "healthy" for health in capability_health
@@ -264,6 +277,7 @@ class BBCRuntime:
                     "count": len(self.capabilities),
                     "states": [health.model_dump(mode="json") for health in capability_health],
                 },
+                "registry": registry_status,
             },
         )
 
@@ -1073,8 +1087,26 @@ class BBCRuntime:
         )
         return RoomConference.model_validate(state_payload)
 
-def build_runtime(*, data_dir: str | Path, app_root: str | Path) -> BBCRuntime:
+def build_runtime(
+    *,
+    data_dir: str | Path,
+    app_root: str | Path,
+    registry: UniversalRegistry | None = None,
+) -> BBCRuntime:
     data_root = Path(data_dir) / "bbc"
     store = BBCStateStore(data_root / "v1.db")
     adapters = RepositoryAdapterRegistry.from_environment(odysseus_root=app_root)
-    return BBCRuntime(store=store, adapters=adapters)
+    capabilities = build_capability_registry(adapters)
+    registry = registry or build_universal_registry(
+        app_root=app_root,
+        data_dir=data_dir,
+        capabilities=capabilities,
+    )
+    if registry.capabilities is None:
+        registry.capabilities = capabilities
+    return BBCRuntime(
+        store=store,
+        adapters=adapters,
+        capabilities=capabilities,
+        registry=registry,
+    )

@@ -24,6 +24,22 @@ Repository `GET` routes are live, read-only projections and never append canonic
 
 Browser sessions use the existing Odysseus authentication middleware. Bearer tokens require `bbc:read`, `bbc:invoke`, or `bbc:write`; the `bbc_ship` token profile grants all three. Capability invocation remains separately scoped from navigation-state writes.
 
+## Universal registry
+
+`GET /api/bbc/v1/registry` is the read-only discovery surface for live
+capabilities, skills, MCP tools, built-in task definitions, configured
+automations, memory providers, model runtimes, and connectors. It reads the
+same manager, database, and configuration authorities used by the running
+application. Results contain compact summaries, machine-readable availability
+and risk, provenance, and context-cost estimates. Use `q`, `kind`, and `limit`
+to keep discovery bounded.
+
+`GET /api/bbc/v1/registry/{entry_id}` loads the bounded detail for one stable
+entry, including a skill instruction packet or tool schema when applicable.
+The projection never returns connector credentials, model endpoint URLs, task
+prompts, or MCP environment values. Source failures are reported explicitly in
+the registry response and BBC health rather than replaced with static claims.
+
 ## State and audit
 
 The migrated SQLite database is `ODYSSEUS_DATA_DIR/bbc/v1.db`. Canonical entity state is mutable by versioned upsert. State events and audit events are append-only, hash-chained, and protected by SQLite update/delete triggers. Canonical reads, writes, health checks, and restores verify each state hash, latest immutable event, and entity coverage. Restore first snapshots and validates the candidate database's schema, migration ledger, immutable triggers, hash chains, and canonical state; rejection leaves the live database unchanged and a post-copy failure restores the pre-restore snapshot. The shared `bbc.repository.inspect` capability is bounded, network-free, repository-authorised, and emits a real audit event for success, failure, or denial.

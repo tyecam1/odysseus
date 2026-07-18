@@ -14,7 +14,14 @@ from core.constants import BASE_DIR, DATA_DIR
 from src.app_helpers import serve_html_with_nonce
 from src.bbc.auth import bbc_caller_grants, require_bbc_access
 from src.bbc.runtime import BBCRuntime, build_runtime
-from src.bbc.models import NavigationTransactionState, RoomConferenceState, WorkNode, WorkStream
+from src.bbc.models import (
+    NavigationTransactionState,
+    RegistryEntryKind,
+    RoomConferenceState,
+    WorkNode,
+    WorkStream,
+)
+from src.bbc.registry import UniversalRegistry
 
 
 TRANSACTION_ID_PATTERN = r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
@@ -77,15 +84,20 @@ class RoomConferenceRequest(BaseModel):
 class _LazyRuntime:
     """Avoid creating the BBC database merely by importing the application."""
 
-    def __init__(self):
+    def __init__(self, registry: UniversalRegistry | None = None):
         self._runtime: BBCRuntime | None = None
+        self._registry = registry
         self._lock = threading.Lock()
 
     def __getattr__(self, name: str):
         if self._runtime is None:
             with self._lock:
                 if self._runtime is None:
-                    self._runtime = build_runtime(data_dir=DATA_DIR, app_root=BASE_DIR)
+                    self._runtime = build_runtime(
+                        data_dir=DATA_DIR,
+                        app_root=BASE_DIR,
+                        registry=self._registry,
+                    )
         return getattr(self._runtime, name)
 
 
@@ -101,8 +113,12 @@ def _http_error(exc: Exception) -> HTTPException:
     return HTTPException(409, str(exc))
 
 
-def setup_bbc_routes(runtime: BBCRuntime | None = None) -> APIRouter:
-    runtime = runtime or _LazyRuntime()
+def setup_bbc_routes(
+    runtime: BBCRuntime | None = None,
+    *,
+    registry: UniversalRegistry | None = None,
+) -> APIRouter:
+    runtime = runtime or _LazyRuntime(registry=registry)
     router = APIRouter(tags=["bbc-v1"])
 
     @router.get("/bbc", include_in_schema=False)
@@ -214,6 +230,37 @@ def setup_bbc_routes(runtime: BBCRuntime | None = None) -> APIRouter:
         require_bbc_access(request, "read")
         try:
             return await asyncio.to_thread(lambda: runtime.capabilities.detail(capability_id))
+        except Exception as exc:
+            raise _http_error(exc) from exc
+
+    @router.get("/api/bbc/v1/registry")
+    async def universal_registry(
+        request: Request,
+        q: str = "",
+        kind: RegistryEntryKind | None = None,
+        limit: int = Query(default=50, ge=1, le=200),
+    ):
+        require_bbc_access(request, "read")
+        if runtime.registry is None:
+            raise HTTPException(503, "universal registry is not configured")
+        summaries = await asyncio.to_thread(
+            lambda: runtime.registry.search(q, kind=kind, limit=limit)
+        )
+        status = await asyncio.to_thread(runtime.registry.status)
+        return {
+            "entries": summaries,
+            "detail_loaded": False,
+            "counts": status["counts"],
+            "source_errors": status["source_errors"],
+        }
+
+    @router.get("/api/bbc/v1/registry/{entry_id}")
+    async def universal_registry_detail(request: Request, entry_id: str):
+        require_bbc_access(request, "read")
+        if runtime.registry is None:
+            raise HTTPException(503, "universal registry is not configured")
+        try:
+            return await asyncio.to_thread(lambda: runtime.registry.detail(entry_id))
         except Exception as exc:
             raise _http_error(exc) from exc
 

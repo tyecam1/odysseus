@@ -101,6 +101,59 @@ class Capability(CapabilitySummary):
     tests: List[str] = Field(default_factory=list)
 
 
+class RegistryEntryKind(str, Enum):
+    capability = "capability"
+    skill = "skill"
+    mcp_tool = "mcp_tool"
+    task_definition = "task_definition"
+    automation = "automation"
+    memory_system = "memory_system"
+    model_runtime = "model_runtime"
+    connector = "connector"
+
+
+class RegistryAvailability(ContractModel):
+    state: Literal["available", "degraded", "disabled", "unavailable", "unknown"]
+    detail: str = Field(default="", max_length=500)
+    checked_at: datetime = Field(default_factory=utc_now)
+
+
+class RegistryRisk(ContractModel):
+    level: Literal["low", "medium", "high"]
+    reasons: List[str] = Field(default_factory=list, max_length=12)
+    permissions: List[str] = Field(default_factory=list, max_length=24)
+
+
+class RegistryProvenance(ContractModel):
+    source: str = Field(min_length=1, max_length=120)
+    reference: str = Field(min_length=1, max_length=500)
+    authoritative: bool = True
+
+
+class RegistryEntrySummary(ContractModel):
+    id: str = Field(pattern=r"^[a-z0-9][a-z0-9:._-]{1,239}$")
+    kind: RegistryEntryKind
+    name: str = Field(min_length=1, max_length=160)
+    description: str = Field(default="", max_length=600)
+    version: str = Field(default="unversioned", max_length=80)
+    owner: str = Field(default="odysseus", max_length=160)
+    scope: List[str] = Field(default_factory=list, max_length=24)
+    availability: RegistryAvailability
+    risk: RegistryRisk
+    provenance: List[RegistryProvenance] = Field(min_length=1, max_length=12)
+    context_cost: int = Field(default=0, ge=0, le=1_000_000)
+
+
+class RegistryEntryDetail(RegistryEntrySummary):
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    definition_schema: Dict[str, Any] = Field(
+        default_factory=dict,
+        validation_alias="schema",
+        serialization_alias="schema",
+    )
+    instructions: str = Field(default="", max_length=20_000)
+
+
 class DifficultyComponents(ContractModel):
     blocker_severity: int = Field(default=0, ge=0, le=100)
     blocker_count: int = Field(default=0, ge=0, le=100)
@@ -394,6 +447,11 @@ DOMAIN_MODELS = {
         Persona,
         PersonaLocation,
         Capability,
+        RegistryAvailability,
+        RegistryRisk,
+        RegistryProvenance,
+        RegistryEntrySummary,
+        RegistryEntryDetail,
         RepositorySystem,
         WorkStream,
         WorkNodeAction,

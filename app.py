@@ -581,6 +581,7 @@ set_session_manager_instance(session_manager)
 app.state.session_manager = session_manager
 memory_manager    = components["memory_manager"]
 memory_vector     = components.get("memory_vector")
+memory_provider_registry = components["memory_provider_registry"]
 upload_handler    = components["upload_handler"]
 app.state.upload_handler = upload_handler
 personal_docs_mgr = components["personal_docs_manager"]
@@ -883,7 +884,15 @@ app.include_router(setup_companion_routes())
 # BBC Odysseus v1 is additive and remains behind the existing auth middleware.
 # Its own route boundary also re-checks browser identity / bearer-token scopes.
 from routes.bbc_routes import setup_bbc_routes
-app.include_router(setup_bbc_routes())
+from src.bbc.registry import build_universal_registry
+bbc_registry = build_universal_registry(
+    app_root=BASE_DIR,
+    data_dir=DATA_DIR,
+    skills_manager=skills_manager,
+    mcp_manager=mcp_manager,
+    memory_provider_registry=memory_provider_registry,
+)
+app.include_router(setup_bbc_routes(registry=bbc_registry))
 
 # ========= ROUTES (kept in app.py) =========
 
