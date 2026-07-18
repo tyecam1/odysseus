@@ -32,6 +32,10 @@ Every transition supplies `expected_version`. `planned` can enter `in_progress` 
 
 `POST /navigation-intents` is read-only resolution for typed or voice commands. It resolves rooms, current persona locations, repository systems, and live work-node aliases, returns confidence-aware clarification when needed, and never creates a movement transaction. Clients create the returned room movement explicitly.
 
+`POST /room-conferences` executes one bounded, structured conference in the ship's active room. The caller supplies the objective and may bind it to one canonical repository work node; the server derives visible occupants from canonical persona locations and selects no more than two task-relevant visitors from the read-only HomeBase persona projection. Callers cannot choose attendees or transition conference state. Repository-bound conferences require both `bbc:write` and `bbc:invoke` scopes.
+
+Execution stages a compact memory pointer, bounded summary, and exact evidence retrieved through `bbc.repository.inspect`. Each participant has an explicit role, focus, context pointer, and output contract. The result contains concise findings, disagreement, uncertainty, proposed actions, and deduplicated provenance; `actions_executed` remains false because a conference does not mutate its source repositories. Planned, running, completed, and failed state is retained for recovery. Memory pointers, the retrieval packet, the completed result, state events, and execution audit commit atomically; dependency and commit failures remain visible as failed conferences without a false completion record.
+
 Difficulty colour has one meaning: green is low, orange is medium, and red is high. Workflow state is rendered separately by node shape and label. The score stores its version, component values, weights, and explanation.
 
 When an alias such as `S2-E1` matches multiple executable work artifacts, the resolver returns `ambiguous` with every candidate and provenance. It returns a canonical node only when exactly one non-archived authoritative artifact matches.

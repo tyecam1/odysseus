@@ -6,6 +6,7 @@ import hashlib
 import os
 import re
 import subprocess
+import yaml
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,6 +16,7 @@ from .difficulty import score_difficulty
 from .models import (
     AmbiguityCandidate,
     DifficultyComponents,
+    PersonaProjection,
     Provenance,
     RepositorySystem,
     WorkNode,
@@ -29,6 +31,7 @@ MAX_SOURCE_BYTES = 512_000
 MAX_INSPECTION_BYTES = 64_000
 MAX_INSPECTION_FILES = 200
 MAX_INSPECTION_TOTAL_BYTES = 2_000_000
+MAX_PERSONA_REGISTRY_BYTES = 256_000
 _FRONTMATTER = re.compile(r"\A---\s*\r?\n(.*?)\r?\n---\s*(?:\r?\n|\Z)", re.S)
 _HEADING = re.compile(r"^#\s+(.+?)\s*$", re.M)
 _CODE_ALIAS = re.compile(r"\b[A-Z]\d+(?:-[A-Z]\d+)+\b", re.I)
@@ -798,6 +801,71 @@ class HomeBaseRepositoryAdapter(ReadOnlyRepositoryAdapter):
     repository_id = "misumi-homebase"
     display_name = "Misumi / homeBase"
     adapter_name = "homebase-agent-tasks-v1"
+
+    def personas(self) -> tuple[PersonaProjection, ...]:
+        """Return a bounded read-only projection of HomeBase persona canon."""
+
+        if self.root is None:
+            return ()
+        path = self._resolve_path("config/personas.yaml")
+        if not path.is_file():
+            return ()
+        if path.stat().st_size > MAX_PERSONA_REGISTRY_BYTES:
+            raise ValueError("persona registry exceeds adapter limit")
+        try:
+            payload = yaml.safe_load(path.read_text(encoding="utf-8"))
+        except yaml.YAMLError as exc:
+            raise ValueError("persona registry is malformed") from exc
+        if not isinstance(payload, dict) or not isinstance(payload.get("personas"), dict):
+            raise ValueError("persona registry must contain a personas mapping")
+        raw_personas = payload["personas"]
+        if len(raw_personas) > 40:
+            raise ValueError("persona registry exceeds persona limit")
+
+        def text(value: Any, field: str, limit: int) -> str:
+            if not isinstance(value, str) or not value.strip() or len(value.strip()) > limit:
+                raise ValueError(f"persona {field} is invalid")
+            return value.strip()
+
+        def strings(value: Any, field: str, limit: int) -> list[str]:
+            if value is None:
+                return []
+            if not isinstance(value, list) or len(value) > limit:
+                raise ValueError(f"persona {field} is invalid")
+            result = []
+            for item in value:
+                if not isinstance(item, str) or not item.strip() or len(item.strip()) > 200:
+                    raise ValueError(f"persona {field} contains an invalid value")
+                result.append(item.strip())
+            return result
+
+        def optional_text(value: Any, field: str, limit: int) -> str:
+            if value is None:
+                return ""
+            if not isinstance(value, str) or len(value.strip()) > limit:
+                raise ValueError(f"persona {field} is invalid")
+            return value.strip()
+
+        projections = []
+        for persona_id, raw in sorted(raw_personas.items()):
+            if not isinstance(persona_id, str) or not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,79}", persona_id):
+                raise ValueError("persona registry contains an invalid id")
+            if not isinstance(raw, dict):
+                raise ValueError(f"persona {persona_id} must be a mapping")
+            routing = raw.get("routing") or {}
+            if not isinstance(routing, dict):
+                raise ValueError(f"persona {persona_id} routing is invalid")
+            projections.append(PersonaProjection(
+                id=persona_id,
+                name=text(raw.get("name"), "name", 120),
+                role=text(raw.get("role"), "role", 160),
+                archetype=optional_text(raw.get("archetype"), "archetype", 160),
+                skills=strings(raw.get("skills"), "skills", 24),
+                consults=strings(raw.get("consults"), "consults", 16),
+                intents=strings(routing.get("intents"), "routing intents", 24),
+                source_ref="repo://misumi-homebase/config/personas.yaml",
+            ))
+        return tuple(projections)
 
     def source_files(self) -> Iterable[Path]:
         if self.root is None:

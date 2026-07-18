@@ -508,6 +508,272 @@ class BBCStateStore:
             connection.commit()
         return transaction
 
+    def create_room_conference(
+        self,
+        state: Dict[str, Any],
+        *,
+        inputs_hash: str,
+    ) -> None:
+        """Persist a room-conference plan and audit record as one commit."""
+
+        conference_id = str(state["id"])
+        actor = str(state["actor"])
+        if state.get("state") != "planned" or int(state.get("version", 0)) != 1:
+            raise ValueError("room conference must be created in planned version 1")
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                "SELECT 1 FROM canonical_state WHERE entity_type = 'room_conference' AND entity_id = ?",
+                (conference_id,),
+            ).fetchone()
+            if existing is not None:
+                raise StateConflict(f"room conference already exists: {conference_id}")
+            self._upsert_entity_in_transaction(
+                connection,
+                "room_conference",
+                conference_id,
+                state,
+                actor=actor,
+                event_type="room_conference.planned",
+            )
+            self._append_audit_in_transaction(
+                connection,
+                actor=actor,
+                capability_id="bbc.room_conference.plan",
+                target=str(state["room_id"]),
+                inputs_hash=inputs_hash,
+                result="succeeded",
+                evidence=[f"state://room_conference/{conference_id}"],
+                rollback_ref=f"room-conference:{conference_id}:fail",
+            )
+            connection.commit()
+
+    def transition_room_conference(
+        self,
+        conference_id: str,
+        *,
+        actor: str,
+        expected_version: int,
+        target_state: str,
+        failure_reason: str | None,
+        inputs_hash: str,
+    ) -> Dict[str, Any]:
+        """Validate and atomically persist one room-conference command."""
+
+        allowed = {
+            "planned": {"running", "failed"},
+            "running": {"failed"},
+            "completed": set(),
+            "failed": set(),
+        }
+        event_types = {
+            "running": "room_conference.started",
+            "failed": "room_conference.failed",
+        }
+        actions = {"running": "start", "failed": "fail"}
+        if target_state not in event_types:
+            raise ValueError(f"invalid room conference target state: {target_state}")
+
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT state_json FROM canonical_state WHERE entity_type = 'room_conference' AND entity_id = ?",
+                (conference_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"room conference not found: {conference_id}")
+            conference = json.loads(row["state_json"])
+            if conference.get("actor") != actor:
+                raise PermissionError("room conference belongs to another actor")
+
+            current_state = str(conference["state"])
+            current_version = int(conference.get("version", 1))
+            if current_state == target_state:
+                if expected_version not in {current_version, current_version - 1}:
+                    raise StateConflict(
+                        f"stale room conference version: expected {expected_version}, current {current_version}"
+                    )
+                if target_state == "failed" and failure_reason != conference.get("failure_reason"):
+                    raise RuntimeError("room conference failure reason is immutable")
+                connection.rollback()
+                return conference
+            if current_version != expected_version:
+                raise StateConflict(
+                    f"stale room conference version: expected {expected_version}, current {current_version}"
+                )
+            if target_state not in allowed[current_state]:
+                raise RuntimeError(
+                    f"room conference cannot transition from {current_state} to {target_state}"
+                )
+
+            if target_state == "running":
+                rows = connection.execute(
+                    "SELECT state_json FROM canonical_state WHERE entity_type = 'room_conference'"
+                ).fetchall()
+                active = next((
+                    item for item in (json.loads(item["state_json"]) for item in rows)
+                    if item.get("room_id") == conference["room_id"]
+                    and item.get("id") != conference_id
+                    and item.get("state") == "running"
+                ), None)
+                if active is not None:
+                    raise StateConflict(
+                        f"room already has a running conference: {active['id']}"
+                    )
+
+            occurred_at = _now()
+            conference["state"] = target_state
+            conference["failure_reason"] = failure_reason
+            conference["version"] = current_version + 1
+            conference["updated_at"] = occurred_at
+            if target_state == "running":
+                conference["started_at"] = occurred_at
+            else:
+                conference["failed_at"] = occurred_at
+            self._upsert_entity_in_transaction(
+                connection,
+                "room_conference",
+                conference_id,
+                conference,
+                actor=actor,
+                event_type=event_types[target_state],
+            )
+            action = actions[target_state]
+            self._append_audit_in_transaction(
+                connection,
+                actor=actor,
+                capability_id=f"bbc.room_conference.{action}",
+                target=str(conference["room_id"]),
+                inputs_hash=inputs_hash,
+                result="succeeded",
+                evidence=[f"state://room_conference/{conference_id}"],
+                rollback_ref=(
+                    f"room-conference:{conference_id}:fail"
+                    if target_state == "running"
+                    else "not-applicable:terminal-room-conference-state"
+                ),
+            )
+            connection.commit()
+        return conference
+
+    def complete_room_conference(
+        self,
+        conference_id: str,
+        *,
+        actor: str,
+        expected_version: int,
+        completed_state: Dict[str, Any],
+        memory_pointers: Iterable[Dict[str, Any]],
+        retrieval_packet: Dict[str, Any],
+        inputs_hash: str,
+    ) -> Dict[str, Any]:
+        """Commit conference results and staged memory as one atomic unit."""
+
+        pointers = list(memory_pointers)
+        if not pointers or len(pointers) > 12:
+            raise ValueError("conference completion requires 1 to 12 memory pointers")
+        pointer_ids = [str(pointer.get("id", "")) for pointer in pointers]
+        if any(not pointer_id for pointer_id in pointer_ids) or len(pointer_ids) != len(set(pointer_ids)):
+            raise ValueError("conference memory pointer ids must be non-empty and unique")
+        if retrieval_packet.get("pointer_ids") != pointer_ids:
+            raise ValueError("retrieval packet must reference exactly the staged memory pointers")
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT state_json FROM canonical_state WHERE entity_type = 'room_conference' AND entity_id = ?",
+                (conference_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"room conference not found: {conference_id}")
+            current = json.loads(row["state_json"])
+            if current.get("actor") != actor:
+                raise PermissionError("room conference belongs to another actor")
+            if current.get("state") == "completed":
+                current_version = int(current.get("version", 1))
+                if expected_version in {current_version, current_version - 1}:
+                    connection.rollback()
+                    return current
+                raise StateConflict(
+                    f"stale room conference version: expected {expected_version}, current {current_version}"
+                )
+            if current.get("state") != "running":
+                raise RuntimeError("only a running room conference can complete")
+            if int(current.get("version", 1)) != expected_version:
+                raise StateConflict(
+                    f"stale room conference version: expected {expected_version}, current {current.get('version')}"
+                )
+
+            immutable_fields = (
+                "id", "actor", "room_id", "objective", "repository_id", "work_node_id",
+                "participant_ids", "visitor_ids", "participants",
+            )
+            changed_fields = [
+                key for key in immutable_fields if completed_state.get(key) != current.get(key)
+            ]
+            if changed_fields:
+                raise ValueError(
+                    "conference completion changed immutable fields: " + ", ".join(changed_fields)
+                )
+            for timestamp_field in ("created_at", "started_at"):
+                current_timestamp = datetime.fromisoformat(
+                    str(current.get(timestamp_field)).replace("Z", "+00:00")
+                )
+                completed_timestamp = datetime.fromisoformat(
+                    str(completed_state.get(timestamp_field)).replace("Z", "+00:00")
+                )
+                if completed_timestamp != current_timestamp:
+                    raise ValueError(
+                        f"conference completion changed immutable field: {timestamp_field}"
+                    )
+            if completed_state.get("state") != "completed":
+                raise ValueError("conference completion state must be completed")
+            if int(completed_state.get("version", 0)) != expected_version + 1:
+                raise ValueError("conference completion version is invalid")
+            if not completed_state.get("completed_at") or completed_state.get("failed_at") is not None:
+                raise ValueError("conference completion timestamps are invalid")
+            packet_id = str(retrieval_packet.get("id", ""))
+            if not packet_id or completed_state.get("retrieval_packet_id") != packet_id:
+                raise ValueError("conference completion must reference its retrieval packet")
+            repository_id = current.get("repository_id")
+            if retrieval_packet.get("repository_id") != repository_id:
+                raise ValueError("retrieval packet crossed the conference repository boundary")
+            if any(pointer.get("repository_id") != repository_id for pointer in pointers):
+                raise ValueError("memory pointer crossed the conference repository boundary")
+            synthesis = completed_state.get("synthesis") or {}
+            if synthesis.get("actions_executed") is not False:
+                raise ValueError("conference synthesis cannot claim an executed action")
+
+            for pointer in pointers:
+                self._upsert_entity_in_transaction(
+                    connection, "memory_pointer", str(pointer["id"]), pointer,
+                    actor=actor, event_type="memory.pointer.indexed",
+                )
+            self._upsert_entity_in_transaction(
+                connection, "retrieval_packet", str(retrieval_packet["id"]), retrieval_packet,
+                actor=actor, event_type="memory.retrieval.completed",
+            )
+            self._upsert_entity_in_transaction(
+                connection, "room_conference", conference_id, completed_state,
+                actor=actor, event_type="room_conference.completed",
+            )
+            evidence = [
+                f"state://room_conference/{conference_id}",
+                f"state://retrieval_packet/{retrieval_packet['id']}",
+                *[f"state://memory_pointer/{pointer['id']}" for pointer in pointers],
+            ]
+            self._append_audit_in_transaction(
+                connection,
+                actor=actor,
+                capability_id="bbc.room_conference.execute",
+                target=str(completed_state["room_id"]),
+                inputs_hash=inputs_hash,
+                result="succeeded",
+                evidence=evidence,
+                rollback_ref="not-applicable:read-only-conference-result",
+            )
+            connection.commit()
+        return completed_state
+
     def list_events(self, *, after: int = 0, limit: int = 200) -> list[StateEvent]:
         bounded = max(1, min(int(limit), 1000))
         with self._connect() as connection:

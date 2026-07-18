@@ -228,29 +228,93 @@ class NavigationTransaction(ContractModel):
     interruption_reason: Optional[str] = Field(default=None, max_length=500)
 
 
+class RoomConferenceState(str, Enum):
+    planned = "planned"
+    running = "running"
+    completed = "completed"
+    failed = "failed"
+
+
+class PersonaProjection(ContractModel):
+    id: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]{0,79}$")
+    name: str = Field(min_length=1, max_length=120)
+    role: str = Field(min_length=1, max_length=160)
+    archetype: str = Field(default="", max_length=160)
+    skills: List[str] = Field(default_factory=list, max_length=24)
+    consults: List[str] = Field(default_factory=list, max_length=16)
+    intents: List[str] = Field(default_factory=list, max_length=24)
+    source_ref: str = Field(min_length=1, max_length=400)
+
+
+class ConferenceParticipant(ContractModel):
+    persona_id: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]{0,79}$")
+    role: str = Field(min_length=1, max_length=160)
+    focus: Literal["evidence", "risk", "workflow", "integration"]
+    context_pointer_ids: List[str] = Field(default_factory=list, max_length=12)
+    output_contract: str = Field(min_length=1, max_length=300)
+
+
+class ConferenceContribution(ContractModel):
+    persona_id: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]{0,79}$")
+    focus: Literal["evidence", "risk", "workflow", "integration"]
+    findings: List[str] = Field(default_factory=list, max_length=8)
+    evidence_refs: List[str] = Field(default_factory=list, max_length=12)
+    uncertainty: List[str] = Field(default_factory=list, max_length=6)
+    proposed_actions: List[str] = Field(default_factory=list, max_length=6)
+
+
+class ConferenceSynthesis(ContractModel):
+    decision: str = Field(min_length=1, max_length=600)
+    disagreements: List[str] = Field(default_factory=list, max_length=8)
+    uncertainty: List[str] = Field(default_factory=list, max_length=8)
+    proposed_actions: List[str] = Field(default_factory=list, max_length=8)
+    provenance: List[str] = Field(default_factory=list, max_length=24)
+    actions_executed: bool = False
+
+
 class RoomConference(ContractModel):
-    id: str
-    room_id: str
-    participant_ids: List[str]
-    visitor_ids: List[str] = Field(default_factory=list)
-    state: Literal["planned", "running", "completed", "failed"] = "planned"
-    provenance: List[str] = Field(default_factory=list)
+    id: str = Field(pattern=r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
+    actor: str = Field(min_length=1, max_length=160)
+    room_id: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]{0,79}$")
+    objective: str = Field(min_length=1, max_length=500)
+    repository_id: Optional[str] = Field(default=None, pattern=r"^[a-z0-9][a-z0-9._-]{0,79}$")
+    work_node_id: Optional[str] = Field(default=None, max_length=200)
+    participant_ids: List[str] = Field(min_length=1, max_length=12)
+    visitor_ids: List[str] = Field(default_factory=list, max_length=2)
+    participants: List[ConferenceParticipant] = Field(default_factory=list, max_length=12)
+    state: RoomConferenceState = RoomConferenceState.planned
+    retrieval_packet_id: Optional[str] = Field(default=None, max_length=120)
+    contributions: List[ConferenceContribution] = Field(default_factory=list, max_length=12)
+    synthesis: Optional[ConferenceSynthesis] = None
+    provenance: List[str] = Field(default_factory=list, max_length=24)
+    version: int = Field(default=1, ge=1)
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    failed_at: Optional[datetime] = None
+    failure_reason: Optional[str] = Field(default=None, max_length=500)
 
 
 class MemoryPointer(ContractModel):
-    id: str
+    id: str = Field(min_length=1, max_length=120)
     repository_id: Optional[str] = None
-    sensitivity: str = "internal"
-    summary: str
-    evidence_ref: str
+    sensitivity: Literal["internal", "research", "operator-private"] = "internal"
+    summary: str = Field(min_length=1, max_length=600)
+    evidence_ref: str = Field(min_length=1, max_length=500)
     confidence: float = Field(default=1.0, ge=0, le=1)
+    contradiction_refs: List[str] = Field(default_factory=list, max_length=12)
+    created_at: datetime = Field(default_factory=utc_now)
 
 
 class RetrievalPacket(ContractModel):
-    id: str
-    pointer_ids: List[str]
-    evidence: List[str] = Field(default_factory=list)
-    token_estimate: int = Field(default=0, ge=0)
+    id: str = Field(min_length=1, max_length=120)
+    repository_id: Optional[str] = None
+    pointer_ids: List[str] = Field(default_factory=list, max_length=12)
+    summaries: List[str] = Field(default_factory=list, max_length=12)
+    evidence: List[str] = Field(default_factory=list, max_length=12)
+    token_estimate: int = Field(default=0, ge=0, le=4096)
+    created_at: datetime = Field(default_factory=utc_now)
 
 
 class RuntimeAction(ContractModel):
@@ -322,6 +386,10 @@ DOMAIN_MODELS = {
         WorkNode,
         WorkNodeResolution,
         NavigationTransaction,
+        PersonaProjection,
+        ConferenceParticipant,
+        ConferenceContribution,
+        ConferenceSynthesis,
         RoomConference,
         MemoryPointer,
         RetrievalPacket,

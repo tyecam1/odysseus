@@ -14,7 +14,7 @@ from core.constants import BASE_DIR, DATA_DIR
 from src.app_helpers import serve_html_with_nonce
 from src.bbc.auth import bbc_caller_grants, require_bbc_access
 from src.bbc.runtime import BBCRuntime, build_runtime
-from src.bbc.models import NavigationTransactionState, WorkNode, WorkStream
+from src.bbc.models import NavigationTransactionState, RoomConferenceState, WorkNode, WorkStream
 
 
 TRANSACTION_ID_PATTERN = r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
@@ -57,6 +57,18 @@ class NavigationIntentRequest(BaseModel):
     text: str = Field(min_length=1, max_length=500)
     source: str = Field(default="typed", pattern=r"^(typed|voice)$")
     context: NavigationIntentContext = Field(default_factory=NavigationIntentContext)
+
+
+class RoomConferenceRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    room_id: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]{0,79}$")
+    objective: str = Field(min_length=1, max_length=500)
+    repository_id: str | None = Field(
+        default=None, pattern=r"^[a-z0-9][a-z0-9._-]{0,79}$"
+    )
+    work_node_id: str | None = Field(default=None, min_length=1, max_length=200)
+    max_visitors: int = Field(default=2, ge=0, le=2)
 
 
 class _LazyRuntime:
@@ -259,6 +271,47 @@ def setup_bbc_routes(runtime: BBCRuntime | None = None) -> APIRouter:
         require_bbc_access(request, "read")
         try:
             return await asyncio.to_thread(lambda: runtime.persona_location(persona_id))
+        except Exception as exc:
+            raise _http_error(exc) from exc
+
+    @router.get("/api/bbc/v1/room-conferences")
+    async def room_conferences(
+        request: Request,
+        room_id: str | None = Query(default=None, pattern=r"^[a-z0-9][a-z0-9._-]{0,79}$"),
+        state: RoomConferenceState | None = None,
+    ):
+        require_bbc_access(request, "read")
+        conferences = await asyncio.to_thread(
+            lambda: runtime.room_conferences(room_id=room_id, state=state)
+        )
+        return {"conferences": conferences}
+
+    @router.get("/api/bbc/v1/room-conferences/{conference_id}")
+    async def room_conference(
+        request: Request,
+        conference_id: str = ApiPath(pattern=TRANSACTION_ID_PATTERN),
+    ):
+        require_bbc_access(request, "read")
+        try:
+            return await asyncio.to_thread(lambda: runtime.room_conference(conference_id))
+        except Exception as exc:
+            raise _http_error(exc) from exc
+
+    @router.post("/api/bbc/v1/room-conferences", status_code=201)
+    async def create_room_conference(request: Request, payload: RoomConferenceRequest):
+        actor = require_bbc_access(request, "write")
+        require_bbc_access(request, "invoke")
+        grants = bbc_caller_grants(request)
+        try:
+            return await asyncio.to_thread(lambda: runtime.run_room_conference(
+                actor=actor,
+                room_id=payload.room_id,
+                objective=payload.objective,
+                repository_id=payload.repository_id,
+                work_node_id=payload.work_node_id,
+                max_visitors=payload.max_visitors,
+                caller_grants=grants,
+            ))
         except Exception as exc:
             raise _http_error(exc) from exc
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import uuid
 from collections import deque
 import difflib
@@ -16,11 +17,19 @@ from .models import (
     API_VERSION,
     SCHEMA_VERSION,
     HealthState,
+    ConferenceContribution,
+    ConferenceParticipant,
+    ConferenceSynthesis,
+    MemoryPointer,
     NavigationTransaction,
     NavigationTransactionState,
     PersonaLocation,
+    PersonaProjection,
     Point,
     Room,
+    RoomConference,
+    RoomConferenceState,
+    RetrievalPacket,
     Ship,
     utc_now,
     WorkNodeResolution,
@@ -37,6 +46,23 @@ ROOM_ADJACENCY: dict[str, tuple[str, ...]] = {
     "commons": ("observatory", "research", "archive", "engineering", "workshop"),
     "engineering": ("research", "commons", "workshop"),
     "workshop": ("commons", "engineering"),
+}
+
+ROOM_PURPOSE_TERMS: dict[str, set[str]] = {
+    "bridge": {"authority", "integration", "strategy", "priority", "governance", "coherence", "boundary"},
+    "observatory": {"repository", "system", "health", "navigation", "selection", "browse", "context"},
+    "research": {"research", "evidence", "experiment", "analysis", "uncertainty", "measurement", "science"},
+    "archive": {"memory", "provenance", "archive", "raw", "fidelity", "history", "record"},
+    "commons": {"household", "care", "food", "music", "wellbeing", "conference", "synthesis", "cleaning"},
+    "engineering": {"runtime", "model", "deployment", "implementation", "security", "code", "technical"},
+    "workshop": {"capability", "tool", "workflow", "process", "automation", "execution", "task"},
+}
+
+CONFERENCE_FOCUS_TERMS: dict[str, set[str]] = {
+    "evidence": {"evidence", "research", "memory", "archive", "provenance", "uncertainty", "measurement"},
+    "risk": {"risk", "priority", "blocker", "safety", "security", "cost", "decision"},
+    "workflow": {"workflow", "task", "process", "implementation", "execution", "planning", "closure"},
+    "integration": {"integration", "coherence", "boundary", "synthesis", "system", "governance"},
 }
 
 
@@ -146,6 +172,39 @@ class BBCRuntime:
         self._ship = authored_ship()
         if self.store.get_entity("ship", self._ship.id) is None:
             self.store.upsert_entity("ship", self._ship.id, self._ship.model_dump(mode="json"), event_type="ship.initialised")
+        self._initialise_persona_locations()
+
+    def persona_projections(self) -> list[PersonaProjection]:
+        try:
+            adapter = self.adapters.get("misumi-homebase")
+        except KeyError:
+            return []
+        provider = getattr(adapter, "personas", None)
+        return list(provider()) if callable(provider) else []
+
+    @staticmethod
+    def _terms(value: str) -> set[str]:
+        return set(re.findall(r"[a-z0-9]+", str(value).casefold()))
+
+    def _derived_room(self, persona: PersonaProjection) -> str:
+        material = " ".join([persona.role, persona.archetype, *persona.skills, *persona.intents])
+        terms = self._terms(material)
+        ranked = [
+            (len(terms.intersection(keywords)), room_id)
+            for room_id, keywords in ROOM_PURPOSE_TERMS.items()
+        ]
+        ranked.sort(key=lambda item: (-item[0], list(ROOM_PURPOSE_TERMS).index(item[1])))
+        return ranked[0][1] if ranked and ranked[0][0] else "bridge"
+
+    def _initialise_persona_locations(self) -> None:
+        for persona in self.persona_projections():
+            if self.store.get_entity("persona_location", persona.id) is not None:
+                continue
+            location = PersonaLocation(persona_id=persona.id, room_id=self._derived_room(persona))
+            self.store.upsert_entity(
+                "persona_location", persona.id, location.model_dump(mode="json"),
+                actor="system", event_type="persona.location.derived",
+            )
 
     def schemas(self) -> Dict[str, Any]:
         return {
@@ -527,6 +586,426 @@ class BBCRuntime:
             }),
         )
         return NavigationTransaction.model_validate(state_payload)
+
+    def _conference_work_node(
+        self,
+        repository_id: str | None,
+        work_node_id: str | None,
+    ) -> WorkNode | None:
+        if bool(repository_id) != bool(work_node_id):
+            raise ValueError("repository_id and work_node_id must be supplied together")
+        if repository_id is None:
+            return None
+        node = next(
+            (
+                candidate
+                for candidate in self.adapters.get(repository_id).snapshot().nodes
+                if candidate.id == work_node_id
+            ),
+            None,
+        )
+        if node is None:
+            raise KeyError(f"work node not found in {repository_id}: {work_node_id}")
+        if node.archived or node.superseded:
+            raise ValueError("room conference requires a current work node")
+        return node
+
+    def _participant_focus(self, persona: PersonaProjection) -> str:
+        material = " ".join((persona.role, persona.archetype, *persona.skills, *persona.intents))
+        terms = self._terms(material)
+        ranked = [
+            (len(terms.intersection(keywords)), focus)
+            for focus, keywords in CONFERENCE_FOCUS_TERMS.items()
+        ]
+        ranked.sort(key=lambda item: (-item[0], list(CONFERENCE_FOCUS_TERMS).index(item[1])))
+        return ranked[0][1] if ranked and ranked[0][0] else "integration"
+
+    def _conference_attendees(
+        self,
+        *,
+        room_id: str,
+        objective: str,
+        node: WorkNode | None,
+        max_visitors: int,
+    ) -> tuple[list[PersonaProjection], list[str]]:
+        projections = {persona.id: persona for persona in self.persona_projections()}
+        occupants = [
+            projections[location.persona_id]
+            for location in self.persona_locations()
+            if location.room_id == room_id and location.persona_id in projections
+        ]
+        occupants.sort(key=lambda persona: persona.id)
+        if len(occupants) > 12:
+            raise ValueError("room occupancy exceeds the conference participant limit")
+
+        task_material = objective
+        if node is not None:
+            task_material = " ".join((
+                task_material,
+                node.title,
+                node.outcome,
+                node.next_action or "",
+                *node.blocker_ids,
+                *node.dependency_ids,
+                *node.difficulty.rationale,
+            ))
+        task_terms = self._terms(task_material)
+        occupant_ids = {persona.id for persona in occupants}
+        ranked: list[tuple[int, str, PersonaProjection]] = []
+        for persona in projections.values():
+            if persona.id in occupant_ids:
+                continue
+            profile_terms = self._terms(" ".join((
+                persona.role, persona.archetype, *persona.skills, *persona.intents,
+            )))
+            score = 3 * len(task_terms.intersection(profile_terms))
+            score += len(profile_terms.intersection(ROOM_PURPOSE_TERMS[room_id]))
+            score += sum(1 for occupant in occupants if persona.id in occupant.consults)
+            ranked.append((score, persona.id, persona))
+        ranked.sort(key=lambda item: (-item[0], item[1]))
+
+        visitors: list[PersonaProjection] = []
+        covered_focuses = {self._participant_focus(persona) for persona in occupants}
+        for score, _, candidate in ranked:
+            if len(visitors) >= max_visitors or len(occupants) + len(visitors) >= 12:
+                break
+            focus = self._participant_focus(candidate)
+            if score <= 0 and (occupants or visitors):
+                continue
+            if visitors and focus in covered_focuses:
+                continue
+            visitors.append(candidate)
+            covered_focuses.add(focus)
+        if not occupants and not visitors:
+            raise ValueError("no source-defined persona is available for the conference")
+        return [*occupants, *visitors], [persona.id for persona in visitors]
+
+    @staticmethod
+    def _bounded_unique(values: list[str], *, limit: int) -> list[str]:
+        return list(dict.fromkeys(value.strip() for value in values if value.strip()))[:limit]
+
+    def _stage_conference_memory(
+        self,
+        *,
+        conference_id: str,
+        actor: str,
+        room_id: str,
+        objective: str,
+        repository_id: str | None,
+        node: WorkNode | None,
+        caller_grants: set[str] | frozenset[str],
+    ) -> tuple[list[MemoryPointer], RetrievalPacket, list[str]]:
+        pointer_id = f"memory:{conference_id}:context"
+        packet_id = f"retrieval:{conference_id}"
+        source_ref = f"state://ship/{self._ship.id}/room/{room_id}"
+        summary = f"{room_id}: {objective}"
+        sensitivity = "internal"
+        exact_evidence = summary
+        provenance = [source_ref]
+
+        if node is not None and repository_id is not None:
+            source = node.provenance[0]
+            source_ref = f"repo://{repository_id}/{source.path}"
+            summary = (
+                f"{node.canonical_key}: {node.title}; state={node.state}; "
+                f"difficulty={node.difficulty.score}/100 {node.difficulty.band}."
+            )
+            sensitivity = "research" if repository_id == "obsidian-phd" else "internal"
+            invocation = self.invoke_capability(
+                "bbc.repository.inspect",
+                {"repository_id": repository_id, "relative_path": source.path, "limit": 12},
+                actor=actor,
+                caller_grants=caller_grants,
+            )
+            result = invocation["result"]
+            if result.get("text"):
+                exact_evidence = str(result["text"])[:4096]
+            elif result.get("hits"):
+                exact_evidence = "\n".join(
+                    str(hit.get("snippet", "")) for hit in result["hits"][:12]
+                )[:4096]
+            else:
+                exact_evidence = json.dumps(result, sort_keys=True, default=str)[:4096]
+            provenance.extend(
+                str(item) for item in invocation["audit"].get("evidence", [])
+            )
+
+        pointer = MemoryPointer(
+            id=pointer_id,
+            repository_id=repository_id,
+            sensitivity=sensitivity,
+            summary=summary[:600],
+            evidence_ref=source_ref,
+            confidence=1.0,
+        )
+        packet = RetrievalPacket(
+            id=packet_id,
+            repository_id=repository_id,
+            pointer_ids=[pointer.id],
+            summaries=[pointer.summary],
+            evidence=[exact_evidence],
+            token_estimate=min(4096, max(1, (len(pointer.summary) + len(exact_evidence) + 3) // 4)),
+        )
+        return [pointer], packet, self._bounded_unique(provenance, limit=24)
+
+    def _conference_contributions(
+        self,
+        participants: list[ConferenceParticipant],
+        packet: RetrievalPacket,
+        node: WorkNode | None,
+    ) -> list[ConferenceContribution]:
+        evidence_refs = [*packet.pointer_ids]
+        if node is not None:
+            evidence_refs.extend(node.source_links)
+            evidence_refs.extend(
+                f"repo://{item.repository_id}/{item.path}"
+                for item in node.provenance
+            )
+        evidence_refs = self._bounded_unique(evidence_refs, limit=12)
+        contributions: list[ConferenceContribution] = []
+        for participant in participants:
+            if node is None:
+                findings = ["The conference is bounded to the authored room context and stated objective."]
+                uncertainty = ["No canonical work node was supplied."]
+                actions = ["Select a canonical work node before requesting an execution decision."]
+            elif participant.focus == "evidence":
+                findings = [
+                    f"The authoritative node is {node.canonical_key}: {node.title}.",
+                    f"Its recorded state is {node.state}; exact source evidence was retrieved through the shared inspection capability.",
+                ]
+                uncertainty = ["The retrieval packet is bounded to one authoritative source file."]
+                actions = ["Review the cited source before changing the work-node state."]
+            elif participant.focus == "risk":
+                blockers = ", ".join(node.blocker_ids) or "none recorded"
+                findings = [
+                    f"Difficulty is {node.difficulty.score}/100 ({node.difficulty.band}).",
+                    f"Recorded blockers: {blockers}.",
+                ]
+                uncertainty = (
+                    ["Absence of recorded blockers is not proof that external blockers are absent."]
+                    if not node.blocker_ids else []
+                )
+                actions = ["Resolve or verify recorded blockers before execution."]
+            elif participant.focus == "workflow":
+                next_action = node.next_action or "define the next concrete action"
+                findings = [f"The recorded next action is: {next_action}."]
+                uncertainty = ["The conference does not infer completion from discussion."]
+                actions = [next_action]
+            else:
+                findings = [
+                    f"The node belongs to {node.repository_id} and is being considered in the current room context.",
+                    "Repository and room boundaries remain explicit in the retrieval packet.",
+                ]
+                uncertainty = ["Cross-repository effects require separate authorised actions."]
+                actions = ["Keep any follow-up action within its owning repository boundary."]
+            contributions.append(ConferenceContribution(
+                persona_id=participant.persona_id,
+                focus=participant.focus,
+                findings=self._bounded_unique(findings, limit=8),
+                evidence_refs=evidence_refs,
+                uncertainty=self._bounded_unique(uncertainty, limit=6),
+                proposed_actions=self._bounded_unique(actions, limit=6),
+            ))
+        return contributions
+
+    def run_room_conference(
+        self,
+        *,
+        actor: str,
+        room_id: str,
+        objective: str,
+        repository_id: str | None = None,
+        work_node_id: str | None = None,
+        max_visitors: int = 2,
+        caller_grants: set[str] | frozenset[str] = frozenset(),
+    ) -> RoomConference:
+        if room_id not in {room.id for room in self._ship.rooms}:
+            raise ValueError("room conference must use an authored room")
+        if self.ship().active_room_id != room_id:
+            raise ValueError("room conference must run in the ship's active room")
+        objective = str(objective).strip()
+        if not objective or len(objective) > 500:
+            raise ValueError("conference objective must contain 1 to 500 characters")
+        if not 0 <= max_visitors <= 2:
+            raise ValueError("max_visitors must be between 0 and 2")
+        node = self._conference_work_node(repository_id, work_node_id)
+        attendees, visitor_ids = self._conference_attendees(
+            room_id=room_id,
+            objective=objective,
+            node=node,
+            max_visitors=max_visitors,
+        )
+        pointer_id = f"memory:pending:context"
+        participants = [ConferenceParticipant(
+            persona_id=persona.id,
+            role=persona.role,
+            focus=self._participant_focus(persona),
+            context_pointer_ids=[pointer_id],
+            output_contract=(
+                "Return no more than two findings, cited evidence, bounded uncertainty, "
+                "and proposed actions; do not claim execution."
+            ),
+        ) for persona in attendees]
+        now = utc_now()
+        conference = RoomConference(
+            id=str(uuid.uuid4()),
+            actor=actor,
+            room_id=room_id,
+            objective=objective,
+            repository_id=repository_id,
+            work_node_id=work_node_id,
+            participant_ids=[persona.id for persona in attendees],
+            visitor_ids=visitor_ids,
+            participants=participants,
+            created_at=now,
+            updated_at=now,
+        )
+        pointer_id = f"memory:{conference.id}:context"
+        participants = [
+            participant.model_copy(update={"context_pointer_ids": [pointer_id]})
+            for participant in participants
+        ]
+        conference = conference.model_copy(update={"participants": participants})
+        command_hash = content_hash({
+            "room_id": room_id,
+            "objective": objective,
+            "repository_id": repository_id,
+            "work_node_id": work_node_id,
+            "max_visitors": max_visitors,
+        })
+        self.store.create_room_conference(
+            conference.model_dump(mode="json"),
+            inputs_hash=command_hash,
+        )
+        running = self.transition_room_conference(
+            conference.id,
+            RoomConferenceState.running,
+            actor=actor,
+            expected_version=1,
+        )
+        try:
+            pointers, packet, provenance = self._stage_conference_memory(
+                conference_id=conference.id,
+                actor=actor,
+                room_id=room_id,
+                objective=objective,
+                repository_id=repository_id,
+                node=node,
+                caller_grants=caller_grants,
+            )
+            contributions = self._conference_contributions(participants, packet, node)
+            uncertainty = self._bounded_unique(
+                [item for contribution in contributions for item in contribution.uncertainty],
+                limit=8,
+            )
+            proposed_actions = self._bounded_unique(
+                [item for contribution in contributions for item in contribution.proposed_actions],
+                limit=8,
+            )
+            if node is None:
+                decision = "No execution decision: select a canonical work node."
+            elif node.blocker_ids:
+                decision = f"Do not execute yet; resolve the recorded blockers for {node.canonical_key}."
+            else:
+                decision = f"Proceed only with the recorded next action for {node.canonical_key}, subject to cited evidence."
+            synthesis = ConferenceSynthesis(
+                decision=decision,
+                disagreements=[
+                    "The workflow view proposes a next action; the evidence view limits confidence to the bounded inspected source.",
+                    "The integration view preserves repository boundaries; it does not authorise cross-repository mutation.",
+                ],
+                uncertainty=uncertainty,
+                proposed_actions=proposed_actions,
+                provenance=self._bounded_unique([*provenance, *packet.pointer_ids], limit=24),
+                actions_executed=False,
+            )
+            completed_at = utc_now()
+            completed = running.model_copy(update={
+                "state": RoomConferenceState.completed,
+                "version": running.version + 1,
+                "updated_at": completed_at,
+                "completed_at": completed_at,
+                "retrieval_packet_id": packet.id,
+                "participants": participants,
+                "contributions": contributions,
+                "synthesis": synthesis,
+                "provenance": synthesis.provenance,
+            })
+            state_payload = self.store.complete_room_conference(
+                conference.id,
+                actor=actor,
+                expected_version=running.version,
+                completed_state=completed.model_dump(mode="json"),
+                memory_pointers=[pointer.model_dump(mode="json") for pointer in pointers],
+                retrieval_packet=packet.model_dump(mode="json"),
+                inputs_hash=command_hash,
+            )
+            return RoomConference.model_validate(state_payload)
+        except Exception as exc:
+            current = self.room_conference(conference.id)
+            if current.state == RoomConferenceState.running:
+                self.transition_room_conference(
+                    conference.id,
+                    RoomConferenceState.failed,
+                    actor=actor,
+                    expected_version=current.version,
+                    failure_reason=f"{type(exc).__name__}: {exc}"[:500],
+                )
+            raise
+
+    def room_conference(self, conference_id: str) -> RoomConference:
+        state = self.store.get_entity("room_conference", conference_id)
+        if state is None:
+            raise KeyError(f"room conference not found: {conference_id}")
+        return RoomConference.model_validate(state)
+
+    def room_conferences(
+        self, *, room_id: str | None = None, state: RoomConferenceState | str | None = None,
+    ) -> list[RoomConference]:
+        target_state = RoomConferenceState(state).value if state is not None else None
+        return [
+            RoomConference.model_validate(item)
+            for item in self.store.list_entities("room_conference")
+            if (room_id is None or item.get("room_id") == room_id)
+            and (target_state is None or item.get("state") == target_state)
+        ]
+
+    def transition_room_conference(
+        self,
+        conference_id: str,
+        state: RoomConferenceState | str,
+        *,
+        actor: str,
+        expected_version: int,
+        failure_reason: str | None = None,
+    ) -> RoomConference:
+        target_state = RoomConferenceState(state)
+        if target_state == RoomConferenceState.planned:
+            raise ValueError("room conference cannot transition back to planned")
+        reason = None
+        if target_state == RoomConferenceState.failed:
+            reason = str(failure_reason or "").strip()
+            if not reason:
+                raise ValueError("failure_reason is required when failing a room conference")
+            if len(reason) > 500:
+                raise ValueError("failure_reason must contain at most 500 characters")
+        elif failure_reason is not None:
+            raise ValueError("failure_reason is only valid for a failed room conference")
+
+        state_payload = self.store.transition_room_conference(
+            conference_id,
+            actor=actor,
+            expected_version=expected_version,
+            target_state=target_state.value,
+            failure_reason=reason,
+            inputs_hash=content_hash({
+                "conference_id": conference_id,
+                "state": target_state.value,
+                "expected_version": expected_version,
+                "failure_reason": reason,
+            }),
+        )
+        return RoomConference.model_validate(state_payload)
 
 def build_runtime(*, data_dir: str | Path, app_root: str | Path) -> BBCRuntime:
     data_root = Path(data_dir) / "bbc"
