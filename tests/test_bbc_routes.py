@@ -50,6 +50,13 @@ def test_versioned_routes_expose_live_data_and_navigation_audit(tmp_path, monkey
     work = client.get("/api/bbc/v1/repositories/odysseus/work-nodes")
     assert work.status_code == 200
     assert work.json()["nodes"][0]["title"] == "Live node"
+    assert work.json()["nodes"][0]["available_actions"] == [{
+        "id": "inspect-source",
+        "label": "Inspect authoritative source",
+        "capability_id": "bbc.repository.inspect",
+        "approval_class": "automatic",
+        "read_only": True,
+    }]
     assert runtime.store.list_entities("work_node") == []
 
     ingested = client.post("/api/bbc/v1/repositories/odysseus/refresh")

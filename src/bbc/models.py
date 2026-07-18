@@ -164,6 +164,14 @@ class WorkNodeState(str, Enum):
     archived = "archived"
 
 
+class WorkNodeAction(ContractModel):
+    id: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]{0,79}$")
+    label: str = Field(min_length=1, max_length=80)
+    capability_id: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]{0,119}$")
+    approval_class: Literal["automatic", "operator", "hard_stop"]
+    read_only: bool
+
+
 class WorkNode(ContractModel):
     id: str
     repository_id: str
@@ -179,6 +187,7 @@ class WorkNode(ContractModel):
     dependency_ids: List[str] = Field(default_factory=list)
     acceptance_evidence: List[str] = Field(default_factory=list)
     source_links: List[str] = Field(default_factory=list)
+    available_actions: List[WorkNodeAction] = Field(default_factory=list, max_length=12)
     provenance: List[Provenance]
     lineage: List[str] = Field(default_factory=list)
     archived: bool = False
@@ -387,6 +396,7 @@ DOMAIN_MODELS = {
         Capability,
         RepositorySystem,
         WorkStream,
+        WorkNodeAction,
         WorkNode,
         WorkNodeResolution,
         NavigationTransaction,

@@ -34,6 +34,7 @@ from .models import (
     utc_now,
     WorkNodeResolution,
     WorkNode,
+    WorkNodeAction,
     WorkStream,
 )
 from .store import BBCStateStore, StateConflict, content_hash
@@ -271,6 +272,11 @@ class BBCRuntime:
 
         adapter = self.adapters.get(repository_id)
         snapshot = adapter.snapshot()
+        snapshot = snapshot.__class__(
+            system=snapshot.system,
+            streams=snapshot.streams,
+            nodes=tuple(self._with_node_actions(node) for node in snapshot.nodes),
+        )
         stored_nodes = {
             item.get("id"): item
             for item in self.store.list_entities("work_node")
@@ -306,10 +312,29 @@ class BBCRuntime:
         )
         return snapshot
 
+    @staticmethod
+    def _with_node_actions(node: WorkNode) -> WorkNode:
+        if node.archived or node.superseded:
+            return node.model_copy(update={"available_actions": []})
+        return node.model_copy(update={
+            "available_actions": [WorkNodeAction(
+                id="inspect-source",
+                label="Inspect authoritative source",
+                capability_id="bbc.repository.inspect",
+                approval_class="automatic",
+                read_only=True,
+            )],
+        })
+
     def refresh_repository(self, repository_id: str, *, actor: str = "system") -> RepositorySnapshot:
         """Explicitly ingest one live snapshot into the canonical event ledger."""
 
         snapshot = self.adapters.get(repository_id).snapshot()
+        snapshot = snapshot.__class__(
+            system=snapshot.system,
+            streams=snapshot.streams,
+            nodes=tuple(self._with_node_actions(node) for node in snapshot.nodes),
+        )
         persisted = self.store.ingest_repository_snapshot(
             system=snapshot.system.model_dump(mode="json"),
             streams=(stream.model_dump(mode="json") for stream in snapshot.streams),
