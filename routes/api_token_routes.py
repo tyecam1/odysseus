@@ -29,6 +29,9 @@ ALLOWED_SCOPES = {
     "cookbook:launch",
     "misumi:read",
     "misumi:execute",
+    "bbc:read",
+    "bbc:invoke",
+    "bbc:write",
 }
 TOKEN_PROFILES = {
     "chat": ["chat"],
@@ -36,6 +39,7 @@ TOKEN_PROFILES = {
     "codex_documents": ["documents:read", "documents:write"],
     "codex_email_drafts": ["email:read", "email:draft", "documents:read", "documents:write"],
     "misumi_interface": ["misumi:read", "misumi:execute"],
+    "bbc_ship": ["bbc:read", "bbc:invoke", "bbc:write"],
 }
 
 
@@ -73,6 +77,8 @@ def _normalize_scopes(scopes: str | list[str] | None = None, profile: str | None
     ensure_before("email:draft", "email:read")
     ensure_before("cookbook:launch", "cookbook:read")
     ensure_before("misumi:execute", "misumi:read")
+    ensure_before("bbc:invoke", "bbc:read")
+    ensure_before("bbc:write", "bbc:read")
 
     return normalized or [DEFAULT_SCOPES]
 

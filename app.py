@@ -880,6 +880,11 @@ app.include_router(setup_contacts_routes())
 from companion import setup_companion_routes
 app.include_router(setup_companion_routes())
 
+# BBC Odysseus v1 is additive and remains behind the existing auth middleware.
+# Its own route boundary also re-checks browser identity / bearer-token scopes.
+from routes.bbc_routes import setup_bbc_routes
+app.include_router(setup_bbc_routes())
+
 # ========= ROUTES (kept in app.py) =========
 
 @app.get("/")

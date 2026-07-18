@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#17152d">
+  <title>BBC Odysseus</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M16 2 27 11 24 26 16 30 8 26 5 11Z' fill='%2317152d' stroke='%235ce1e6' stroke-width='2'/%3E%3Cpath d='M16 6v18M10 15h12' stroke='%23ff71ce' stroke-width='2'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/static/bbc/ship.css">
+</head>
+<body>
+  <canvas id="vapour-field" aria-hidden="true"></canvas>
+  <div class="scanlines" aria-hidden="true"></div>
+  <header class="masthead">
+    <div>
+      <p class="eyebrow">CONTROL PLANE / BBC v1</p>
+      <h1>ODYSSEUS</h1>
+    </div>
+    <div class="telemetry">
+      <span id="runtime-state" class="signal">CONNECTING</span>
+      <span id="event-sequence">EVENT 0000</span>
+    </div>
+  </header>
+
+  <main>
+    <section class="panel deck-panel" aria-labelledby="deck-title">
+      <div class="panel-title">
+        <div><span>01</span><h2 id="deck-title">AUTHORED DECK</h2></div>
+        <p id="ship-meta">Loading canonical ship state…</p>
+      </div>
+      <svg id="deck" viewBox="0 0 100 92" role="img" aria-label="BBC Odysseus one-deck room plan"></svg>
+    </section>
+
+    <section class="panel systems-panel" aria-labelledby="systems-title">
+      <div class="panel-title">
+        <div><span>02</span><h2 id="systems-title">REPOSITORY SYSTEMS</h2></div>
+        <div id="system-tabs" class="tabs" role="tablist" aria-label="Repository systems"></div>
+      </div>
+      <div id="system-status" class="system-status" aria-live="polite">Awaiting repository telemetry.</div>
+      <p id="work-map-help" class="visually-hidden">Use Tab to move to a work node, then Enter or Space to inspect it. Scroll horizontally to explore long streams.</p>
+      <div class="work-map-scroll" role="group" aria-label="Scrollable repository work map" tabindex="0">
+        <svg id="work-map" viewBox="0 0 960 430" role="region" aria-labelledby="systems-title" aria-describedby="work-map-help"></svg>
+      </div>
+    </section>
+
+    <aside id="node-card" class="node-card" aria-live="polite">
+      <p class="eyebrow">SELECTED WORK NODE</p>
+      <h2>No node selected</h2>
+      <p class="outcome">Select a point in the repository system.</p>
+      <dl>
+        <div><dt>State</dt><dd data-field="state">—</dd></div>
+        <div><dt>Difficulty</dt><dd data-field="difficulty">—</dd></div>
+        <div><dt>Owner</dt><dd data-field="owner">—</dd></div>
+        <div><dt>Next source action</dt><dd data-field="next-action">—</dd></div>
+        <div><dt>Available action</dt><dd data-field="available-action">Read-only inspection only.</dd></div>
+        <div><dt>Blockers</dt><dd data-field="blockers">—</dd></div>
+        <div><dt>Dependencies</dt><dd data-field="dependencies">—</dd></div>
+        <div><dt>Evidence</dt><dd data-field="evidence">—</dd></div>
+        <div><dt>Source links</dt><dd data-field="source-links">—</dd></div>
+      </dl>
+    </aside>
+  </main>
+
+  <footer>
+    <span>LIVE DATA / NO LOCAL AUTHORITY</span>
+    <a href="/">RETURN TO ODYSSEUS</a>
+  </footer>
+  <script src="/static/bbc/ship.js" defer></script>
+</body>
+</html>
