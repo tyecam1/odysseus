@@ -559,6 +559,40 @@ class OSSSkillIngestion:
             raise OSSSkillIngestionError("active release pointer fails integrity verification")
         return pointer
 
+    def intake(self, intake_id: str) -> dict[str, object]:
+        """Return one integrity-verified quarantine manifest and static review."""
+        _, manifest, review = self._load_intake(intake_id)
+        return {"manifest": manifest, "review": review}
+
+    def active_bundle(self, candidate_id: str) -> dict[str, object] | None:
+        """Return the verified active prompt/data bundle without importing it."""
+        pointer = self.active_release(candidate_id)
+        if pointer is None:
+            return None
+        release_path = self.release_root / _safe_id(candidate_id, "candidate_id") / str(pointer["release_id"])
+        manifest = self._load_json(release_path / "manifest.json")
+        review = self._load_json(release_path / "review.json")
+        self._verify_release(release_path, manifest)
+        if review.get("prompt_data_only") is not True or review.get("candidate_code_executed") is not False:
+            raise OSSSkillIngestionError("active release violates prompt/data-only execution policy")
+        files = {
+            str(item["path"]): (release_path / "files").joinpath(
+                *PurePosixPath(str(item["path"])).parts
+            ).read_text(encoding="utf-8")
+            for item in manifest["files"]
+        }
+        return {"pointer": pointer, "manifest": manifest, "review": review, "files": files}
+
+    def active_bundles(self, *, limit: int = 100) -> list[dict[str, object]]:
+        """Enumerate integrity-verified active releases only."""
+        paths = sorted(self.active_root.glob("*.json"))[:max(1, min(int(limit), 100))]
+        bundles: list[dict[str, object]] = []
+        for path in paths:
+            bundle = self.active_bundle(path.stem)
+            if bundle is not None:
+                bundles.append(bundle)
+        return bundles
+
     def _load_intake(self, intake_id: str) -> tuple[Path, dict[str, object], dict[str, object]]:
         if not re.fullmatch(r"[a-z0-9._-]+--[0-9a-f]{40}--[0-9a-f]{64}", str(intake_id or "")):
             raise OSSSkillIngestionError("invalid intake_id")

@@ -236,6 +236,48 @@ class SkillsManager:
             out.append(d)
             seen_names.add(sk.name)
         # Legacy JSON entries — surfaced as draft, not editable from new flow
+        # Approved OSS releases are projected only from integrity-verified active
+        # pointers. Quarantine is never scanned and candidate files are not executed.
+        try:
+            from .oss_skill_ingestion import OSSSkillIngestion
+            from .skill_importer import pick_skill_md
+
+            intake_root = os.path.join(self.data_dir, "oss-skill-intake")
+            if os.path.isdir(os.path.join(intake_root, "active")):
+                for bundle in OSSSkillIngestion(intake_root).active_bundles():
+                    manifest = bundle["manifest"]
+                    candidate = manifest["candidate"]
+                    candidate_id = str(candidate["candidate_id"])
+                    stable_name = slugify("oss-" + candidate_id, fallback="oss-skill")
+                    if stable_name in seen_names:
+                        logger.warning("Skipping approved OSS skill with duplicate name %s", stable_name)
+                        continue
+                    rel, text = pick_skill_md(bundle["files"])
+                    sk = Skill.from_markdown(text)
+                    sk.name = stable_name
+                    sk.category = "oss-approved"
+                    sk.owner = str(manifest["approval"]["approved_by"])
+                    sk.source = (
+                        "oss-approved:"
+                        + str(candidate["provenance"]["repository"])
+                        + "@"
+                        + str(candidate["provenance"]["commit"])
+                    )
+                    sk.status = "published"
+                    sk.confidence = min(float(sk.confidence or 0.0), 0.8)
+                    sk.path = os.path.join(str(bundle["pointer"]["release_path"]), "files", rel)
+                    d = sk.to_dict()
+                    d.update({
+                        "uses": 0,
+                        "last_used": None,
+                        "oss_candidate_id": candidate_id,
+                        "oss_release_id": str(manifest["release_id"]),
+                        "oss_bundle_sha256": str(manifest["bundle_sha256"]),
+                    })
+                    out.append(d)
+                    seen_names.add(stable_name)
+        except Exception as exc:
+            logger.warning("Approved OSS skill projection failed closed: %s", exc)
         if os.path.exists(self.legacy_file):
             try:
                 with open(self.legacy_file, encoding="utf-8") as f:

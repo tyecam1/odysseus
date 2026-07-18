@@ -91,11 +91,28 @@ degrades safely, and the projection never grants tool authority or write access.
 ## External skill intake
 
 ```http
-POST /misumi/skills/import-draft
+POST /misumi/skills/quarantine
+GET  /misumi/skills/quarantine/{intake_id}
+POST /misumi/skills/quarantine/{intake_id}/promote
+GET  /misumi/skills/{candidate_id}/active
+POST /misumi/skills/{candidate_id}/rollback
 GET /misumi/skills/security-review/{skill}
 ```
 
-Imports accept supported GitHub/skills.sh URLs through the existing constrained fetcher. Every external skill is forced to draft, scripts are stored only as text, no bundle code runs, and static security flags are returned. Publication requires a separate human/admin review path.
+The former mutable-ref `/misumi/skills/import-draft` route returns 410. Intake is
+admin-only and accepts only a GitHub URL pinned to a lowercase full 40-character
+commit together with a gap, capability IDs, SPDX licence, dependency pins, and
+maintenance evidence. The constrained fetcher hands text bytes to a separate
+quarantine; candidate code is never imported or executed. Static review covers
+secrets, network access, destructive behaviour, prompt injection, persistence,
+telemetry, dependencies, and capability overlap. Scripts, runtime dependencies,
+unlicensed inputs, and flagged bundles remain quarantined.
+
+Only prompt/data bundles that pass policy can be promoted, and promotion requires an
+authenticated admin plus a meaningful approval reason. SkillsManager reads the
+integrity-verified active-release pointer directly and never scans quarantine. A
+rollback atomically repoints that pointer to a previously verified release. Every
+stage, promotion, and rollback emits an immutable intake audit record.
 
 ## Status
 

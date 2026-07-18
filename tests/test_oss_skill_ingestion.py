@@ -298,3 +298,26 @@ def test_staging_same_immutable_bundle_is_idempotent(tmp_path: Path):
     audit_events = list((tmp_path / "intake" / "audit").glob("*.json"))
     assert len(audit_events) == 1
     assert json.loads(audit_events[0].read_text(encoding="utf-8"))["event"] == "staged"
+
+
+def test_active_bundle_and_skills_manager_consume_only_promoted_release(tmp_path: Path):
+    from services.memory.skills import SkillsManager
+
+    service = OSSSkillIngestion(tmp_path / "oss-skill-intake")
+    staged = service.stage(_candidate(), _safe_bundle())
+    manager = SkillsManager(str(tmp_path))
+    assert not [row for row in manager.load_all() if row["name"] == "oss-recipe-planner"]
+
+    service.promote(
+        staged["manifest"]["intake_id"],
+        approved_by="operator",
+        approval_reason="Reviewed prompt-only planner and provenance.",
+    )
+    bundle = service.active_bundle("recipe-planner")
+    assert bundle is not None
+    assert sorted(bundle["files"]) == ["LICENSE", "SKILL.md", "references/categories.yaml"]
+    projected = [row for row in manager.load(owner="operator") if row["name"] == "oss-recipe-planner"]
+    assert len(projected) == 1
+    assert projected[0]["status"] == "published"
+    assert projected[0]["category"] == "oss-approved"
+    assert projected[0]["oss_release_id"] == bundle["manifest"]["release_id"]

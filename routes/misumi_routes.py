@@ -77,10 +77,30 @@ class MisumiTaskRequest(BaseModel):
     selected_task: Optional[str] = None
 
 
-class MisumiSkillImportRequest(BaseModel):
-    url: str
-    persona: str = "aoteru"
-    category: Optional[str] = None
+class MisumiSkillDependencyRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    version: str = Field(min_length=1, max_length=120)
+    kind: str = Field(default="package", min_length=1, max_length=80)
+    source: str = Field(default="declared", min_length=1, max_length=160)
+    sha256: Optional[str] = Field(default=None, min_length=64, max_length=64)
+
+
+class MisumiSkillQuarantineRequest(BaseModel):
+    url: str = Field(min_length=1, max_length=800)
+    candidate_id: str = Field(min_length=1, max_length=100)
+    gap_id: str = Field(min_length=1, max_length=100)
+    capability_ids: List[str] = Field(min_length=1, max_length=32)
+    license_spdx: str = Field(min_length=1, max_length=120)
+    dependencies: List[MisumiSkillDependencyRequest] = Field(default_factory=list, max_length=50)
+    maintenance_evidence: Optional[str] = Field(default=None, max_length=500)
+
+
+class MisumiSkillApprovalRequest(BaseModel):
+    reason: str = Field(min_length=8, max_length=500)
+
+
+class MisumiSkillRollbackRequest(MisumiSkillApprovalRequest):
+    release_id: str = Field(min_length=1, max_length=100)
 
 
 class MisumiMemoryCaptureRequest(BaseModel):
@@ -659,12 +679,17 @@ def setup_misumi_routes(
     memory_manager=None,
     session_manager=None,
     chat_processor=None,
+    oss_skill_ingestion=None,
 ) -> APIRouter:
     router = APIRouter(prefix="/misumi", tags=["misumi"])
     adapter = HouseholdReadOnlyAdapter()
     task_router = MisumiTaskRouter(adapter)
     events = MisumiEventLog()
     memory = MisumiMemory(memory_root)
+    if oss_skill_ingestion is None:
+        from services.memory.oss_skill_ingestion import OSSSkillIngestion
+
+        oss_skill_ingestion = OSSSkillIngestion(Path(skills_manager.data_dir) / "oss-skill-intake")
 
     def memory_call(operation, *args, **kwargs):
         try:
@@ -942,30 +967,155 @@ def setup_misumi_routes(
         }
 
     @router.post("/skills/import-draft")
-    async def import_draft(request: Request, body: MisumiSkillImportRequest):
+    async def import_draft_retired(request: Request):
         require_admin(request)
-        from services.memory.skill_importer import SkillImportError, fetch_skill_bundle
+        raise HTTPException(
+            410,
+            "Mutable-ref draft import is retired; use /misumi/skills/quarantine with an immutable commit.",
+        )
 
-        persona = normalize_persona(body.persona)
-        categories = list(persona_record(persona).get("allowed_skill_categories") or [])
-        category = body.category if body.category in categories else categories[0]
+    @router.post("/skills/quarantine")
+    async def quarantine_skill(request: Request, body: MisumiSkillQuarantineRequest):
+        require_admin(request)
+        from services.memory.oss_skill_ingestion import (
+            Candidate,
+            Dependency,
+            OSSSkillIngestionError,
+            SourceProvenance,
+            utc_now,
+        )
+        from services.memory.skill_importer import (
+            SkillImportError,
+            fetch_skill_bundle,
+            parse_skill_source,
+        )
+
+        actor = _owner(request) or "local-admin"
         try:
-            files, _source = fetch_skill_bundle(body.url.strip())
-            review = security_review_files(files)
-            entry = skills_manager.import_bundle_from_files(
-                files,
-                owner=_owner(request),
-                source_url=body.url.strip(),
-                category=str(category),
+            source = parse_skill_source(body.url.strip())
+            if not re.fullmatch(r"[0-9a-f]{40}", source.ref):
+                raise SkillImportError("Source URL must pin a lowercase full 40-character Git commit")
+            files, fetched_source = fetch_skill_bundle(body.url.strip())
+            if fetched_source != source:
+                raise SkillImportError("Fetched source identity changed during intake")
+            installed_ids = {"bbc.repository.inspect"}
+            for skill in skills_manager.load_all():
+                name = str(skill.get("name") or "").strip()
+                if name:
+                    installed_ids.update({name, "skill." + name})
+            candidate = Candidate(
+                candidate_id=body.candidate_id,
+                gap_id=body.gap_id,
+                capability_ids=tuple(body.capability_ids),
+                provenance=SourceProvenance(
+                    repository=f"https://github.com/{source.owner}/{source.repo}",
+                    commit=source.ref,
+                    path=source.path,
+                    license_spdx=body.license_spdx,
+                    discovered_at=utc_now(),
+                    discovered_by=actor,
+                    upstream_url=body.url.strip(),
+                    maintenance_evidence=body.maintenance_evidence,
+                ),
+                dependencies=tuple(Dependency(**item.model_dump()) for item in body.dependencies),
             )
-        except SkillImportError as exc:
+            staged = oss_skill_ingestion.stage(
+                candidate,
+                files,
+                installed_capability_ids=installed_ids,
+            )
+        except (SkillImportError, OSSSkillIngestionError) as exc:
             raise HTTPException(400, str(exc)) from exc
         return {
-            "status": "draft",
-            "persona": persona,
-            "skill": entry,
-            "security_review": review,
-            "scripts_executed": False,
+            "status": "quarantined",
+            **staged,
+            "candidate_code_executed": False,
+            "publication_changed": False,
+        }
+
+    @router.get("/skills/quarantine/{intake_id}")
+    async def quarantine_review(request: Request, intake_id: str):
+        require_admin(request)
+        from services.memory.oss_skill_ingestion import OSSSkillIngestionError
+
+        try:
+            return oss_skill_ingestion.intake(intake_id)
+        except OSSSkillIngestionError as exc:
+            raise HTTPException(404, str(exc)) from exc
+
+    @router.post("/skills/quarantine/{intake_id}/promote")
+    async def promote_quarantine(
+        request: Request,
+        intake_id: str,
+        body: MisumiSkillApprovalRequest,
+    ):
+        require_admin(request)
+        from services.memory.oss_skill_ingestion import OSSSkillIngestionError
+
+        actor = _owner(request) or "local-admin"
+        try:
+            promoted = oss_skill_ingestion.promote(
+                intake_id,
+                approved_by=actor,
+                approval_reason=body.reason,
+            )
+            active = oss_skill_ingestion.active_bundle(
+                str(promoted["release"]["candidate"]["candidate_id"])
+            )
+        except OSSSkillIngestionError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return {
+            "status": "active",
+            **promoted,
+            "runtime_projection": "skills-manager-active-release",
+            "projected_name": "oss-" + str(promoted["release"]["candidate"]["candidate_id"]),
+            "files_verified": len(active["files"] if active else {}),
+            "candidate_code_executed": False,
+        }
+
+    @router.get("/skills/{candidate_id}/active")
+    async def active_oss_skill(request: Request, candidate_id: str):
+        require_admin(request)
+        from services.memory.oss_skill_ingestion import OSSSkillIngestionError
+
+        try:
+            active = oss_skill_ingestion.active_bundle(candidate_id)
+        except OSSSkillIngestionError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        if active is None:
+            raise HTTPException(404, "No active release")
+        return {
+            "pointer": active["pointer"],
+            "manifest": active["manifest"],
+            "review": active["review"],
+            "file_paths": sorted(active["files"]),
+            "candidate_code_executed": False,
+        }
+
+    @router.post("/skills/{candidate_id}/rollback")
+    async def rollback_oss_skill(
+        request: Request,
+        candidate_id: str,
+        body: MisumiSkillRollbackRequest,
+    ):
+        require_admin(request)
+        from services.memory.oss_skill_ingestion import OSSSkillIngestionError
+
+        try:
+            pointer = oss_skill_ingestion.rollback(
+                candidate_id,
+                body.release_id,
+                approved_by=_owner(request) or "local-admin",
+                approval_reason=body.reason,
+            )
+            oss_skill_ingestion.active_bundle(candidate_id)
+        except OSSSkillIngestionError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return {
+            "status": "rolled-back",
+            "active": pointer,
+            "runtime_projection": "skills-manager-active-release",
+            "candidate_code_executed": False,
         }
 
     @router.get("/skills/security-review/{skill_name}")
