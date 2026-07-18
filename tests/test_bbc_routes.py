@@ -1,6 +1,8 @@
 from pathlib import Path
 import subprocess
 
+import pytest
+
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from starlette.requests import Request
@@ -14,7 +16,7 @@ from src.bbc.adapters import (
 )
 from src.bbc.auth import bbc_caller_grants, require_bbc_access
 from src.bbc.runtime import BBCRuntime
-from src.bbc.store import BBCStateStore
+from src.bbc.store import BBCStateStore, StateConflict
 
 
 def runtime_fixture(tmp_path: Path) -> BBCRuntime:
@@ -49,10 +51,12 @@ def test_versioned_routes_expose_live_data_and_navigation_audit(tmp_path, monkey
     assert work.json()["nodes"][0]["title"] == "Live node"
 
     navigation = client.post("/api/bbc/v1/navigation-transactions", json={
-        "origin": "bridge", "destination": "odysseus:node", "path": ["bridge", "observatory"], "duration_ms": 900,
+        "persona_id": "aoteru", "origin": "bridge", "destination": "research",
+        "path": [], "duration_ms": 900,
     })
     assert navigation.status_code == 201
     assert navigation.json()["state"] == "planned"
+    assert navigation.json()["path"] == ["bridge", "research"]
     audit = client.get("/api/bbc/v1/audit").json()["events"]
     assert audit[-1]["capability_id"] == "bbc.navigation.plan"
 
@@ -177,3 +181,182 @@ def test_queue_move_updates_one_stored_node_with_retained_provenance_and_state_e
         if event.entity_type == "work_node" and event.entity_id == first.id
     ]
     assert [event.payload["state"]["state"] for event in transitions] == ["active", "completed"]
+
+
+def _navigation_client(tmp_path, monkeypatch):
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    runtime = runtime_fixture(tmp_path)
+    app = FastAPI()
+    app.include_router(setup_bbc_routes(runtime))
+    return runtime, TestClient(app)
+
+
+def test_navigation_lifecycle_is_versioned_atomic_and_persistent(tmp_path, monkeypatch):
+    runtime, client = _navigation_client(tmp_path, monkeypatch)
+    planned_response = client.post("/api/bbc/v1/navigation-transactions", json={
+        "persona_id": "kurisu", "origin": "bridge", "destination": "archive",
+        "path": [], "duration_ms": 1200,
+    })
+    assert planned_response.status_code == 201
+    planned = planned_response.json()
+    assert planned["actor"] != planned["persona_id"]
+    assert planned["path"] == ["bridge", "observatory", "archive"]
+    assert planned["version"] == 1 and planned["started_at"] is None
+    url = f"/api/bbc/v1/navigation-transactions/{planned['id']}"
+
+    started_response = client.patch(url, json={"state": "in_progress", "expected_version": 1})
+    assert started_response.status_code == 200
+    started = started_response.json()
+    assert started["version"] == 2 and started["started_at"]
+    assert started["completed_at"] is None
+    location = client.get("/api/bbc/v1/persona-locations/kurisu").json()
+    assert location["room_id"] == "bridge"
+    assert location["navigation_transaction_id"] == planned["id"]
+    assert client.get("/api/bbc/v1/ship").json()["active_room_id"] == "bridge"
+
+    completed_response = client.patch(url, json={"state": "completed", "expected_version": 2})
+    assert completed_response.status_code == 200
+    completed = completed_response.json()
+    assert completed["version"] == 3 and completed["completed_at"]
+    assert completed["updated_at"] != planned["updated_at"]
+    retry = client.patch(url, json={"state": "completed", "expected_version": 2})
+    assert retry.status_code == 200
+    assert retry.json() == completed
+    assert client.patch(url, json={"state": "completed", "expected_version": 1}).status_code == 409
+    location = client.get("/api/bbc/v1/persona-locations/kurisu").json()
+    assert location["room_id"] == "archive" and location["navigation_transaction_id"] is None
+    assert client.get("/api/bbc/v1/ship").json()["active_room_id"] == "archive"
+    assert client.get("/api/bbc/v1/persona-locations").json()["locations"] == [location]
+
+    transition_events = [
+        event.event_type for event in runtime.store.list_events(limit=1000)
+        if event.entity_type == "navigation_transaction" and event.entity_id == planned["id"]
+    ]
+    assert transition_events == ["navigation.planned", "navigation.started", "navigation.completed"]
+    completion_audit = runtime.store.list_audit(limit=1000)[-1]
+    assert completion_audit.capability_id == "bbc.navigation.complete"
+    assert {
+        f"state://navigation_transaction/{planned['id']}",
+        "state://persona_location/kurisu",
+        "state://ship/bbc-odysseus",
+    }.issubset(set(completion_audit.evidence))
+
+    rebuilt = BBCRuntime(store=BBCStateStore(runtime.store.path), adapters=runtime.adapters)
+    assert rebuilt.ship().active_room_id == "archive"
+    assert rebuilt.persona_location("kurisu").room_id == "archive"
+
+
+@pytest.mark.parametrize("payload", [
+    {"persona_id": "aoteru", "origin": "bridge", "destination": "unknown", "path": []},
+    {"persona_id": "aoteru", "origin": "bridge", "destination": "bridge", "path": []},
+    {"persona_id": "aoteru", "origin": "bridge", "destination": "archive", "path": ["bridge", "archive"]},
+    {"persona_id": "aoteru", "origin": "bridge", "destination": "archive", "path": ["bridge", "observatory", "bridge", "archive"]},
+    {"persona_id": "aoteru", "origin": "bridge", "destination": "archive", "path": ["observatory", "archive"]},
+])
+def test_navigation_rejects_unknown_noop_and_invalid_paths(tmp_path, monkeypatch, payload):
+    _runtime, client = _navigation_client(tmp_path, monkeypatch)
+    response = client.post("/api/bbc/v1/navigation-transactions", json={**payload, "duration_ms": 10})
+    assert response.status_code == 400
+
+
+def test_navigation_stale_version_interruption_and_terminal_immutability(tmp_path, monkeypatch):
+    runtime, client = _navigation_client(tmp_path, monkeypatch)
+    planned = client.post("/api/bbc/v1/navigation-transactions", json={
+        "persona_id": "aoteru", "origin": "bridge", "destination": "research",
+        "path": [], "duration_ms": 0,
+    }).json()
+    url = f"/api/bbc/v1/navigation-transactions/{planned['id']}"
+    assert client.patch(url, json={"state": "in_progress", "expected_version": 2}).status_code == 409
+    assert runtime.navigation_transaction(planned["id"]).state == "planned"
+    assert client.patch(url, json={"state": "interrupted", "expected_version": 1}).status_code == 400
+
+    interrupted = client.patch(url, json={
+        "state": "interrupted", "expected_version": 1,
+        "interruption_reason": "operator changed destination",
+    })
+    assert interrupted.status_code == 200
+    assert interrupted.json()["version"] == 2 and interrupted.json()["interrupted_at"]
+    event_count = runtime.store.latest_event_sequence()
+    replay = client.patch(url, json={
+        "state": "interrupted", "expected_version": 2,
+        "interruption_reason": "operator changed destination",
+    })
+    assert replay.status_code == 200 and replay.json()["version"] == 2
+    assert runtime.store.latest_event_sequence() == event_count
+    assert client.patch(url, json={"state": "in_progress", "expected_version": 2}).status_code == 409
+    stale_replay = client.patch(url, json={
+        "state": "interrupted", "expected_version": 1,
+        "interruption_reason": "operator changed destination",
+    })
+    assert stale_replay.status_code == 200 and stale_replay.json()["version"] == 2
+    assert runtime.store.latest_event_sequence() == event_count
+
+
+def test_navigation_optimistic_conflict_and_atomic_rollback(tmp_path, monkeypatch):
+    runtime = runtime_fixture(tmp_path)
+    second_runtime = BBCRuntime(store=BBCStateStore(runtime.store.path), adapters=runtime.adapters)
+    planned = runtime.create_navigation(
+        actor="operator", persona_id="aoteru", origin="bridge", destination="research",
+        path=[], duration_ms=100,
+    )
+    started = runtime.transition_navigation(
+        planned.id, "in_progress", actor="operator", expected_version=1,
+    )
+    with pytest.raises(StateConflict, match="stale navigation version"):
+        second_runtime.transition_navigation(
+            planned.id, "interrupted", actor="operator", expected_version=1,
+            interruption_reason="stale client",
+        )
+
+    event_count = runtime.store.latest_event_sequence()
+    audit_count = len(runtime.store.list_audit(limit=1000))
+    monkeypatch.setattr(
+        runtime.store, "_append_audit_in_transaction",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("audit unavailable")),
+    )
+    with pytest.raises(RuntimeError, match="audit unavailable"):
+        runtime.transition_navigation(
+            planned.id, "completed", actor="operator", expected_version=started.version,
+        )
+    assert runtime.navigation_transaction(planned.id).state == "in_progress"
+    assert runtime.persona_location("aoteru").room_id == "bridge"
+    assert runtime.ship().active_room_id == "bridge"
+    assert runtime.store.latest_event_sequence() == event_count
+    assert len(runtime.store.list_audit(limit=1000)) == audit_count
+
+
+def test_global_navigation_intent_resolves_rooms_repositories_and_real_work(tmp_path, monkeypatch):
+    runtime, client = _navigation_client(tmp_path, monkeypatch)
+    research = tmp_path / "vault" / "10-inbox" / "research.md"
+    research.write_text(
+        "---\nartifact_type: work-item\nstatus: open\n---\n# S2-E1 perception hardware setup\n",
+        encoding="utf-8",
+    )
+    room = client.post("/api/bbc/v1/navigation-intents", json={
+        "text": "go to enginering", "source": "voice",
+    })
+    assert room.status_code == 200
+    assert room.json()["status"] == "resolved"
+    assert room.json()["arrival_room_id"] == "engineering"
+
+    repository = client.post("/api/bbc/v1/navigation-intents", json={"text": "open the PhD system"})
+    assert repository.json()["target"]["id"] == "obsidian-phd"
+    assert repository.json()["arrival_room_id"] == "observatory"
+
+    work = client.post("/api/bbc/v1/navigation-intents", json={"text": "plot a course to S2-E1"})
+    assert work.json()["status"] == "resolved"
+    assert work.json()["target"]["repository_id"] == "obsidian-phd"
+    assert work.json()["arrival_room_id"] == "research"
+    assert client.post("/api/bbc/v1/navigation-intents", json={"text": "hello there"}).json()["status"] == "unsupported"
+    assert client.post("/api/bbc/v1/navigation-intents", json={
+        "text": "inspect this node", "context": {"untrusted": "value"},
+    }).status_code == 422
+
+    planned = runtime.create_navigation(
+        actor="operator", persona_id="kurisu", origin="bridge", destination="archive",
+        path=[], duration_ms=0,
+    )
+    runtime.transition_navigation(planned.id, "in_progress", actor="operator", expected_version=1)
+    runtime.transition_navigation(planned.id, "completed", actor="operator", expected_version=2)
+    visit = client.post("/api/bbc/v1/navigation-intents", json={"text": "visit Kurisu"}).json()
+    assert visit["status"] == "resolved" and visit["arrival_room_id"] == "archive"

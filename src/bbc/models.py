@@ -47,8 +47,8 @@ class Ship(ContractModel):
 
 
 class PersonaLocation(ContractModel):
-    persona_id: str
-    room_id: str
+    persona_id: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]{0,79}$")
+    room_id: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]{0,79}$")
     navigation_transaction_id: Optional[str] = None
     updated_at: datetime = Field(default_factory=utc_now)
 
@@ -211,15 +211,21 @@ class NavigationTransactionState(str, Enum):
 
 
 class NavigationTransaction(ContractModel):
-    id: str
-    actor: str
-    origin: str
-    destination: str
-    path: List[str]
+    id: str = Field(pattern=r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
+    actor: str = Field(min_length=1, max_length=160)
+    persona_id: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]{0,79}$")
+    origin: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]{0,79}$")
+    destination: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]{0,79}$")
+    path: List[str] = Field(min_length=2, max_length=40)
     start_time: datetime = Field(default_factory=utc_now)
     duration_ms: int = Field(default=0, ge=0)
     state: NavigationTransactionState = NavigationTransactionState.planned
-    interruption_reason: Optional[str] = None
+    version: int = Field(default=1, ge=1)
+    updated_at: datetime = Field(default_factory=utc_now)
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    interrupted_at: Optional[datetime] = None
+    interruption_reason: Optional[str] = Field(default=None, max_length=500)
 
 
 class RoomConference(ContractModel):

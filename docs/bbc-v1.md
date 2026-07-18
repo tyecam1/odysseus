@@ -26,6 +26,12 @@ Browser sessions use the existing Odysseus authentication middleware. Bearer tok
 
 The migrated SQLite database is `ODYSSEUS_DATA_DIR/bbc/v1.db`. Canonical entity state is mutable by versioned upsert. State events and audit events are append-only, hash-chained, and protected by SQLite update/delete triggers. The shared `bbc.repository.inspect` capability is bounded, network-free, repository-authorised, and emits a real audit event for success, failure, or denial.
 
+Navigation uses `POST /navigation-transactions` followed by versioned `PATCH /navigation-transactions/{id}` commands. The plan records the authenticated actor separately from the moving `persona_id`; only authored rooms are accepted, and omitted paths use the deterministic shortest route through the stable one-deck adjacency graph. Supplied paths must be continuous, non-repeating, and begin/end at the declared rooms.
+
+Every transition supplies `expected_version`. `planned` can enter `in_progress` or be interrupted; `in_progress` can complete or be interrupted; terminal states cannot change. An identical retry at the current or immediately preceding version returns the committed state without adding events; other stale commands receive HTTP 409 and must reload canonical state. Start keeps the persona at the origin with the transaction attached. Only completion changes the persona room and `ship.active_room_id`; interruption preserves the prior room. Transaction, location, ship, state-event, and audit writes commit atomically in one SQLite `BEGIN IMMEDIATE` transaction. SQLite serialises runtime instances and local processes sharing the database file; the database must not be placed on a network filesystem.
+
+`POST /navigation-intents` is read-only resolution for typed or voice commands. It resolves rooms, current persona locations, repository systems, and live work-node aliases, returns confidence-aware clarification when needed, and never creates a movement transaction. Clients create the returned room movement explicitly.
+
 Difficulty colour has one meaning: green is low, orange is medium, and red is high. Workflow state is rendered separately by node shape and label. The score stores its version, component values, weights, and explanation.
 
 When an alias such as `S2-E1` matches multiple executable work artifacts, the resolver returns `ambiguous` with every candidate and provenance. It returns a canonical node only when exactly one non-archived authoritative artifact matches.

@@ -7,14 +7,17 @@ import threading
 from pathlib import Path
 from typing import Any, Dict
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Path as ApiPath, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from core.constants import BASE_DIR, DATA_DIR
 from src.app_helpers import serve_html_with_nonce
 from src.bbc.auth import bbc_caller_grants, require_bbc_access
 from src.bbc.runtime import BBCRuntime, build_runtime
-from src.bbc.models import WorkNode, WorkStream
+from src.bbc.models import NavigationTransactionState, WorkNode, WorkStream
+
+
+TRANSACTION_ID_PATTERN = r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
 
 
 class CapabilityInvocationRequest(BaseModel):
@@ -26,10 +29,34 @@ class CapabilityInvocationRequest(BaseModel):
 class NavigationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    origin: str = Field(min_length=1, max_length=160)
-    destination: str = Field(min_length=1, max_length=160)
+    persona_id: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]{0,79}$")
+    origin: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]{0,79}$")
+    destination: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]{0,79}$")
     path: list[str] = Field(default_factory=list, max_length=40)
     duration_ms: int = Field(default=0, ge=0, le=3_600_000)
+
+
+class NavigationTransitionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    state: NavigationTransactionState
+    expected_version: int = Field(ge=1)
+    interruption_reason: str | None = Field(default=None, min_length=1, max_length=500)
+
+
+class NavigationIntentContext(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    node_id: str | None = Field(default=None, min_length=1, max_length=200)
+    repository_id: str | None = Field(default=None, pattern=r"^[a-z0-9][a-z0-9._-]{0,79}$")
+
+
+class NavigationIntentRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    text: str = Field(min_length=1, max_length=500)
+    source: str = Field(default="typed", pattern=r"^(typed|voice)$")
+    context: NavigationIntentContext = Field(default_factory=NavigationIntentContext)
 
 
 class _LazyRuntime:
@@ -168,13 +195,72 @@ def setup_bbc_routes(runtime: BBCRuntime | None = None) -> APIRouter:
         transactions = await asyncio.to_thread(lambda: runtime.store.list_entities("navigation_transaction"))
         return {"transactions": transactions}
 
+    @router.post("/api/bbc/v1/navigation-intents")
+    async def resolve_navigation_intent(request: Request, payload: NavigationIntentRequest):
+        require_bbc_access(request, "read")
+        try:
+            return await asyncio.to_thread(lambda: runtime.resolve_navigation_intent(
+                payload.text, source=payload.source,
+                context=payload.context.model_dump(exclude_none=True),
+            ))
+        except Exception as exc:
+            raise _http_error(exc) from exc
+
+    @router.get("/api/bbc/v1/navigation-transactions/{transaction_id}")
+    async def navigation_transaction(
+        request: Request,
+        transaction_id: str = ApiPath(pattern=TRANSACTION_ID_PATTERN),
+    ):
+        require_bbc_access(request, "read")
+        try:
+            return await asyncio.to_thread(lambda: runtime.navigation_transaction(transaction_id))
+        except Exception as exc:
+            raise _http_error(exc) from exc
+
     @router.post("/api/bbc/v1/navigation-transactions", status_code=201)
     async def create_navigation(request: Request, payload: NavigationRequest):
         actor = require_bbc_access(request, "write")
-        return await asyncio.to_thread(lambda: runtime.create_navigation(
-            actor=actor, origin=payload.origin, destination=payload.destination,
-            path=payload.path, duration_ms=payload.duration_ms,
-        ))
+        try:
+            return await asyncio.to_thread(lambda: runtime.create_navigation(
+                actor=actor, persona_id=payload.persona_id,
+                origin=payload.origin, destination=payload.destination,
+                path=payload.path, duration_ms=payload.duration_ms,
+            ))
+        except Exception as exc:
+            raise _http_error(exc) from exc
+
+    @router.patch("/api/bbc/v1/navigation-transactions/{transaction_id}")
+    async def transition_navigation(
+        request: Request,
+        payload: NavigationTransitionRequest,
+        transaction_id: str = ApiPath(pattern=TRANSACTION_ID_PATTERN),
+    ):
+        actor = require_bbc_access(request, "write")
+        try:
+            return await asyncio.to_thread(lambda: runtime.transition_navigation(
+                transaction_id, payload.state, actor=actor,
+                expected_version=payload.expected_version,
+                interruption_reason=payload.interruption_reason,
+            ))
+        except Exception as exc:
+            raise _http_error(exc) from exc
+
+    @router.get("/api/bbc/v1/persona-locations")
+    async def persona_locations(request: Request):
+        require_bbc_access(request, "read")
+        locations = await asyncio.to_thread(runtime.persona_locations)
+        return {"locations": locations}
+
+    @router.get("/api/bbc/v1/persona-locations/{persona_id}")
+    async def persona_location(
+        request: Request,
+        persona_id: str = ApiPath(pattern=r"^[a-z0-9][a-z0-9._-]{0,79}$"),
+    ):
+        require_bbc_access(request, "read")
+        try:
+            return await asyncio.to_thread(lambda: runtime.persona_location(persona_id))
+        except Exception as exc:
+            raise _http_error(exc) from exc
 
     @router.get("/api/bbc/v1/audit")
     async def audit_events(

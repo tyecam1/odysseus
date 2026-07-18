@@ -14,6 +14,10 @@ from typing import Any, Dict, Iterable, Optional
 from .models import AuditEvent, SCHEMA_VERSION, StateEvent
 
 
+class StateConflict(RuntimeError):
+    """Canonical state changed after the caller read it."""
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -136,47 +140,66 @@ class BBCStateStore:
         actor: str = "system",
         event_type: str = "state.changed",
     ) -> Optional[StateEvent]:
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            event = self._upsert_entity_in_transaction(
+                connection,
+                entity_type,
+                entity_id,
+                state,
+                actor=actor,
+                event_type=event_type,
+            )
+            connection.commit()
+        return event
+
+    def _upsert_entity_in_transaction(
+        self,
+        connection: sqlite3.Connection,
+        entity_type: str,
+        entity_id: str,
+        state: Dict[str, Any],
+        *,
+        actor: str,
+        event_type: str,
+    ) -> Optional[StateEvent]:
         state_json = _canonical_json(state)
         state_digest = hashlib.sha256(state_json.encode("utf-8")).hexdigest()
         occurred_at = _now()
-        with self._lock, self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            existing = connection.execute(
-                "SELECT version, state_hash FROM canonical_state WHERE entity_type = ? AND entity_id = ?",
-                (entity_type, entity_id),
-            ).fetchone()
-            if existing and existing["state_hash"] == state_digest:
-                connection.rollback()
-                return None
-            version = int(existing["version"]) + 1 if existing else 1
-            connection.execute(
-                "INSERT INTO canonical_state(entity_type, entity_id, version, state_json, state_hash, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?) "
-                "ON CONFLICT(entity_type, entity_id) DO UPDATE SET "
-                "version=excluded.version, state_json=excluded.state_json, state_hash=excluded.state_hash, updated_at=excluded.updated_at",
-                (entity_type, entity_id, version, state_json, state_digest, occurred_at),
-            )
-            previous_hash = self._last_hash(connection, "state_events")
-            event_id = str(uuid.uuid4())
-            payload = {"version": version, "state_hash": state_digest, "state": state}
-            chain_material = {
-                "id": event_id,
-                "event_type": event_type,
-                "entity_type": entity_type,
-                "entity_id": entity_id,
-                "actor": actor,
-                "occurred_at": occurred_at,
-                "payload": payload,
-                "previous_hash": previous_hash,
-            }
-            event_hash = content_hash(chain_material)
-            cursor = connection.execute(
-                "INSERT INTO state_events(id, event_type, entity_type, entity_id, actor, occurred_at, payload_json, previous_hash, event_hash) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (event_id, event_type, entity_type, entity_id, actor, occurred_at, _canonical_json(payload), previous_hash, event_hash),
-            )
-            sequence = int(cursor.lastrowid)
-            connection.commit()
+        existing = connection.execute(
+            "SELECT version, state_hash FROM canonical_state WHERE entity_type = ? AND entity_id = ?",
+            (entity_type, entity_id),
+        ).fetchone()
+        if existing and existing["state_hash"] == state_digest:
+            return None
+        version = int(existing["version"]) + 1 if existing else 1
+        connection.execute(
+            "INSERT INTO canonical_state(entity_type, entity_id, version, state_json, state_hash, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(entity_type, entity_id) DO UPDATE SET "
+            "version=excluded.version, state_json=excluded.state_json, state_hash=excluded.state_hash, updated_at=excluded.updated_at",
+            (entity_type, entity_id, version, state_json, state_digest, occurred_at),
+        )
+        previous_hash = self._last_hash(connection, "state_events")
+        event_id = str(uuid.uuid4())
+        payload = {"version": version, "state_hash": state_digest, "state": state}
+        chain_material = {
+            "id": event_id,
+            "event_type": event_type,
+            "entity_type": entity_type,
+            "entity_id": entity_id,
+            "actor": actor,
+            "occurred_at": occurred_at,
+            "payload": payload,
+            "previous_hash": previous_hash,
+        }
+        event_hash = content_hash(chain_material)
+        cursor = connection.execute(
+            "INSERT INTO state_events(id, event_type, entity_type, entity_id, actor, occurred_at, payload_json, previous_hash, event_hash) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (event_id, event_type, entity_type, entity_id, actor, occurred_at, _canonical_json(payload), previous_hash, event_hash),
+        )
+        sequence = int(cursor.lastrowid)
         return StateEvent(sequence=sequence, event_hash=event_hash, **chain_material)
 
     def get_entity(self, entity_type: str, entity_id: str) -> Optional[Dict[str, Any]]:
@@ -206,36 +229,284 @@ class BBCStateStore:
         evidence: Iterable[str],
         rollback_ref: str,
     ) -> AuditEvent:
-        occurred_at = _now()
-        evidence_list = [str(item)[:800] for item in evidence]
         with self._lock, self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            previous_hash = self._last_hash(connection, "audit_events")
-            event_id = str(uuid.uuid4())
-            chain_material = {
-                "id": event_id,
-                "actor": actor,
-                "capability_id": capability_id,
-                "target": target,
-                "inputs_hash": inputs_hash,
-                "result": result,
-                "evidence": evidence_list,
-                "rollback_ref": rollback_ref,
-                "occurred_at": occurred_at,
-                "previous_hash": previous_hash,
-            }
-            event_hash = content_hash(chain_material)
-            cursor = connection.execute(
-                "INSERT INTO audit_events(id, actor, capability_id, target, inputs_hash, result, evidence_json, rollback_ref, occurred_at, previous_hash, event_hash) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    event_id, actor, capability_id, target, inputs_hash, result,
-                    _canonical_json(evidence_list), rollback_ref, occurred_at, previous_hash, event_hash,
+            event = self._append_audit_in_transaction(
+                connection,
+                actor=actor,
+                capability_id=capability_id,
+                target=target,
+                inputs_hash=inputs_hash,
+                result=result,
+                evidence=evidence,
+                rollback_ref=rollback_ref,
+            )
+            connection.commit()
+        return event
+
+    def _append_audit_in_transaction(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        actor: str,
+        capability_id: str,
+        target: str,
+        inputs_hash: str,
+        result: str,
+        evidence: Iterable[str],
+        rollback_ref: str,
+    ) -> AuditEvent:
+        occurred_at = _now()
+        evidence_list = [str(item)[:800] for item in evidence]
+        previous_hash = self._last_hash(connection, "audit_events")
+        event_id = str(uuid.uuid4())
+        chain_material = {
+            "id": event_id,
+            "actor": actor,
+            "capability_id": capability_id,
+            "target": target,
+            "inputs_hash": inputs_hash,
+            "result": result,
+            "evidence": evidence_list,
+            "rollback_ref": rollback_ref,
+            "occurred_at": occurred_at,
+            "previous_hash": previous_hash,
+        }
+        event_hash = content_hash(chain_material)
+        cursor = connection.execute(
+            "INSERT INTO audit_events(id, actor, capability_id, target, inputs_hash, result, evidence_json, rollback_ref, occurred_at, previous_hash, event_hash) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                event_id, actor, capability_id, target, inputs_hash, result,
+                _canonical_json(evidence_list), rollback_ref, occurred_at, previous_hash, event_hash,
+            ),
+        )
+        sequence = int(cursor.lastrowid)
+        return AuditEvent(sequence=sequence, event_hash=event_hash, **chain_material)
+
+    def create_navigation(
+        self,
+        state: Dict[str, Any],
+        *,
+        inputs_hash: str,
+    ) -> None:
+        """Persist a navigation plan and its audit record as one commit."""
+
+        transaction_id = str(state["id"])
+        actor = str(state["actor"])
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._upsert_entity_in_transaction(
+                connection,
+                "navigation_transaction",
+                transaction_id,
+                state,
+                actor=actor,
+                event_type="navigation.planned",
+            )
+            self._append_audit_in_transaction(
+                connection,
+                actor=actor,
+                capability_id="bbc.navigation.plan",
+                target=str(state["destination"]),
+                inputs_hash=inputs_hash,
+                result="succeeded",
+                evidence=[f"state://navigation_transaction/{transaction_id}"],
+                rollback_ref=f"navigation:{transaction_id}:interrupt",
+            )
+            connection.commit()
+
+    def transition_navigation(
+        self,
+        transaction_id: str,
+        *,
+        actor: str,
+        expected_version: int,
+        target_state: str,
+        interruption_reason: str | None,
+        room_ids: set[str],
+        ship_id: str,
+        inputs_hash: str,
+    ) -> Dict[str, Any]:
+        """Validate and atomically persist one navigation lifecycle command."""
+
+        allowed = {
+            "planned": {"in_progress", "interrupted"},
+            "in_progress": {"completed", "interrupted"},
+            "completed": set(),
+            "interrupted": set(),
+        }
+        event_types = {
+            "in_progress": "navigation.started",
+            "completed": "navigation.completed",
+            "interrupted": "navigation.interrupted",
+        }
+        actions = {
+            "in_progress": "start",
+            "completed": "complete",
+            "interrupted": "interrupt",
+        }
+        if target_state not in event_types:
+            raise ValueError(f"invalid navigation target state: {target_state}")
+
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT state_json FROM canonical_state WHERE entity_type = 'navigation_transaction' AND entity_id = ?",
+                (transaction_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"navigation transaction not found: {transaction_id}")
+            transaction = json.loads(row["state_json"])
+            if transaction.get("actor") != actor:
+                raise PermissionError("navigation transaction belongs to another actor")
+            if (
+                transaction.get("origin") not in room_ids or
+                transaction.get("destination") not in room_ids or
+                any(room not in room_ids for room in transaction.get("path", []))
+            ):
+                raise RuntimeError("navigation transaction contains an unknown room")
+
+            current_state = str(transaction["state"])
+            current_version = int(transaction.get("version", 1))
+            if current_state == target_state:
+                if expected_version not in {current_version, current_version - 1}:
+                    raise StateConflict(
+                        f"stale navigation version: expected {expected_version}, current {current_version}"
+                    )
+                if target_state == "interrupted" and interruption_reason != transaction.get("interruption_reason"):
+                    raise RuntimeError("interrupted navigation reason is immutable")
+                connection.rollback()
+                return transaction
+            if current_version != expected_version:
+                raise StateConflict(
+                    f"stale navigation version: expected {expected_version}, current {current_version}"
+                )
+            if target_state not in allowed[current_state]:
+                raise RuntimeError(
+                    f"navigation cannot transition from {current_state} to {target_state}"
+                )
+
+            if target_state == "in_progress":
+                rows = connection.execute(
+                    "SELECT state_json FROM canonical_state WHERE entity_type = 'navigation_transaction'"
+                ).fetchall()
+                active = next((
+                    item for item in (json.loads(item["state_json"]) for item in rows)
+                    if item.get("persona_id") == transaction["persona_id"]
+                    and item.get("id") != transaction_id
+                    and item.get("state") == "in_progress"
+                ), None)
+                if active is not None:
+                    raise StateConflict(
+                        f"persona already has navigation in progress: {active['id']}"
+                    )
+
+            occurred_at = _now()
+            transaction["state"] = target_state
+            transaction["interruption_reason"] = interruption_reason
+            transaction["version"] = current_version + 1
+            transaction["updated_at"] = occurred_at
+            if target_state == "in_progress":
+                transaction["started_at"] = occurred_at
+            elif target_state == "completed":
+                transaction["completed_at"] = occurred_at
+            else:
+                transaction["interrupted_at"] = occurred_at
+            self._upsert_entity_in_transaction(
+                connection,
+                "navigation_transaction",
+                transaction_id,
+                transaction,
+                actor=actor,
+                event_type=event_types[target_state],
+            )
+
+            persona_id = str(transaction["persona_id"])
+            location_row = connection.execute(
+                "SELECT state_json FROM canonical_state WHERE entity_type = 'persona_location' AND entity_id = ?",
+                (persona_id,),
+            ).fetchone()
+            current_location = json.loads(location_row["state_json"]) if location_row else None
+            location: Dict[str, Any] | None = None
+            if target_state == "in_progress":
+                room_id = str(transaction["origin"])
+                location = {
+                    "persona_id": persona_id,
+                    "room_id": room_id,
+                    "navigation_transaction_id": transaction_id,
+                    "updated_at": occurred_at,
+                }
+            elif target_state == "completed":
+                room_id = str(transaction["destination"])
+                location = {
+                    "persona_id": persona_id,
+                    "room_id": room_id,
+                    "navigation_transaction_id": None,
+                    "updated_at": occurred_at,
+                }
+            else:
+                location = {
+                    "persona_id": persona_id,
+                    "room_id": str((current_location or {}).get("room_id") or transaction["origin"]),
+                    "navigation_transaction_id": None,
+                    "updated_at": occurred_at,
+                }
+            if location is not None:
+                self._upsert_entity_in_transaction(
+                    connection,
+                    "persona_location",
+                    persona_id,
+                    location,
+                    actor=actor,
+                    event_type="persona.location.changed",
+                )
+
+            ship_changed = False
+            if target_state == "completed":
+                ship_row = connection.execute(
+                    "SELECT state_json FROM canonical_state WHERE entity_type = 'ship' AND entity_id = ?",
+                    (ship_id,),
+                ).fetchone()
+                if ship_row is None:
+                    raise RuntimeError("canonical ship state is missing")
+                ship = json.loads(ship_row["state_json"])
+                if ship.get("active_room_id") != transaction["destination"]:
+                    ship["active_room_id"] = transaction["destination"]
+                    ship["updated_at"] = occurred_at
+                    self._upsert_entity_in_transaction(
+                        connection,
+                        "ship",
+                        ship_id,
+                        ship,
+                        actor=actor,
+                        event_type="ship.active_room.changed",
+                    )
+                    ship_changed = True
+
+            action = actions[target_state]
+            evidence = [
+                f"state://navigation_transaction/{transaction_id}",
+                f"state://persona_location/{persona_id}",
+            ]
+            if ship_changed:
+                evidence.append(f"state://ship/{ship_id}")
+            self._append_audit_in_transaction(
+                connection,
+                actor=actor,
+                capability_id=f"bbc.navigation.{action}",
+                target=str(transaction["destination"]),
+                inputs_hash=inputs_hash,
+                result="succeeded",
+                evidence=evidence,
+                rollback_ref=(
+                    f"navigation:{transaction_id}:interrupt"
+                    if target_state == "in_progress"
+                    else "not-applicable:terminal-navigation-state"
                 ),
             )
-            sequence = int(cursor.lastrowid)
             connection.commit()
-        return AuditEvent(sequence=sequence, event_hash=event_hash, **chain_material)
+        return transaction
 
     def list_events(self, *, after: int = 0, limit: int = 200) -> list[StateEvent]:
         bounded = max(1, min(int(limit), 1000))
