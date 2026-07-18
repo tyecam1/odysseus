@@ -147,13 +147,16 @@ def test_persona_projection_rejects_oversized_registry(tmp_path):
 
 def test_conference_server_selects_bounded_roles_and_stages_exact_evidence(tmp_path, monkeypatch):
     runtime, client, node = _conference_runtime(tmp_path, monkeypatch)
-    response = client.post("/api/bbc/v1/room-conferences", json={
+    navigation_id = runtime.store.list_entities("navigation_transaction")[-1]["id"]
+    request_body = {
         "room_id": "research",
         "objective": "Assess S2-E1 evidence, blockers, and the next safe action.",
         "repository_id": "obsidian-phd",
         "work_node_id": node.id,
+        "trigger_navigation_transaction_id": navigation_id,
         "max_visitors": 2,
-    })
+    }
+    response = client.post("/api/bbc/v1/room-conferences", json=request_body)
     assert response.status_code == 201, response.text
     conference = response.json()
     assert conference["state"] == "completed" and conference["version"] == 3
@@ -189,6 +192,13 @@ def test_conference_server_selects_bounded_roles_and_stages_exact_evidence(tmp_p
     ]
     assert all(runtime.store.verify_event_chains().values())
     assert client.get(f"/api/bbc/v1/room-conferences/{conference['id']}").json() == conference
+    assert client.get(
+        "/api/bbc/v1/room-conferences?room_id=research&state=completed&limit=1"
+    ).json()["conferences"] == [conference]
+    event_count = runtime.store.latest_event_sequence()
+    replay = client.post("/api/bbc/v1/room-conferences", json=request_body)
+    assert replay.status_code == 201 and replay.json() == conference
+    assert runtime.store.latest_event_sequence() == event_count
 
 
 def test_conference_request_cannot_choose_personas_or_cross_boundaries(tmp_path, monkeypatch):
@@ -211,6 +221,30 @@ def test_conference_request_cannot_choose_personas_or_cross_boundaries(tmp_path,
     assert client.post("/api/bbc/v1/room-conferences", json={
         "room_id": "bridge", "objective": "Run outside the active room",
     }).status_code == 400
+
+
+def test_conference_never_recommends_execution_without_canonical_next_action(tmp_path, monkeypatch):
+    runtime, client, original_node = _conference_runtime(tmp_path, monkeypatch)
+    source = tmp_path / "vault" / "10-inbox" / "s2-e1.md"
+    source.write_text(
+        source.read_text(encoding="utf-8").replace(
+            "next_action: Verify the physical acquisition interface.\n", ""
+        ),
+        encoding="utf-8",
+    )
+    node = next(
+        item for item in runtime.refresh_repository("obsidian-phd").nodes
+        if item.id == original_node.id
+    )
+    response = client.post("/api/bbc/v1/room-conferences", json={
+        "room_id": "research", "objective": "Assess S2-E1",
+        "repository_id": "obsidian-phd", "work_node_id": node.id,
+    })
+    assert response.status_code == 201
+    assert response.json()["synthesis"]["decision"].startswith(
+        "Do not execute yet; define a canonical next action"
+    )
+    assert response.json()["synthesis"]["actions_executed"] is False
 
 
 def test_conference_requires_write_and_invoke_scopes(tmp_path, monkeypatch):

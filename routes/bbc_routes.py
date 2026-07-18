@@ -68,6 +68,9 @@ class RoomConferenceRequest(BaseModel):
         default=None, pattern=r"^[a-z0-9][a-z0-9._-]{0,79}$"
     )
     work_node_id: str | None = Field(default=None, min_length=1, max_length=200)
+    trigger_navigation_transaction_id: str | None = Field(
+        default=None, pattern=TRANSACTION_ID_PATTERN
+    )
     max_visitors: int = Field(default=2, ge=0, le=2)
 
 
@@ -279,10 +282,11 @@ def setup_bbc_routes(runtime: BBCRuntime | None = None) -> APIRouter:
         request: Request,
         room_id: str | None = Query(default=None, pattern=r"^[a-z0-9][a-z0-9._-]{0,79}$"),
         state: RoomConferenceState | None = None,
+        limit: int = Query(default=20, ge=1, le=100),
     ):
         require_bbc_access(request, "read")
         conferences = await asyncio.to_thread(
-            lambda: runtime.room_conferences(room_id=room_id, state=state)
+            lambda: runtime.room_conferences(room_id=room_id, state=state, limit=limit)
         )
         return {"conferences": conferences}
 
@@ -309,6 +313,7 @@ def setup_bbc_routes(runtime: BBCRuntime | None = None) -> APIRouter:
                 objective=payload.objective,
                 repository_id=payload.repository_id,
                 work_node_id=payload.work_node_id,
+                trigger_navigation_transaction_id=payload.trigger_navigation_transaction_id,
                 max_visitors=payload.max_visitors,
                 caller_grants=grants,
             ))

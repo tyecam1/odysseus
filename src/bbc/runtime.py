@@ -35,7 +35,7 @@ from .models import (
     WorkNodeResolution,
     WorkNode,
 )
-from .store import BBCStateStore, content_hash
+from .store import BBCStateStore, StateConflict, content_hash
 
 
 ROOM_ADJACENCY: dict[str, tuple[str, ...]] = {
@@ -816,6 +816,7 @@ class BBCRuntime:
         objective: str,
         repository_id: str | None = None,
         work_node_id: str | None = None,
+        trigger_navigation_transaction_id: str | None = None,
         max_visitors: int = 2,
         caller_grants: set[str] | frozenset[str] = frozenset(),
     ) -> RoomConference:
@@ -823,6 +824,15 @@ class BBCRuntime:
             raise ValueError("room conference must use an authored room")
         if self.ship().active_room_id != room_id:
             raise ValueError("room conference must run in the ship's active room")
+        if trigger_navigation_transaction_id is not None:
+            trigger = self.navigation_transaction(trigger_navigation_transaction_id)
+            if trigger.actor != actor:
+                raise PermissionError("navigation transaction belongs to another actor")
+            if trigger.state != NavigationTransactionState.completed or trigger.destination != room_id:
+                raise ValueError("conference trigger must be a completed arrival in the requested room")
+            existing = self._conference_by_trigger(trigger_navigation_transaction_id)
+            if existing is not None:
+                return existing
         objective = str(objective).strip()
         if not objective or len(objective) > 500:
             raise ValueError("conference objective must contain 1 to 500 characters")
@@ -854,6 +864,7 @@ class BBCRuntime:
             objective=objective,
             repository_id=repository_id,
             work_node_id=work_node_id,
+            trigger_navigation_transaction_id=trigger_navigation_transaction_id,
             participant_ids=[persona.id for persona in attendees],
             visitor_ids=visitor_ids,
             participants=participants,
@@ -871,12 +882,22 @@ class BBCRuntime:
             "objective": objective,
             "repository_id": repository_id,
             "work_node_id": work_node_id,
+            "trigger_navigation_transaction_id": trigger_navigation_transaction_id,
             "max_visitors": max_visitors,
         })
-        self.store.create_room_conference(
-            conference.model_dump(mode="json"),
-            inputs_hash=command_hash,
-        )
+        try:
+            self.store.create_room_conference(
+                conference.model_dump(mode="json"),
+                inputs_hash=command_hash,
+            )
+        except StateConflict:
+            existing = (
+                self._conference_by_trigger(trigger_navigation_transaction_id)
+                if trigger_navigation_transaction_id is not None else None
+            )
+            if existing is not None:
+                return existing
+            raise
         running = self.transition_room_conference(
             conference.id,
             RoomConferenceState.running,
@@ -906,6 +927,8 @@ class BBCRuntime:
                 decision = "No execution decision: select a canonical work node."
             elif node.blocker_ids:
                 decision = f"Do not execute yet; resolve the recorded blockers for {node.canonical_key}."
+            elif not node.next_action:
+                decision = f"Do not execute yet; define a canonical next action for {node.canonical_key}."
             else:
                 decision = f"Proceed only with the recorded next action for {node.canonical_key}, subject to cited evidence."
             synthesis = ConferenceSynthesis(
@@ -960,15 +983,30 @@ class BBCRuntime:
         return RoomConference.model_validate(state)
 
     def room_conferences(
-        self, *, room_id: str | None = None, state: RoomConferenceState | str | None = None,
+        self,
+        *,
+        room_id: str | None = None,
+        state: RoomConferenceState | str | None = None,
+        limit: int = 20,
     ) -> list[RoomConference]:
         target_state = RoomConferenceState(state).value if state is not None else None
-        return [
+        if not 1 <= int(limit) <= 100:
+            raise ValueError("conference list limit must be between 1 and 100")
+        conferences = [
             RoomConference.model_validate(item)
             for item in self.store.list_entities("room_conference")
             if (room_id is None or item.get("room_id") == room_id)
             and (target_state is None or item.get("state") == target_state)
         ]
+        conferences.sort(key=lambda item: item.updated_at, reverse=True)
+        return conferences[:int(limit)]
+
+    def _conference_by_trigger(self, transaction_id: str) -> RoomConference | None:
+        state = next((
+            item for item in self.store.list_entities("room_conference")
+            if item.get("trigger_navigation_transaction_id") == transaction_id
+        ), None)
+        return RoomConference.model_validate(state) if state is not None else None
 
     def transition_room_conference(
         self,

@@ -528,6 +528,19 @@ class BBCStateStore:
             ).fetchone()
             if existing is not None:
                 raise StateConflict(f"room conference already exists: {conference_id}")
+            trigger_id = state.get("trigger_navigation_transaction_id")
+            if trigger_id is not None:
+                rows = connection.execute(
+                    "SELECT state_json FROM canonical_state WHERE entity_type = 'room_conference'"
+                ).fetchall()
+                duplicate = next((
+                    item for item in (json.loads(row["state_json"]) for row in rows)
+                    if item.get("trigger_navigation_transaction_id") == trigger_id
+                ), None)
+                if duplicate is not None:
+                    raise StateConflict(
+                        f"navigation arrival already has conference: {duplicate['id']}"
+                    )
             self._upsert_entity_in_transaction(
                 connection,
                 "room_conference",
@@ -705,7 +718,7 @@ class BBCStateStore:
 
             immutable_fields = (
                 "id", "actor", "room_id", "objective", "repository_id", "work_node_id",
-                "participant_ids", "visitor_ids", "participants",
+                "trigger_navigation_transaction_id", "participant_ids", "visitor_ids", "participants",
             )
             changed_fields = [
                 key for key in immutable_fields if completed_state.get(key) != current.get(key)

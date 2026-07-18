@@ -279,6 +279,10 @@ class RoomConference(ContractModel):
     objective: str = Field(min_length=1, max_length=500)
     repository_id: Optional[str] = Field(default=None, pattern=r"^[a-z0-9][a-z0-9._-]{0,79}$")
     work_node_id: Optional[str] = Field(default=None, max_length=200)
+    trigger_navigation_transaction_id: Optional[str] = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+    )
     participant_ids: List[str] = Field(min_length=1, max_length=12)
     visitor_ids: List[str] = Field(default_factory=list, max_length=2)
     participants: List[ConferenceParticipant] = Field(default_factory=list, max_length=12)
