@@ -3,7 +3,7 @@ import sqlite3
 
 import pytest
 
-from src.bbc.store import BBCStateStore, content_hash
+from src.bbc.store import BBCStateStore, CanonicalIntegrityError, content_hash
 
 
 def test_migration_and_unchanged_state_do_not_emit_fake_events(tmp_path):
@@ -22,6 +22,9 @@ def test_migration_and_unchanged_state_do_not_emit_fake_events(tmp_path):
     assert store.get_entity("ship", "one")["room"] == "engineering"
     assert store.latest_event_sequence() == changed.sequence
     assert store.list_events(limit=1)[0].sequence != store.latest_event_sequence()
+    assert store.verify_canonical_state() == {
+        "hashes": True, "latest_events": True, "entity_coverage": True,
+    }
 
 
 def test_event_and_audit_tables_are_immutable_and_hash_chained(tmp_path):
@@ -58,6 +61,70 @@ def test_backup_restore_is_verified_and_recovers_canonical_state(tmp_path):
     store.restore(backup)
     assert store.get_entity("ship", "one")["room"] == "bridge"
     assert store.integrity_check()
+
+
+def test_canonical_state_tampering_is_detected_on_read_write_and_health_check(tmp_path):
+    store = BBCStateStore(tmp_path / "bbc.db")
+    store.upsert_entity("ship", "one", {"room": "bridge"})
+    with sqlite3.connect(store.path) as connection:
+        connection.execute(
+            "UPDATE canonical_state SET state_json = ? WHERE entity_type = 'ship' AND entity_id = 'one'",
+            (json.dumps({"room": "engineering"}),),
+        )
+
+    assert store.verify_canonical_state() == {
+        "hashes": False, "latest_events": False, "entity_coverage": True,
+    }
+    with pytest.raises(CanonicalIntegrityError, match="hash mismatch"):
+        store.get_entity("ship", "one")
+    with pytest.raises(CanonicalIntegrityError, match="hash mismatch"):
+        store.upsert_entity("ship", "one", {"room": "archive"})
+
+
+def test_restore_rejects_forged_canonical_state_without_changing_live_database(tmp_path):
+    store = BBCStateStore(tmp_path / "bbc.db")
+    store.upsert_entity("ship", "one", {"room": "bridge"})
+    backup = store.backup(tmp_path / "forged.db")
+    forged_state = {"room": "archive"}
+    with sqlite3.connect(backup) as connection:
+        connection.execute(
+            "UPDATE canonical_state SET state_json = ?, state_hash = ? "
+            "WHERE entity_type = 'ship' AND entity_id = 'one'",
+            (json.dumps(forged_state), content_hash(forged_state)),
+        )
+    store.upsert_entity("ship", "one", {"room": "engineering"})
+
+    with pytest.raises(ValueError, match="canonical state"):
+        store.restore(backup)
+    assert store.get_entity("ship", "one")["room"] == "engineering"
+
+
+def test_restore_rejects_a_backup_missing_immutable_ledger_guards(tmp_path):
+    store = BBCStateStore(tmp_path / "bbc.db")
+    store.upsert_entity("ship", "one", {"room": "bridge"})
+    backup = store.backup(tmp_path / "unguarded.db")
+    with sqlite3.connect(backup) as connection:
+        connection.execute("DROP TRIGGER state_events_no_update")
+    store.upsert_entity("ship", "one", {"room": "engineering"})
+
+    with pytest.raises(ValueError, match="triggers are missing"):
+        store.restore(backup)
+    assert store.get_entity("ship", "one")["room"] == "engineering"
+
+
+def test_restore_rejects_a_backup_with_missing_canonical_entities(tmp_path):
+    store = BBCStateStore(tmp_path / "bbc.db")
+    store.upsert_entity("ship", "one", {"room": "bridge"})
+    backup = store.backup(tmp_path / "missing-state.db")
+    with sqlite3.connect(backup) as connection:
+        connection.execute(
+            "DELETE FROM canonical_state WHERE entity_type = 'ship' AND entity_id = 'one'"
+        )
+    store.upsert_entity("ship", "one", {"room": "engineering"})
+
+    with pytest.raises(ValueError, match="canonical state"):
+        store.restore(backup)
+    assert store.get_entity("ship", "one")["room"] == "engineering"
 
 
 def test_applied_migration_checksum_cannot_be_rewritten(tmp_path):

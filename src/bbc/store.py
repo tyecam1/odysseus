@@ -5,8 +5,10 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import tempfile
 import threading
 import uuid
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
@@ -16,6 +18,10 @@ from .models import AuditEvent, SCHEMA_VERSION, StateEvent
 
 class StateConflict(RuntimeError):
     """Canonical state changed after the caller read it."""
+
+
+class CanonicalIntegrityError(RuntimeError):
+    """Canonical state no longer agrees with its immutable event ledger."""
 
 
 def _now() -> str:
@@ -90,9 +96,10 @@ class BBCStateStore:
             row = connection.execute("PRAGMA integrity_check").fetchone()
             return bool(row and row[0] == "ok")
 
-    def verify_event_chains(self) -> Dict[str, bool]:
+    @staticmethod
+    def _verify_event_chains_in_connection(connection: sqlite3.Connection) -> Dict[str, bool]:
         results: Dict[str, bool] = {}
-        with self._connect() as connection:
+        try:
             state_rows = connection.execute("SELECT * FROM state_events ORDER BY sequence").fetchall()
             previous = None
             valid = True
@@ -123,7 +130,106 @@ class BBCStateStore:
                     break
                 previous = row["event_hash"]
             results["audit_events"] = valid
+        except (json.JSONDecodeError, KeyError, sqlite3.DatabaseError, TypeError):
+            return {"state_events": False, "audit_events": False}
         return results
+
+    def verify_event_chains(self) -> Dict[str, bool]:
+        with self._connect() as connection:
+            return self._verify_event_chains_in_connection(connection)
+
+    @staticmethod
+    def _verify_canonical_state_in_connection(connection: sqlite3.Connection) -> Dict[str, bool]:
+        hashes_valid = True
+        latest_events_valid = True
+        entity_coverage_valid = True
+        try:
+            rows = connection.execute(
+                "SELECT entity_type, entity_id, version, state_json, state_hash FROM canonical_state"
+            ).fetchall()
+            canonical_keys = {
+                (str(row["entity_type"]), str(row["entity_id"])) for row in rows
+            }
+            event_keys = {
+                (str(row["entity_type"]), str(row["entity_id"]))
+                for row in connection.execute(
+                    "SELECT DISTINCT entity_type, entity_id FROM state_events"
+                )
+            }
+            entity_coverage_valid = canonical_keys == event_keys
+            for row in rows:
+                state = json.loads(row["state_json"])
+                state_digest = content_hash(state)
+                if state_digest != row["state_hash"]:
+                    hashes_valid = False
+                event = connection.execute(
+                    "SELECT payload_json FROM state_events "
+                    "WHERE entity_type = ? AND entity_id = ? ORDER BY sequence DESC LIMIT 1",
+                    (row["entity_type"], row["entity_id"]),
+                ).fetchone()
+                if event is None:
+                    latest_events_valid = False
+                    continue
+                payload = json.loads(event["payload_json"])
+                if (
+                    int(payload.get("version", -1)) != int(row["version"])
+                    or payload.get("state_hash") != row["state_hash"]
+                    or payload.get("state") != state
+                ):
+                    latest_events_valid = False
+        except (json.JSONDecodeError, KeyError, sqlite3.DatabaseError, TypeError, ValueError):
+            return {"hashes": False, "latest_events": False, "entity_coverage": False}
+        return {
+            "hashes": hashes_valid,
+            "latest_events": latest_events_valid,
+            "entity_coverage": entity_coverage_valid,
+        }
+
+    def verify_canonical_state(self) -> Dict[str, bool]:
+        with self._connect() as connection:
+            return self._verify_canonical_state_in_connection(connection)
+
+    @staticmethod
+    def _decode_canonical_row(
+        connection: sqlite3.Connection,
+        row: sqlite3.Row,
+        entity_type: str,
+        entity_id: str,
+    ) -> Dict[str, Any]:
+        try:
+            state = json.loads(row["state_json"])
+        except (json.JSONDecodeError, TypeError) as exc:
+            raise CanonicalIntegrityError(
+                f"canonical state JSON is invalid: {entity_type}/{entity_id}"
+            ) from exc
+        if content_hash(state) != row["state_hash"]:
+            raise CanonicalIntegrityError(
+                f"canonical state hash mismatch: {entity_type}/{entity_id}"
+            )
+        event = connection.execute(
+            "SELECT payload_json FROM state_events "
+            "WHERE entity_type = ? AND entity_id = ? ORDER BY sequence DESC LIMIT 1",
+            (entity_type, entity_id),
+        ).fetchone()
+        if event is None:
+            raise CanonicalIntegrityError(
+                f"canonical state has no event ledger entry: {entity_type}/{entity_id}"
+            )
+        try:
+            payload = json.loads(event["payload_json"])
+        except (json.JSONDecodeError, TypeError) as exc:
+            raise CanonicalIntegrityError(
+                f"canonical event payload is invalid: {entity_type}/{entity_id}"
+            ) from exc
+        if (
+            int(payload.get("version", -1)) != int(row["version"])
+            or payload.get("state_hash") != row["state_hash"]
+            or payload.get("state") != state
+        ):
+            raise CanonicalIntegrityError(
+                f"canonical state does not match its latest event: {entity_type}/{entity_id}"
+            )
+        return state
 
     def _last_hash(self, connection: sqlite3.Connection, table: str) -> Optional[str]:
         if table not in {"state_events", "audit_events"}:
@@ -167,9 +273,11 @@ class BBCStateStore:
         state_digest = hashlib.sha256(state_json.encode("utf-8")).hexdigest()
         occurred_at = _now()
         existing = connection.execute(
-            "SELECT version, state_hash FROM canonical_state WHERE entity_type = ? AND entity_id = ?",
+            "SELECT version, state_json, state_hash FROM canonical_state WHERE entity_type = ? AND entity_id = ?",
             (entity_type, entity_id),
         ).fetchone()
+        if existing:
+            self._decode_canonical_row(connection, existing, entity_type, entity_id)
         if existing and existing["state_hash"] == state_digest:
             return None
         version = int(existing["version"]) + 1 if existing else 1
@@ -205,18 +313,110 @@ class BBCStateStore:
     def get_entity(self, entity_type: str, entity_id: str) -> Optional[Dict[str, Any]]:
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT state_json FROM canonical_state WHERE entity_type = ? AND entity_id = ?",
+                "SELECT version, state_json, state_hash FROM canonical_state WHERE entity_type = ? AND entity_id = ?",
                 (entity_type, entity_id),
             ).fetchone()
-            return json.loads(row["state_json"]) if row else None
+            return self._decode_canonical_row(connection, row, entity_type, entity_id) if row else None
 
     def list_entities(self, entity_type: str) -> list[Dict[str, Any]]:
         with self._connect() as connection:
             rows = connection.execute(
-                "SELECT state_json FROM canonical_state WHERE entity_type = ? ORDER BY entity_id",
+                "SELECT entity_id, version, state_json, state_hash FROM canonical_state "
+                "WHERE entity_type = ? ORDER BY entity_id",
                 (entity_type,),
             ).fetchall()
-            return [json.loads(row["state_json"]) for row in rows]
+            return [
+                self._decode_canonical_row(connection, row, entity_type, str(row["entity_id"]))
+                for row in rows
+            ]
+
+    def ingest_repository_snapshot(
+        self,
+        *,
+        system: Dict[str, Any],
+        streams: Iterable[Dict[str, Any]],
+        nodes: Iterable[Dict[str, Any]],
+        actor: str,
+    ) -> Dict[str, Any]:
+        """Merge and persist one repository snapshot as a single transaction."""
+
+        stream_states = [dict(item) for item in streams]
+        node_states = [dict(item) for item in nodes]
+        repository_id = str(system["id"])
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                "SELECT entity_id, version, state_json, state_hash FROM canonical_state "
+                "WHERE entity_type = 'work_node'"
+            ).fetchall()
+            stored_nodes = {
+                str(row["entity_id"]): self._decode_canonical_row(
+                    connection, row, "work_node", str(row["entity_id"])
+                )
+                for row in rows
+            }
+            stored_nodes = {
+                entity_id: state for entity_id, state in stored_nodes.items()
+                if state.get("repository_id") == repository_id
+            }
+
+            merged_nodes: list[Dict[str, Any]] = []
+            for node in node_states:
+                previous = stored_nodes.get(str(node.get("id")))
+                if previous:
+                    provenance: dict[tuple[Any, ...], Dict[str, Any]] = {}
+                    for item in [*(previous.get("provenance") or []), *(node.get("provenance") or [])]:
+                        key = (
+                            item.get("repository_id"), item.get("path"), item.get("line_start"),
+                            item.get("line_end"), item.get("source_kind"), item.get("content_hash"),
+                        )
+                        provenance[key] = item
+                    node["provenance"] = list(provenance.values())
+                    node["source_links"] = sorted(set(previous.get("source_links") or []) | set(node.get("source_links") or []))
+                    node["lineage"] = list(dict.fromkeys([
+                        *(previous.get("lineage") or []), *(node.get("lineage") or []),
+                    ]))
+                merged_nodes.append(node)
+
+            self._upsert_entity_in_transaction(
+                connection, "repository_system", repository_id, dict(system),
+                actor=actor, event_type="repository.ingested",
+            )
+            for stream in stream_states:
+                self._upsert_entity_in_transaction(
+                    connection, "work_stream", str(stream["id"]), stream,
+                    actor=actor, event_type="work_stream.ingested",
+                )
+            for node in merged_nodes:
+                self._upsert_entity_in_transaction(
+                    connection, "work_node", str(node["id"]), node,
+                    actor=actor, event_type="work_node.ingested",
+                )
+
+            current_ids = {str(node["id"]) for node in merged_nodes}
+            archived_nodes: list[Dict[str, Any]] = []
+            for entity_id, previous in stored_nodes.items():
+                if entity_id in current_ids or previous.get("archived") or previous.get("superseded"):
+                    continue
+                archived = dict(previous)
+                archived["archived"] = True
+                archived["state"] = "archived"
+                marker = f"source-removed:{system.get('revision') or 'unknown-revision'}"
+                archived["lineage"] = list(dict.fromkeys([
+                    *(archived.get("lineage") or []), marker,
+                ]))
+                self._upsert_entity_in_transaction(
+                    connection, "work_node", entity_id, archived,
+                    actor=actor, event_type="work_node.archived",
+                )
+                archived_nodes.append(archived)
+            connection.commit()
+        return {
+            "system": dict(system),
+            "streams": stream_states,
+            "nodes": merged_nodes,
+            "archived_nodes": archived_nodes,
+        }
 
     def append_audit(
         self,
@@ -352,12 +552,15 @@ class BBCStateStore:
         with self._lock, self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
-                "SELECT state_json FROM canonical_state WHERE entity_type = 'navigation_transaction' AND entity_id = ?",
+                "SELECT version, state_json, state_hash FROM canonical_state "
+                "WHERE entity_type = 'navigation_transaction' AND entity_id = ?",
                 (transaction_id,),
             ).fetchone()
             if row is None:
                 raise KeyError(f"navigation transaction not found: {transaction_id}")
-            transaction = json.loads(row["state_json"])
+            transaction = self._decode_canonical_row(
+                connection, row, "navigation_transaction", transaction_id
+            )
             if transaction.get("actor") != actor:
                 raise PermissionError("navigation transaction belongs to another actor")
             if (
@@ -389,10 +592,16 @@ class BBCStateStore:
 
             if target_state == "in_progress":
                 rows = connection.execute(
-                    "SELECT state_json FROM canonical_state WHERE entity_type = 'navigation_transaction'"
+                    "SELECT entity_id, version, state_json, state_hash FROM canonical_state "
+                    "WHERE entity_type = 'navigation_transaction'"
                 ).fetchall()
                 active = next((
-                    item for item in (json.loads(item["state_json"]) for item in rows)
+                    item for item in (
+                        self._decode_canonical_row(
+                            connection, row, "navigation_transaction", str(row["entity_id"])
+                        )
+                        for row in rows
+                    )
                     if item.get("persona_id") == transaction["persona_id"]
                     and item.get("id") != transaction_id
                     and item.get("state") == "in_progress"
@@ -424,10 +633,13 @@ class BBCStateStore:
 
             persona_id = str(transaction["persona_id"])
             location_row = connection.execute(
-                "SELECT state_json FROM canonical_state WHERE entity_type = 'persona_location' AND entity_id = ?",
+                "SELECT version, state_json, state_hash FROM canonical_state "
+                "WHERE entity_type = 'persona_location' AND entity_id = ?",
                 (persona_id,),
             ).fetchone()
-            current_location = json.loads(location_row["state_json"]) if location_row else None
+            current_location = self._decode_canonical_row(
+                connection, location_row, "persona_location", persona_id
+            ) if location_row else None
             location: Dict[str, Any] | None = None
             if target_state == "in_progress":
                 room_id = str(transaction["origin"])
@@ -465,12 +677,13 @@ class BBCStateStore:
             ship_changed = False
             if target_state == "completed":
                 ship_row = connection.execute(
-                    "SELECT state_json FROM canonical_state WHERE entity_type = 'ship' AND entity_id = ?",
+                    "SELECT version, state_json, state_hash FROM canonical_state "
+                    "WHERE entity_type = 'ship' AND entity_id = ?",
                     (ship_id,),
                 ).fetchone()
                 if ship_row is None:
                     raise RuntimeError("canonical ship state is missing")
-                ship = json.loads(ship_row["state_json"])
+                ship = self._decode_canonical_row(connection, ship_row, "ship", ship_id)
                 if ship.get("active_room_id") != transaction["destination"]:
                     ship["active_room_id"] = transaction["destination"]
                     ship["updated_at"] = occurred_at
@@ -531,10 +744,16 @@ class BBCStateStore:
             trigger_id = state.get("trigger_navigation_transaction_id")
             if trigger_id is not None:
                 rows = connection.execute(
-                    "SELECT state_json FROM canonical_state WHERE entity_type = 'room_conference'"
+                    "SELECT entity_id, version, state_json, state_hash FROM canonical_state "
+                    "WHERE entity_type = 'room_conference'"
                 ).fetchall()
                 duplicate = next((
-                    item for item in (json.loads(row["state_json"]) for row in rows)
+                    item for item in (
+                        self._decode_canonical_row(
+                            connection, row, "room_conference", str(row["entity_id"])
+                        )
+                        for row in rows
+                    )
                     if item.get("trigger_navigation_transaction_id") == trigger_id
                 ), None)
                 if duplicate is not None:
@@ -590,12 +809,15 @@ class BBCStateStore:
         with self._lock, self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
-                "SELECT state_json FROM canonical_state WHERE entity_type = 'room_conference' AND entity_id = ?",
+                "SELECT version, state_json, state_hash FROM canonical_state "
+                "WHERE entity_type = 'room_conference' AND entity_id = ?",
                 (conference_id,),
             ).fetchone()
             if row is None:
                 raise KeyError(f"room conference not found: {conference_id}")
-            conference = json.loads(row["state_json"])
+            conference = self._decode_canonical_row(
+                connection, row, "room_conference", conference_id
+            )
             if conference.get("actor") != actor:
                 raise PermissionError("room conference belongs to another actor")
 
@@ -621,10 +843,16 @@ class BBCStateStore:
 
             if target_state == "running":
                 rows = connection.execute(
-                    "SELECT state_json FROM canonical_state WHERE entity_type = 'room_conference'"
+                    "SELECT entity_id, version, state_json, state_hash FROM canonical_state "
+                    "WHERE entity_type = 'room_conference'"
                 ).fetchall()
                 active = next((
-                    item for item in (json.loads(item["state_json"]) for item in rows)
+                    item for item in (
+                        self._decode_canonical_row(
+                            connection, row, "room_conference", str(row["entity_id"])
+                        )
+                        for row in rows
+                    )
                     if item.get("room_id") == conference["room_id"]
                     and item.get("id") != conference_id
                     and item.get("state") == "running"
@@ -693,12 +921,15 @@ class BBCStateStore:
         with self._lock, self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
-                "SELECT state_json FROM canonical_state WHERE entity_type = 'room_conference' AND entity_id = ?",
+                "SELECT version, state_json, state_hash FROM canonical_state "
+                "WHERE entity_type = 'room_conference' AND entity_id = ?",
                 (conference_id,),
             ).fetchone()
             if row is None:
                 raise KeyError(f"room conference not found: {conference_id}")
-            current = json.loads(row["state_json"])
+            current = self._decode_canonical_row(
+                connection, row, "room_conference", conference_id
+            )
             if current.get("actor") != actor:
                 raise PermissionError("room conference belongs to another actor")
             if current.get("state") == "completed":
@@ -836,22 +1067,112 @@ class BBCStateStore:
         destination.parent.mkdir(parents=True, exist_ok=True)
         if destination.resolve() == self.path.resolve():
             raise ValueError("backup destination must differ from the live database")
-        with self._lock, self._connect() as source, sqlite3.connect(destination) as target:
+        with self._lock, closing(self._connect()) as source, closing(sqlite3.connect(destination)) as target:
             source.backup(target)
         return destination
+
+    def _validate_database_connection(self, connection: sqlite3.Connection) -> None:
+        connection.row_factory = sqlite3.Row
+        try:
+            row = connection.execute("PRAGMA integrity_check").fetchone()
+            if not row or row[0] != "ok":
+                raise ValueError("BBC database failed SQLite integrity check")
+            objects = {
+                (str(item["type"]), str(item["name"]))
+                for item in connection.execute(
+                    "SELECT type, name FROM sqlite_master WHERE type IN ('table', 'trigger')"
+                )
+            }
+            required_tables = {
+                ("table", "schema_migrations"), ("table", "canonical_state"),
+                ("table", "state_events"), ("table", "audit_events"),
+            }
+            required_triggers = {
+                ("trigger", "state_events_no_update"), ("trigger", "state_events_no_delete"),
+                ("trigger", "audit_events_no_update"), ("trigger", "audit_events_no_delete"),
+            }
+            if not required_tables.issubset(objects) or not required_triggers.issubset(objects):
+                raise ValueError("BBC database schema or immutable-ledger triggers are missing")
+            required_columns = {
+                "schema_migrations": {"version", "name", "checksum", "applied_at"},
+                "canonical_state": {
+                    "entity_type", "entity_id", "version", "state_json", "state_hash", "updated_at",
+                },
+                "state_events": {
+                    "sequence", "id", "event_type", "entity_type", "entity_id", "actor",
+                    "occurred_at", "payload_json", "previous_hash", "event_hash",
+                },
+                "audit_events": {
+                    "sequence", "id", "actor", "capability_id", "target", "inputs_hash",
+                    "result", "evidence_json", "rollback_ref", "occurred_at", "previous_hash", "event_hash",
+                },
+            }
+            for table, expected_columns in required_columns.items():
+                actual_columns = {
+                    str(item["name"]) for item in connection.execute(f"PRAGMA table_info({table})")
+                }
+                if not expected_columns.issubset(actual_columns):
+                    raise ValueError(f"BBC database table is missing required columns: {table}")
+            trigger_requirements = {
+                "state_events_no_update": ("before update on state_events", "raise(abort"),
+                "state_events_no_delete": ("before delete on state_events", "raise(abort"),
+                "audit_events_no_update": ("before update on audit_events", "raise(abort"),
+                "audit_events_no_delete": ("before delete on audit_events", "raise(abort"),
+            }
+            trigger_sql = {
+                str(item["name"]): " ".join(str(item["sql"] or "").casefold().split())
+                for item in connection.execute(
+                    "SELECT name, sql FROM sqlite_master WHERE type = 'trigger'"
+                )
+            }
+            for name, fragments in trigger_requirements.items():
+                if any(fragment not in trigger_sql.get(name, "") for fragment in fragments):
+                    raise ValueError(f"BBC database immutable-ledger trigger is invalid: {name}")
+
+            expected_migrations: dict[int, str] = {}
+            for migration in sorted(self.migrations_dir.glob("[0-9][0-9][0-9]_*.sql")):
+                version = int(migration.name.split("_", 1)[0])
+                expected_migrations[version] = hashlib.sha256(
+                    migration.read_text(encoding="utf-8").encode("utf-8")
+                ).hexdigest()
+            applied_migrations = {
+                int(item["version"]): str(item["checksum"])
+                for item in connection.execute("SELECT version, checksum FROM schema_migrations")
+            }
+            if expected_migrations != applied_migrations or max(applied_migrations, default=0) != SCHEMA_VERSION:
+                raise ValueError("BBC database migration ledger is incompatible")
+
+            chains = self._verify_event_chains_in_connection(connection)
+            if not all(chains.values()):
+                raise ValueError("BBC database event ledger failed hash-chain validation")
+            canonical = self._verify_canonical_state_in_connection(connection)
+            if not all(canonical.values()):
+                raise ValueError("BBC canonical state does not match its event ledger")
+        except sqlite3.DatabaseError as exc:
+            raise ValueError("BBC database schema could not be validated") from exc
 
     def restore(self, source: str | Path) -> None:
         source = Path(source)
         if not source.is_file() or source.resolve() == self.path.resolve():
             raise ValueError("restore source must be a separate SQLite backup")
-        with sqlite3.connect(source) as probe:
-            row = probe.execute("PRAGMA integrity_check").fetchone()
-            if not row or row[0] != "ok":
-                raise ValueError("restore source failed SQLite integrity check")
-            version = probe.execute("SELECT COALESCE(MAX(version), 0) FROM schema_migrations").fetchone()[0]
-            if int(version) != SCHEMA_VERSION:
-                raise ValueError("restore source has an incompatible schema version")
-        with self._lock, sqlite3.connect(source) as backup_connection, self._connect() as live_connection:
-            backup_connection.backup(live_connection)
-        if not self.integrity_check():
-            raise RuntimeError("restored BBC database failed integrity check")
+        with self._lock, tempfile.TemporaryDirectory(
+            prefix="bbc-restore-", dir=self.path.parent
+        ) as temporary_directory:
+            staging_path = Path(temporary_directory) / "staging.db"
+            rollback_path = Path(temporary_directory) / "rollback.db"
+            with closing(sqlite3.connect(source)) as source_connection, closing(sqlite3.connect(staging_path)) as staging_target:
+                source_connection.backup(staging_target)
+            with closing(sqlite3.connect(staging_path)) as staging_probe:
+                self._validate_database_connection(staging_probe)
+
+            with closing(self._connect()) as live_source, closing(sqlite3.connect(rollback_path)) as rollback_target:
+                live_source.backup(rollback_target)
+            try:
+                with closing(sqlite3.connect(staging_path)) as staging_source, closing(self._connect()) as live_target:
+                    staging_source.backup(live_target)
+                with closing(self._connect()) as restored_probe:
+                    self._validate_database_connection(restored_probe)
+            except Exception:
+                with closing(sqlite3.connect(rollback_path)) as rollback_source, closing(self._connect()) as live_target:
+                    rollback_source.backup(live_target)
+                raise

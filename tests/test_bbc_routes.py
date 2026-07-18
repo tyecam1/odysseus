@@ -1,4 +1,5 @@
 from pathlib import Path
+import sqlite3
 import subprocess
 
 import pytest
@@ -49,6 +50,12 @@ def test_versioned_routes_expose_live_data_and_navigation_audit(tmp_path, monkey
     work = client.get("/api/bbc/v1/repositories/odysseus/work-nodes")
     assert work.status_code == 200
     assert work.json()["nodes"][0]["title"] == "Live node"
+    assert runtime.store.list_entities("work_node") == []
+
+    ingested = client.post("/api/bbc/v1/repositories/odysseus/refresh")
+    assert ingested.status_code == 200
+    assert ingested.json()["nodes"][0]["title"] == "Live node"
+    assert runtime.store.list_entities("work_node")[0]["title"] == "Live node"
 
     navigation = client.post("/api/bbc/v1/navigation-transactions", json={
         "persona_id": "aoteru", "origin": "bridge", "destination": "research",
@@ -122,14 +129,54 @@ def test_removed_source_is_archived_with_lineage_and_available_only_in_history(t
     app = FastAPI()
     app.include_router(setup_bbc_routes(runtime))
     client = TestClient(app)
-    first = client.get("/api/bbc/v1/repositories/odysseus/work-nodes").json()["nodes"]
+    first = client.post("/api/bbc/v1/repositories/odysseus/refresh").json()["nodes"]
     assert len(first) == 1
     (tmp_path / "odysseus" / "ROADMAP.md").write_text("# Roadmap\n", encoding="utf-8")
+    assert client.get("/api/bbc/v1/repositories/odysseus/work-nodes").json()["nodes"] == []
+    assert client.post("/api/bbc/v1/repositories/odysseus/refresh").status_code == 200
     assert client.get("/api/bbc/v1/repositories/odysseus/work-nodes").json()["nodes"] == []
     history = client.get("/api/bbc/v1/repositories/odysseus/work-nodes?include_archived=true").json()["nodes"]
     assert len(history) == 1
     assert history[0]["archived"] and history[0]["state"] == "archived"
     assert history[0]["lineage"][0].startswith("source-removed:")
+
+
+def test_repository_gets_are_read_only_and_refresh_is_explicit(tmp_path, monkeypatch):
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    runtime = runtime_fixture(tmp_path)
+    app = FastAPI()
+    app.include_router(setup_bbc_routes(runtime))
+    client = TestClient(app)
+    before = runtime.store.latest_event_sequence()
+
+    assert client.get("/api/bbc/v1/repositories/odysseus").status_code == 200
+    assert client.get("/api/bbc/v1/repositories/odysseus/work-nodes").status_code == 200
+    assert client.get(
+        "/api/bbc/v1/repositories/odysseus/work-nodes?include_archived=true"
+    ).status_code == 200
+    assert runtime.store.latest_event_sequence() == before
+
+    assert client.post("/api/bbc/v1/repositories/odysseus/refresh").status_code == 200
+    assert runtime.store.latest_event_sequence() > before
+
+
+def test_health_reports_canonical_state_tampering(tmp_path, monkeypatch):
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    runtime = runtime_fixture(tmp_path)
+    with sqlite3.connect(runtime.store.path) as connection:
+        connection.execute(
+            "UPDATE canonical_state SET state_json = '{}' "
+            "WHERE entity_type = 'ship' AND entity_id = 'bbc-odysseus'"
+        )
+    app = FastAPI()
+    app.include_router(setup_bbc_routes(runtime))
+
+    response = TestClient(app).get("/api/bbc/v1/health")
+    assert response.status_code == 200
+    assert response.json()["status"] == "unavailable"
+    database = response.json()["checks"]["database"]
+    assert database["ok"] is False
+    assert database["canonical_state"]["hashes"] is False
 
 
 def test_paused_nodes_remain_visible_in_normal_results(tmp_path, monkeypatch):

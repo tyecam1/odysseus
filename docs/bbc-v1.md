@@ -18,13 +18,15 @@ The adapters are read-only and confined to their authoritative work surfaces:
 - Misumi/homeBase: `agent-tasks/**/*.md`;
 - Obsidian-PhD: front-matter `artifact_type: work-item` files under `10-inbox`, with `10-inbox/backlog.md` retained as an index source.
 
+Repository `GET` routes are live, read-only projections and never append canonical events. `POST /api/bbc/v1/repositories/{repository_id}/refresh` is the explicit `bbc:write` ingestion boundary. It merges retained provenance, ingests the system, streams, and nodes, and archives removed source nodes in one SQLite transaction. Historical nodes appear only after that explicit ingestion has recorded their removal.
+
 ## Authentication
 
 Browser sessions use the existing Odysseus authentication middleware. Bearer tokens require `bbc:read`, `bbc:invoke`, or `bbc:write`; the `bbc_ship` token profile grants all three. Capability invocation remains separately scoped from navigation-state writes.
 
 ## State and audit
 
-The migrated SQLite database is `ODYSSEUS_DATA_DIR/bbc/v1.db`. Canonical entity state is mutable by versioned upsert. State events and audit events are append-only, hash-chained, and protected by SQLite update/delete triggers. The shared `bbc.repository.inspect` capability is bounded, network-free, repository-authorised, and emits a real audit event for success, failure, or denial.
+The migrated SQLite database is `ODYSSEUS_DATA_DIR/bbc/v1.db`. Canonical entity state is mutable by versioned upsert. State events and audit events are append-only, hash-chained, and protected by SQLite update/delete triggers. Canonical reads, writes, health checks, and restores verify each state hash, latest immutable event, and entity coverage. Restore first snapshots and validates the candidate database's schema, migration ledger, immutable triggers, hash chains, and canonical state; rejection leaves the live database unchanged and a post-copy failure restores the pre-restore snapshot. The shared `bbc.repository.inspect` capability is bounded, network-free, repository-authorised, and emits a real audit event for success, failure, or denial.
 
 Navigation uses `POST /navigation-transactions` followed by versioned `PATCH /navigation-transactions/{id}` commands. The plan records the authenticated actor separately from the moving `persona_id`; only authored rooms are accepted, and omitted paths use the deterministic shortest route through the stable one-deck adjacency graph. Supplied paths must be continuous, non-repeating, and begin/end at the declared rooms.
 

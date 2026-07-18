@@ -34,6 +34,7 @@ from .models import (
     utc_now,
     WorkNodeResolution,
     WorkNode,
+    WorkStream,
 )
 from .store import BBCStateStore, StateConflict, content_hash
 
@@ -230,7 +231,13 @@ class BBCRuntime:
     def health(self) -> HealthState:
         systems = self.adapters.systems()
         chains = self.store.verify_event_chains()
-        db_ok = self.store.integrity_check() and self.store.schema_version() == SCHEMA_VERSION and all(chains.values())
+        canonical = self.store.verify_canonical_state()
+        db_ok = (
+            self.store.integrity_check()
+            and self.store.schema_version() == SCHEMA_VERSION
+            and all(chains.values())
+            and all(canonical.values())
+        )
         unavailable = [system.id for system in systems if not system.reachable]
         status = "healthy" if db_ok and not unavailable else "degraded" if db_ok else "unavailable"
         capability_health = [summary.health for summary in self.capabilities.search(limit=100)]
@@ -241,7 +248,11 @@ class BBCRuntime:
             status=status,
             schema_version=self.store.schema_version(),
             checks={
-                "database": {"ok": db_ok, "event_chains": chains},
+                "database": {
+                    "ok": db_ok,
+                    "event_chains": chains,
+                    "canonical_state": canonical,
+                },
                 "repositories": {
                     "ok": not unavailable,
                     "systems": [system.model_dump(mode="json") for system in systems],
@@ -255,7 +266,9 @@ class BBCRuntime:
             },
         )
 
-    def refresh_repository(self, repository_id: str, *, actor: str = "system") -> RepositorySnapshot:
+    def repository_snapshot(self, repository_id: str) -> RepositorySnapshot:
+        """Read a live adapter snapshot without changing canonical state."""
+
         adapter = self.adapters.get(repository_id)
         snapshot = adapter.snapshot()
         stored_nodes = {
@@ -291,33 +304,23 @@ class BBCRuntime:
             streams=snapshot.streams,
             nodes=tuple(refreshed_nodes),
         )
-        self.store.upsert_entity(
-            "repository_system", snapshot.system.id, snapshot.system.model_dump(mode="json"),
-            actor=actor, event_type="repository.ingested",
-        )
-        for stream in snapshot.streams:
-            self.store.upsert_entity("work_stream", stream.id, stream.model_dump(mode="json"), actor=actor, event_type="work_stream.ingested")
-        for node in snapshot.nodes:
-            self.store.upsert_entity("work_node", node.id, node.model_dump(mode="json"), actor=actor, event_type="work_node.ingested")
-        current_ids = {node.id for node in snapshot.nodes}
-        for previous in stored_nodes.values():
-            if previous.get("repository_id") != repository_id or previous.get("id") in current_ids:
-                continue
-            if previous.get("archived") or previous.get("superseded"):
-                continue
-            previous["archived"] = True
-            previous["state"] = "archived"
-            lineage = list(previous.get("lineage") or [])
-            marker = f"source-removed:{snapshot.system.revision or 'unknown-revision'}"
-            if marker not in lineage:
-                lineage.append(marker)
-            previous["lineage"] = lineage
-            archived = WorkNode.model_validate(previous)
-            self.store.upsert_entity(
-                "work_node", archived.id, archived.model_dump(mode="json"),
-                actor=actor, event_type="work_node.archived",
-            )
         return snapshot
+
+    def refresh_repository(self, repository_id: str, *, actor: str = "system") -> RepositorySnapshot:
+        """Explicitly ingest one live snapshot into the canonical event ledger."""
+
+        snapshot = self.adapters.get(repository_id).snapshot()
+        persisted = self.store.ingest_repository_snapshot(
+            system=snapshot.system.model_dump(mode="json"),
+            streams=(stream.model_dump(mode="json") for stream in snapshot.streams),
+            nodes=(node.model_dump(mode="json") for node in snapshot.nodes),
+            actor=actor,
+        )
+        return RepositorySnapshot(
+            system=type(snapshot.system).model_validate(persisted["system"]),
+            streams=tuple(WorkStream.model_validate(item) for item in persisted["streams"]),
+            nodes=tuple(WorkNode.model_validate(item) for item in persisted["nodes"]),
+        )
 
     def resolve_work_node(self, repository_id: str, query: str) -> WorkNodeResolution:
         return self.adapters.get(repository_id).resolve(query)

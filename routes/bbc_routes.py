@@ -132,31 +132,55 @@ def setup_bbc_routes(runtime: BBCRuntime | None = None) -> APIRouter:
 
     @router.get("/api/bbc/v1/repositories/{repository_id}")
     async def repository(request: Request, repository_id: str):
-        actor = require_bbc_access(request, "read")
+        require_bbc_access(request, "read")
         try:
-            snapshot = await asyncio.to_thread(lambda: runtime.refresh_repository(repository_id, actor=actor))
+            snapshot = await asyncio.to_thread(lambda: runtime.repository_snapshot(repository_id))
             return snapshot.system
         except Exception as exc:
             raise _http_error(exc) from exc
 
+    @router.post("/api/bbc/v1/repositories/{repository_id}/refresh")
+    async def refresh_repository(request: Request, repository_id: str):
+        actor = require_bbc_access(request, "write")
+        try:
+            snapshot = await asyncio.to_thread(
+                lambda: runtime.refresh_repository(repository_id, actor=actor)
+            )
+        except Exception as exc:
+            raise _http_error(exc) from exc
+        return {
+            "system": snapshot.system,
+            "streams": snapshot.streams,
+            "nodes": snapshot.nodes,
+        }
+
     @router.get("/api/bbc/v1/repositories/{repository_id}/work-nodes")
     async def work_nodes(request: Request, repository_id: str, include_archived: bool = False):
-        actor = require_bbc_access(request, "read")
+        require_bbc_access(request, "read")
         try:
-            snapshot = await asyncio.to_thread(lambda: runtime.refresh_repository(repository_id, actor=actor))
+            snapshot = await asyncio.to_thread(lambda: runtime.repository_snapshot(repository_id))
         except Exception as exc:
             raise _http_error(exc) from exc
         if include_archived:
-            nodes = [
+            historical_nodes = [
                 WorkNode.model_validate(item)
                 for item in runtime.store.list_entities("work_node")
                 if item.get("repository_id") == repository_id
+                and (item.get("archived") or item.get("superseded"))
             ]
-            stored_streams = [
+            current_ids = {node.id for node in snapshot.nodes}
+            nodes = [
+                *snapshot.nodes,
+                *(node for node in historical_nodes if node.id not in current_ids),
+            ]
+            stream_by_id = {stream.id: stream for stream in snapshot.streams}
+            for stream in [
                 WorkStream.model_validate(item)
                 for item in runtime.store.list_entities("work_stream")
                 if item.get("repository_id") == repository_id
-            ]
+            ]:
+                stream_by_id.setdefault(stream.id, stream)
+            stored_streams = list(stream_by_id.values())
         else:
             nodes = [
                 node for node in snapshot.nodes
