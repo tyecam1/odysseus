@@ -15,6 +15,7 @@ param(
     [int]$Port = 420,
     [string]$TaskName = 'Odysseus-Misumi',
     [string]$HouseholdRoot = $env:MISUMI_HOUSEHOLD_ROOT,
+    [string]$ObsidianPhDRoot = $env:BBC_OBSIDIAN_PHD_ROOT,
     [string]$ModelHealthUrl = 'http://127.0.0.1:11434/api/tags',
     [string]$InterfaceHealthUrl = $env:MISUMI_INTERFACE_HEALTH_URL,
     [string]$ModelUrl = 'http://127.0.0.1:11434/api',
@@ -50,6 +51,9 @@ function Assert-Configuration {
     }
     if (-not (Test-Path -LiteralPath $Python)) {
         throw "Virtualenv Python not found at $Python. Run launch-windows.ps1 once in $SourceRoot."
+    }
+    if ($ObsidianPhDRoot -and -not (Test-Path -LiteralPath $ObsidianPhDRoot)) {
+        throw "Obsidian-PhD repository not found at $ObsidianPhDRoot"
     }
 }
 
@@ -99,6 +103,7 @@ switch ($Action) {
         $env:LOCALHOST_BYPASS = 'false'
         $env:MISUMI_REQUIRED = 'true'
         if ($HouseholdRoot) { $env:MISUMI_HOUSEHOLD_ROOT = [IO.Path]::GetFullPath($HouseholdRoot) }
+        if ($ObsidianPhDRoot) { $env:BBC_OBSIDIAN_PHD_ROOT = [IO.Path]::GetFullPath($ObsidianPhDRoot) }
         if ($ModelHealthUrl) { $env:MISUMI_MODEL_HEALTH_URL = $ModelHealthUrl }
         if ($InterfaceHealthUrl) { $env:MISUMI_INTERFACE_HEALTH_URL = $InterfaceHealthUrl }
         if ($ModelUrl) { $env:MISUMI_MODEL_URL = $ModelUrl }
@@ -129,6 +134,7 @@ switch ($Action) {
             '-BindHost',$BindHost,'-Port',[string]$Port,'-TaskName',('"' + $TaskName + '"')
         )
         if ($HouseholdRoot) { $argumentParts += @('-HouseholdRoot',('"' + $HouseholdRoot + '"')) }
+        if ($ObsidianPhDRoot) { $argumentParts += @('-ObsidianPhDRoot',('"' + $ObsidianPhDRoot + '"')) }
         if ($ModelHealthUrl) { $argumentParts += @('-ModelHealthUrl',('"' + $ModelHealthUrl + '"')) }
         if ($InterfaceHealthUrl) { $argumentParts += @('-InterfaceHealthUrl',('"' + $InterfaceHealthUrl + '"')) }
         if ($ModelUrl) { $argumentParts += @('-ModelUrl',('"' + $ModelUrl + '"')) }
@@ -182,6 +188,7 @@ switch ($Action) {
             pid = if ($listener) { $listener.OwningProcess } else { $null }
             data_root = $DataRoot
             source_root = $SourceRoot
+            obsidian_phd_root = $ObsidianPhDRoot
         }
     }
     'Health' {
