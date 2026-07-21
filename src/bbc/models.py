@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Dict, List, Literal, Optional
+from typing import Annotated, Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -26,6 +26,11 @@ class Point(ContractModel):
     y: float
 
 
+# Mirrors RegistryEntrySummary.id: a room may only name an id the universal
+# registry is capable of producing, so the grammar is shared deliberately.
+RegistryEntryId = Annotated[str, Field(pattern=r"^[a-z0-9][a-z0-9:._-]{1,239}$")]
+
+
 class Room(ContractModel):
     id: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]{1,79}$")
     name: str = Field(min_length=1, max_length=120)
@@ -34,6 +39,10 @@ class Room(ContractModel):
     position: Point
     size: Point
     occupant_ids: List[str] = Field(default_factory=list)
+    # Universal-registry entry ids this compartment represents. Declaration is
+    # inventory only: it confers no invocation right and bypasses no permission
+    # check. Every id must resolve in the live registry.
+    capability_ids: List[RegistryEntryId] = Field(default_factory=list, max_length=32)
     active: bool = True
 
 

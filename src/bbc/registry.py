@@ -224,6 +224,24 @@ class UniversalRegistry:
         except KeyError as exc:
             raise KeyError(f"unknown registry entry: {entry_id}") from exc
 
+    def entries(self) -> list[RegistryEntryDetail]:
+        """Every entry the live projection can currently produce.
+
+        Uncapped and unranked, unlike ``search``: callers resolving declarations
+        need the whole projection, not a discovery slice of it.
+        """
+
+        return list(self._project().values())
+
+    def entry_ids(self) -> set[str]:
+        """Ids the live projection can currently produce, with no size cap.
+
+        ``search`` is deliberately limited and ranked for discovery; resolving a
+        declared reference must see every entry, so this stays separate.
+        """
+
+        return set(self._project())
+
     def status(self) -> dict[str, Any]:
         entries = self._project().values()
         counts = Counter(str(entry.kind) for entry in entries)

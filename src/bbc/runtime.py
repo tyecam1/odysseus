@@ -146,6 +146,74 @@ def _rank_target(query: str, candidates: list[dict[str, Any]]) -> dict[str, Any]
     return {"status": "resolved", "confidence": ranked[0][0], "target": ranked[0][1]}
 
 
+# Universal-registry entry ids each compartment represents, derived from the
+# authored room `function` strings above.
+#
+# Only ids the registry produces from *code or repository files* may appear
+# here. Model runtimes, connectors, MCP tools and automations are projected from
+# per-install database rows and user data, so their ids differ between
+# deployments and a static seed can never reference them safely. Those kinds
+# stay discoverable through /api/bbc/v1/registry rather than being claimed here.
+#
+# Declaring an id is an inventory statement, not a grant: nothing in this map
+# creates an invocation path, and CapabilityRegistry.invoke still enforces
+# permissions for the one capability that is actually invokable.
+# What each compartment represents, expressed as a RULE over the live registry
+# rather than as a list of ids.
+#
+# A static id map cannot work here and the first attempt proved it: of twenty
+# hand-written ids, nineteen did not exist on the real deployment. Model
+# runtimes, connectors, MCP tools and automations are projected from per-install
+# database rows, so their ids differ between installs - the very ids that exist
+# on a given box are the ones a static seed can never name. Selecting by kind
+# resolves against whatever that install actually has, so a declaration cannot
+# reference something absent.
+#
+# Declaring is inventory, not permission: nothing here creates an invocation
+# path, and CapabilityRegistry.invoke still enforces every permission check.
+ROOM_CAPABILITY_KINDS: dict[str, tuple[str, ...]] = {
+    # Repository navigation and system health.
+    "observatory": ("capability",),
+    # Bounded conferences and synthesis over household correspondence: the
+    # automations here are the email and calendar passes.
+    "commons": ("automation",),
+    # Capabilities and controlled execution: the callable tool surface.
+    "workshop": ("mcp_tool",),
+    # Deliberately unmapped. bridge, archive, engineering and research have no
+    # kind of their own in the current projection, and inventing one would put
+    # claims on screen that the registry cannot back. They populate themselves
+    # the moment the harness projects a kind that belongs to them.
+}
+
+# A room shows at most this many entries. The registry can project hundreds;
+# a compartment listing all of them is a wall of text, not an inventory.
+ROOM_CAPABILITY_LIMIT = 12
+
+
+def room_capability_ids(registry: UniversalRegistry | None) -> dict[str, list[str]]:
+    """Resolve each room's capability ids from the live registry projection.
+
+    Returns ids that provably exist, because they are read out of the same
+    projection the unknown-id guard checks against.
+    """
+
+    if registry is None:
+        return {}
+    by_kind: dict[str, list[str]] = {}
+    for entry in registry.entries():
+        by_kind.setdefault(str(entry.kind), []).append(str(entry.id))
+    resolved: dict[str, list[str]] = {}
+    for room_id, kinds in ROOM_CAPABILITY_KINDS.items():
+        ids: list[str] = []
+        for kind in kinds:
+            # Sorted so a room's inventory is stable between renders rather than
+            # reshuffling with dictionary order.
+            ids.extend(sorted(by_kind.get(kind, ())))
+        if ids:
+            resolved[room_id] = ids[:ROOM_CAPABILITY_LIMIT]
+    return resolved
+
+
 def authored_ship() -> Ship:
     """Stable one-deck geometry; occupancy/allocation remains registry-driven."""
 
@@ -158,7 +226,32 @@ def authored_ship() -> Ship:
         Room(id="engineering", name="Engineering", function="Runtime, models, and deployment", position=Point(x=68, y=43), size=Point(x=22, y=19)),
         Room(id="workshop", name="Workshop", function="Capabilities and controlled execution", position=Point(x=39, y=67), size=Point(x=22, y=19)),
     ]
+    # Geometry only. Capability ids are resolved against the live registry when
+    # the ship is projected, because the authored layer cannot know which ids a
+    # given install produces.
     return Ship(id="bbc-odysseus", name="BBC Odysseus", active_room_id="bridge", rooms=rooms)
+
+
+def unknown_room_capability_ids(
+    ship: Ship,
+    registry: UniversalRegistry | None,
+) -> dict[str, list[str]]:
+    """Report declared room capability ids the registry cannot actually produce.
+
+    A room advertising a capability the registry cannot resolve is the exact
+    failure this projection exists to prevent, so the check is by resolution
+    against the live projection rather than against the authored map.
+    """
+
+    if registry is None:
+        return {}
+    known = registry.entry_ids()
+    unknown: dict[str, list[str]] = {}
+    for room in ship.rooms:
+        missing = [entry_id for entry_id in room.capability_ids if entry_id not in known]
+        if missing:
+            unknown[room.id] = missing
+    return unknown
 
 
 class BBCRuntime:
@@ -177,7 +270,39 @@ class BBCRuntime:
         self._ship = authored_ship()
         if self.store.get_entity("ship", self._ship.id) is None:
             self.store.upsert_entity("ship", self._ship.id, self._ship.model_dump(mode="json"), event_type="ship.initialised")
+        else:
+            self._refresh_authored_geometry()
         self._initialise_persona_locations()
+
+    def _refresh_authored_geometry(self) -> None:
+        """Re-materialise authored room geometry when the code has moved on.
+
+        Rooms are authored in code and only materialised in the store, but
+        ``active_room_id`` is genuine runtime state written by navigation, so it
+        is preserved. Without this an existing deployment would keep serving the
+        geometry it was first seeded with and never see a room's declarations.
+        """
+
+        try:
+            stored = Ship.model_validate(self.store.get_entity("ship", self._ship.id))
+        except Exception:
+            # Unreadable or tampered canonical state is a health signal, not
+            # something startup should paper over by overwriting it.
+            return
+        if stored.rooms == self._ship.rooms:
+            return
+        refreshed = stored.model_copy(update={"rooms": self._ship.rooms, "updated_at": utc_now()})
+        self.store.upsert_entity(
+            "ship",
+            self._ship.id,
+            refreshed.model_dump(mode="json"),
+            event_type="ship.geometry.refreshed",
+        )
+
+    def unknown_room_capability_ids(self) -> dict[str, list[str]]:
+        """Declared room capability ids the live registry cannot resolve."""
+
+        return unknown_room_capability_ids(self.ship(), self.registry)
 
     def persona_projections(self) -> list[PersonaProjection]:
         try:
@@ -226,8 +351,17 @@ class BBCRuntime:
             location = PersonaLocation.model_validate(item)
             if location.room_id in occupants:
                 occupants[location.room_id].append(location.persona_id)
+        # Capability ids are resolved here, not stored, so a room's inventory
+        # always reflects what this install can currently produce. A registry
+        # that is unavailable yields no ids rather than stale ones - showing a
+        # capability the box cannot presently resolve is the failure this whole
+        # projection exists to avoid.
+        declared = room_capability_ids(self.registry)
         rooms = [
-            room.model_copy(update={"occupant_ids": sorted(occupants[room.id])})
+            room.model_copy(update={
+                "occupant_ids": sorted(occupants[room.id]),
+                "capability_ids": declared.get(room.id, []),
+            })
             for room in ship.rooms
         ]
         return ship.model_copy(update={"rooms": rooms})
@@ -250,8 +384,22 @@ class BBCRuntime:
             "source_errors": {"registry": "Universal registry is not configured."},
         }
         registry_ok = registry_status["ok"] if self.registry is not None else True
+        # Reporting a declaration must never itself break the report: a corrupt
+        # or unreadable ship is already covered by the database check above, so
+        # this degrades to "cannot tell" rather than raising out of /health.
+        try:
+            declared_ship = self.ship()
+            unknown_capabilities = unknown_room_capability_ids(declared_ship, self.registry)
+            declared_count = sum(len(room.capability_ids) for room in declared_ship.rooms)
+            rooms_ok = not unknown_capabilities
+            rooms_detail = ""
+        except Exception as exc:
+            unknown_capabilities = {}
+            declared_count = 0
+            rooms_ok = False
+            rooms_detail = f"{type(exc).__name__}: {exc}"[:500]
         status = (
-            "healthy" if db_ok and not unavailable and registry_ok
+            "healthy" if db_ok and not unavailable and registry_ok and rooms_ok
             else "degraded" if db_ok else "unavailable"
         )
         capability_health = [summary.health for summary in self.capabilities.search(limit=100)]
@@ -278,6 +426,12 @@ class BBCRuntime:
                     "states": [health.model_dump(mode="json") for health in capability_health],
                 },
                 "registry": registry_status,
+                "room_capabilities": {
+                    "ok": rooms_ok,
+                    "declared": declared_count,
+                    "unknown": unknown_capabilities,
+                    "detail": rooms_detail,
+                },
             },
         )
 
