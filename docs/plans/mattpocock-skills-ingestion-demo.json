@@ -1,0 +1,22 @@
+{
+  "candidate": "mattpocock/skills",
+  "provenance": "local-fixture",
+  "fetch_status": "not-run",
+  "fixture": "tests/fixtures/prompt_ingestion/mattpocock-skills-local-fixture",
+  "represented_release": "v1.1.0",
+  "licence": "MIT",
+  "adapted_principle": "evidence-closed-change-loop",
+  "evaluation_corpus": "odysseus-tdd-held-out-v1",
+  "baseline_score": 1.0,
+  "candidate_score": 1.0,
+  "evaluation_delta": 0.0,
+  "terminal_state": "reject",
+  "terminal_reason": "evaluation-did-not-beat-baseline",
+  "activation_residue": "none",
+  "limitations": [
+    "No network fetch occurred; the source is a synthetic local fixture, not upstream bytes.",
+    "The fixture omits the executable installer and cannot establish current upstream contents or release integrity.",
+    "The deterministic lexical rubric measures required evidence language, not task execution quality or model generalisation.",
+    "The adapted principle tied the held-out baseline and was therefore rejected rather than activated."
+  ]
+}

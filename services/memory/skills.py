@@ -69,6 +69,15 @@ class SkillsManager:
         self.legacy_file = os.path.join(data_dir, "skills.json")  # back-compat
         os.makedirs(self.skills_root, exist_ok=True)
 
+    @property
+    def search_roots(self) -> tuple[str, ...]:
+        """Canonical roots reachable by the skill loader.
+
+        Keeping this explicit makes confinement auditable: quarantine and
+        adaptation staging directories must never be added here.
+        """
+        return (os.path.realpath(self.skills_root),)
+
     # ----------------------------------------------------------------------
     # Path helpers
     # ----------------------------------------------------------------------
@@ -157,11 +166,12 @@ class SkillsManager:
     # ----------------------------------------------------------------------
 
     def _iter_skill_files(self) -> Iterable[str]:
-        if not os.path.isdir(self.skills_root):
-            return
-        for root, _dirs, files in os.walk(self.skills_root, followlinks=False):
-            if "SKILL.md" in files:
-                yield os.path.join(root, "SKILL.md")
+        for search_root in self.search_roots:
+            if not os.path.isdir(search_root):
+                continue
+            for root, _dirs, files in os.walk(search_root, followlinks=False):
+                if "SKILL.md" in files:
+                    yield os.path.join(root, "SKILL.md")
 
     def _read_skill(self, path: str) -> Optional[Skill]:
         try:

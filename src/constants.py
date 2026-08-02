@@ -52,6 +52,12 @@ SKILLS_DIR = os.path.join(DATA_DIR, "skills")
 GALLERY_DIR = os.path.join(DATA_DIR, "gallery")
 GALLERY_UPLOADS_DIR = os.path.join(DATA_DIR, "gallery_uploads")
 MEMORY_VECTORS_DIR = os.path.join(DATA_DIR, "memory_vectors")
+PROMPT_INGESTION_DIR = os.path.join(DATA_DIR, "prompt_ingestion")
+PROMPT_INGESTION_SNAPSHOTS_DIR = os.path.join(PROMPT_INGESTION_DIR, "snapshots")
+PROMPT_INGESTION_QUARANTINE_DIR = os.path.join(PROMPT_INGESTION_DIR, "quarantine")
+PROMPT_INGESTION_RECORDS_DIR = os.path.join(PROMPT_INGESTION_DIR, "records")
+PROMPT_INGESTION_ADAPTATIONS_DIR = os.path.join(PROMPT_INGESTION_DIR, "adaptations")
+PROMPT_INGESTION_EVALUATIONS_DIR = os.path.join(PROMPT_INGESTION_DIR, "evaluations")
 
 # Paths with an intentional dedicated env override, defaulting under DATA_DIR.
 MAIL_ATTACHMENTS_DIR = os.getenv("ODYSSEUS_MAIL_ATTACHMENTS_DIR", os.path.join(DATA_DIR, "mail-attachments"))

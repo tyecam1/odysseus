@@ -1,0 +1,9 @@
+{
+  "represented_candidate": "mattpocock/skills",
+  "represented_release_from_reference_register": "v1.1.0",
+  "provenance": "synthetic-local-fixture",
+  "network_fetch_performed": false,
+  "upstream_bytes_claimed": false,
+  "scope": "MIT licence and representative small skill structure only",
+  "known_omission": "The upstream executable installer described by the reference register is not included or run."
+}

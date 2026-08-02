@@ -1,0 +1,28 @@
+{
+  "corpus_id": "odysseus-tdd-held-out-v1",
+  "created": "2026-01-15",
+  "trusted_source": true,
+  "cases": [
+    {
+      "id": "behaviour-change",
+      "prompt": "Plan a small behavioural change with evidence.",
+      "required_phrases": [
+        "write a failing test",
+        "observe the failure",
+        "smallest implementation",
+        "run the full relevant suite"
+      ],
+      "baseline_response": "Write a failing test, observe the failure, make the smallest implementation, then run the full relevant suite."
+    },
+    {
+      "id": "regression-fix",
+      "prompt": "How should a regression fix be closed?",
+      "required_phrases": [
+        "regression test",
+        "failure mode",
+        "verify"
+      ],
+      "baseline_response": "Add a regression test for the failure mode and verify the focused and neighbouring checks."
+    }
+  ]
+}
