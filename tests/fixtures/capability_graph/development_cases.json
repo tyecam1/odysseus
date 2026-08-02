@@ -1,0 +1,14 @@
+{
+  "cases": [
+    {
+      "id": "development-handle-shape",
+      "input_question": "What should handle this request?",
+      "route_id": "demo",
+      "expected_answer_shape": {
+        "result": ["handlers"]
+      },
+      "expected_route_id": "demo"
+    }
+  ]
+}
+

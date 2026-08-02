@@ -1,0 +1,27 @@
+{
+  "cases": [
+    {
+      "id": "held-out-valid-route",
+      "input_question": "Why was this route selected?",
+      "route_id": "task-class:orchestration",
+      "expected_answer_shape": {
+        "result": ["paths"]
+      },
+      "expected_route_id": "task-class:orchestration"
+    },
+    {
+      "id": "held-out-unroutable-refusal",
+      "input_question": "What should handle this request?",
+      "route_id": "task-class:does-not-exist",
+      "expected_answer_shape": "refusal",
+      "expected_refusal": "unroutable"
+    },
+    {
+      "id": "held-out-second-unroutable-refusal",
+      "input_question": "Which validator proves completion?",
+      "route_id": "task-class:not-in-real-source",
+      "expected_answer_shape": "refusal",
+      "expected_refusal": "unroutable"
+    }
+  ]
+}

@@ -1,0 +1,7 @@
+schema_version: 1
+model_profiles:
+  default:
+    model: local/test-model
+routes:
+  - route_id: task-class:demo
+    model_profile: default

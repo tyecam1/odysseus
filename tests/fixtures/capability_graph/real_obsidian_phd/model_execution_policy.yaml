@@ -1,0 +1,95 @@
+# Model execution policy. Extends [models] in automation/config/settings.ini
+# (forbid_laptop_local_ollama = true remains the committed default).
+# Status: policy/contract only — enforcement remains in
+# Scripts/automation (model guard, endpoint diagnostics, retrieval policy).
+
+version: 1
+
+# Estate roles for convergence programme v2 (2026-07-27). Contract-only: this
+# block adds no enforcement. It records who does what across the agent estate.
+# It SUPERSEDES conflicting role text in
+# automation/prompts/long-horizon-vault-consolidation-loop.md for the
+# convergence programme v2 ONLY; that prompt remains the historical contract for
+# its own loop. Authority actions are governed by
+# automation/docs/dual-agreement-protocol.md; architecture selection by
+# automation/docs/agent-architecture-selection-gate.md.
+roles:
+  fable-5:
+    role: programme-orchestrator
+    responsibilities:
+      - architecture selection (per agent-architecture-selection-gate.md)
+      - dispatch of task packets
+      - accept/revert of work
+    # Accept/revert authority is bounded: Fable may accept or revert ONLY named
+    # task packets along their declared verification_route. No general, standing,
+    # or class-wide acceptance authority.
+    accept_revert_scope: named-task-packets-only
+    accept_revert_bound_to: declared-verification-route
+    never: in-loop-implementation
+  sol-5.6:
+    role: estate-governor
+    invoked_via: codex-cli            # codex exec
+    default_mode: read-only
+    workspace_write: only-inside-a-named-task
+    responsibilities:
+      - independent review under the dual-agreement protocol
+      - estate governance and validation reporting
+  opus-5:
+    role: infrastructure-engineer
+    lane: claude-cli-or-subagent
+    isolation: one-isolated-worktree-per-task
+    responsibilities:
+      - bounded infrastructure/automation engineering inside its worktree
+  codex-workers:
+    role: focused-implementation-and-verification
+    responsibilities:
+      - focused implementation
+      - focused verification
+  preference_order:
+    # Prefer the cheapest sufficient lane for bounded work.
+    - deterministic-scripts-first
+    - smaller-models-next
+    - larger-models-only-when-needed
+
+laptop:
+  local_model_execution: forbidden      # no Ollama serve, no sentence-transformers, no weights
+  permitted:
+    - ssh tunnel client to compute box (127.0.0.1:11434 as forwarded endpoint only)
+    - model-free CLI commands (model-preflight config half, inspect-vault, lexical query-context)
+  endpoint_attestation: >
+    FM-1 mitigation is now positive endpoint attestation rather than only
+    process heuristics. When provider=ollama is enabled on a laptop,
+    settings.local.ini must keep endpoint_attestation_required=true and set
+    endpoint_attestation_models to a non-secret compute-box-only tag set,
+    preferably including a tiny sentinel tag present only on the box. Both
+    model-preflight --require-ready and model-endpoint-diagnostics
+    --require-remote fail closed when the forwarded /api/tags payload does not
+    contain that configured fingerprint. Keep local Ollama disabled via
+    automation/deploy/windows/Disable-LocalOllama.ps1.
+
+compute_box:
+  host_alias: agent@dmem-hp-z2-tower-g9-workstation-desktop-pc
+  endpoint_topology: local_compute_box   # set in gitignored settings.local.ini
+  binding: 127.0.0.1 only                # never expose model or MCP ports publicly
+  allowed_runtimes: [ollama]
+  model_allowlist:
+    - qwen3:30b
+  embedding_endpoint: 127.0.0.1:11434
+  provider_default: disabled             # opt-in per settings.local.ini, unchanged
+
+subscriptions:
+  claude:
+    lane: opus-class            # parity repair R6: lane refreshed to operator-approved Fable 5
+    model_required: claude-fable-5
+    use_for: [synthesis, critique, decision-packet, evidence-readiness, provenance, literature]
+  codex_gpt:
+    use_for: [implementation, refactor, debugging, repo-hygiene, pr-review, migration]
+
+preflight:
+  required_before_model_jobs:
+    - python -m Scripts.automation model-preflight
+    - python -m Scripts.automation model-endpoint-diagnostics --require-remote
+  fail_closed: true                      # any failure blocks dispatch; never degrade to laptop
+
+secrets:
+  policy: reference-only                 # e.g. HF_TOKEN; never created, inspected, or committed
