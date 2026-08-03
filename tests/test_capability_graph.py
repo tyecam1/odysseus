@@ -9,6 +9,8 @@ from pathlib import Path
 import pytest
 
 from src.capability_graph.adapters.base import (
+    AdapterResult,
+    SourceAdapter,
     edge_id,
     sha256_file,
     source_identity,
@@ -773,3 +775,68 @@ def test_existing_mismatched_sqlite_schema_fails_closed(tmp_path):
 
     with pytest.raises(SchemaMismatchError, match="schema version mismatch"):
         build_graph([_copy_sources(tmp_path)], db)
+
+
+# --- Mutation-testing findings, 2026-08-03 ------------------------------------
+# Six guards were mutation-tested by disabling each raise in turn and running
+# the suite. Results and their correct interpretation:
+#
+#   authority-conflict raise        KILLED
+#   cycle-detection raise           KILLED
+#   human-gate escalation raise     KILLED
+#   duplicate source identity       SURVIVED -- see the note below the tests
+#   no-sources: zero nodes          SURVIVED individually
+#   no-sources: no supported files  SURVIVED individually
+#
+# The two no-sources survivals are NOT a coverage gap. They are redundant
+# guards that mask each other: with either one disabled, the other still
+# catches an empty root. Disabling BOTH fails two tests, so the behaviour --
+# an empty or unproductive source root raises an explicit NoSourcesError and
+# never yields a graph that reports success -- is genuinely enforced and
+# tested.
+#
+# That distinction matters generally: a surviving mutant can mean "redundant
+# guard" as well as "untested guard", and only a combined mutation
+# distinguishes them. Reading every survival as a gap overstates the problem.
+
+
+class _ClaimsFileEmitsNothing(SourceAdapter):
+    """Discovers a real file but emits no nodes or edges for it."""
+
+    name = "empty_adapter"
+    version = "1.0.0"
+    node_types = frozenset()
+    edge_types = frozenset()
+
+    def discover(self, root):
+        return tuple(sorted(root.rglob("*.md")))
+
+    def parse(self, path, identity):
+        return AdapterResult(nodes=(), edges=(), source_paths=(path,))
+
+
+def test_sources_present_but_zero_nodes_raises_no_sources(tmp_path):
+    """A root whose adapters emit nothing must fail, not yield an empty graph.
+
+    Mutation: deleting the "adapters produced zero nodes" raise previously left
+    the suite green. This is the more dangerous of the two no-sources paths -- a
+    zero-node graph reporting success would answer every permission query with
+    an empty result.
+    """
+    root = tmp_path / "unclaimed"
+    root.mkdir()
+    (root / "README.md").write_text("# not a capability source\n", encoding="utf-8")
+
+    with pytest.raises((NoSourcesError, ValidationError)) as excinfo:
+        build_graph([root], tmp_path / "out.db", adapters=(_ClaimsFileEmitsNothing(),))
+    message = str(excinfo.value)
+    assert "no-sources" in message or "emitted no provenance" in message
+
+
+# NOT TESTED: the "duplicate source identity with differing records" guard in
+# builder.py survived mutation (disabling its raise left the suite green), and
+# an attempt to reach it through the public build_graph() API did not trigger
+# it: two adapters sharing a name and claiming one path, differing only in
+# source_revision, build without error. The guard may be unreachable from the
+# public path and therefore defensive-only. Recorded rather than papered over
+# with a test that exercises a reimplementation of the condition.
