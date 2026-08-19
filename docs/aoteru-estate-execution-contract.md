@@ -65,6 +65,26 @@ Use the weakest adequate mechanism:
 
 Prefer existing skills/hooks/MCPs/connectors. CLI is preferred where simpler. Deterministic hooks enforce hard invariants.
 
+## Laptop Claude routing skill — required UX
+
+The normal human interface should remain the user's local laptop Claude session. Implement one user-scoped, Odysseus-owned Claude skill generated/installed by `agent sync`; it is an ergonomic wrapper over the existing estate-control/`agent` routing plane, never a second router or authority.
+
+Required logical modes:
+
+- `auto <task>`: resolve the appropriate host/repo/session from live estate state;
+- `lab <task>`: dispatch/resume a native lab-PC Claude execution context;
+- `home <task>`: dispatch/resume a native home-PC Claude execution context;
+- `where`: report the current logical remote sessions/parking state;
+- explicit interactive handoff only when genuinely needed.
+
+The laptop conversation remains the front end. Normal routed work is executed remotely next to the repo, preferably through non-interactive Claude/agent execution, and returns a compact structured result to the laptop conversation; do not require the operator to enter nested SSH terminals for ordinary work.
+
+Claude transcripts are machine-local. Do not pretend one transcript is shared across PCs. Odysseus must persist the logical session mapping needed to resume the correct native remote session, minimally `{logical_session, host, repo/worktree, claude_session_id_or_name, lease, last_result/handoff}`. If cross-machine transcript continuity is later needed, implement it only through a validated shared SessionStore/equivalent rather than copying opaque session files ad hoc.
+
+The skill must contain no hard-coded hostnames, paths, repo maps, credentials or business logic. It queries live Odysseus state and obeys parking, target-repo governance and fallback rules. If the requested host is unavailable, explicit `lab`/`home` fails truthfully; `auto` may choose another valid route.
+
+Gate this UX across the existing phase sequence rather than introducing a new phase: P1 installs/discovers the user-scoped skill and live host IDs; P3 proves lab/home native dispatch + session mapping + parking; P5 proves invocation from an arbitrary local laptop Claude repo/session without importing domain configuration or spending Claude inference merely to route.
+
 ## Human escalation
 
 Before asking the operator, independently establish all four:
