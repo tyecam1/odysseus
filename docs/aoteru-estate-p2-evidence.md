@@ -10,109 +10,102 @@ parent: docs/aoteru-estate-execution-contract.md
 
 Compact durable record. Do not reread unless a dependency changes.
 
-## Escalation on record
+## Corrections on record (operator, 2026-08-19, twice)
 
-Read-only reconnaissance into the second tailnet peer (`DESKTOP-7DJ1HMA`)
-was proposed with the contract's `BLOCKED` format and explicitly approved by
-the operator before any cross-host action was taken (`tailscale ssh
-DESKTOP-7DJ1HMA "whoami"` etc.). `glovebox` was explicitly excluded from the
-approval scope while offline. No config/ACL/service mutation has been made
-on this or any other tailnet node.
+1. `DESKTOP-7DJ1HMA` is the **laptop/interface controller**, not a worker
+   PC. Confirmed twice by the operator — this doc previously drifted back
+   toward treating it as a worker mid-revision; it is not.
+2. Home is `DESKTOP-IN7O23D` (letter O; the operator's own message earlier
+   this phase used `IN7023D` with a zero — both spellings recorded as
+   aliases in `config/estate.yaml`, neither trusted as confirmed).
+3. **Lab→laptop SSH is not a P2/P3 requirement.** An earlier revision of
+   this document spent effort re-testing and reporting on whether this
+   lab host could reach `DESKTOP-7DJ1HMA` over the tailnet, and treated the
+   timeout as a blocker. That was a misdirected test: the plan's required
+   direction is laptop→worker (§10.2, "the launcher SSHs to the parked
+   worker"), never worker→laptop. That finding is not carried forward as a
+   blocker below.
+4. Commit `62b29b3` (unpushed) contained this mistaken framing and has been
+   amended in place rather than layered with another correction commit —
+   explicitly authorized by the operator for this unpushed commit, and it
+   keeps the history from accumulating "fix the fix" noise.
+
+## Required connectivity, re-derived from the canonical gates
+
+Not from whatever happens to be reachable from wherever this is being run.
+Plan §12 P2 gate + §10 access surfaces reduce to exactly three edges:
+
+| edge | status | why |
+|---|---|---|
+| laptop → lab | lab-side ready, untested end-to-end | lab `sshd` confirmed active/listening/reachable via its own tailscale IP (self-check, see below). The laptop-initiated half can't be tested from a session running on the lab host — wrong end. |
+| laptop → home | untested | operator states interface↔home are pre-configured for mutual LAN SSH; home's own identity is unverified (see below), and this can only be genuinely tested from a session running on the laptop. |
+| phone → `svc:aoteru` | blocked on build, not connectivity | `svc:aoteru` doesn't exist yet (P5/P6). No phone reachable from this session either way. |
+
+**Structural limitation of this session:** it runs on the lab host. All
+three required edges originate at the laptop or the phone, neither of which
+this session has shell access to. This session can verify lab-side
+prerequisites and prepare tests, but cannot execute any of the three edges
+end-to-end itself. That is a fact about this session, not a stalled task.
 
 ## What already exists (audited, not built by this session)
 
-- Tailnet `tyecam1.github` is live; this host is already a member,
-  authenticated as `tyecam1@`, with `cap/is-admin`, `cap/is-owner` and
-  `cap/ssh` (i.e. this node's identity has tailnet admin/owner rights, and
-  Tailscale SSH capability is present).
-- MagicDNS is **enabled** (`MagicDNSSuffix: tail171792.ts.net`) — plan §5.2
-  requirement already met.
-- Two more devices are tailnet members: `DESKTOP-7DJ1HMA` (Windows, online,
-  direct connection) and `glovebox` (Linux, offline, last seen 32d ago).
-- `tailscale serve status` / `tailscale funnel status`: **no config on
-  either** — nothing is publicly exposed. The "no public
-  model/MCP/shell/control endpoints" safety invariant and the "no router
-  port forwarding or Funnel/public exposure" plan invariant are both intact
-  as of this check.
+- Tailnet `tyecam1.github` is live; this host is a member, authenticated as
+  `tyecam1@`, `cap/is-admin`/`cap/is-owner`/`cap/ssh`.
+- MagicDNS **enabled** (`tail171792.ts.net`) — plan §5.2 met.
+- `tailscale serve status` / `tailscale funnel status`: empty on both —
+  nothing publicly exposed. Safety/plan invariants intact.
+- Tailnet members visible from lab: `DESKTOP-7DJ1HMA` (online), `glovebox`
+  (offline, 32d). `DESKTOP-IN7O23D`/`DESKTOP-IN7023D` (home) is **not** a
+  visible tailnet member under either spelling.
 
-## What was tested and does not currently work
+## Lab-side prerequisite — verified
 
-- `tailscale ssh DESKTOP-7DJ1HMA "whoami"` — timed out (exit 124, no
-  output). **Correction (per `docs/p2-home-windows-bootstrap.md`):**
-  Tailscale SSH does not terminate SSH on Windows at all, so this result is
-  not evidence of a Grants denial or a misconfiguration — it was the wrong
-  test for a Windows peer. Only `ssh DESKTOP-7DJ1HMA` failing (below) is
-  meaningful for this host; Tailscale SSH remains the right tool for future
-  Linux peers (e.g. `glovebox`).
-- Deterministic TCP probe of `100.75.44.26` (all 4s timeout, single
-  attempt per port, no retries/scanning beyond this):
-  - `22` (SSH): filtered/timeout
-  - `3389` (RDP): filtered/timeout
-  - `5985`/`5986` (WinRM): filtered/timeout
-  - `445` (SMB): **open**
-  - `135` (RPC endpoint mapper): **open**
-- Searched both repos + this host's `~/.ssh/known_hosts` for any existing
-  admin path/credential reference to this machine: none found.
-  `services/hwfit/hardware.py` / `core/platform_compat.py:run_ssh_command`
-  confirm the app's own remote-Windows execution design is plain OS-level
-  SSH (host/port passed at call time, auth via the ambient SSH agent/keys)
-  — i.e. it's the same transport the plan wants, not a separate mechanism,
-  but it has no built-in credential store and nothing here is pre-trusted:
-  `ssh-keygen -F` against every known hostname/IP for this peer returned no
-  match in `known_hosts`, so this host has never successfully SSH'd there.
-- Net: no port that would give a *non-interactive admin* path (22/3389/
-  5985/5986) is currently reachable. `445`/`135` being open doesn't help
-  without credentials, and none were invented or attempted, per the
-  bootstrap doc's explicit prohibition.
-- The plan's §5.7 "Normal Windows OpenSSH over the tailnet is the
-  management/parking transport" is **not yet functional** to the one
-  online peer. This directly blocks P3 (parking + remote execution).
+Self-check, local only, no other host touched:
 
-## Genuinely blocked items (human/credential-gated, not re-attempted)
-
-1. **No reachable bootstrap port at all.** SSH, RDP and WinRM are all
-   filtered from this host right now — there isn't even an interactive
-   fallback (RDP) reachable over the tailnet, so this can't be resolved
-   by finding a "lesser" remote path. Per the bootstrap doc's ordering
-   rule, Grants/ACL should only be investigated *after* Windows `sshd` is
-   confirmed locally listening — that precondition can't be checked
-   remotely either, so a Tailscale API key is correctly **not** being
-   requested yet.
-2. **Windows-side enablement is circular.** Enabling OpenSSH Server (or
-   Remote Desktop) on `DESKTOP-7DJ1HMA` needs either physical/interactive
-   access to that machine, or a remote-management path to it — which is
-   exactly what's missing.
-3. **Phone.** Plan §10.3/§10.4 (mobile default surface, Remote Control
-   escalation) needs a physical phone on the tailnet; none is reachable
-   from this session.
-4. **`glovebox`.** Offline; excluded from this phase's approval scope.
-   Re-audit when it's online and the operator wants it in scope.
-
-## Prepared: run immediately once home SSH becomes reachable
-
-```bash
-# 1. confirm the port opens
-python3 -c "import socket; s=socket.socket(); s.settimeout(4); s.connect(('100.75.44.26',22)); print('open')"
-# 2. confirm native OpenSSH auth (replace <winuser> with the Windows account name)
-ssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=accept-new \
-    <winuser>@desktop-7dj1hma.tail171792.ts.net "whoami; hostname; Get-Service sshd | Select Status,StartType"
-# 3. only if step 2 fails after port 22 is confirmed open: escalate to Grants/ACL
-#    inspection (needs an operator-provided Tailscale API key or admin console check)
+```text
+systemctl is-active ssh   → active
+ss -tlnp | grep :22       → LISTEN 0.0.0.0:22 and [::]:22
+connect to own tailscale IP (100.75.149.126:22) → succeeds
 ```
 
-Also register in `config/repositories.yaml`/`config/estate.yaml` once reachable:
-confirm/deny whether `misumi` and `obsidian-PhD` exist there (resolves the
-open P0 item), and fill in `desktop-7dj1hma`'s real hardware/runtime specs
-in `config/estate.yaml` (currently identity-only, no specs — couldn't be
-inventoried without a working admin path).
+Lab is ready to accept an inbound laptop→lab connection as far as its own
+service state goes. Whether the laptop can actually reach it (Grants,
+laptop-side firewall/keys) is unverified and can only be tested from the
+laptop.
 
-## Registry updates this phase
+## Home identity — explicitly not trusted yet
 
-`config/estate.yaml` now carries all three known tailnet members with
-honest status: `hz2-workstation` (role `lab`, this host), `desktop-7dj1hma`
-(role `home`, `admin_path: unresolved`), `glovebox` (role `unassigned`,
-offline, out of scope). No fabricated specs — only what was actually
-observed via `tailscale status --json`.
+Per direct operator instruction: do not trust the home hostname/IP until
+verified through the existing laptop→home LAN SSH path.
+`docs/operations/odysseus-host-deployment.md` (pre-existing in this repo)
+gives deployment specifics — home reachable at `DESKTOP-IN7O23D:420`,
+interface box LAN IP `192.168.4.37` — but this is documentation, not a
+live check, and the two spellings the operator has used disagree. Treated
+in `config/estate.yaml` as `verified: false` with both spellings recorded
+as aliases. Do not promote this to "resolved" anywhere until a laptop-run
+session confirms it live.
+
+## Superseded finding (kept for the record only, not a blocker)
+
+Earlier this phase, lab→`DESKTOP-7DJ1HMA` SSH was tested twice (raw TCP
+probe, then verbose `ssh` by MagicDNS name) and both timed out. This was
+reported as a P2 blocker; it is not one, per the correction above. Left
+here only so the dead end isn't silently rediscovered — do not re-test this
+edge as part of the P2 gate.
+
+## Genuinely blocked items (human/credential-gated)
+
+1. **Laptop-run verification is needed for both real edges.** Testing
+   laptop→lab and laptop→home requires a session (or the operator
+   directly) running on `DESKTOP-7DJ1HMA`. This session cannot do that —
+   it has no shell access to the laptop, and per correction #3 above,
+   reaching it from lab isn't the right approach even if it worked.
+2. **Home identity unverified.** Blocked on item 1 — the only sanctioned
+   verification path is laptop→home.
+3. **`svc:aoteru` doesn't exist.** Independent of connectivity; P5/P6 build
+   item. Phone access is moot until this exists regardless.
+4. **`glovebox`.** Offline; role unknown relative to the laptop/home/lab
+   topology; out of scope until clarified and online.
 
 ## Gate
 
@@ -121,16 +114,19 @@ outside home LAN; raw services are not publicly reachable; access-control
 tests deny unapproved cross-domain paths."
 
 - [x] raw services not publicly reachable (verified — no serve/funnel config)
-- [ ] laptop + phone reach `svc:aoteru` — `svc:aoteru` doesn't exist yet
-      (that's the P1 registry's `endpoint: null` placeholder; building the
-      actual authenticated front door is P5/P6 work), and no phone is
-      reachable from this session
-- [ ] access-control tests deny unapproved cross-domain paths — can't test
-      without ACL/Grants visibility (blocked item 1 above)
+- [x] lab-side SSH prerequisite verified (this session's one directly
+      testable contribution to the laptop→lab edge)
+- [ ] laptop → lab, end-to-end — needs a laptop-run session or the operator
+- [ ] laptop → home, end-to-end — needs a laptop-run session or the
+      operator, and home's identity confirmed first
+- [ ] phone → `svc:aoteru` — service doesn't exist yet (P5/P6)
+- [ ] access-control tests deny unapproved cross-domain paths — no ACL/
+      Grants visibility from this session (checked `tailscale debug prefs`/
+      `configure`/`localapi` for any admin-capability shortcut; none expose
+      tailnet policy, only local node prefs — would need the web admin
+      console or an API key)
 
-**P2: PARTIAL.** The network substrate (tailnet, MagicDNS, no public
-exposure) pre-exists and is verified sound. The management-transport half of
-the gate (SSH to the peer) does not currently work and needs either operator
-action on `DESKTOP-7DJ1HMA` or ACL visibility I don't have credentials for.
-Not fabricating a PASS here — recording the true state and stopping to ask
-rather than guessing further into a live network.
+**P2: PARTIAL.** Substrate (tailnet, MagicDNS, no public exposure) and the
+lab-side half of one edge are verified. The two real remaining edges both
+require execution from the laptop, which is outside this session's reach —
+not something more probing from the lab host can resolve.

@@ -1,14 +1,50 @@
 # Aoteru estate — host/service registry (P1, plan section 4).
 #
-# Hosts are added here only once genuinely inventoried (hostname, live specs)
-# — never speculatively. As of P0 (docs/aoteru-estate-p0-evidence.md) exactly
-# one host is reachable from any execution session; the plan's "home"/"lab"
-# roles are aspirational until a second host is actually registered by the
-# operator. Do not invent a second host to make this file look complete.
+# Hosts are added here only once genuinely inventoried or explicitly named
+# by the operator — never speculatively. `verified: false` / `tailscale:
+# false` / `os: unknown` mean exactly that: named, not yet confirmed. This
+# execution session's own filesystem/shell access reaches only
+# `hz2-workstation` (lab) — that is a session limitation, not a statement
+# about the estate's real topology, which the operator has now specified as
+# laptop (`desktop-7dj1hma`) / home (`desktop-in7o23d`) / lab (this host).
 #
 # Services are logical names (plan section 5.6). None are provisioned yet —
 # that's P2 (private connectivity). `endpoint: null` means "not live";
 # `agent status` must report that plainly, not fabricate a reachable URL.
+
+# Required connectivity (re-derived 2026-08-19 from the canonical plan
+# gates, not from what happens to be reachable from wherever this file is
+# being edited): the plan's management/parking transport is laptop→worker
+# (§10.2 "the launcher SSHs to the parked worker"), plus phone→svc:aoteru
+# for the mobile surface. lab→laptop and lab→home are NOT gate
+# requirements — an earlier revision of this registry/evidence mistakenly
+# treated lab→laptop unreachability as a P2 blocker. It isn't tracked here.
+required_connectivity:
+  - edge: laptop-to-lab
+    from: desktop-7dj1hma
+    to: hz2-workstation
+    status: lab-side-ready-untested-end-to-end
+    note: >-
+      Lab sshd is confirmed active/listening/reachable via its own tailscale
+      IP (self-check). The actual laptop→lab direction has not been tested
+      because no session has run on the laptop yet — this session runs on
+      the lab host, which is the wrong end to initiate this test from.
+  - edge: laptop-to-home
+    from: desktop-7dj1hma
+    to: desktop-in7o23d
+    status: untested
+    note: >-
+      Per the operator, interface and home are pre-configured for mutual
+      LAN SSH. Not yet verified from a session running on the laptop. Home
+      host identity itself is unverified — see that host's entry.
+  - edge: phone-to-svc-aoteru
+    from: phone
+    to: "svc:aoteru"
+    status: blocked-on-build
+    note: >-
+      svc:aoteru doesn't exist yet (P5/P6 build item), independent of
+      whether a phone is reachable. Not a connectivity gap yet — a missing
+      service.
 
 hosts:
   - id: hz2-workstation
@@ -19,22 +55,43 @@ hosts:
     inventoried_at: "2026-08-19"
     notes: >-
       cpu_count/ram/disk are read live by `agent status`, not hardcoded here
-      — hardware drifts, this file shouldn't. This is the only host this
-      execution session's filesystem access reaches.
+      — hardware drifts, this file shouldn't. This is the host this
+      execution session's filesystem/shell access actually reaches; it is
+      not itself a required endpoint of the laptop→lab/home connectivity
+      tests, only one end of one of them.
 
   - id: desktop-7dj1hma
     hostname: DESKTOP-7DJ1HMA
-    role: home
+    role: interface  # operator's controller/laptop machine (plan §3.1) — NOT a parking worker
     os: windows
     tailscale: true
     tailscale_dns: desktop-7dj1hma.tail171792.ts.net
     inventoried_at: "2026-08-19"
-    admin_path: unresolved  # see docs/aoteru-estate-p2-evidence.md — SSH/RDP/WinRM all filtered as of P2
     notes: >-
-      Tailscale peer only — no repo/hardware clone inventory possible until
-      a remote-management path is reachable (P2 blocker). Do not assume
-      Tailscale SSH works here: it does not terminate SSH on Windows: the
-      intended transport is native Windows OpenSSH Server over Tailscale.
+      Corrected 2026-08-19 (operator, twice): this is the laptop/interface
+      controller, not a worker. Whether *lab* can reach *this* machine is
+      not a plan requirement and is not tracked as a blocker — the required
+      direction is this machine reaching lab/home, which needs a session
+      running on the laptop itself to test. Do not assume Tailscale SSH
+      works here regardless: it does not terminate SSH on Windows.
+
+  - id: desktop-in7o23d
+    hostname: DESKTOP-IN7O23D  # per docs/operations/odysseus-host-deployment.md
+    aliases: [DESKTOP-IN7023D]  # operator's own message used this spelling once — treat both as unverified
+    role: home
+    os: unknown  # not yet observed — see notes
+    tailscale: false
+    verified: false
+    inventoried_at: "2026-08-19"
+    notes: >-
+      NOT VERIFIED. Hostname/IP are sourced only from
+      docs/operations/odysseus-host-deployment.md and the operator's own
+      messages, which disagree on spelling (IN7O23D vs IN7023D). Per
+      explicit operator instruction, do not trust this identity until
+      confirmed live through the existing laptop→home LAN SSH path — that
+      requires a session running on the laptop, which this session is not.
+      Not present in `tailscale status` from the lab host under either
+      spelling as of this check.
 
   - id: glovebox
     hostname: glovebox
@@ -44,9 +101,10 @@ hosts:
     tailscale_dns: glovebox.tail171792.ts.net
     inventoried_at: "2026-08-19"
     notes: >-
-      Offline at inventory time (last seen 32d ago per `tailscale status`).
-      Out of scope for this phase's approved reconnaissance; re-audit once
-      online and explicitly brought into scope.
+      Offline at inventory time (last seen 32d ago). Not mentioned in the
+      operator's laptop/home/lab topology — role relative to that topology
+      is genuinely unknown, not assumed. Out of scope until clarified and
+      online.
 
 services:
   - id: svc:aoteru
