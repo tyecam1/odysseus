@@ -13,11 +13,40 @@
 hosts:
   - id: hz2-workstation
     hostname: dmem-HP-Z2-Tower-G9-Workstation-Desktop-PC
-    role: unassigned  # set to home|lab once a second host exists and roles are chosen
+    role: lab
+    os: linux
+    tailscale: true  # cap/is-admin, cap/is-owner, cap/ssh on this node's identity
     inventoried_at: "2026-08-19"
     notes: >-
-      Single host known to this registry. cpu_count/ram/disk are read live by
-      `agent status`, not hardcoded here — hardware drifts, this file shouldn't.
+      cpu_count/ram/disk are read live by `agent status`, not hardcoded here
+      — hardware drifts, this file shouldn't. This is the only host this
+      execution session's filesystem access reaches.
+
+  - id: desktop-7dj1hma
+    hostname: DESKTOP-7DJ1HMA
+    role: home
+    os: windows
+    tailscale: true
+    tailscale_dns: desktop-7dj1hma.tail171792.ts.net
+    inventoried_at: "2026-08-19"
+    admin_path: unresolved  # see docs/aoteru-estate-p2-evidence.md — SSH/RDP/WinRM all filtered as of P2
+    notes: >-
+      Tailscale peer only — no repo/hardware clone inventory possible until
+      a remote-management path is reachable (P2 blocker). Do not assume
+      Tailscale SSH works here: it does not terminate SSH on Windows: the
+      intended transport is native Windows OpenSSH Server over Tailscale.
+
+  - id: glovebox
+    hostname: glovebox
+    role: unassigned
+    os: linux
+    tailscale: true
+    tailscale_dns: glovebox.tail171792.ts.net
+    inventoried_at: "2026-08-19"
+    notes: >-
+      Offline at inventory time (last seen 32d ago per `tailscale status`).
+      Out of scope for this phase's approved reconnaissance; re-audit once
+      online and explicitly brought into scope.
 
 services:
   - id: svc:aoteru
