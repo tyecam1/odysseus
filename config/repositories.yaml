@@ -1,0 +1,50 @@
+# Aoteru estate — repository registry (P1, plan section 4).
+#
+# Logical repo IDs only. No secrets, no physical host paths — `path` is a
+# template resolved against a host-local root variable from
+# ~/.aoteru/config.local.json (never committed). `agent status`/`agent where`
+# report a repo as unresolved on a host where its root variable isn't set or
+# the path doesn't exist, rather than guessing.
+#
+# `authority` names the repo that owns the concepts documented in
+# docs/aoteru-estate-execution-contract.md's Authority section. Odysseus
+# never becomes the canonical owner of another repo's domain content by
+# being the one that indexes/discovers it.
+
+repos:
+  - id: odysseus
+    description: Aoteru target — canonical estate runtime (this repo)
+    authority: odysseus
+    remote: https://github.com/tyecam1/odysseus.git
+    root_var: AI_ROOT
+    path: "${AI_ROOT}/odysseus-aoteru"
+    canonical: true
+
+  - id: odysseus-upstream-lab
+    description: >-
+      Upstream/runtime capability source (pewdiepie-archdaemon/odysseus).
+      Inspected capability-by-capability per the execution contract's
+      Odysseus lineage section; not a parking target and not authoritative
+      for anything the canonical repo already owns.
+    authority: odysseus
+    remote: https://github.com/pewdiepie-archdaemon/odysseus.git
+    root_var: AI_ROOT
+    path: "${AI_ROOT}/odysseus"
+    canonical: false
+    role: capability-source
+
+  - id: misumi
+    description: Aoteru persona and household policy
+    authority: misumi
+    remote: null  # not yet known to this registry — no clone found on any registered host
+    root_var: HOUSEHOLD_ROOT
+    path: "${HOUSEHOLD_ROOT}/misumi"
+    canonical: false
+
+  - id: obsidian-phd
+    description: PhD knowledge, research workflow, evidence/trust/write gates
+    authority: obsidian-phd
+    remote: null  # not yet known to this registry — no clone found on any registered host
+    root_var: PHD_ROOT
+    path: "${PHD_ROOT}/obsidian-PhD"
+    canonical: false

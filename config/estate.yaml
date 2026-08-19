@@ -1,0 +1,44 @@
+# Aoteru estate — host/service registry (P1, plan section 4).
+#
+# Hosts are added here only once genuinely inventoried (hostname, live specs)
+# — never speculatively. As of P0 (docs/aoteru-estate-p0-evidence.md) exactly
+# one host is reachable from any execution session; the plan's "home"/"lab"
+# roles are aspirational until a second host is actually registered by the
+# operator. Do not invent a second host to make this file look complete.
+#
+# Services are logical names (plan section 5.6). None are provisioned yet —
+# that's P2 (private connectivity). `endpoint: null` means "not live";
+# `agent status` must report that plainly, not fabricate a reachable URL.
+
+hosts:
+  - id: hz2-workstation
+    hostname: dmem-HP-Z2-Tower-G9-Workstation-Desktop-PC
+    role: unassigned  # set to home|lab once a second host exists and roles are chosen
+    inventoried_at: "2026-08-19"
+    notes: >-
+      Single host known to this registry. cpu_count/ram/disk are read live by
+      `agent status`, not hardcoded here — hardware drifts, this file shouldn't.
+
+services:
+  - id: svc:aoteru
+    description: authenticated Aoteru/Odysseus front door
+    endpoint: null
+  - id: svc:memory
+    description: memory broker API (home primary, lab read-cache fallback)
+    endpoint: null
+  - id: svc:models-lab
+    description: model serving on the lab host
+    endpoint: null
+  - id: svc:models-home
+    description: model serving on the home host
+    endpoint: null
+  - id: svc:odysseus-lab
+    description: Odysseus instance on the lab host
+    endpoint: null
+  - id: svc:odysseus-home
+    description: Odysseus instance on the home host
+    endpoint: null
+
+# Domain permissions: which authority may request mutation routes through
+# which host role. Populated once P3 parking exists; empty is correct for P1.
+domain_permissions: []

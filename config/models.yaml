@@ -1,0 +1,43 @@
+# Aoteru estate — model/capability alias registry (P1 scaffold, plan section 9).
+#
+# Capability aliases are what domain skills request; they resolve to a live
+# host/model at dispatch time, never to a hardcoded brand. Bindings stay
+# `null` until P7 (benchmark + cost router) produces evidence — a P1 registry
+# that pre-fills bindings without a benchmark would be exactly the kind of
+# unearned "false completion" the execution contract forbids.
+
+capabilities:
+  - alias: general-fast
+    binding: null
+  - alias: general-strong
+    binding: null
+  - alias: code-fast
+    binding: null
+  - alias: code-strong
+    binding: null
+  - alias: reasoning-strong
+    binding: null
+  - alias: vision
+    binding: null
+  - alias: embedding
+    binding: null
+  - alias: reranker
+    binding: null
+
+# Candidates under consideration per the canonical plan — not selections.
+# P7 benchmarks these against real estate tasks before anything here is
+# treated as a default.
+benchmark_candidates:
+  - Qwen3.6-35B-A3B
+  - Qwen3.6-27B
+  - GLM-4.7-Flash-30B-A3B
+  - Devstral-Small-2-24B
+  - GPT-OSS-20B
+  - Qwen3-Coder-Next
+
+paid_escalation_order:
+  - deterministic
+  - local-fast
+  - local-strong
+  - claude-or-codex
+  - human-gate

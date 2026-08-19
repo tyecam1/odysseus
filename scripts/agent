@@ -1,0 +1,278 @@
+#!/usr/bin/env python3
+"""agent — Aoteru estate operator bay front door.
+
+P1 scope only (docs/aoteru-estate-implementation-plan.md section "P1 -
+Estate registry + operator bay"): read-only discovery. No mutation, no
+parking — that's P3. Later phases extend this same file rather than
+introducing a second launcher/config system.
+
+    agent status              # live host + registry resolution, JSON
+    agent where                # current repo's registry identity + lease (none yet)
+    agent sync                 # regenerate the disposable bay + workspace bootstrap
+
+Reads the four canonical registries in config/*.yaml (committed, no secrets,
+no physical paths) plus a host-local file at ~/.aoteru/config.local.json
+(never committed — see plan section 3.1) that maps root variables like
+AI_ROOT/PHD_ROOT/HOUSEHOLD_ROOT to real paths on *this* host. A repo whose
+root variable isn't set, or whose resolved path doesn't exist, is reported
+as unresolved — never guessed.
+"""
+from __future__ import annotations
+import sys
+import os, sys
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "_lib"))
+from cli import quiet_logs, emit, fail, common_parser, run, REPO_ROOT as _REPO_ROOT
+quiet_logs()
+
+import argparse
+import json
+import platform
+import re
+import socket
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+try:
+    import yaml
+except ModuleNotFoundError as e:
+    sys.stderr.write(f"error: {e}\nhint: pip install -r requirements.txt (PyYAML)\n")
+    sys.exit(2)
+
+_CONFIG_DIR = _REPO_ROOT / "config"
+_AOTERU_HOME = Path.home() / ".aoteru"
+_HOST_LOCAL_PATH = _AOTERU_HOME / "config.local.json"
+_BAY_DIR = Path.home() / "aoteru-bay"
+
+_ROOT_VARS = ("AI_ROOT", "PHD_ROOT", "HOUSEHOLD_ROOT")
+
+
+def _load_yaml(name: str):
+    path = _CONFIG_DIR / f"{name}.yaml"
+    if not path.exists():
+        fail(f"missing registry: {path}")
+    with path.open() as f:
+        return yaml.safe_load(f) or {}
+
+
+def _load_host_local() -> dict:
+    """Host-local root/path config. Generated on first use, never committed.
+    AI_ROOT defaults to this repo's parent dir since the odysseus family
+    lives as siblings under one projects root on every host seen so far;
+    PHD_ROOT/HOUSEHOLD_ROOT are left unset — inferring those would be a
+    guess this tool must not make."""
+    if _HOST_LOCAL_PATH.exists():
+        try:
+            return json.loads(_HOST_LOCAL_PATH.read_text())
+        except (json.JSONDecodeError, OSError):
+            pass
+    cfg = {
+        "host_id": None,
+        "AI_ROOT": str(_REPO_ROOT.parent),
+        "PHD_ROOT": None,
+        "HOUSEHOLD_ROOT": None,
+    }
+    _AOTERU_HOME.mkdir(parents=True, exist_ok=True)
+    _HOST_LOCAL_PATH.write_text(json.dumps(cfg, indent=2) + "\n")
+    return cfg
+
+
+_VAR_RE = re.compile(r"\$\{(\w+)\}")
+
+
+def _resolve_path(template: str, host_local: dict) -> dict:
+    """Resolve a `${ROOT_VAR}/...` template against host-local config.
+    Returns a dict describing resolution status rather than a bare path or
+    None, so callers never have to guess why something didn't resolve."""
+    m = _VAR_RE.search(template)
+    if not m:
+        return {"status": "resolved", "path": template, "exists": Path(template).exists()}
+    var = m.group(1)
+    root = host_local.get(var)
+    if not root:
+        return {"status": f"unresolved: {var} not set in {_HOST_LOCAL_PATH}", "path": None, "exists": False}
+    resolved = template.replace(f"${{{var}}}", root)
+    exists = Path(resolved).exists()
+    return {
+        "status": "resolved" if exists else "root-set-but-path-missing",
+        "path": resolved,
+        "exists": exists,
+    }
+
+
+def _live_host_inventory() -> dict:
+    disk = None
+    try:
+        import shutil as _shutil
+        total, used, free = _shutil.disk_usage(str(_REPO_ROOT))
+        disk = {"total_gb": round(total / 2**30, 1), "free_gb": round(free / 2**30, 1)}
+    except OSError:
+        pass
+    mem_total_gb = None
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemTotal:"):
+                    mem_total_gb = round(int(line.split()[1]) / 2**20, 1)
+                    break
+    except OSError:
+        pass
+    return {
+        "hostname": socket.gethostname(),
+        "os": platform.platform(),
+        "cpu_count": os.cpu_count(),
+        "mem_total_gb": mem_total_gb,
+        "disk_at_repo_root": disk,
+    }
+
+
+def _resolve_repos(host_local: dict) -> list[dict]:
+    repos = _load_yaml("repositories").get("repos", [])
+    out = []
+    for r in repos:
+        res = _resolve_path(r["path"], host_local)
+        out.append({
+            "id": r["id"],
+            "authority": r.get("authority"),
+            "canonical": bool(r.get("canonical")),
+            "role": r.get("role"),
+            **res,
+        })
+    return out
+
+
+def _resolve_current_host(estate: dict, hostname: str) -> dict | None:
+    for h in estate.get("hosts", []):
+        if h.get("hostname") == hostname:
+            return h
+    return None
+
+
+def cmd_status(args):
+    host_local = _load_host_local()
+    live = _live_host_inventory()
+    estate = _load_yaml("estate")
+    models = _load_yaml("models")
+    memory_sources = _load_yaml("memory-sources")
+
+    repos = _resolve_repos(host_local)
+    this_host = _resolve_current_host(estate, live["hostname"])
+
+    emit({
+        "host": {
+            **live,
+            "registered_as": this_host["id"] if this_host else None,
+            "role": this_host.get("role") if this_host else None,
+            "registered": this_host is not None,
+        },
+        "repos": repos,
+        "services": [
+            {"id": s["id"], "description": s.get("description"), "live": s.get("endpoint") is not None}
+            for s in estate.get("services", [])
+        ],
+        "capabilities": [
+            {"alias": c["alias"], "bound": c.get("binding") is not None}
+            for c in models.get("capabilities", [])
+        ],
+        "memory_sources": [
+            {"id": s["id"], "status": s.get("status")} for s in memory_sources.get("sources", [])
+        ],
+        "host_local_config": str(_HOST_LOCAL_PATH),
+    }, args)
+
+
+def cmd_where(args):
+    host_local = _load_host_local()
+    repos = _resolve_repos(host_local)
+    cwd = str(Path.cwd().resolve())
+    current = next((r for r in repos if r.get("path") and Path(r["path"]).resolve() == Path(cwd)), None)
+    if current is None and (_REPO_ROOT / ".git").exists():
+        # Fall back to identifying by repo root when cwd is a subdirectory.
+        current = next((r for r in repos if r.get("path") and Path(r["path"]).resolve() == _REPO_ROOT.resolve()), None)
+    emit({
+        "cwd": cwd,
+        "registered_repo": current["id"] if current else None,
+        "lease": None,
+        "note": "parking/leases not implemented until P3 — this is identity resolution only",
+    }, args)
+
+
+def _bay_claude_md() -> str:
+    return (
+        "<!-- generated by `agent sync` — do not hand-edit, re-run sync instead -->\n"
+        "You are speaking as **Aoteru**.\n\n"
+        "For live estate/host/repo/service state, use the user-scoped "
+        "`estate-control` MCP; for personal memory, use `aoteru-memory`. "
+        "Never infer a host, path, or model from this file's prose — it is "
+        "a pointer, not a source of truth.\n\n"
+        "Inside a specific repo, that repo's own CLAUDE.md/AGENTS.md and "
+        "rules take precedence over anything here.\n\n"
+        "Before any mutation in a registered repo, run `agent park` first.\n"
+    )
+
+
+def _workspace_claude_md() -> str:
+    return (
+        "<!-- generated by `agent sync` — do not hand-edit, re-run sync instead -->\n"
+        "You are speaking as **Aoteru**, operating inside the estate "
+        "workspace. Each cloned repo below carries its own authority — obey "
+        "its local CLAUDE.md/AGENTS.md once you're inside it.\n\n"
+        "Resolve hosts/repos/services by logical ID via `agent status` / "
+        "`agent where`; do not hardcode paths from this file.\n\n"
+        "Mutation requires an active parking lease (`agent park`, once P3 "
+        "lands) — none exists yet in P1.\n"
+    )
+
+
+def cmd_sync(args):
+    host_local = _load_host_local()
+    repos = _resolve_repos(host_local)
+
+    _AOTERU_HOME.mkdir(parents=True, exist_ok=True)
+    cache = {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "repos": repos,
+    }
+    (_AOTERU_HOME / "estate-cache.json").write_text(json.dumps(cache, indent=2) + "\n")
+
+    _BAY_DIR.mkdir(parents=True, exist_ok=True)
+    bay_md = _bay_claude_md()
+    (_BAY_DIR / "CLAUDE.md").write_text(bay_md)
+
+    written = ["estate-cache.json", str(_BAY_DIR / "CLAUDE.md")]
+    ai_root = host_local.get("AI_ROOT")
+    if ai_root and Path(ai_root).exists():
+        workspace = Path(ai_root) / "workspace"
+        workspace.mkdir(parents=True, exist_ok=True)
+        ws_md = _workspace_claude_md()
+        (workspace / "CLAUDE.md").write_text(ws_md)
+        written.append(str(workspace / "CLAUDE.md"))
+
+    bay_lines = len(bay_md.splitlines())
+    emit({
+        "ok": True,
+        "written": written,
+        "bay_claude_md_lines": bay_lines,
+        "under_30_lines": bay_lines < 30,
+    }, args)
+
+
+def _build_parser():
+    p = common_parser("agent", "Aoteru estate operator bay front door (P1: read-only discovery).")
+    parent = p._common_parents[0]
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    ps = sub.add_parser("status", parents=[parent], help="live host + registry resolution")
+    ps.set_defaults(func=cmd_status)
+
+    pw = sub.add_parser("where", parents=[parent], help="current repo's registry identity + lease")
+    pw.set_defaults(func=cmd_where)
+
+    psy = sub.add_parser("sync", parents=[parent], help="regenerate disposable bay + workspace bootstrap")
+    psy.set_defaults(func=cmd_sync)
+
+    return p
+
+
+if __name__ == "__main__":
+    sys.exit(run(_build_parser()))

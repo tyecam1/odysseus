@@ -1,0 +1,53 @@
+# Aoteru estate — allowed memory import sources (P1 scaffold, plan section 6.6).
+#
+# Declarative allowlist only. No adapter here is implemented until P4 (central
+# Aoteru memory); `status: planned` means exactly that. Only registered repos
+# and allowlisted roots are ever searchable — this file is also the boundary
+# that keeps memory ingestion from silently becoming "index the whole PC".
+
+sources:
+  - id: misumi-capsules
+    description: existing Misumi capsule/open-loop/handoff memory
+    domain: misumi
+    status: planned
+    note: >-
+      Reuse target named in plan section 6.1 (src/misumi_memory.py) was not
+      found on this host during P0 — see docs/aoteru-estate-p0-evidence.md.
+      Must be located (likely inside the separate misumi repo) before this
+      adapter can be built.
+
+  - id: claude-code-sessions
+    description: Claude Code transcript/session hook events
+    domain: neutral
+    status: planned
+
+  - id: chatgpt-export
+    description: official ChatGPT data export
+    domain: neutral
+    status: planned
+
+  - id: codex-artifacts
+    description: Codex task/session artifacts where exportable
+    domain: neutral
+    status: planned
+
+  - id: repo-pointers
+    description: registered repo commit/task/log pointers
+    domain: neutral
+    status: planned
+
+  - id: explicit-capture
+    description: explicit user capture/import
+    domain: neutral
+    status: planned
+
+  - id: external-knowledge-ingestion
+    description: centralised external-knowledge ingestion outputs
+    domain: neutral
+    status: planned
+
+sensitivity_rules:
+  # Enforced by the P4 broker, not by this file alone — recorded here so the
+  # allowlist and the rule that governs it live next to each other.
+  default: domain-scoped
+  cross_domain_write: deny
