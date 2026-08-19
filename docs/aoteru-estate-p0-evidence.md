@@ -12,14 +12,31 @@ Compact durable record. Do not reread unless a dependency changes.
 
 ## Environment reality (binding scope note for later phases)
 
-Single host available to this execution session: `dmem-HP-Z2-Tower-G9-Workstation-Desktop-PC`
-(24 cores, 125 GiB RAM, 984G/`nvme0n1p5`, 668G free). No second PC, no phone, no
-Tailscale/VPN account, no WhatsApp connector are reachable from this session.
-`tyecam1/misumi` and `obsidian-PhD` are not cloned anywhere on this host
-(searched `/home/agent` to depth 4 for `*misumi*`/`*obsidian-phd*`, `~/.ssh/config`
-has no second-host entry). Treat P2 (private connectivity), P6 (mobile) and any
-step requiring those two repos as genuinely human/infra-gated, not as missing work
-on my part — flag with `BLOCKED` per contract when reached, do not fabricate.
+Filesystem/repo access from this execution session is limited to one host:
+`dmem-HP-Z2-Tower-G9-Workstation-Desktop-PC` (24 cores, 125 GiB RAM,
+984G/`nvme0n1p5`, 668G free). `tyecam1/misumi` and `obsidian-PhD` are not cloned
+anywhere on this host (searched `/home/agent` to depth 4 for
+`*misumi*`/`*obsidian-phd*`).
+
+**Correction (found during P2 start, not re-litigated in P0 above since the
+inventory table itself is otherwise accurate):** the original version of this
+note claimed no Tailscale/VPN existed. That was never actually checked — it
+was an unverified assumption, not evidence. In fact Tailscale is already
+installed, authenticated as `tyecam1@`, and live: tailnet `tyecam1.github`,
+MagicDNS enabled (`tail171792.ts.net`), this node has `is-admin`/`is-owner`/
+`cap/ssh` capability, and two more devices are already members —
+`DESKTOP-7DJ1HMA` (Windows, online) and `glovebox` (Linux, offline, last seen
+32d ago). No Serve/Funnel exposure currently configured (`tailscale serve
+status` / `funnel status` both empty) — the "no public endpoints" safety
+invariant is intact as of this check. This means P2 may already be
+substantially satisfied rather than needing to be built from scratch, and
+`misumi`/`obsidian-PhD` may exist on `DESKTOP-7DJ1HMA` or `glovebox` rather
+than being genuinely absent from the estate. Neither has been confirmed yet —
+an attempt to `tailscale ssh` into `DESKTOP-7DJ1HMA` for read-only
+reconnaissance was blocked by the harness's own auto-mode classifier, which is
+being treated as a signal to get explicit operator sign-off before reaching
+into a second live machine, not routed around. See the P2 evidence doc for
+how this was escalated.
 
 ## Repo inventory
 
