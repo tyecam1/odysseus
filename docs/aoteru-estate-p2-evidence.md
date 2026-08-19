@@ -93,6 +93,33 @@ reported as a P2 blocker; it is not one, per the correction above. Left
 here only so the dead end isn't silently rediscovered — do not re-test this
 edge as part of the P2 gate.
 
+## Prepared: run from the laptop, not from lab
+
+These must run **on `DESKTOP-7DJ1HMA`** (PowerShell/OpenSSH client) — not
+from this lab session, per the correction above.
+
+```powershell
+# 1. laptop -> lab
+ssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=accept-new `
+    <lab-linux-user>@dmem-hp-z2-tower-g9-workstation-desktop-pc.tail171792.ts.net "whoami; hostname"
+
+# 2. laptop -> home, over the existing LAN path (do this first — it's the
+#    one the operator says already works, and it's what confirms home's
+#    real identity before anything else trusts it)
+ssh <home-user>@DESKTOP-IN7O23D "whoami; hostname"
+#    if that hostname doesn't resolve, try the alias the operator used:
+ssh <home-user>@DESKTOP-IN7023D "whoami; hostname"
+
+# 3. once home's real hostname is confirmed, check whether it's a tailnet
+#    member (run on whichever machine has `tailscale` installed and can
+#    see it, likely the laptop or home itself):
+tailscale status | findstr /I "in7o23d in7023d"
+```
+
+Feed the confirmed hostname/IP back into `config/estate.yaml`
+(`desktop-in7o23d.hostname`, `verified: true`) once step 2 succeeds — do
+not hand-edit that field from documentation alone.
+
 ## Genuinely blocked items (human/credential-gated)
 
 1. **Laptop-run verification is needed for both real edges.** Testing
