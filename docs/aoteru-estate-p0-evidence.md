@@ -106,3 +106,14 @@ locate the real capsule/open-loop implementation (likely `routes/misumi_routes.p
 - [x] restore test for current Odysseus data (PASS, see above)
 
 **P0: PASS** (after repair of the two verifier-caught discrepancies above).
+
+## Known constraint: no push credentials in this session
+
+`git push origin dev` fails: `fatal: could not read Username for 'https://github.com'`.
+No `gh` CLI, no credential helper, no `GH_TOKEN`/`GITHUB_TOKEN` in env. This
+session can commit locally but cannot sync to GitHub. Commits remain valid and
+ordered on disk; nothing is lost. This does not block continued phase work
+(none of P1's build steps require a successful push), so execution continues.
+Flagging because only the operator can add push credentials (PAT/SSH key/gh
+auth) to this environment, and until then the `dev` branch on GitHub will lag
+behind local `HEAD` for everything this session does.
