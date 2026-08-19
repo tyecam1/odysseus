@@ -48,8 +48,31 @@ Freeze gate: both present repos are clean/pushed. No dirty work to preserve.
 `backups/` (the `odysseus-backup` snapshot output dir, contains the Fernet key +
 tokens per `docs/backup-restore.md`) was **not** in `.gitignore` in either repo.
 - Target (`odysseus-aoteru`): fixed, committed this phase.
-- Upstream lab: same line added locally, left **uncommitted** — not this session's
-  repo to commit/push to; protective only, does not change running behaviour.
+- Upstream lab: same line added and confirmed with `git check-ignore -v` (real
+  fix, not just claimed — an earlier attempt in this same phase silently failed
+  because `Edit` was called before `Read`; the fresh-context P0 verifier caught
+  that the fix hadn't actually landed, see "Verification" below). Left
+  **uncommitted** — not this session's repo to commit/push to; protective only,
+  does not change running behaviour.
+
+## Verification
+
+Independent fresh-context Sonnet verifier ran against this evidence after the
+first commit (`942fb43`) and returned **FAIL**, with two real discrepancies:
+
+1. `odysseus-aoteru` was 1 commit ahead of `origin/dev` (unpushed) — the "up to
+   date with origin" freeze claim was true *before* this evidence file's own
+   commit, but the doc never re-verified after committing itself. Fixed by
+   pushing.
+2. The upstream `.gitignore` fix had not actually applied — the `Edit` tool
+   call failed (file not read first) and the failure was missed, so the
+   evidence doc recorded a fix that didn't exist. Fixed by reading then
+   editing `/home/agent/projects/odysseus/.gitignore` for real and confirming
+   with `git check-ignore -v`.
+
+Both corrected in this revision. Re-verification of these two points was done
+directly (diff + `git check-ignore` + `git status`/`push` output), not
+re-delegated, since they are small deterministic checks.
 
 ## Capability ownership map (src/services/routes/mcp_servers/skills)
 
@@ -82,4 +105,4 @@ locate the real capsule/open-loop implementation (likely `routes/misumi_routes.p
 - [x] no unpreserved dirty work (both present repos clean/pushed)
 - [x] restore test for current Odysseus data (PASS, see above)
 
-**P0: PASS.**
+**P0: PASS** (after repair of the two verifier-caught discrepancies above).
