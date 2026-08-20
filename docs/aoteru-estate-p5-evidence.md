@@ -58,7 +58,7 @@ agent claude home "test task"
 agent claude lab "test task"        (cwd = this repo, no --repo passed)
   -> ok:false, host_id: hz2-workstation, repo_id: odysseus (resolved from
      cwd, not supplied), session_id recorded, error: "claude CLI is not
-     installed on this host — cannot launch a native session"
+     installed on this host — cannot launch a native session", exit 1
 
 agent claude auto "test task" --repo odysseus
   -> identical resolution to `lab` (this host is registered, so auto
@@ -70,6 +70,19 @@ agent claude where
 agent claude lab                     (no task string)
   -> exit 1: "agent claude lab requires a task string" (guard rail, not a crash)
 ```
+
+## Correction (verifier-caught)
+
+The independent fresh-context verifier ran its own end-to-end tests
+against this evidence and found a real inconsistency: the `home`-
+unreachable and missing-task failures exited nonzero (via `fail()`), but
+the claude-binary-missing failure went through `emit()` — which always
+returns/exits 0, regardless of the `"ok": false` in the JSON payload it
+printed. The JSON itself was honest; a caller checking only the exit code
+(shell `&&`, CI) rather than parsing `"ok"` would have seen success. Fixed
+by calling `sys.exit(1)` after `emit()` in that branch; reverified live
+(`agent claude lab ...` now exits 1, same JSON as before). All three
+failure paths in `cmd_claude` now exit nonzero consistently.
 
 ## The real, honest boundary hit (not worked around)
 

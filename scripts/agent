@@ -376,12 +376,15 @@ def cmd_claude(args):
         ))
 
     if claude_bin is None:
+        # Emit the structured JSON (a caller parsing "ok" gets the detail)
+        # AND exit nonzero — a caller that only checks the exit code (shell
+        # `&&`, CI) must see this as a failure too, not silent success.
         emit({
             "ok": False, "mode": args.mode, "host_id": host["id"], "session_id": session_id,
             "repo_id": repo_id, "task": args.task,
             "error": "claude CLI is not installed on this host — cannot launch a native session",
         }, args)
-        return
+        sys.exit(1)
 
     # claude_bin present: launch non-interactively in the resolved
     # worktree. Unreachable in this environment (no `claude` binary here —
