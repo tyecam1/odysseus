@@ -10,10 +10,20 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from src.estate_router import eligible_hosts, resolve_alias, resolve_route
+from src.estate_router import RoutingConfigError, eligible_hosts, resolve_alias, resolve_route
+
+
+def _route_call(fn, *args, **kwargs):
+    """P9 fault test ("stale inventory"): a malformed registry file must
+    fail as a clean, informative error — not an unhandled 500 with a raw
+    YAML-parser traceback."""
+    try:
+        return fn(*args, **kwargs)
+    except RoutingConfigError as e:
+        raise HTTPException(503, str(e)) from e
 
 
 class TaskEnvelopeRequirements(BaseModel):
@@ -40,14 +50,14 @@ def setup_estate_routing_routes() -> APIRouter:
     @router.post("/route")
     async def route_task(request: Request, envelope: TaskEnvelope):
         task = envelope.model_dump()
-        return resolve_route(task)
+        return _route_call(resolve_route, task)
 
     @router.get("/route/hosts")
     async def route_hosts(request: Request, repo: Optional[str] = None):
-        return {"hosts": eligible_hosts(repo)}
+        return {"hosts": _route_call(eligible_hosts, repo)}
 
     @router.get("/route/alias/{alias}")
     async def route_alias(request: Request, alias: str):
-        return resolve_alias(alias)
+        return _route_call(resolve_alias, alias)
 
     return router

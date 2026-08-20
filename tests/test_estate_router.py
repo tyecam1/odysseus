@@ -56,12 +56,26 @@ def test_eligible_hosts_home_fails_truthfully_not_a_tailnet_member(fixture_confi
     assert "not a tailnet member" in hosts["test-home"]["reason"]
 
 
-def test_resolve_alias_bound(fixture_config):
+def test_resolve_alias_bound_and_live(fixture_config, monkeypatch):
+    monkeypatch.setattr(estate_router, "_ollama_model_live", lambda model, timeout=3.0: (True, "live"))
     result = estate_router.resolve_alias("local-fast")
     assert result == {
         "alias": "local-fast", "resolved": True,
         "concrete_model": "test-model-fast", "evidence": None,
     }
+
+
+def test_resolve_alias_bound_but_not_live_fails_truthfully(fixture_config, monkeypatch):
+    """P9 fault test: a config binding alone is not proof the model is
+    actually loadable right now (Ollama could be down, model removed)."""
+    monkeypatch.setattr(
+        estate_router, "_ollama_model_live",
+        lambda model, timeout=3.0: (False, "Ollama unreachable at http://127.0.0.1:11434: connection refused"),
+    )
+    result = estate_router.resolve_alias("local-fast")
+    assert result["resolved"] is False
+    assert "not currently live" in result["reason"]
+    assert result["concrete_model"] == "test-model-fast"  # still reported, for diagnosis
 
 
 def test_resolve_alias_unbound_fails_truthfully_not_silently(fixture_config):
@@ -76,6 +90,14 @@ def test_resolve_alias_unknown(fixture_config):
     assert "unknown alias" in result["reason"]
 
 
+def test_malformed_config_fails_cleanly_not_a_raw_traceback(fixture_config):
+    """P9 fault test ("stale inventory"): a malformed registry file must
+    raise a clear, catchable error, not an unhandled yaml.YAMLError."""
+    (fixture_config / "models.yaml").write_text("not: valid: yaml: [")
+    with pytest.raises(estate_router.RoutingConfigError, match="models.yaml is malformed"):
+        estate_router.resolve_alias("local-fast")
+
+
 def test_resolve_route_deterministic_task_needs_no_model(fixture_config, monkeypatch):
     monkeypatch.setattr(estate_router, "_record_decision", lambda *a, **k: "fake-decision-id")
     route = estate_router.resolve_route({"task_class": "audit"})
@@ -86,6 +108,7 @@ def test_resolve_route_deterministic_task_needs_no_model(fixture_config, monkeyp
 
 def test_resolve_route_bound_alias_resolves_to_local(fixture_config, monkeypatch):
     monkeypatch.setattr(estate_router, "_record_decision", lambda *a, **k: "fake-decision-id")
+    monkeypatch.setattr(estate_router, "_ollama_model_live", lambda model, timeout=3.0: (True, "live"))
     route = estate_router.resolve_route({
         "task_class": "coding", "requirements": {"capabilities": ["local-fast"]},
     })

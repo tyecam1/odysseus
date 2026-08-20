@@ -39,12 +39,22 @@ from src.runtime_paths import get_app_root
 _CONFIG_DIR = Path(get_app_root()) / "config"
 
 
+class RoutingConfigError(RuntimeError):
+    """A registry file the router depends on is missing/malformed. Raised
+    deliberately (P9 fault test: "stale inventory") rather than letting a
+    raw YAML parser exception surface as an unhandled 500 — a config
+    problem should fail as a clear, catchable error, not a stack trace."""
+
+
 def _load_yaml(name: str) -> dict:
     path = _CONFIG_DIR / f"{name}.yaml"
     if not path.exists():
         return {}
-    with path.open() as f:
-        return yaml.safe_load(f) or {}
+    try:
+        with path.open() as f:
+            return yaml.safe_load(f) or {}
+    except yaml.YAMLError as e:
+        raise RoutingConfigError(f"config/{name}.yaml is malformed: {e}") from e
 
 
 def host_reachable(host: dict, live_hostname: str) -> tuple[bool, str]:
@@ -100,11 +110,36 @@ def eligible_hosts(repo_id: Optional[str] = None) -> list[dict]:
     return out
 
 
+_OLLAMA_BASE = "http://127.0.0.1:11434"
+
+
+def _ollama_model_live(model: str, timeout: float = 3.0) -> tuple[bool, str]:
+    """Bounded live check against the local Ollama registry (P9 fault
+    test: "model/runtime failure"). A static `binding` in
+    config/models.yaml is evidence the model was benchmarked once, not
+    evidence it is loadable right now — Ollama could be stopped, or the
+    model could have been removed since. Only applies to local/Ollama-
+    style bindings; a future paid-provider binding would need its own
+    liveness check rather than reusing this one blindly."""
+    import httpx
+    try:
+        resp = httpx.get(f"{_OLLAMA_BASE}/api/tags", timeout=timeout)
+        resp.raise_for_status()
+    except (httpx.HTTPError, OSError) as e:
+        return False, f"Ollama unreachable at {_OLLAMA_BASE}: {e}"
+    names = {m.get("name") for m in resp.json().get("models", [])}
+    if model in names:
+        return True, "live"
+    return False, f"configured as {model!r} in config/models.yaml but not currently listed by Ollama"
+
+
 def resolve_alias(alias: str) -> dict:
     """WHAT half: resolve a capability alias to a concrete model from
     config/models.yaml's evidence-backed bindings. Never a hardcoded brand
     in this function — an unbound alias fails truthfully rather than
-    guessing a model."""
+    guessing a model. A bound alias is additionally checked live before
+    being reported resolved — a config binding alone is not proof the
+    model is actually available right now (see `_ollama_model_live`)."""
     models = _load_yaml("models")
     entry = next((c for c in models.get("capabilities", []) if c["alias"] == alias), None)
     if entry is None:
@@ -115,24 +150,42 @@ def resolve_alias(alias: str) -> dict:
             "alias": alias, "resolved": False,
             "reason": "no evidence-backed binding yet — see config/models.yaml",
         }
+    live, live_reason = _ollama_model_live(binding)
+    if not live:
+        return {
+            "alias": alias, "resolved": False, "concrete_model": binding,
+            "reason": f"bound but not currently live: {live_reason}",
+        }
     return {"alias": alias, "resolved": True, "concrete_model": binding, "evidence": entry.get("evidence")}
 
 
 def _record_decision(task: dict, *, host_id, executor, model_alias, concrete_model, status) -> str:
+    """Telemetry is a side effect of routing, not the routing decision
+    itself (P9 fault test: "partial result handling") — a caller who
+    successfully got a route back must not lose that answer just because
+    the telemetry write failed (DB unavailable, disk full, a threading/
+    pooling quirk under a test's in-memory SQLite). Logged, not silently
+    swallowed: a caller that actually needs to know telemetry didn't
+    persist can check for the `decision-unrecorded-` id prefix."""
     from core.database import RoutingDecision, get_db_session
     decision_id = str(uuid.uuid4())
-    with get_db_session() as db:
-        db.add(RoutingDecision(
-            id=decision_id,
-            task_class=task.get("task_class") or "unclassified",
-            complexity=task.get("complexity"),
-            consequence=task.get("consequence"),
-            host_id=host_id or "none",
-            executor=executor,
-            model_alias=model_alias,
-            concrete_model=concrete_model,
-            status=status,
-        ))
+    try:
+        with get_db_session() as db:
+            db.add(RoutingDecision(
+                id=decision_id,
+                task_class=task.get("task_class") or "unclassified",
+                complexity=task.get("complexity"),
+                consequence=task.get("consequence"),
+                host_id=host_id or "none",
+                executor=executor,
+                model_alias=model_alias,
+                concrete_model=concrete_model,
+                status=status,
+            ))
+    except Exception:
+        import logging
+        logging.getLogger(__name__).exception("routing_decisions write failed; route result is unaffected")
+        return f"decision-unrecorded-{decision_id}"
     return decision_id
 
 
