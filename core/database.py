@@ -824,6 +824,33 @@ class MemoryRelation(TimestampMixin, Base):
     )
 
 
+class LogicalSession(TimestampMixin, Base):
+    """Logical Claude/Codex/local-agent session mapping (execution
+    contract's "Laptop Claude routing skill" binding rule; P5, lab-first).
+
+    Lets the laptop-side routing skill resume the correct native remote
+    session instead of starting a fresh one each dispatch. Distinct from
+    `ParkLease`: a session can exist read-only, before or without ever
+    acquiring a mutation lease — `lease_id` is recorded when one was
+    acquired, not required to create the session row.
+    """
+    __tablename__ = "logical_sessions"
+
+    id                 = Column(String, primary_key=True, index=True)
+    host_id            = Column(String, nullable=False, index=True)
+    repo_id            = Column(String, nullable=True, index=True)
+    worktree_path      = Column(String, nullable=True)
+    claude_session_id  = Column(String, nullable=True)
+    lease_id           = Column(String, nullable=True)
+    engine             = Column(String, nullable=False, default="claude")  # claude | codex | local
+    status             = Column(String, nullable=False, default="active")  # active | closed
+    last_result        = Column(Text, nullable=True)  # compact JSON summary, never the full transcript
+
+    __table_args__ = (
+        Index('ix_logical_sessions_host_repo_status', 'host_id', 'repo_id', 'status'),
+    )
+
+
 class Memory(Base):
     """
     SQLAlchemy model for Memory table.

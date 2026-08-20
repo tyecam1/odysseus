@@ -4,14 +4,17 @@
 P1 (docs/aoteru-estate-implementation-plan.md "P1 - Estate registry +
 operator bay"): read-only discovery. P3 ("P3 - Parking + remote native
 execution", lab-first per docs/aoteru-lab-first-continuation.md) adds
-parking leases in the same file rather than a second launcher/config
-system.
+parking leases. P5 (execution contract's "Laptop Claude routing skill"
+binding rule, lab-first) adds `agent claude` dispatch — all in the same
+file rather than a second launcher/config system.
 
     agent status                       # live host + registry resolution, JSON
     agent where                        # current repo's registry identity + lease
     agent sync                         # regenerate the disposable bay + workspace bootstrap
     agent park <repo_id> [--host ID]   # acquire a write lease (fails closed on dirty/conflict)
     agent release <repo_id> [--host ID]
+    agent claude <auto|lab|home> "<task>" [--repo ID]   # resolve + dispatch, fails truthfully if unreachable
+    agent claude where                                    # active logical sessions
 
 Reads the four canonical registries in config/*.yaml (committed, no secrets,
 no physical paths) plus a host-local file at ~/.aoteru/config.local.json
@@ -264,6 +267,131 @@ def cmd_release(args):
     emit({"ok": True, **released}, args)
 
 
+def _session_db():
+    try:
+        from core.database import get_db_session, LogicalSession
+    except ModuleNotFoundError as e:
+        fail(f"{e}\nhint: run from a venv with the app's requirements installed (agent claude needs core.database).")
+    return get_db_session, LogicalSession
+
+
+def _host_by_role(estate: dict, role: str) -> dict | None:
+    return next((h for h in estate.get("hosts", []) if h.get("role") == role), None)
+
+
+def _resolve_target_host(mode: str, estate: dict, live_hostname: str) -> dict | None:
+    if mode == "lab":
+        return _host_by_role(estate, "lab")
+    if mode == "home":
+        return _host_by_role(estate, "home")
+    # auto: prefer this host if it's registered at all, else the first
+    # registered worker role (lab before home — lab is what's actually
+    # verified reachable per the lab-first contract).
+    this_host = _resolve_current_host(estate, live_hostname)
+    if this_host is not None:
+        return this_host
+    return _host_by_role(estate, "lab") or _host_by_role(estate, "home")
+
+
+def _host_reachable(host: dict, live_hostname: str) -> tuple[bool, str]:
+    """No assumptions: this host is reachable by construction; anything
+    else needs a real, bounded network probe. `home` genuinely failing
+    this check (not a tailnet member, or SSH unreachable) is the contract's
+    "home must fail truthfully as unavailable" requirement, not a bug."""
+    if host.get("hostname") == live_hostname:
+        return True, "this host"
+    if not host.get("tailscale"):
+        return False, f"{host['id']!r} is not a tailnet member"
+    dns = host.get("tailscale_dns")
+    if not dns:
+        return False, f"{host['id']!r} has no tailscale_dns recorded in config/estate.yaml"
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(4)
+    try:
+        s.connect((dns, 22))
+        return True, "SSH port reachable over the tailnet"
+    except OSError as e:
+        return False, f"unreachable: {e}"
+    finally:
+        s.close()
+
+
+def cmd_claude(args):
+    if args.mode != "where" and not args.task:
+        fail(f"agent claude {args.mode} requires a task string")
+
+    if args.mode == "where":
+        get_db_session, LogicalSession = _session_db()
+        with get_db_session() as db:
+            rows = db.query(LogicalSession).filter(LogicalSession.status == "active").all()
+            sessions = [{
+                "id": r.id, "host_id": r.host_id, "repo_id": r.repo_id, "engine": r.engine,
+                "claude_session_id": r.claude_session_id, "last_result": r.last_result,
+            } for r in rows]
+        emit({"active_sessions": sessions}, args)
+        return
+
+    host_local = _load_host_local()
+    estate = _load_yaml("estate")
+    live_hostname = socket.gethostname()
+
+    host = _resolve_target_host(args.mode, estate, live_hostname)
+    if host is None:
+        fail(f"no host registered for mode {args.mode!r} — see config/estate.yaml")
+
+    reachable, reason = _host_reachable(host, live_hostname)
+    if not reachable:
+        fail(f"{args.mode} ({host['id']}) is unavailable: {reason}")
+
+    repos = _resolve_repos(host_local)
+    repo_id = args.repo
+    if repo_id is None:
+        cwd = str(Path.cwd().resolve())
+        current = next((r for r in repos if r.get("path") and Path(r["path"]).resolve() == Path(cwd)), None)
+        repo_id = current["id"] if current else None
+    repo = _repo_by_id(repos, repo_id) if repo_id else None
+
+    if host.get("hostname") != live_hostname:
+        # Remote dispatch would SSH into `host` and launch claude there.
+        # Not implemented from this session: lab-first has no second
+        # reachable worker to actually dispatch to yet (see
+        # docs/aoteru-estate-p5-evidence.md) — failing truthfully rather
+        # than pretending a remote launch happened.
+        fail(
+            f"{args.mode} would dispatch to {host['id']} via SSH — not implemented from "
+            f"this session (no second reachable worker; see docs/aoteru-estate-p5-evidence.md)"
+        )
+
+    import shutil as _shutil
+    import uuid
+    claude_bin = _shutil.which("claude")
+
+    get_db_session, LogicalSession = _session_db()
+    session_id = str(uuid.uuid4())
+    with get_db_session() as db:
+        db.add(LogicalSession(
+            id=session_id, host_id=host["id"], repo_id=repo_id,
+            worktree_path=repo["path"] if repo else None,
+            engine="claude", status="active",
+        ))
+
+    if claude_bin is None:
+        emit({
+            "ok": False, "mode": args.mode, "host_id": host["id"], "session_id": session_id,
+            "repo_id": repo_id, "task": args.task,
+            "error": "claude CLI is not installed on this host — cannot launch a native session",
+        }, args)
+        return
+
+    # claude_bin present: launch non-interactively in the resolved
+    # worktree. Unreachable in this environment (no `claude` binary here —
+    # see evidence doc) so deliberately not implemented speculatively;
+    # the interface above (session already recorded, repo/host already
+    # resolved) is what a future session with the binary present extends,
+    # not redesigns.
+    fail("claude CLI found but native launch is not yet implemented — session recorded, extend here")
+
+
 def cmd_status(args):
     host_local = _load_host_local()
     live = _live_host_inventory()
@@ -353,8 +481,37 @@ def _workspace_claude_md() -> str:
         "its local CLAUDE.md/AGENTS.md once you're inside it.\n\n"
         "Resolve hosts/repos/services by logical ID via `agent status` / "
         "`agent where`; do not hardcode paths from this file.\n\n"
-        "Mutation requires an active parking lease (`agent park`, once P3 "
-        "lands) — none exists yet in P1.\n"
+        "Mutation requires an active parking lease — run `agent park <repo_id>` "
+        "first; it fails closed on a dirty tree or a conflicting lease.\n"
+    )
+
+
+def _estate_routing_skill_md() -> str:
+    return (
+        "---\n"
+        "name: aoteru-estate-routing\n"
+        "description: Route a task to an Aoteru estate worker (lab/home) "
+        "via `agent claude auto|lab|home \"<task>\"`, or list active "
+        "sessions via `agent claude where`. Use when the user wants work "
+        "executed on a specific estate machine instead of locally.\n"
+        "---\n\n"
+        "Ergonomic wrapper over the existing `agent` CLI / estate registry "
+        "— never a second router or authority. Never hardcode a hostname, "
+        "path, repo map, model name, or credential here; always resolve "
+        "through the live `agent` command's own output.\n\n"
+        "- `agent claude auto \"<task>\" [--repo <id>]` — resolve the best "
+        "available host from live estate state.\n"
+        "- `agent claude lab \"<task>\" [--repo <id>]` — dispatch to the lab worker.\n"
+        "- `agent claude home \"<task>\" [--repo <id>]` — dispatch to the home "
+        "worker. It fails truthfully when home is unavailable — report that "
+        "failure plainly, never invent a result.\n"
+        "- `agent claude where` — report active logical sessions.\n\n"
+        "Read the JSON the command prints. On `\"ok\": false` or a nonzero "
+        "exit, report the exact error — do not retry silently and do not "
+        "fabricate a successful outcome.\n\n"
+        "Once inside a resolved repo/worktree, that repo's own "
+        "CLAUDE.md/AGENTS.md and rules take precedence over this skill's "
+        "own convenience.\n"
     )
 
 
@@ -381,6 +538,11 @@ def cmd_sync(args):
         ws_md = _workspace_claude_md()
         (workspace / "CLAUDE.md").write_text(ws_md)
         written.append(str(workspace / "CLAUDE.md"))
+
+    skill_dir = Path.home() / ".claude" / "skills" / "aoteru-estate-routing"
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text(_estate_routing_skill_md())
+    written.append(str(skill_dir / "SKILL.md"))
 
     bay_lines = len(bay_md.splitlines())
     emit({
@@ -416,6 +578,12 @@ def _build_parser():
     pr.add_argument("repo_id")
     pr.add_argument("--host", default=None)
     pr.set_defaults(func=cmd_release)
+
+    pc = sub.add_parser("claude", parents=[parent], help="resolve + dispatch a Claude session (auto/lab/home/where)")
+    pc.add_argument("mode", choices=["auto", "lab", "home", "where"])
+    pc.add_argument("task", nargs="?", default=None)
+    pc.add_argument("--repo", default=None)
+    pc.set_defaults(func=cmd_claude)
 
     return p
 
