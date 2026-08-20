@@ -128,9 +128,10 @@ services:
   - id: svc:odysseus-lab
     description: Odysseus backend instance on the lab host (API/jobs/memory/
       RAG — not the user-facing interface)
-    endpoint: http://127.0.0.1:7001  # loopback only as of this check
+    endpoint: http://dmem-hp-z2-tower-g9-workstation-desktop-pc.tail171792.ts.net:8080
+    local_endpoint: http://127.0.0.1:7001  # what tailscale serve proxies to
     role: backend
-    tailnet_exposure: prepared-not-live
+    tailnet_exposure: live-http-tailnet-only
     notes: >-
       Running natively (venv, uvicorn, port 7001; upstream lab deployment
       already owns 7000). Own dedicated ChromaDB on 127.0.0.1:8101 —
@@ -139,11 +140,14 @@ services:
       into its live vector collections; kept fully separate instead.
       AUTH_ENABLED=true, LOCALHOST_BYPASS=false, verified (unauthenticated
       GET / -> 302, /api/health -> 200 unauthenticated by design).
-      Not yet exposed over the tailnet: `tailscale serve --https` requires
-      the tailnet's HTTPS Certificates feature (admin-console setting, not
-      visible/enabled from this session — `CertDomains: None`), and a
-      direct `tailscale cert` attempt was blocked by the harness's own
-      auto-mode classifier. Plain `tailscale serve --http` would sidestep
+      Exposed privately over the tailnet via `tailscale serve --bg
+      --http=8080` (plain HTTP, no TLS — HTTPS Certificates aren't enabled
+      for this tailnet). Confirmed via `tailscale serve status --json`:
+      `Web` handler only, no `AllowFunnel` key — tailnet-only, not public.
+      End-to-end self-test from this host over the tailnet URL: GET / -> 302,
+      GET /api/health -> 200. Required a one-time operator-run
+      `sudo tailscale set --operator=agent` — `tailscale serve` needs root
+      otherwise, and sudo itself is classifier-blocked from this session.
       the cert requirement but network/identity actions have now been
       classifier-blocked twice this session (SSH reconnaissance earlier,
       cert issuance here) — treating that as a pattern to get explicit

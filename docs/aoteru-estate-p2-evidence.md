@@ -127,25 +127,38 @@ What was actually built on lab (backend only):
   `tailnet_exposure: prepared-not-live`). `svc:aoteru` stays `endpoint:
   null`, `role: interface`, with a note not to repeat this mistake.
 
-## Paused: tailnet exposure of the lab backend
+## Resolved: tailnet exposure of the lab backend
 
-Attempted `tailscale serve --bg --https=8443 http://127.0.0.1:7001` to make
-the lab backend privately reachable over the tailnet (still not the
-interface — just making the backend reachable for whatever eventually runs
-on the interface PC to call). It hung/never applied
-(`tailscale serve status` still shows "No serve config" after). Tailnet
-HTTPS Certificates are off for this tailnet (`CertDomains: None` in
-`tailscale status --json`) — that's an admin-console setting, not visible
-or changeable from this session. A direct `tailscale cert <domain>` probe
-to get a clearer error was blocked by the harness's own auto-mode
-classifier — the same thing that blocked the earlier SSH reconnaissance
-attempt into `DESKTOP-7DJ1HMA`. `tailscale serve --http` (plain, no TLS)
-would sidestep the cert requirement entirely, but two classifier blocks on
-network/identity-adjacent actions in one session reads as a real pattern,
-not noise — pausing here rather than reaching for the workaround, and
-raising it with the operator instead. The backend itself is fully
-functional and verified on loopback regardless of whether/how it gets
-privately exposed.
+`tailscale serve --https` was blocked (HTTPS Certificates off for this
+tailnet — admin-console setting; a direct `tailscale cert` probe was also
+classifier-blocked, as was a subsequent `sudo` attempt to grant Tailscale
+operator permission). Three classifier blocks on network/identity-adjacent
+actions in one session — SSH reconnaissance, cert issuance, sudo — were
+treated as a real pattern, not routed around: paused each time and asked
+the operator rather than trying alternate phrasings of the same action.
+
+Operator explicitly approved plain HTTP serve and ran the one-time
+`sudo tailscale set --operator=agent` directly (outside this session, since
+sudo is classifier-blocked here). After confirming that grant actually took
+(`tailscale serve status` succeeding without root — the first confirmation
+attempt hadn't actually applied), this session ran:
+
+```text
+tailscale serve --bg --http=8080 http://127.0.0.1:7001
+```
+
+Verified, not assumed:
+- `tailscale serve status --json`: a `Web` handler for `:8080` only, no
+  `AllowFunnel` key anywhere — tailnet-private, not public.
+- `tailscale funnel status`: same tailnet-only listing, no funnel enabled.
+- End-to-end self-test over the actual tailnet URL (not loopback):
+  `GET http://dmem-hp-z2-tower-g9-workstation-desktop-pc.tail171792.ts.net:8080/`
+  → 302 (auth redirect, correct), `/api/health` → 200.
+
+`svc:odysseus-lab` in `config/estate.yaml` now carries the real endpoint
+and this verification. The backend is genuinely privately reachable over
+the tailnet — the next consumer is whatever eventually runs on the
+interface PC, not this session.
 
 ## Prepared: run from the laptop, not from lab
 
@@ -194,13 +207,14 @@ Plan §12 P2 gate: "laptop + phone reach authenticated `svc:aoteru` from
 outside home LAN; raw services are not publicly reachable; access-control
 tests deny unapproved cross-domain paths."
 
-- [x] raw services not publicly reachable (verified — no serve/funnel config,
-      lab backend is loopback-only, no exposure attempted or applied)
+- [x] raw services not publicly reachable (verified — `serve status --json`
+      has no `AllowFunnel`; `funnel status` confirms tailnet-only)
 - [x] lab-side SSH prerequisite verified (this session's one directly
       testable contribution to the laptop→lab edge)
-- [x] lab backend built and auth-verified (`svc:odysseus-lab`) — not itself
-      a gate line item, but the dependency-safe slice of P2 buildable on
-      lab alone, per the lab-first contract
+- [x] lab backend built, isolated, auth-verified, and privately reachable
+      over the tailnet (`svc:odysseus-lab`) — not itself a gate line item,
+      but the full dependency-safe slice of P2 buildable on lab alone, per
+      the lab-first contract
 - [ ] laptop → lab, end-to-end — needs a laptop-run session or the operator
 - [ ] laptop → home, end-to-end — needs a laptop-run session or the
       operator, and home's identity confirmed first
@@ -213,10 +227,11 @@ tests deny unapproved cross-domain paths."
       tailnet policy, only local node prefs — would need the web admin
       console or an API key)
 
-**P2: PARTIAL.** Substrate (tailnet, MagicDNS, no public exposure) verified;
-lab backend built, isolated from the live upstream deployment, and
-auth-verified; not yet privately exposed over the tailnet pending an
-operator decision (HTTPS Certificates / `--http` vs `--https`, and two
-classifier blocks on network-identity actions this session). The three
-edges needing laptop/interface-PC execution remain outside this session's
-reach.
+**P2: PARTIAL, lab-first slice complete.** Substrate (tailnet, MagicDNS, no
+public exposure) verified; lab backend built, isolated from the live
+upstream deployment, auth-verified, and now genuinely reachable privately
+over the tailnet. Everything buildable with laptop/controller + lab per the
+lab-first contract is done. The remaining edges (laptop→lab, laptop→home,
+`svc:aoteru` on the interface PC, Grants/ACL visibility) all require
+execution from the laptop/interface PC or admin-console access — DEFERRED,
+not blocking further lab-first phases.
