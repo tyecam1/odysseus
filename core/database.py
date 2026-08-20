@@ -743,6 +743,38 @@ class TaskRun(Base):
     )
 
 
+class ParkLease(TimestampMixin, Base):
+    """Parking lease for estate repo access (canonical plan §8 / P3).
+
+    The `ix_park_leases_active_repo_unique` partial unique index is the
+    actual single-writer guarantee: SQLite rejects a second row with
+    status='active' for the same repo_id at the constraint level, so two
+    concurrent `agent park` calls for the same repo can't both succeed even
+    under a race — the loser gets an IntegrityError, not a silently
+    overwritten lease. host_id is recorded but is NOT part of the unique
+    scope: a repo may only be parked on one host at a time, not one lease
+    per host.
+    """
+    __tablename__ = "park_leases"
+
+    id                  = Column(String, primary_key=True, index=True)
+    repo_id             = Column(String, nullable=False, index=True)   # config/repositories.yaml id
+    host_id             = Column(String, nullable=False, index=True)   # config/estate.yaml id
+    worktree_path       = Column(String, nullable=False)
+    branch              = Column(String, nullable=True)
+    session_id          = Column(String, nullable=True)
+    allowed_write_scope = Column(String, nullable=True, default="repo")
+    status              = Column(String, nullable=False, default="active")  # active|released
+    heartbeat_at        = Column(DateTime, nullable=False, default=utcnow_naive)
+    released_at         = Column(DateTime, nullable=True)
+
+    __table_args__ = (
+        Index('ix_park_leases_repo_host_status', 'repo_id', 'host_id', 'status'),
+        Index('ix_park_leases_active_repo_unique', 'repo_id', unique=True,
+              sqlite_where=text("status = 'active'")),
+    )
+
+
 class Memory(Base):
     """
     SQLAlchemy model for Memory table.

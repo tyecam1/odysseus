@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """agent — Aoteru estate operator bay front door.
 
-P1 scope only (docs/aoteru-estate-implementation-plan.md section "P1 -
-Estate registry + operator bay"): read-only discovery. No mutation, no
-parking — that's P3. Later phases extend this same file rather than
-introducing a second launcher/config system.
+P1 (docs/aoteru-estate-implementation-plan.md "P1 - Estate registry +
+operator bay"): read-only discovery. P3 ("P3 - Parking + remote native
+execution", lab-first per docs/aoteru-lab-first-continuation.md) adds
+parking leases in the same file rather than a second launcher/config
+system.
 
-    agent status              # live host + registry resolution, JSON
-    agent where                # current repo's registry identity + lease (none yet)
-    agent sync                 # regenerate the disposable bay + workspace bootstrap
+    agent status                       # live host + registry resolution, JSON
+    agent where                        # current repo's registry identity + lease
+    agent sync                         # regenerate the disposable bay + workspace bootstrap
+    agent park <repo_id> [--host ID]   # acquire a write lease (fails closed on dirty/conflict)
+    agent release <repo_id> [--host ID]
 
 Reads the four canonical registries in config/*.yaml (committed, no secrets,
 no physical paths) plus a host-local file at ~/.aoteru/config.local.json
@@ -148,6 +151,119 @@ def _resolve_current_host(estate: dict, hostname: str) -> dict | None:
     return None
 
 
+def _repo_by_id(repos: list[dict], repo_id: str) -> dict | None:
+    return next((r for r in repos if r["id"] == repo_id), None)
+
+
+def _git_is_clean(path: str) -> tuple[bool, str]:
+    """Fail closed: anything but a clean `git status --porcelain` (including
+    the command itself failing) is treated as dirty."""
+    import subprocess
+    try:
+        out = subprocess.run(
+            ["git", "-C", path, "status", "--porcelain"],
+            capture_output=True, text=True, timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return False, f"git status failed: {e}"
+    if out.returncode != 0:
+        return False, out.stderr.strip() or "git status failed"
+    if out.stdout.strip():
+        return False, "working tree has uncommitted changes"
+    return True, ""
+
+
+def _lease_db():
+    """Import lazily — the CLI must still work (status/where/sync) even if
+    the app's dependencies aren't installed in whatever environment invokes
+    it; only park/release/heartbeat need the ORM."""
+    try:
+        from core.database import get_db_session, ParkLease, utcnow_naive
+    except ModuleNotFoundError as e:
+        fail(f"{e}\nhint: run from a venv with the app's requirements installed (park/release need core.database).")
+    return get_db_session, ParkLease, utcnow_naive
+
+
+def cmd_park(args):
+    host_local = _load_host_local()
+    estate = _load_yaml("estate")
+    repos = _resolve_repos(host_local)
+    repo = _repo_by_id(repos, args.repo_id)
+    if repo is None:
+        fail(f"unknown repo id {args.repo_id!r} (see config/repositories.yaml)")
+    if not repo["exists"]:
+        fail(f"{args.repo_id!r} does not resolve on this host: {repo['status']}")
+
+    live_hostname = socket.gethostname()
+    this_host = _resolve_current_host(estate, live_hostname)
+    host_id = args.host or (this_host["id"] if this_host else None)
+    if host_id is None:
+        fail("could not determine host id — pass --host explicitly (this host isn't in config/estate.yaml)")
+    if host_id != (this_host["id"] if this_host else None):
+        fail(
+            f"--host {host_id!r} is not this machine ({live_hostname!r}) — "
+            f"parking a repo on a host this session isn't running on requires that host's own "
+            f"session/operator to acquire the lease, not a remote insert from here."
+        )
+
+    clean, reason = _git_is_clean(repo["path"])
+    if not clean:
+        fail(f"refusing to park {args.repo_id!r}: {reason} (fail-closed — commit/stash first)")
+
+    get_db_session, ParkLease, _ = _lease_db()
+    import uuid
+    from sqlalchemy.exc import IntegrityError
+
+    lease_id = str(uuid.uuid4())
+    try:
+        with get_db_session() as db:
+            lease = ParkLease(
+                id=lease_id,
+                repo_id=args.repo_id,
+                host_id=host_id,
+                worktree_path=repo["path"],
+                branch=args.branch,
+                session_id=args.session,
+                allowed_write_scope="repo",
+                status="active",
+            )
+            db.add(lease)
+    except IntegrityError:
+        fail(f"{args.repo_id!r} is already parked (active lease exists) — release it first")
+
+    emit({
+        "ok": True,
+        "lease_id": lease_id,
+        "repo_id": args.repo_id,
+        "host_id": host_id,
+        "worktree_path": repo["path"],
+        "branch": args.branch,
+        "session_id": args.session,
+    }, args)
+
+
+def cmd_release(args):
+    get_db_session, ParkLease, utcnow_naive = _lease_db()
+    host_local = _load_host_local()
+    estate = _load_yaml("estate")
+    live_hostname = socket.gethostname()
+    this_host = _resolve_current_host(estate, live_hostname)
+    host_id = args.host or (this_host["id"] if this_host else None)
+
+    with get_db_session() as db:
+        q = db.query(ParkLease).filter(ParkLease.repo_id == args.repo_id, ParkLease.status == "active")
+        if host_id:
+            q = q.filter(ParkLease.host_id == host_id)
+        lease = q.first()
+        if lease is None:
+            fail(f"no active lease for {args.repo_id!r}" + (f" on {host_id!r}" if host_id else ""))
+        lease.status = "released"
+        lease.released_at = utcnow_naive()
+        released = {"lease_id": lease.id, "repo_id": lease.repo_id, "host_id": lease.host_id}
+
+    emit({"ok": True, **released}, args)
+
+
 def cmd_status(args):
     host_local = _load_host_local()
     live = _live_host_inventory()
@@ -189,11 +305,29 @@ def cmd_where(args):
     if current is None and (_REPO_ROOT / ".git").exists():
         # Fall back to identifying by repo root when cwd is a subdirectory.
         current = next((r for r in repos if r.get("path") and Path(r["path"]).resolve() == _REPO_ROOT.resolve()), None)
+
+    lease = None
+    if current is not None:
+        try:
+            from core.database import get_db_session, ParkLease
+        except ModuleNotFoundError:
+            lease = "unavailable (core.database not importable from this environment)"
+        else:
+            with get_db_session() as db:
+                row = db.query(ParkLease).filter(
+                    ParkLease.repo_id == current["id"], ParkLease.status == "active"
+                ).first()
+                if row is not None:
+                    lease = {
+                        "lease_id": row.id, "host_id": row.host_id,
+                        "branch": row.branch, "session_id": row.session_id,
+                        "heartbeat_at": row.heartbeat_at.isoformat() if row.heartbeat_at else None,
+                    }
+
     emit({
         "cwd": cwd,
         "registered_repo": current["id"] if current else None,
-        "lease": None,
-        "note": "parking/leases not implemented until P3 — this is identity resolution only",
+        "lease": lease,
     }, args)
 
 
@@ -270,6 +404,18 @@ def _build_parser():
 
     psy = sub.add_parser("sync", parents=[parent], help="regenerate disposable bay + workspace bootstrap")
     psy.set_defaults(func=cmd_sync)
+
+    pp = sub.add_parser("park", parents=[parent], help="acquire a write lease on a registered repo")
+    pp.add_argument("repo_id")
+    pp.add_argument("--host", default=None, help="host id from config/estate.yaml (default: this host)")
+    pp.add_argument("--branch", default=None)
+    pp.add_argument("--session", default=None)
+    pp.set_defaults(func=cmd_park)
+
+    pr = sub.add_parser("release", parents=[parent], help="release an active lease on a registered repo")
+    pr.add_argument("repo_id")
+    pr.add_argument("--host", default=None)
+    pr.set_defaults(func=cmd_release)
 
     return p
 
