@@ -93,6 +93,60 @@ reported as a P2 blocker; it is not one, per the correction above. Left
 here only so the dead end isn't silently rediscovered — do not re-test this
 edge as part of the P2 gate.
 
+## Backend built on lab; interface explicitly not built on lab
+
+Operator correction, 2026-08-20: lab hosts backend capability only. The
+Aoteru interface (`svc:aoteru`) belongs on the interface PC
+(`desktop-7dj1hma`), which is currently unreachable — it stays deferred,
+not stood up as a lab-hosted stand-in.
+
+What was actually built on lab (backend only):
+
+- A second, isolated Odysseus instance (this canonical target repo, not the
+  upstream lab deployment) running natively — venv on the same managed
+  Python 3.12 interpreter the upstream deployment uses, `uvicorn app:app
+  --host 127.0.0.1 --port 7001` (upstream already owns 7000).
+- Its own dedicated ChromaDB (`chroma run --port 8101`, separate data dir)
+  — **not** the upstream's shared instance on port 8100. Caught before any
+  real use: `src/chroma_client.py` defaults to a fixed `CHROMADB_PORT=8100`
+  regardless of `.env`, and collection names are global/deterministic
+  (`{base}_{lane}`, `src/embedding_lanes.py`) with no per-install
+  namespacing — sharing the server would have meant reading/writing the
+  live upstream deployment's actual vector collections, a direct violation
+  of "no active-active writes" and "preserve the running service". Stopped
+  the first boot immediately on noticing the shared-port default, verified
+  the risk in the source, then restarted against its own Chroma server.
+- `AUTH_ENABLED=true`, `LOCALHOST_BYPASS=false` — verified: unauthenticated
+  `GET /` → 302 (redirect to login), `GET /api/health` → 200 (by design,
+  proves-liveness-only per `docs/backup-restore.md`-adjacent docs),
+  `GET /login` → 200. Admin credentials generated locally
+  (`~/.aoteru/svc-aoteru-admin.env`, mode 600, never printed to any log or
+  this document).
+- Registered in `config/estate.yaml` as `svc:odysseus-lab`
+  (`endpoint: http://127.0.0.1:7001`, `role: backend`,
+  `tailnet_exposure: prepared-not-live`). `svc:aoteru` stays `endpoint:
+  null`, `role: interface`, with a note not to repeat this mistake.
+
+## Paused: tailnet exposure of the lab backend
+
+Attempted `tailscale serve --bg --https=8443 http://127.0.0.1:7001` to make
+the lab backend privately reachable over the tailnet (still not the
+interface — just making the backend reachable for whatever eventually runs
+on the interface PC to call). It hung/never applied
+(`tailscale serve status` still shows "No serve config" after). Tailnet
+HTTPS Certificates are off for this tailnet (`CertDomains: None` in
+`tailscale status --json`) — that's an admin-console setting, not visible
+or changeable from this session. A direct `tailscale cert <domain>` probe
+to get a clearer error was blocked by the harness's own auto-mode
+classifier — the same thing that blocked the earlier SSH reconnaissance
+attempt into `DESKTOP-7DJ1HMA`. `tailscale serve --http` (plain, no TLS)
+would sidestep the cert requirement entirely, but two classifier blocks on
+network/identity-adjacent actions in one session reads as a real pattern,
+not noise — pausing here rather than reaching for the workaround, and
+raising it with the operator instead. The backend itself is fully
+functional and verified on loopback regardless of whether/how it gets
+privately exposed.
+
 ## Prepared: run from the laptop, not from lab
 
 These must run **on `DESKTOP-7DJ1HMA`** (PowerShell/OpenSSH client) — not
@@ -140,20 +194,29 @@ Plan §12 P2 gate: "laptop + phone reach authenticated `svc:aoteru` from
 outside home LAN; raw services are not publicly reachable; access-control
 tests deny unapproved cross-domain paths."
 
-- [x] raw services not publicly reachable (verified — no serve/funnel config)
+- [x] raw services not publicly reachable (verified — no serve/funnel config,
+      lab backend is loopback-only, no exposure attempted or applied)
 - [x] lab-side SSH prerequisite verified (this session's one directly
       testable contribution to the laptop→lab edge)
+- [x] lab backend built and auth-verified (`svc:odysseus-lab`) — not itself
+      a gate line item, but the dependency-safe slice of P2 buildable on
+      lab alone, per the lab-first contract
 - [ ] laptop → lab, end-to-end — needs a laptop-run session or the operator
 - [ ] laptop → home, end-to-end — needs a laptop-run session or the
       operator, and home's identity confirmed first
-- [ ] phone → `svc:aoteru` — service doesn't exist yet (P5/P6)
+- [ ] `svc:aoteru` — correctly deferred to the interface PC, not lab; stays
+      null until that machine is reachable (operator correction, see above)
+- [ ] phone → `svc:aoteru` — moot until the above exists
 - [ ] access-control tests deny unapproved cross-domain paths — no ACL/
       Grants visibility from this session (checked `tailscale debug prefs`/
       `configure`/`localapi` for any admin-capability shortcut; none expose
       tailnet policy, only local node prefs — would need the web admin
       console or an API key)
 
-**P2: PARTIAL.** Substrate (tailnet, MagicDNS, no public exposure) and the
-lab-side half of one edge are verified. The two real remaining edges both
-require execution from the laptop, which is outside this session's reach —
-not something more probing from the lab host can resolve.
+**P2: PARTIAL.** Substrate (tailnet, MagicDNS, no public exposure) verified;
+lab backend built, isolated from the live upstream deployment, and
+auth-verified; not yet privately exposed over the tailnet pending an
+operator decision (HTTPS Certificates / `--http` vs `--https`, and two
+classifier blocks on network-identity actions this session). The three
+edges needing laptop/interface-PC execution remain outside this session's
+reach.

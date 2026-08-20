@@ -110,6 +110,12 @@ services:
   - id: svc:aoteru
     description: authenticated Aoteru/Odysseus front door
     endpoint: null
+    role: interface
+    notes: >-
+      Corrected 2026-08-20 (operator): belongs on the interface PC
+      (desktop-7dj1hma), not lab. Lab hosts backend capability only. Stays
+      null/deferred until the interface PC is reachable — do not stand up a
+      lab-hosted stand-in and call it svc:aoteru.
   - id: svc:memory
     description: memory broker API (home primary, lab read-cache fallback)
     endpoint: null
@@ -120,8 +126,28 @@ services:
     description: model serving on the home host
     endpoint: null
   - id: svc:odysseus-lab
-    description: Odysseus instance on the lab host
-    endpoint: null
+    description: Odysseus backend instance on the lab host (API/jobs/memory/
+      RAG — not the user-facing interface)
+    endpoint: http://127.0.0.1:7001  # loopback only as of this check
+    role: backend
+    tailnet_exposure: prepared-not-live
+    notes: >-
+      Running natively (venv, uvicorn, port 7001; upstream lab deployment
+      already owns 7000). Own dedicated ChromaDB on 127.0.0.1:8101 —
+      collection names are global/deterministic (src/chroma_client.py), so
+      sharing port 8100 with the upstream deployment would mean writing
+      into its live vector collections; kept fully separate instead.
+      AUTH_ENABLED=true, LOCALHOST_BYPASS=false, verified (unauthenticated
+      GET / -> 302, /api/health -> 200 unauthenticated by design).
+      Not yet exposed over the tailnet: `tailscale serve --https` requires
+      the tailnet's HTTPS Certificates feature (admin-console setting, not
+      visible/enabled from this session — `CertDomains: None`), and a
+      direct `tailscale cert` attempt was blocked by the harness's own
+      auto-mode classifier. Plain `tailscale serve --http` would sidestep
+      the cert requirement but network/identity actions have now been
+      classifier-blocked twice this session (SSH reconnaissance earlier,
+      cert issuance here) — treating that as a pattern to get explicit
+      operator sign-off on, not route around.
   - id: svc:odysseus-home
     description: Odysseus instance on the home host
     endpoint: null
