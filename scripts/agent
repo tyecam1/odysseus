@@ -294,26 +294,14 @@ def _resolve_target_host(mode: str, estate: dict, live_hostname: str) -> dict | 
 
 
 def _host_reachable(host: dict, live_hostname: str) -> tuple[bool, str]:
-    """No assumptions: this host is reachable by construction; anything
-    else needs a real, bounded network probe. `home` genuinely failing
-    this check (not a tailnet member, or SSH unreachable) is the contract's
+    """Delegates to src.estate_router.host_reachable (Phase B, docs/aoteru-
+    model-host-routing-contract.md) — that module is now the one place
+    this check lives; a second copy here would be exactly the duplicate
+    routing authority the contract forbids. `home` genuinely failing this
+    check (not a tailnet member, or SSH unreachable) is the contract's
     "home must fail truthfully as unavailable" requirement, not a bug."""
-    if host.get("hostname") == live_hostname:
-        return True, "this host"
-    if not host.get("tailscale"):
-        return False, f"{host['id']!r} is not a tailnet member"
-    dns = host.get("tailscale_dns")
-    if not dns:
-        return False, f"{host['id']!r} has no tailscale_dns recorded in config/estate.yaml"
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(4)
-    try:
-        s.connect((dns, 22))
-        return True, "SSH port reachable over the tailnet"
-    except OSError as e:
-        return False, f"unreachable: {e}"
-    finally:
-        s.close()
+    from src.estate_router import host_reachable
+    return host_reachable(host, live_hostname)
 
 
 def cmd_claude(args):

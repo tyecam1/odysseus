@@ -851,6 +851,42 @@ class LogicalSession(TimestampMixin, Base):
     )
 
 
+class RoutingDecision(TimestampMixin, Base):
+    """Per-task routing telemetry (docs/aoteru-model-host-routing-contract.md
+    "Continuous improvement contract", Phase B). One row per routed task —
+    not a second job/queue system alongside `ScheduledTask`/`TaskRun`
+    (routes/task_routes.py), which is cron/event automation, a different
+    concern from ad-hoc model+host routing decisions.
+
+    This is deliberately a plain outcome log, not yet the full
+    replay/shadow evaluator the contract describes — that needs enough
+    accumulated rows to be meaningful, which doesn't exist on day one.
+    """
+    __tablename__ = "routing_decisions"
+
+    id                    = Column(String, primary_key=True, index=True)
+    task_class            = Column(String, nullable=False, index=True)
+    complexity            = Column(String, nullable=True)  # trivial | routine | hard | frontier
+    consequence           = Column(String, nullable=True)  # low | medium | high
+    host_id               = Column(String, nullable=False, index=True)
+    executor              = Column(String, nullable=False)  # deterministic | local | codex | claude
+    model_alias           = Column(String, nullable=True)
+    concrete_model        = Column(String, nullable=True)
+    context_tokens        = Column(Integer, nullable=True)
+    paid_tokens           = Column(Integer, nullable=True)
+    latency_ms            = Column(Integer, nullable=True)
+    deterministic_gate    = Column(String, nullable=True)  # pass | fail | n/a
+    retries               = Column(Integer, nullable=False, default=0)
+    escalated             = Column(Boolean, nullable=False, default=False)
+    escalation_reason     = Column(String, nullable=True)
+    verification_outcome  = Column(String, nullable=True)
+    status                = Column(String, nullable=False)  # complete | blocked | failed | needs_escalation
+
+    __table_args__ = (
+        Index('ix_routing_decisions_class_host', 'task_class', 'host_id'),
+    )
+
+
 class Memory(Base):
     """
     SQLAlchemy model for Memory table.

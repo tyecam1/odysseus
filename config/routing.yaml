@@ -1,0 +1,62 @@
+# Aoteru estate — central routing policy (Phase B,
+# docs/aoteru-model-host-routing-contract.md).
+#
+# Genuinely new surface — confirmed missing by a targeted audit before this
+# file was written (nothing in ModelEndpoint/misumi_task_router.py/
+# llm_core.py/model_capabilities.py/teacher_escalation.py owns policy like
+# this). Extends config/models.yaml (aliases/candidates) and
+# config/estate.yaml (hosts/services); does not duplicate either.
+
+# Host eligibility mirrors config/estate.yaml's `role` field exactly — this
+# file does not re-derive host state, it reads it. Kept here only as the
+# routing-specific interpretation of that state.
+host_eligibility:
+  interface:
+    execution_worker: false  # human control surface, never a routing target
+  lab:
+    execution_worker: true
+  home:
+    execution_worker: true
+    # Never hardcode this true from prose. Real eligibility is computed at
+    # request time from config/estate.yaml's desktop-in7o23d entry
+    # (verified/tailscale fields) — this block only documents intent.
+
+# Evidence-triggered escalation only — never a vague "difficulty" judgment.
+escalation_triggers:
+  - deterministic_gate_failed
+  - worker_failed
+  - insufficient_capability
+  - confidence_below_threshold
+  - unresolved_ambiguity
+  - conflicting_evidence
+  - context_limit
+  - quality_floor_not_met
+
+# Quality floors per task_class. Empty/null until real benchmark evidence
+# (beyond P7's single-prompt measurements) supports a number — an
+# unevidenced floor would just be a made-up gate that looks rigorous
+# without being true.
+quality_floors:
+  default: null
+
+# Budgets are per-request ceilings a task envelope may set; these are
+# estate-wide defaults, overridable per task. Null = no default cap yet
+# (no paid provider is configured in this lab-first instance to have a
+# budget over).
+budget_defaults:
+  max_worker_calls: 3
+  max_paid_calls: null
+  max_frontier_calls: null
+  max_context_tokens: null
+
+# Independent verification preference order (contract's "Independent
+# verification" section) — cross-provider first when it matters, same
+# provider only when cross-provider isn't available/justified.
+verification_preference:
+  - cross_provider
+  - same_provider_independent_pass
+  - deterministic_only
+
+exploration:
+  enabled: false  # no incumbent/candidate route history exists yet to explore against
+  high_consequence_exploration: false

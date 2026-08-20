@@ -785,6 +785,12 @@ app.include_router(setup_misumi_routes(
 from routes.misumi_operator_runtime_routes import setup_misumi_operator_runtime_routes
 app.include_router(setup_misumi_operator_runtime_routes())
 
+# Central model+host routing authority (docs/aoteru-model-host-routing-
+# contract.md, Phase B). Odysseus-owned, domain-neutral - not part of the
+# Misumi compatibility surface above.
+from routes.estate_routing_routes import setup_estate_routing_routes
+app.include_router(setup_estate_routing_routes())
+
 # Calendar (CalDAV)
 from routes.calendar_routes import setup_calendar_routes
 calendar_router = setup_calendar_routes(upload_handler=upload_handler)
