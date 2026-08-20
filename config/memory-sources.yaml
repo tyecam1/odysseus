@@ -9,12 +9,17 @@ sources:
   - id: misumi-capsules
     description: existing Misumi capsule/open-loop/handoff memory
     domain: misumi
-    status: planned
+    status: active
+    path: src/misumi_memory.py
     note: >-
-      Reuse target named in plan section 6.1 (src/misumi_memory.py) was not
-      found on this host during P0 — see docs/aoteru-estate-p0-evidence.md.
-      Must be located (likely inside the separate misumi repo) before this
-      adapter can be built.
+      Corrected 2026-08-20 (P4 start): this exists in the target repo —
+      `MisumiMemory`, append-only JSONL at `data/misumi/memory/
+      {capsules,open_loops,handoffs}.jsonl`, fold-to-latest-by-id. P0's
+      earlier "not found" claim was an audit error (only the upstream repo
+      was ever grepped) — see the correction in
+      docs/aoteru-estate-p0-evidence.md. This is P4's actual memory
+      authority; P4 extends it (source_event linking) rather than
+      replacing it.
 
   - id: claude-code-sessions
     description: Claude Code transcript/session hook events

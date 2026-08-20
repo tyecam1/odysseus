@@ -106,15 +106,27 @@ target has **123** extra files (new routes: `misumi_routes.py`,
 | Agent tool surface | upstream: single `src/agent_tools.py` (140 lines); target: `src/agent_tools/` package (10 modules incl. `admin_tools.py`, `document_tools.py`, `filesystem_tools.py`, `session_tools.py`, `subprocess_tools.py`, `web_tools.py`, `bg_job_tools.py`) | target | **KEEP** (target is a superset expansion, not a fork-divergence) | `wc -l`/dir listing comparison |
 | MCP shared helpers (`mcp_servers/_common.py`) | present upstream only (`truncate()`, timeout constants); grepped and **zero** upstream files import it | none — dead code upstream | **RETIRE** (upstream-side only; nothing to port) | `grep -l _common mcp_servers/*.py` in upstream matches only the file itself |
 | Misumi persona/routing, memory routes, research, gallery, contacts, history, BBC, ChatGPT subscription, device flow | target only | target | **KEEP** (already estate-native; upstream has no equivalent) | file-diff list above |
-| Misumi JSONL memory (`src/misumi_memory.py` per canonical plan §6.1) | not found in either repo's `src/`; no `*.jsonl` anywhere under either repo; no `misumi` string match in upstream `src/` at all | **does not exist yet on this host** | **NEW required** (plan §6.1 reuse target doesn't exist here — likely lives only in the separate `misumi` repo, which is absent) | `grep -ril misumi src/`, `find -iname '*.jsonl'` both empty upstream; target's `routes/misumi_routes.py` exists but is a routes layer, not the memory capsule model itself — needs direct inspection before P4 |
+| Misumi JSONL memory (`src/misumi_memory.py` per canonical plan §6.1) | **CORRECTED at P4 start (2026-08-20): exists in target**, `src/misumi_memory.py`, 365 lines — full capsule/open-loop/handoff model, append-only JSONL at `data/misumi/memory/{capsules,open_loops,handoffs}.jsonl`, fold-to-latest-by-id | target (`odysseus-aoteru`) | **KEEP/EXTEND** — this was a real audit error, not a missing capability; see correction note below | `wc -l src/misumi_memory.py`, direct read of the file |
 
 Net finding: in the directories audited, the Aoteru target is already the
 capability-ahead repo. This phase found **no upstream feature requiring
-port/wrap** and **no duplication to retire on the target side**. The one
-open item is that plan §6.1's named reuse target (`src/misumi_memory.py`)
-does not exist under this name in either repo present on this host — P4 must
-locate the real capsule/open-loop implementation (likely `routes/misumi_routes.py`
-+ backing store, or the absent `misumi` repo) before deciding reuse vs. new.
+port/wrap** and **no duplication to retire on the target side**.
+
+**Correction (2026-08-20, at P4 start):** the row above originally claimed
+`src/misumi_memory.py` "does not exist in either repo." That was a real
+audit error, not a genuine gap — the evidence cited (`grep -ril misumi
+src/`, `find -iname '*.jsonl'`) was only ever run against the **upstream**
+repo (`/home/agent/projects/odysseus`); this repo's own `src/` was never
+grepped for the file directly, and the conclusion overreached past what was
+actually tested. A P4 memory-capability audit (fork, then verified directly
+by reading the file) found it fully present: capsule types
+(`observation/decision/inventory/blocker/preference/open_loop/
+experiment_result/note`), 11 named personas, routing/classification
+heuristics, and fold-by-id JSONL persistence — exactly plan §6.1's reuse
+target. `config/memory-sources.yaml`'s `misumi-capsules` entry corrected to
+match. P4 proceeds as **KEEP/EXTEND**, not **NEW**, for the memory
+authority itself; see `docs/aoteru-estate-p4-evidence.md` for what's
+genuinely new (source-event/relation tracking, which really is missing).
 
 ## Gate
 
