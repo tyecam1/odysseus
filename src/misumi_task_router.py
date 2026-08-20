@@ -24,6 +24,26 @@ RANKING = (
 )
 
 
+def _recommended_executor(selected: Dict[str, object]) -> object:
+    """P8 domain convergence: this used to be a hardcoded `"Codex"` string
+    — exactly the kind of competing host/model-selection policy
+    docs/aoteru-model-host-routing-contract.md's invariant 1 forbids.
+    Routes through the one central authority (src.estate_router) instead.
+    Implementation work defaults to the `code-strong` capability; if
+    nothing is bound yet (see config/models.yaml), this reports that
+    honestly rather than falling back to a hardcoded brand."""
+    try:
+        from src.estate_router import resolve_route
+    except ImportError:
+        return {"resolved": False, "reason": "estate_router unavailable"}
+    route = resolve_route({
+        "task_class": "household-task-implementation",
+        "complexity": "routine",
+        "requirements": {"capabilities": ["code-strong"]},
+    })
+    return route.get("route", {"resolved": False, "reason": route.get("error", "unresolved")})
+
+
 def _frontmatter(text: str) -> Dict[str, str]:
     if not text.startswith("---"):
         return {}
@@ -150,6 +170,7 @@ class MisumiTaskRouter:
             f"Implement {selected['path']} in its owning repository. Preserve Phase A read-only household access, "
             f"follow the referenced contracts, run focused tests, and report files changed and rollback steps."
         )
+        recommended_route = _recommended_executor(selected)
         return {
             "status": "blocked" if blockers else "planned",
             "summary": f"Recommended {selected['title']} as the highest-ranked safe task.",
@@ -164,7 +185,7 @@ class MisumiTaskRouter:
             "blockers": blockers,
             "blocked_by": blockers,
             "safe_to_execute_now": False,
-            "recommended_executor": "Codex",
+            "recommended_executor": recommended_route,
             "handoff_prompt": handoff,
             "next_human_action": "Resolve the listed blocker." if blockers else None,
             "source": "odysseus-task-router",
