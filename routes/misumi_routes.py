@@ -111,6 +111,7 @@ class MisumiMemoryCaptureRequest(BaseModel):
     entities: List[str] = Field(default_factory=list)
     next_action: Optional[str] = None
     meta: Dict[str, object] = Field(default_factory=dict)
+    source_event_id: Optional[str] = None
 
 
 class MisumiMemoryRouteRequest(BaseModel):
@@ -120,6 +121,18 @@ class MisumiMemoryRouteRequest(BaseModel):
 
 class MisumiMemoryCloseRequest(BaseModel):
     resolution: Optional[str] = None
+
+
+class SourceEventRequest(BaseModel):
+    """Provenance record (canonical plan §6.2 / P4) — create one of these
+    first, then pass its id as `source_event_id` to /memory/capture so a
+    capsule can be traced back to where it came from."""
+    source: str
+    external_id: Optional[str] = None
+    content_hash: Optional[str] = None
+    domain: str = "neutral"
+    sensitivity: str = "normal"
+    payload: Optional[str] = None
 
 
 class MisumiHandoffRequest(BaseModel):
@@ -1187,7 +1200,7 @@ def setup_misumi_routes(
         return memory_call(
             memory.capture, body.text, source=body.source, capsule_type=body.type,
             persona=body.persona, entities=body.entities, next_action=body.next_action,
-            meta=body.meta,
+            meta=body.meta, source_event_id=body.source_event_id,
         )
 
     @router.get("/memory/inbox")
@@ -1227,6 +1240,60 @@ def setup_misumi_routes(
     async def close_memory(request: Request, capsule_id: str, body: Optional[MisumiMemoryCloseRequest] = None):
         _require_api_scope(request, "misumi:execute")
         return memory_call(memory.close, capsule_id, body.resolution if body else None)
+
+    @router.get("/memory/{capsule_id}/history")
+    async def memory_history(request: Request, capsule_id: str):
+        """Every revision ever appended for this capsule, oldest first —
+        the trail plan §6.2's memory_revision item asks for, read directly
+        off the existing JSONL log rather than a second store (P4)."""
+        _require_api_scope(request, "misumi:read")
+        versions = memory.history("capsules", capsule_id)
+        if not versions:
+            raise HTTPException(404, "Memory record not found")
+        return {"capsule_id": capsule_id, "versions": versions}
+
+    @router.post("/memory/source-events")
+    async def create_source_event(request: Request, body: SourceEventRequest):
+        _require_api_scope(request, "misumi:execute")
+        from core.database import SourceEvent, get_db_session
+        import uuid as _uuid
+
+        event_id = str(_uuid.uuid4())
+        with get_db_session() as db:
+            db.add(SourceEvent(
+                id=event_id, source=body.source, external_id=body.external_id,
+                content_hash=body.content_hash, domain=body.domain,
+                sensitivity=body.sensitivity, payload=body.payload,
+            ))
+        return {"id": event_id}
+
+    @router.get("/memory/{capsule_id}/source-trace")
+    async def memory_source_trace(request: Request, capsule_id: str):
+        """plan §7.1's source_trace: the capsule plus the source_event it
+        was captured from (if any) and any explicit relations pointing at
+        it — not a new authority, a read across the two stores."""
+        _require_api_scope(request, "misumi:read")
+        from core.database import SourceEvent, MemoryRelation, get_db_session
+
+        capsule = memory_call(memory.get_capsule, capsule_id)
+        source_event = None
+        event_id = capsule.get("source_event_id")
+        with get_db_session() as db:
+            if event_id:
+                row = db.query(SourceEvent).filter(SourceEvent.id == event_id).first()
+                if row is not None:
+                    source_event = {
+                        "id": row.id, "source": row.source, "external_id": row.external_id,
+                        "content_hash": row.content_hash, "domain": row.domain,
+                        "sensitivity": row.sensitivity, "payload": row.payload,
+                    }
+            relations = [
+                {"predicate": r.predicate, "object_type": r.object_type, "object_id": r.object_id}
+                for r in db.query(MemoryRelation).filter(
+                    MemoryRelation.subject_type == "capsule", MemoryRelation.subject_id == capsule_id,
+                ).all()
+            ]
+        return {"capsule_id": capsule_id, "source_event": source_event, "relations": relations}
 
     @router.post("/handoff")
     async def create_handoff(request: Request, body: MisumiHandoffRequest):

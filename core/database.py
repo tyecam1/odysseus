@@ -775,6 +775,55 @@ class ParkLease(TimestampMixin, Base):
     )
 
 
+class SourceEvent(TimestampMixin, Base):
+    """Provenance record for Aoteru memory (canonical plan §6.2 / P4).
+
+    NOT a new memory-authority table — `src/misumi_memory.py`'s JSONL
+    capsule/open-loop/handoff store remains the actual memory (see P0/P4
+    correction in docs/aoteru-estate-p0-evidence.md; that file already
+    existed and was wrongly reported missing). This table only answers
+    "where did this memory fact come from" — a capsule optionally carries
+    `source_event_id` linking back here. `content_hash` lets an ingest
+    adapter (Claude Code sessions, ChatGPT export, etc. — plan §6.6) dedupe
+    without re-importing the same event twice.
+    """
+    __tablename__ = "source_events"
+
+    id            = Column(String, primary_key=True, index=True)
+    source        = Column(String, nullable=False, index=True)   # e.g. "chat", "claude-code-session", "import"
+    external_id   = Column(String, nullable=True, index=True)    # stable id in the originating system, if any
+    content_hash  = Column(String, nullable=True, index=True)    # for incremental/idempotent ingest
+    domain        = Column(String, nullable=False, default="neutral")  # misumi | obsidian-phd | neutral | ...
+    sensitivity   = Column(String, nullable=False, default="normal")
+    payload       = Column(Text, nullable=True)  # small pointer/excerpt, not the full source content
+
+    __table_args__ = (
+        Index('ix_source_events_source_external', 'source', 'external_id'),
+    )
+
+
+class MemoryRelation(TimestampMixin, Base):
+    """Typed link between two memory-adjacent things (canonical plan §6.2 /
+    P4's `relation` table). Subject/object are (type, id) pairs rather than
+    foreign keys, since they may point at JSONL capsule/open_loop/handoff
+    ids (not SQL rows) as well as `source_events` rows — this table indexes
+    across both stores rather than becoming a second authority for either.
+    """
+    __tablename__ = "memory_relations"
+
+    id           = Column(String, primary_key=True, index=True)
+    subject_type = Column(String, nullable=False)  # capsule | open_loop | handoff | source_event
+    subject_id   = Column(String, nullable=False, index=True)
+    predicate    = Column(String, nullable=False)  # e.g. derived_from, supersedes, relates_to
+    object_type  = Column(String, nullable=False)
+    object_id    = Column(String, nullable=False, index=True)
+
+    __table_args__ = (
+        Index('ix_memory_relations_subject', 'subject_type', 'subject_id'),
+        Index('ix_memory_relations_object', 'object_type', 'object_id'),
+    )
+
+
 class Memory(Base):
     """
     SQLAlchemy model for Memory table.

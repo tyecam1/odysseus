@@ -38,7 +38,7 @@ def test_capture_without_model_preserves_raw_text_verbatim(tmp_path):
     assert set(capsule) == {
         "id", "created", "updated", "raw_text", "summary", "type", "confidence",
         "source", "persona_primary", "persona_secondary", "entities", "next_action",
-        "status", "human_confirmed", "meta",
+        "status", "human_confirmed", "meta", "source_event_id",
     }
 
 

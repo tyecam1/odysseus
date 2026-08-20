@@ -186,6 +186,7 @@ class MisumiMemory:
         entities: Optional[Iterable[str]] = None,
         next_action: Optional[str] = None,
         meta: Optional[Dict[str, object]] = None,
+        source_event_id: Optional[str] = None,
     ) -> Dict[str, object]:
         if not isinstance(text, str) or not text.strip():
             raise ValueError("text must be non-empty")
@@ -205,6 +206,10 @@ class MisumiMemory:
             "persona_primary": primary, "persona_secondary": secondary,
             "entities": entity_list, "next_action": next_action,
             "status": "open", "human_confirmed": False, "meta": dict(meta or {}),
+            # Optional provenance link into core.database.SourceEvent (P4,
+            # plan §6.2). Absent on records captured before this field
+            # existed — every reader must use .get(), never index directly.
+            "source_event_id": source_event_id,
         }
         if "remember" in text.lower():
             record["meta"]["human_confirmation_suggested"] = True
@@ -261,6 +266,31 @@ class MisumiMemory:
         if not found:
             raise KeyError(record_id)
         return found
+
+    def history(self, store: str, record_id: str) -> List[Dict[str, object]]:
+        """Every raw version ever appended for `record_id`, oldest first —
+        the revision trail `_fold` collapses away. Nothing here overwrites;
+        a correction (`update_capsule`, `confirm`, `reroute`, `close`, ...)
+        is always a new appended line, so this is the actual answer to
+        plan §6.2's "correction supersedes rather than silently overwrites"
+        without needing a separate memory_revision table (P4)."""
+        path = self._path(store)
+        if not path.is_file():
+            return []
+        versions = []
+        with path.open(encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(rec, dict) and rec.get("id") == record_id:
+                    versions.append(rec)
+        return versions
+
+    def get_capsule(self, capsule_id: str) -> Dict[str, object]:
+        """Latest version of one capsule by id. Raises KeyError if unknown."""
+        return self._latest("capsules", capsule_id)
 
     def update_capsule(self, capsule_id: str, **changes: object) -> Dict[str, object]:
         record = dict(self._latest("capsules", capsule_id))
