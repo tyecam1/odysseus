@@ -61,7 +61,18 @@ def host_reachable(host: dict, live_hostname: str) -> tuple[bool, str]:
     """Shared with `scripts/agent`, which imports this function directly
     rather than maintaining its own copy — a second, slightly-different
     reachability rule would itself be the kind of duplicate authority the
-    routing contract forbids."""
+    routing contract forbids.
+
+    Explicit `verified: false` (config/estate.yaml) is a hard gate checked
+    before reachability, not after: a host that merely answers on the
+    tailnet is not the same claim as a host whose identity has actually
+    been confirmed (finding: "a newly reachable but unverified home host
+    must never become eligible automatically"). A host with no `verified`
+    key at all defaults to verified — this is the existing lab/interface
+    convention, not a new category; only hosts that explicitly opt out
+    (currently just the home host) are affected."""
+    if host.get("verified", True) is False:
+        return False, f"{host['id']!r} is not verified (config/estate.yaml verified: false) — reachability alone is not sufficient"
     if host.get("hostname") == live_hostname:
         return True, "this host"
     if not host.get("tailscale"):
@@ -96,13 +107,22 @@ def eligible_hosts(repo_id: Optional[str] = None) -> list[dict]:
         reachable, reason = host_reachable(host, live_hostname)
         entry = {"host_id": host["id"], "role": host.get("role"), "eligible": reachable, "reason": reason}
         if reachable and repo_id:
-            from core.database import ParkLease, get_db_session
+            from core.database import ParkLease, get_db_session, park_lease_is_stale
             with get_db_session() as db:
                 conflicting = db.query(ParkLease).filter(
                     ParkLease.repo_id == repo_id,
                     ParkLease.status == "active",
                     ParkLease.host_id != host["id"],
                 ).first()
+                # A stale lease (holder crashed/killed, heartbeat never
+                # renewed — see park_lease_is_stale) does not get to block
+                # routing forever; only a lease that is still actually
+                # alive widens no other host's write authority (invariant
+                # 10 is about live conflicts, not abandoned ones). This is
+                # a read-only check — reclaiming the row itself still only
+                # happens through `agent park`'s explicit reclaim path.
+                if conflicting is not None and park_lease_is_stale(conflicting):
+                    conflicting = None
             if conflicting is not None:
                 entry["eligible"] = False
                 entry["reason"] = f"repo {repo_id!r} is parked on {conflicting.host_id!r}, not here"
@@ -189,6 +209,12 @@ def _record_decision(task: dict, *, host_id, executor, model_alias, concrete_mod
     return decision_id
 
 
+_UNVERIFIABLE_BUDGET_FIELDS = (
+    "max_worker_calls", "max_paid_calls", "max_frontier_calls",
+    "max_context_tokens", "latency_priority",
+)
+
+
 def resolve_route(task: dict) -> dict:
     """The routing API: canonical task envelope in, route out (docs/
     aoteru-model-host-routing-contract.md's "Canonical task envelope" /
@@ -196,17 +222,53 @@ def resolve_route(task: dict) -> dict:
     Records the decision to `routing_decisions` regardless of outcome —
     even a failed/blocked resolution is telemetry.
 
-    Only the fields actually used by this lab-first implementation are
-    required: `task_class` (str), optional `repo`, optional
-    `requirements.capabilities` (list of alias names — only the first is
-    used today; multi-capability tasks are future work). Everything else
-    in the contract's full envelope schema is accepted and ignored rather
-    than rejected, so callers can send the full envelope now without this
-    module needing to understand every field yet.
+    Recognizes, beyond `task_class`/`repo`/`requirements.capabilities`:
+
+    - `placement.requested_host`: an explicit non-"auto" value narrows
+      eligibility to that host and fails truthfully (not a silent
+      fallback to whatever else is eligible) if it isn't eligible —
+      silently substituting a different host would violate the caller's
+      explicit constraint.
+    - `requirements.capabilities` (plural): *every* requested alias must
+      resolve, not just the first — a task needing two capabilities where
+      only one is bound is not actually routable.
+    - `requirements.context_tokens`: checked against the resolved model's
+      *known* context window (`src.model_context.get_context_length_known`
+      — same "known vs fallback" distinction that module already draws)
+      when a local alias is resolved; an unknown window is reported as
+      unverified, never silently assumed adequate.
+    - `routing.quality_floor`: config/models.yaml carries no numeric
+      quality score (P7's evidence is single-prompt prose, not a
+      benchmarked floor) — an explicit floor request always fails
+      truthfully as unverifiable rather than fabricating a pass.
+    - `budget.*`: no call/quota accounting exists yet in this lab-first
+      slice; any budget field present is reported back under
+      `unverified_constraints` rather than silently ignored, so a caller
+      can see plainly that it wasn't actually enforced.
+
+    Everything else in the contract's full envelope schema is accepted
+    and ignored rather than rejected, so callers can send the real
+    envelope now without this module needing to understand every field.
     """
     repo_id = task.get("repo")
     hosts = eligible_hosts(repo_id)
     eligible = [h for h in hosts if h["eligible"]]
+
+    requested_host = (task.get("placement") or {}).get("requested_host")
+    if requested_host and requested_host != "auto":
+        narrowed = [h for h in eligible if h["host_id"] == requested_host or h["role"] == requested_host]
+        if not narrowed:
+            decision_id = _record_decision(
+                task, host_id=None, executor="none", model_alias=None,
+                concrete_model=None, status="blocked",
+            )
+            return {
+                "ok": False,
+                "error": f"requested host {requested_host!r} is not eligible",
+                "hosts_checked": hosts,
+                "decision_id": decision_id,
+            }
+        eligible = narrowed
 
     if not eligible:
         decision_id = _record_decision(
@@ -227,12 +289,47 @@ def resolve_route(task: dict) -> dict:
     host = eligible[0]
 
     capabilities = (task.get("requirements") or {}).get("capabilities") or []
+    capability_resolutions = [resolve_alias(a) for a in capabilities]
     alias = capabilities[0] if capabilities else None
-    alias_result = resolve_alias(alias) if alias else {"resolved": False, "reason": "no capability requested"}
+    alias_result = capability_resolutions[0] if capability_resolutions else {
+        "resolved": False, "reason": "no capability requested",
+    }
+    all_resolved = bool(capability_resolutions) and all(r.get("resolved") for r in capability_resolutions)
 
-    if alias is None:
+    unverified_constraints = [
+        f"budget.{field}" for field in _UNVERIFIABLE_BUDGET_FIELDS
+        if (task.get("budget") or {}).get(field) is not None
+    ]
+
+    quality_floor = (task.get("routing") or {}).get("quality_floor")
+    quality_floor_error = None
+    if quality_floor:
+        # Never fabricate a quality floor pass: config/models.yaml has no
+        # benchmarked numeric quality score to check it against.
+        quality_floor_error = (
+            f"quality_floor {quality_floor!r} requested but no benchmarked quality "
+            f"score exists in config/models.yaml to verify it against"
+        )
+
+    context_tokens = (task.get("requirements") or {}).get("context_tokens")
+    context_error = None
+    context_note = None
+    if context_tokens and alias and alias_result.get("resolved"):
+        from src.model_context import get_context_length_known
+        window, known = get_context_length_known(_OLLAMA_BASE, alias_result["concrete_model"])
+        if known and context_tokens > window:
+            context_error = (
+                f"requirements.context_tokens={context_tokens} exceeds "
+                f"{alias_result['concrete_model']!r}'s known context window of {window}"
+            )
+        elif not known:
+            context_note = f"requested context_tokens={context_tokens} could not be verified (unknown context window)"
+
+    if not capabilities:
         executor, status = "deterministic", "complete"
-    elif alias_result.get("resolved"):
+    elif quality_floor_error or context_error:
+        executor, status = "none", "needs_escalation"
+    elif all_resolved:
         executor, status = "local", "complete"
     else:
         executor, status = "none", "needs_escalation"
@@ -242,7 +339,7 @@ def resolve_route(task: dict) -> dict:
         concrete_model=alias_result.get("concrete_model"), status=status,
     )
 
-    return {
+    result = {
         "ok": status != "needs_escalation",
         "route": {
             "host": host["host_id"],
@@ -252,5 +349,116 @@ def resolve_route(task: dict) -> dict:
         },
         "hosts_checked": hosts,
         "alias_resolution": alias_result,
+        "capability_resolutions": capability_resolutions,
         "decision_id": decision_id,
     }
+    if quality_floor_error:
+        result["quality_floor_error"] = quality_floor_error
+    if context_error:
+        result["context_error"] = context_error
+    if context_note:
+        result["context_note"] = context_note
+    if unverified_constraints:
+        result["unverified_constraints"] = unverified_constraints
+    return result
+
+
+def _update_decision_outcome(decision_id: str, *, status: str, deterministic_gate: str,
+                             latency_ms: Optional[int] = None, escalation_reason: Optional[str] = None) -> None:
+    """Execution happens after `resolve_route()` already wrote its
+    decision row — update that same row with the real outcome rather than
+    writing a second telemetry row for one routed task (`RoutingDecision`
+    is 'one row per routed task', not one row per stage). Same
+    swallow-and-log discipline as `_record_decision`: a telemetry update
+    failing must not turn an actually-successful execution into a
+    reported failure."""
+    if decision_id.startswith("decision-unrecorded-"):
+        return  # the routing write itself already failed; nothing to update
+    from core.database import RoutingDecision, get_db_session
+    try:
+        with get_db_session() as db:
+            row = db.query(RoutingDecision).filter(RoutingDecision.id == decision_id).first()
+            if row is not None:
+                row.status = status
+                row.deterministic_gate = deterministic_gate
+                if latency_ms is not None:
+                    row.latency_ms = latency_ms
+                if escalation_reason is not None:
+                    row.escalation_reason = escalation_reason
+    except Exception:
+        import logging
+        logging.getLogger(__name__).exception("routing_decisions outcome update failed; execution result is unaffected")
+
+
+def execute_local(concrete_model: str, objective: str, *, timeout: float = 60.0) -> dict:
+    """WHAT actually happens once WHERE+WHAT have been resolved: the one
+    provider-neutral bounded execution/result path this lab-first slice
+    can run for real right now (no claude/codex binary or paid
+    ModelEndpoint available — see scripts/agent's cmd_claude). Reuses
+    `src.llm_core.llm_call` — the actual provider-call layer — rather than
+    a second HTTP client living in this module; "provider-neutral" because
+    `llm_call` already dispatches on URL shape, so a future non-Ollama
+    local runtime needs no new code here. Bounded by `timeout` (llm_call's
+    own `timeout` kwarg) so a hung/slow local model can't hang the caller
+    indefinitely; every failure mode (timeout, connection refused,
+    malformed upstream response) is caught and returned as a clean
+    `{"ok": False, "error": ...}` rather than a raised exception, matching
+    every other truthful-failure surface in this module."""
+    from fastapi import HTTPException
+
+    from src.llm_core import llm_call
+
+    import time
+    messages = [{"role": "user", "content": objective}]
+    started = time.monotonic()
+    try:
+        output = llm_call(_OLLAMA_BASE, concrete_model, messages, timeout=int(timeout))
+    except HTTPException as e:
+        return {"ok": False, "error": f"{e.status_code}: {e.detail}",
+                "latency_ms": int((time.monotonic() - started) * 1000)}
+    except Exception as e:
+        return {"ok": False, "error": str(e), "latency_ms": int((time.monotonic() - started) * 1000)}
+    return {"ok": True, "output": output, "latency_ms": int((time.monotonic() - started) * 1000)}
+
+
+def run_task(task: dict) -> dict:
+    """Closes the execution gap: `resolve_route()` alone only answers
+    WHERE+WHAT, it never calls a model. `run_task()` routes first (same
+    `resolve_route()`, unchanged — deterministic-first and parking/domain
+    gates are untouched), then actually executes when the resolved
+    executor is `local`, the only executor with a real, live runtime in
+    this environment. A `deterministic` route has no model to call and is
+    returned as `executed: False` (there was nothing to execute — the
+    route itself already is the answer, same as before this function
+    existed); a `needs_escalation` route is returned unexecuted for the
+    same honest reason `resolve_route()` already gives — no adequate
+    route exists yet, and this module does not invent a Claude/Codex
+    execution path where none is available.
+
+    The deterministic gate applied to a local execution result is
+    intentionally minimal and does not fabricate a quality floor (that
+    would need real benchmark evidence, per config/models.yaml's own
+    convention) — it only checks the model actually returned a non-empty
+    response, the cheapest real signal available before any task-specific
+    verification exists.
+    """
+    route = resolve_route(task)
+    executor = (route.get("route") or {}).get("executor")
+    if executor != "local":
+        return {**route, "executed": False}
+
+    concrete_model = route["route"]["concrete_model"]
+    objective = task.get("objective")
+    if not objective:
+        return {**route, "executed": False, "execution_error": "no objective provided to execute"}
+
+    result = execute_local(concrete_model, objective)
+    gate = "pass" if result.get("ok") and (result.get("output") or "").strip() else "fail"
+    _update_decision_outcome(
+        route["decision_id"],
+        status="complete" if gate == "pass" else "failed",
+        deterministic_gate=gate,
+        latency_ms=result.get("latency_ms"),
+        escalation_reason=None if gate == "pass" else "worker_failed",
+    )
+    return {**route, "executed": True, "execution": result, "deterministic_gate": gate}

@@ -2,7 +2,7 @@
 title: Aoteru lab-first operator guide
 status: operator-doc
 owner: odysseus
-as_of: 2026-08-20
+as_of: 2026-08-21
 parent: docs/aoteru-long-horizon-sonnet-followup.md
 ---
 
@@ -34,12 +34,13 @@ Run from the repo root with the venv active (`source venv/bin/activate`):
 agent status              # live host + registry resolution
 agent where                # current repo's registry identity + active lease
 agent sync                 # regenerate bay/workspace/skill bootstraps
-agent park <repo_id>       # acquire a write lease (fails closed on dirty tree / conflict)
+agent park <repo_id>       # acquire a write lease (fails closed on dirty tree / conflict; reclaims a stale one)
 agent release <repo_id>
+agent heartbeat <repo_id>  # renew an active lease's heartbeat_at — run periodically during long work
 agent claude auto "<task>" [--repo ID]   # resolve host+dispatch; home fails truthfully
 agent claude lab "<task>"
-agent claude home "<task>"               # will fail — home isn't on the tailnet yet
-agent claude where                        # active logical sessions
+agent claude home "<task>"               # will fail — home isn't verified/on the tailnet yet
+agent claude where                        # active logical sessions (failed/non-launched sessions no longer show as active)
 ```
 
 ## Querying the routing authority directly
@@ -49,6 +50,11 @@ curl -s http://127.0.0.1:7001/api/estate/route/hosts        # (needs a session c
 curl -s http://127.0.0.1:7001/api/estate/route/alias/local-fast
 curl -s -X POST http://127.0.0.1:7001/api/estate/route \
      -d '{"task_class":"coding","requirements":{"capabilities":["local-fast"]}}'
+
+# actually executes the resolved route (local executor only — no
+# claude/codex binary/credentials available in this environment):
+curl -s -X POST http://127.0.0.1:7001/api/estate/run \
+     -d '{"task_class":"coding","objective":"say pong","requirements":{"capabilities":["local-fast"]}}'
 ```
 
 Bound aliases today: `local-fast` → `qwen3:8b`, `local-strong` →
@@ -58,6 +64,8 @@ Bound aliases today: `local-fast` → `qwen3:8b`, `local-strong` →
 correctly reported as such rather than guessed.
 
 ## Restarting the service
+
+Manual (works today, same as before):
 
 ```bash
 # find and stop it
@@ -69,13 +77,23 @@ nohup python -m uvicorn app:app --host 127.0.0.1 --port 7001 > logs/svc-aoteru.l
 disown
 ```
 
-**Known gap**: this is not yet a systemd service, so it will not survive a
-host reboot automatically. Installing one needs `sudo` (a systemd unit
-template already exists at `odysseus-ui.service`/`install-service.sh` in
-this repo — adapt the port/paths), which this session couldn't run
-(no passwordless sudo). This is the single biggest gap between "lab-first
-cutover" and genuine unattended production persistence — flagged, not
-silently accepted as done.
+**One remaining human action**: a dedicated systemd unit for this exact
+deployment — `odysseus-aoteru-lab.service` in this repo root — has been
+prepared and verified (`systemd-analyze verify` clean; `User=agent`,
+this checkout's own venv, `127.0.0.1:7001` only, never `0.0.0.0`,
+`Restart=on-failure`) but **not installed**, deliberately: installing it
+needs `sudo`, which this session doesn't have. This is *not* a copy of
+the generic `odysseus-ui.service` template — it is fully concrete for
+this host/checkout. To install it:
+
+```bash
+sudo cp odysseus-aoteru-lab.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now odysseus-aoteru-lab.service
+```
+
+Until that one command runs, the service still only survives a process
+restart, not a host reboot — flagged, not silently accepted as done.
 
 ## Rollback
 
@@ -93,19 +111,43 @@ silently accepted as done.
 
 ## Explicit scope — what this cutover is and is not
 
-This is a **lab-first cutover**, not full-estate completion:
+This is a **lab-first execution cutover**, not full-estate completion.
+See `docs/aoteru-estate-p10-evidence.md` for the segment-by-segment chain
+and `docs/aoteru-lab-execution-convergence.md` for this pass's specific
+findings and fixes.
 
 **Works now, verified live:**
 - Estate registry resolution (`agent status`/`where`) — host-agnostic,
   no hardcoded paths.
-- Parking/leases with a real DB-enforced single-writer guarantee.
+- Parking/leases with a real DB-enforced single-writer guarantee, plus
+  heartbeat renewal and stale-lease auto-reclaim (a crashed holder no
+  longer blocks a repo forever).
 - Misumi memory (capsule/open-loop/handoff) with provenance
   (source-event) linking and a real revision trail.
-- Central model+host routing authority, live-checked against Ollama,
-  with per-decision telemetry.
-- Fault handling: truthful failure on unavailable home, auth boundaries,
-  service-restart persistence, malformed-config handling, telemetry-write
-  resilience — all tested live, three real defects found and fixed.
+- Central model+host routing authority, live-checked against Ollama, with
+  per-decision telemetry — validates *every* requested capability (not
+  just the first), honors an explicit requested host, and never
+  fabricates a quality-floor or budget-constraint pass it can't verify.
+- **Actual execution**: `run_task()` / `POST /api/estate/run` routes
+  *and then runs* the task against the resolved local model (reusing
+  `src.llm_core.llm_call`), applies a minimal deterministic gate
+  (non-empty response), and persists the real outcome/latency back to
+  `routing_decisions` — closing the previous "resolves but never
+  executes" gap. Live-tested against the real Ollama server on this
+  host (`qwen3:8b` / `local-fast`).
+- Host eligibility now requires an explicit `verified` flag in addition
+  to reachability — a host that merely answers on the tailnet but was
+  never operator-confirmed (currently `desktop-in7o23d`) cannot become
+  eligible just by becoming reachable.
+- `LogicalSession` rows for a dispatch that never actually launches a
+  process are now written `failed` at creation, and a stale `active` row
+  (crashed wrapper) self-heals via reconciliation — no more permanently
+  "active" phantom sessions.
+- GitHub origin durability: `git push`/`pull` both verified working over
+  HTTPS with stored credentials — commits are no longer local-only.
+- Fault handling: truthful failure on unavailable/unverified home, auth
+  boundaries, service-restart persistence, malformed-config handling,
+  telemetry-write resilience — all tested live.
 
 **Explicitly not working / deferred, not fabricated:**
 - The interface PC (`desktop-7dj1hma`) and home PC (`desktop-in7o23d`,
@@ -113,17 +155,17 @@ This is a **lab-first cutover**, not full-estate completion:
 - `svc:aoteru` (the actual mobile/PWA front door) — belongs on the
   interface PC by design, not stood up here.
 - Claude/Codex execution — no `claude` binary in this environment, no
-  paid-provider `ModelEndpoint` configured.
-- Origin durability — `git push` fails (no GitHub credentials in this
-  session); every commit above is real and local but not yet reflected
-  on GitHub.
-- Automatic service persistence across a host reboot (see above).
+  paid-provider `ModelEndpoint` configured. The execution path built this
+  pass is real but local-model-only for that reason, not a limitation of
+  the path itself.
+- Automatic service persistence across a host reboot — unit prepared and
+  verified, install needs operator `sudo` (see above).
 - Dual-worker fault tests (split-brain, home-offline-primary) — need the
   home PC to exist first.
 
 Full estate completion requires: the interface/home PCs coming online and
-being live-verified (not assumed), GitHub push credentials being added,
-and a systemd unit being installed (needs `sudo`, run by the operator).
-None of these require redesigning anything already built — the schema,
-registries and routing authority are already host-agnostic and were built
-to extend, not to be rebuilt, once those dependencies clear.
+being live-verified (not assumed), and the systemd unit being installed
+(needs `sudo`, run by the operator). Neither requires redesigning
+anything already built — the schema, registries and routing authority are
+already host-agnostic and were built to extend, not to be rebuilt, once
+those dependencies clear.

@@ -11,8 +11,9 @@ file rather than a second launcher/config system.
     agent status                       # live host + registry resolution, JSON
     agent where                        # current repo's registry identity + lease
     agent sync                         # regenerate the disposable bay + workspace bootstrap
-    agent park <repo_id> [--host ID]   # acquire a write lease (fails closed on dirty/conflict)
+    agent park <repo_id> [--host ID]   # acquire a write lease (fails closed on dirty/conflict; reclaims a stale lease)
     agent release <repo_id> [--host ID]
+    agent heartbeat <repo_id> [--host ID]   # renew an active lease's heartbeat_at (run periodically during work)
     agent claude <auto|lab|home> "<task>" [--repo ID]   # resolve + dispatch, fails truthfully if unreachable
     agent claude where                                    # active logical sessions
 
@@ -213,9 +214,26 @@ def cmd_park(args):
     if not clean:
         fail(f"refusing to park {args.repo_id!r}: {reason} (fail-closed — commit/stash first)")
 
-    get_db_session, ParkLease, _ = _lease_db()
+    get_db_session, ParkLease, utcnow_naive = _lease_db()
+    from core.database import park_lease_is_stale
     import uuid
     from sqlalchemy.exc import IntegrityError
+
+    reclaimed_stale = None
+    with get_db_session() as db:
+        existing = db.query(ParkLease).filter(
+            ParkLease.repo_id == args.repo_id, ParkLease.status == "active",
+        ).first()
+        # A holder that crashed/was killed without releasing must not
+        # block this repo forever — the finding this fixes ("heartbeat
+        # renewal/stale lease handling... incomplete"). Only a *stale*
+        # active lease is auto-reclaimed here; a live one still fails
+        # closed exactly as before (same IntegrityError-backed guarantee).
+        if existing is not None and park_lease_is_stale(existing):
+            reclaimed_stale = {"lease_id": existing.id, "host_id": existing.host_id,
+                                "heartbeat_at": existing.heartbeat_at.isoformat()}
+            existing.status = "released"
+            existing.released_at = utcnow_naive()
 
     lease_id = str(uuid.uuid4())
     try:
@@ -242,7 +260,35 @@ def cmd_park(args):
         "worktree_path": repo["path"],
         "branch": args.branch,
         "session_id": args.session,
+        "reclaimed_stale_lease": reclaimed_stale,
     }, args)
+
+
+def cmd_heartbeat(args):
+    """Renew `heartbeat_at` on the caller's active lease (plan §8 step 9:
+    'Renew heartbeat during work') — the missing half of parking that made
+    every lease look permanently fresh regardless of whether the holder
+    was still actually working."""
+    get_db_session, ParkLease, utcnow_naive = _lease_db()
+    host_local = _load_host_local()
+    estate = _load_yaml("estate")
+    live_hostname = socket.gethostname()
+    this_host = _resolve_current_host(estate, live_hostname)
+    host_id = args.host or (this_host["id"] if this_host else None)
+
+    with get_db_session() as db:
+        q = db.query(ParkLease).filter(ParkLease.repo_id == args.repo_id, ParkLease.status == "active")
+        if host_id:
+            q = q.filter(ParkLease.host_id == host_id)
+        lease = q.first()
+        if lease is None:
+            fail(f"no active lease for {args.repo_id!r}" + (f" on {host_id!r}" if host_id else "") +
+                 " — heartbeat only renews an existing lease, it does not acquire one")
+        lease.heartbeat_at = utcnow_naive()
+        renewed = {"lease_id": lease.id, "repo_id": lease.repo_id, "host_id": lease.host_id,
+                   "heartbeat_at": lease.heartbeat_at.isoformat()}
+
+    emit({"ok": True, **renewed}, args)
 
 
 def cmd_release(args):
@@ -273,6 +319,41 @@ def _session_db():
     except ModuleNotFoundError as e:
         fail(f"{e}\nhint: run from a venv with the app's requirements installed (agent claude needs core.database).")
     return get_db_session, LogicalSession
+
+
+_STALE_ACTIVE_SESSION_SECONDS = 300
+
+
+def _reconcile_stale_sessions(db, LogicalSession) -> int:
+    """Finding: 'failed or non-launched Claude sessions must not remain
+    active; add minimal reconciliation/cleanup semantics.' A session row
+    is written *before* the native launch is attempted (so a session_id
+    exists for correlation even in the error path); a launch that never
+    actually starts a process (no `claude` binary, unimplemented remote
+    dispatch) is fixed to write `status='failed'` directly at creation
+    time (see `cmd_claude`). This reconciliation pass is the backstop for
+    the case that fix can't cover: a wrapper process that itself dies
+    (killed, crashed) between creating the row and recording an outcome,
+    leaving `status='active'` with no `claude_session_id` ever set. A row
+    still young (< 5 min) is left alone — a real launch needs time to
+    report its session id back. Deliberately reuses `LogicalSession`
+    (no second lifecycle table) — this is cleanup of that one authority's
+    existing rows, not a new authority."""
+    from datetime import datetime, timedelta, timezone
+    cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=_STALE_ACTIVE_SESSION_SECONDS)
+    stale = db.query(LogicalSession).filter(
+        LogicalSession.status == "active",
+        LogicalSession.claude_session_id.is_(None),
+        LogicalSession.created_at < cutoff,
+    ).all()
+    for row in stale:
+        row.status = "failed"
+        row.last_result = json.dumps({
+            "reconciled": True,
+            "reason": "stale active session with no claude_session_id recorded within "
+                      f"{_STALE_ACTIVE_SESSION_SECONDS}s — launch never confirmed",
+        })
+    return len(stale)
 
 
 def _host_by_role(estate: dict, role: str) -> dict | None:
@@ -311,6 +392,7 @@ def cmd_claude(args):
     if args.mode == "where":
         get_db_session, LogicalSession = _session_db()
         with get_db_session() as db:
+            _reconcile_stale_sessions(db, LogicalSession)
             rows = db.query(LogicalSession).filter(LogicalSession.status == "active").all()
             sessions = [{
                 "id": r.id, "host_id": r.host_id, "repo_id": r.repo_id, "engine": r.engine,
@@ -356,31 +438,42 @@ def cmd_claude(args):
 
     get_db_session, LogicalSession = _session_db()
     session_id = str(uuid.uuid4())
+
+    # Finding: "failed or non-launched Claude sessions must not remain
+    # active." A session that never actually starts a native process must
+    # never be written as status="active" in the first place — write the
+    # real outcome in the same insert rather than creating "active" and
+    # hoping something updates it later (that hope is exactly how the
+    # previous version leaked permanently-active rows for every no-binary
+    # or unimplemented-launch call).
+    if claude_bin is None:
+        failure_reason = "claude CLI is not installed on this host — cannot launch a native session"
+    else:
+        # claude_bin present: launch non-interactively in the resolved
+        # worktree. Unreachable in this environment (no `claude` binary
+        # here — see evidence doc) so deliberately not implemented
+        # speculatively; the interface above (session already recorded,
+        # repo/host already resolved) is what a future session with the
+        # binary present extends, not redesigns.
+        failure_reason = "claude CLI found but native launch is not yet implemented"
+
     with get_db_session() as db:
+        _reconcile_stale_sessions(db, LogicalSession)
         db.add(LogicalSession(
             id=session_id, host_id=host["id"], repo_id=repo_id,
             worktree_path=repo["path"] if repo else None,
-            engine="claude", status="active",
+            engine="claude", status="failed",
+            last_result=json.dumps({"error": failure_reason}),
         ))
 
-    if claude_bin is None:
-        # Emit the structured JSON (a caller parsing "ok" gets the detail)
-        # AND exit nonzero — a caller that only checks the exit code (shell
-        # `&&`, CI) must see this as a failure too, not silent success.
-        emit({
-            "ok": False, "mode": args.mode, "host_id": host["id"], "session_id": session_id,
-            "repo_id": repo_id, "task": args.task,
-            "error": "claude CLI is not installed on this host — cannot launch a native session",
-        }, args)
-        sys.exit(1)
-
-    # claude_bin present: launch non-interactively in the resolved
-    # worktree. Unreachable in this environment (no `claude` binary here —
-    # see evidence doc) so deliberately not implemented speculatively;
-    # the interface above (session already recorded, repo/host already
-    # resolved) is what a future session with the binary present extends,
-    # not redesigns.
-    fail("claude CLI found but native launch is not yet implemented — session recorded, extend here")
+    # Emit the structured JSON (a caller parsing "ok" gets the detail) AND
+    # exit nonzero — a caller that only checks the exit code (shell `&&`,
+    # CI) must see this as a failure too, not silent success.
+    emit({
+        "ok": False, "mode": args.mode, "host_id": host["id"], "session_id": session_id,
+        "repo_id": repo_id, "task": args.task, "error": failure_reason,
+    }, args)
+    sys.exit(1)
 
 
 def cmd_status(args):
@@ -428,7 +521,7 @@ def cmd_where(args):
     lease = None
     if current is not None:
         try:
-            from core.database import get_db_session, ParkLease
+            from core.database import get_db_session, ParkLease, park_lease_is_stale
         except ModuleNotFoundError:
             lease = "unavailable (core.database not importable from this environment)"
         else:
@@ -437,10 +530,19 @@ def cmd_where(args):
                     ParkLease.repo_id == current["id"], ParkLease.status == "active"
                 ).first()
                 if row is not None:
+                    # `stale` is the technical write-enforcement signal: an
+                    # active-looking lease whose holder stopped renewing
+                    # heartbeat_at is not actually being worked on right
+                    # now, and a caller (human, or a future PreToolUse/
+                    # git-hook gate) deciding whether a write is really
+                    # authorized should see that plainly rather than
+                    # trusting `status == "active"` alone.
                     lease = {
                         "lease_id": row.id, "host_id": row.host_id,
                         "branch": row.branch, "session_id": row.session_id,
                         "heartbeat_at": row.heartbeat_at.isoformat() if row.heartbeat_at else None,
+                        "allowed_write_scope": row.allowed_write_scope,
+                        "stale": park_lease_is_stale(row),
                     }
 
     emit({
@@ -569,6 +671,11 @@ def _build_parser():
     pr.add_argument("repo_id")
     pr.add_argument("--host", default=None)
     pr.set_defaults(func=cmd_release)
+
+    ph = sub.add_parser("heartbeat", parents=[parent], help="renew heartbeat_at on an active lease (run periodically during work)")
+    ph.add_argument("repo_id")
+    ph.add_argument("--host", default=None)
+    ph.set_defaults(func=cmd_heartbeat)
 
     pc = sub.add_parser("claude", parents=[parent], help="resolve + dispatch a Claude session (auto/lab/home/where)")
     pc.add_argument("mode", choices=["auto", "lab", "home", "where"])

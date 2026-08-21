@@ -754,6 +754,11 @@ class ParkLease(TimestampMixin, Base):
     overwritten lease. host_id is recorded but is NOT part of the unique
     scope: a repo may only be parked on one host at a time, not one lease
     per host.
+
+    `heartbeat_at` is renewed by `agent heartbeat <repo_id>` while work is
+    in progress; `park_lease_is_stale()` is the one shared rule for when a
+    lease has gone stale (holder crashed/killed without releasing) rather
+    than each caller inventing its own threshold.
     """
     __tablename__ = "park_leases"
 
@@ -773,6 +778,19 @@ class ParkLease(TimestampMixin, Base):
         Index('ix_park_leases_active_repo_unique', 'repo_id', unique=True,
               sqlite_where=text("status = 'active'")),
     )
+
+
+# A lease whose holder stopped renewing `heartbeat_at` (crashed, killed,
+# network dropped) must not block the repo forever — this is the one
+# place staleness is defined so `scripts/agent` (park/release/heartbeat)
+# and `src/estate_router.py` (routing's conflicting-lease check) apply the
+# identical rule instead of drifting into two lease authorities.
+PARK_LEASE_STALE_SECONDS = 1800  # 30 min without a heartbeat renewal
+
+
+def park_lease_is_stale(lease: "ParkLease", *, now: Optional[datetime] = None) -> bool:
+    now = now or utcnow_naive()
+    return (now - lease.heartbeat_at).total_seconds() > PARK_LEASE_STALE_SECONDS
 
 
 class SourceEvent(TimestampMixin, Base):
@@ -833,6 +851,14 @@ class LogicalSession(TimestampMixin, Base):
     `ParkLease`: a session can exist read-only, before or without ever
     acquiring a mutation lease — `lease_id` is recorded when one was
     acquired, not required to create the session row.
+
+    `status="active"` is written only once a native process actually
+    starts; a dispatch that fails before launching (no binary, launch not
+    implemented) is written as `status="failed"` directly, and
+    `scripts/agent`'s `_reconcile_stale_sessions()` sweeps any row still
+    `active` with no `claude_session_id` past a bounded staleness window
+    to `failed` — a launch that started but whose wrapper process died
+    must not read as permanently active.
     """
     __tablename__ = "logical_sessions"
 
@@ -843,7 +869,7 @@ class LogicalSession(TimestampMixin, Base):
     claude_session_id  = Column(String, nullable=True)
     lease_id           = Column(String, nullable=True)
     engine             = Column(String, nullable=False, default="claude")  # claude | codex | local
-    status             = Column(String, nullable=False, default="active")  # active | closed
+    status             = Column(String, nullable=False, default="active")  # active | closed | failed
     last_result        = Column(Text, nullable=True)  # compact JSON summary, never the full transcript
 
     __table_args__ = (

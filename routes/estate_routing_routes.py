@@ -13,7 +13,7 @@ from typing import Dict, List, Optional
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from src.estate_router import RoutingConfigError, eligible_hosts, resolve_alias, resolve_route
+from src.estate_router import RoutingConfigError, eligible_hosts, resolve_alias, resolve_route, run_task
 
 
 def _route_call(fn, *args, **kwargs):
@@ -44,6 +44,14 @@ class TaskEnvelope(BaseModel):
     requirements: TaskEnvelopeRequirements = Field(default_factory=TaskEnvelopeRequirements)
 
 
+class RunTaskEnvelope(TaskEnvelope):
+    """Same envelope, plus `objective` — the actual prompt text to execute
+    once routing resolves a `local` route. Optional because a caller may
+    legitimately only want the route (deterministic/needs_escalation
+    tasks have nothing to execute anyway)."""
+    objective: Optional[str] = None
+
+
 def setup_estate_routing_routes() -> APIRouter:
     router = APIRouter(prefix="/api/estate", tags=["estate-routing"])
 
@@ -51,6 +59,16 @@ def setup_estate_routing_routes() -> APIRouter:
     async def route_task(request: Request, envelope: TaskEnvelope):
         task = envelope.model_dump()
         return _route_call(resolve_route, task)
+
+    @router.post("/run")
+    async def run_task_route(request: Request, envelope: RunTaskEnvelope):
+        """Closes the 'resolves routes but does not execute them' gap at
+        the HTTP layer: routes the envelope, then actually executes it
+        when the resolved route is `local` — the only executor with a
+        live runtime in this environment (docs/aoteru-lab-execution-
+        convergence.md finding #6)."""
+        task = envelope.model_dump()
+        return _route_call(run_task, task)
 
     @router.get("/route/hosts")
     async def route_hosts(request: Request, repo: Optional[str] = None):

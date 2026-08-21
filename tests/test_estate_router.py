@@ -56,6 +56,32 @@ def test_eligible_hosts_home_fails_truthfully_not_a_tailnet_member(fixture_confi
     assert "not a tailnet member" in hosts["test-home"]["reason"]
 
 
+def test_eligible_hosts_explicit_verified_false_blocks_even_if_reachable(fixture_config):
+    """Finding: 'a newly reachable but unverified home host must never
+    become eligible automatically' — verified: false must gate ahead of
+    (not merely alongside) live reachability."""
+    estate = yaml.safe_load((fixture_config / "estate.yaml").read_text())
+    for host in estate["hosts"]:
+        if host["id"] == "test-home":
+            host["tailscale"] = True
+            host["tailscale_dns"] = "test-home.example.ts.net"
+            host["verified"] = False
+    (fixture_config / "estate.yaml").write_text(yaml.safe_dump(estate))
+
+    hosts = {h["host_id"]: h for h in estate_router.eligible_hosts()}
+    assert hosts["test-home"]["eligible"] is False
+    assert "not verified" in hosts["test-home"]["reason"]
+
+
+def test_host_reachable_missing_verified_key_defaults_true(fixture_config):
+    """Existing hosts (lab/interface) that never opted into `verified`
+    must not regress to ineligible."""
+    reachable, reason = estate_router.host_reachable(
+        {"id": "test-lab", "hostname": "THIS-HOST"}, "THIS-HOST",
+    )
+    assert reachable is True
+
+
 def test_resolve_alias_bound_and_live(fixture_config, monkeypatch):
     monkeypatch.setattr(estate_router, "_ollama_model_live", lambda model, timeout=3.0: (True, "live"))
     result = estate_router.resolve_alias("local-fast")
@@ -117,6 +143,113 @@ def test_resolve_route_bound_alias_resolves_to_local(fixture_config, monkeypatch
     assert route["route"]["concrete_model"] == "test-model-fast"
 
 
+def test_resolve_route_validates_all_capabilities_not_just_first(fixture_config, monkeypatch):
+    """Finding: 'validate all requested capabilities rather than only the
+    first.' Two capabilities requested, first bound+live, second unbound
+    — the route must fail even though capabilities[0] alone would pass."""
+    monkeypatch.setattr(estate_router, "_record_decision", lambda *a, **k: "fake-decision-id")
+    monkeypatch.setattr(estate_router, "_ollama_model_live", lambda model, timeout=3.0: (True, "live"))
+    route = estate_router.resolve_route({
+        "task_class": "coding",
+        "requirements": {"capabilities": ["local-fast", "reasoning-strong"]},
+    })
+    assert route["ok"] is False
+    assert route["route"]["executor"] == "none"
+    assert len(route["capability_resolutions"]) == 2
+    assert route["capability_resolutions"][0]["resolved"] is True
+    assert route["capability_resolutions"][1]["resolved"] is False
+
+
+def test_resolve_route_all_capabilities_resolved_succeeds(fixture_config, monkeypatch):
+    monkeypatch.setattr(estate_router, "_record_decision", lambda *a, **k: "fake-decision-id")
+    monkeypatch.setattr(estate_router, "_ollama_model_live", lambda model, timeout=3.0: (True, "live"))
+    (fixture_config / "models.yaml").write_text(yaml.safe_dump({
+        "capabilities": [
+            {"alias": "local-fast", "binding": "test-model-fast"},
+            {"alias": "embedding", "binding": "test-model-embed"},
+        ],
+    }))
+    route = estate_router.resolve_route({
+        "task_class": "coding",
+        "requirements": {"capabilities": ["local-fast", "embedding"]},
+    })
+    assert route["ok"] is True
+    assert route["route"]["executor"] == "local"
+
+
+def test_resolve_route_explicit_requested_host_narrows_eligibility(fixture_config, monkeypatch):
+    monkeypatch.setattr(estate_router, "_record_decision", lambda *a, **k: "fake-decision-id")
+    route = estate_router.resolve_route({
+        "task_class": "audit", "placement": {"requested_host": "test-lab"},
+    })
+    assert route["ok"] is True
+    assert route["route"]["host"] == "test-lab"
+
+
+def test_resolve_route_explicit_requested_host_fails_truthfully_when_ineligible(fixture_config, monkeypatch):
+    """Must not silently substitute a different (eligible) host when the
+    caller explicitly asked for one that isn't eligible."""
+    monkeypatch.setattr(estate_router, "_record_decision", lambda *a, **k: "fake-decision-id")
+    route = estate_router.resolve_route({
+        "task_class": "audit", "placement": {"requested_host": "test-home"},
+    })
+    assert route["ok"] is False
+    assert "test-home" in route["error"]
+
+
+def test_resolve_route_quality_floor_never_fabricated(fixture_config, monkeypatch):
+    monkeypatch.setattr(estate_router, "_record_decision", lambda *a, **k: "fake-decision-id")
+    monkeypatch.setattr(estate_router, "_ollama_model_live", lambda model, timeout=3.0: (True, "live"))
+    route = estate_router.resolve_route({
+        "task_class": "coding",
+        "requirements": {"capabilities": ["local-fast"]},
+        "routing": {"quality_floor": "high"},
+    })
+    assert route["ok"] is False
+    assert "quality_floor_error" in route
+    assert "no benchmarked quality" in route["quality_floor_error"]
+
+
+def test_resolve_route_context_tokens_exceeding_known_window_fails_truthfully(fixture_config, monkeypatch):
+    monkeypatch.setattr(estate_router, "_record_decision", lambda *a, **k: "fake-decision-id")
+    monkeypatch.setattr(estate_router, "_ollama_model_live", lambda model, timeout=3.0: (True, "live"))
+    monkeypatch.setattr(
+        "src.model_context.get_context_length_known",
+        lambda url, model: (8192, True),
+    )
+    route = estate_router.resolve_route({
+        "task_class": "coding",
+        "requirements": {"capabilities": ["local-fast"], "context_tokens": 32000},
+    })
+    assert route["ok"] is False
+    assert "context_error" in route
+
+
+def test_resolve_route_context_tokens_unknown_window_reported_not_assumed(fixture_config, monkeypatch):
+    monkeypatch.setattr(estate_router, "_record_decision", lambda *a, **k: "fake-decision-id")
+    monkeypatch.setattr(estate_router, "_ollama_model_live", lambda model, timeout=3.0: (True, "live"))
+    monkeypatch.setattr(
+        "src.model_context.get_context_length_known",
+        lambda url, model: (0, False),
+    )
+    route = estate_router.resolve_route({
+        "task_class": "coding",
+        "requirements": {"capabilities": ["local-fast"], "context_tokens": 32000},
+    })
+    assert route["ok"] is True  # unknown != exceeded — not silently blocked either
+    assert "context_note" in route
+    assert "could not be verified" in route["context_note"]
+
+
+def test_resolve_route_budget_fields_reported_as_unverified_not_silently_ignored(fixture_config, monkeypatch):
+    monkeypatch.setattr(estate_router, "_record_decision", lambda *a, **k: "fake-decision-id")
+    route = estate_router.resolve_route({
+        "task_class": "audit", "budget": {"max_worker_calls": 3},
+    })
+    assert route["ok"] is True
+    assert "budget.max_worker_calls" in route["unverified_constraints"]
+
+
 def test_resolve_route_unbound_alias_needs_escalation_not_silent_failure(fixture_config, monkeypatch):
     monkeypatch.setattr(estate_router, "_record_decision", lambda *a, **k: "fake-decision-id")
     route = estate_router.resolve_route({
@@ -125,3 +258,89 @@ def test_resolve_route_unbound_alias_needs_escalation_not_silent_failure(fixture
     assert route["ok"] is False
     assert route["route"]["executor"] == "none"
     assert route["alias_resolution"]["resolved"] is False
+
+
+# --- run_task / execute_local: closes "resolves routes but does not execute them" ---
+
+def test_run_task_executes_local_route_and_persists_outcome(fixture_config, monkeypatch):
+    monkeypatch.setattr(estate_router, "_record_decision", lambda *a, **k: "fake-decision-id")
+    monkeypatch.setattr(estate_router, "_ollama_model_live", lambda model, timeout=3.0: (True, "live"))
+    monkeypatch.setattr(estate_router, "execute_local", lambda model, objective, **k: {"ok": True, "output": "pong", "latency_ms": 42})
+    recorded = {}
+    monkeypatch.setattr(estate_router, "_update_decision_outcome", lambda decision_id, **k: recorded.update(k))
+
+    result = estate_router.run_task({
+        "task_class": "coding", "objective": "say pong",
+        "requirements": {"capabilities": ["local-fast"]},
+    })
+    assert result["executed"] is True
+    assert result["execution"]["output"] == "pong"
+    assert result["deterministic_gate"] == "pass"
+    assert recorded["status"] == "complete"
+    assert recorded["deterministic_gate"] == "pass"
+
+
+def test_run_task_marks_empty_output_as_failed_gate(fixture_config, monkeypatch):
+    monkeypatch.setattr(estate_router, "_record_decision", lambda *a, **k: "fake-decision-id")
+    monkeypatch.setattr(estate_router, "_ollama_model_live", lambda model, timeout=3.0: (True, "live"))
+    monkeypatch.setattr(estate_router, "execute_local", lambda model, objective, **k: {"ok": True, "output": "", "latency_ms": 5})
+    recorded = {}
+    monkeypatch.setattr(estate_router, "_update_decision_outcome", lambda decision_id, **k: recorded.update(k))
+
+    result = estate_router.run_task({
+        "task_class": "coding", "objective": "say pong",
+        "requirements": {"capabilities": ["local-fast"]},
+    })
+    assert result["deterministic_gate"] == "fail"
+    assert recorded["status"] == "failed"
+    assert recorded["escalation_reason"] == "worker_failed"
+
+
+def test_run_task_does_not_execute_deterministic_route(fixture_config, monkeypatch):
+    monkeypatch.setattr(estate_router, "_record_decision", lambda *a, **k: "fake-decision-id")
+    called = []
+    monkeypatch.setattr(estate_router, "execute_local", lambda *a, **k: called.append(1))
+
+    result = estate_router.run_task({"task_class": "audit"})
+    assert result["executed"] is False
+    assert called == []
+
+
+def test_run_task_does_not_execute_needs_escalation_route(fixture_config, monkeypatch):
+    monkeypatch.setattr(estate_router, "_record_decision", lambda *a, **k: "fake-decision-id")
+    called = []
+    monkeypatch.setattr(estate_router, "execute_local", lambda *a, **k: called.append(1))
+
+    result = estate_router.run_task({
+        "task_class": "research", "objective": "prove P=NP",
+        "requirements": {"capabilities": ["reasoning-strong"]},
+    })
+    assert result["ok"] is False
+    assert result["executed"] is False
+    assert called == []
+
+
+def test_run_task_local_route_without_objective_does_not_execute(fixture_config, monkeypatch):
+    monkeypatch.setattr(estate_router, "_record_decision", lambda *a, **k: "fake-decision-id")
+    monkeypatch.setattr(estate_router, "_ollama_model_live", lambda model, timeout=3.0: (True, "live"))
+    called = []
+    monkeypatch.setattr(estate_router, "execute_local", lambda *a, **k: called.append(1))
+
+    result = estate_router.run_task({
+        "task_class": "coding", "requirements": {"capabilities": ["local-fast"]},
+    })
+    assert result["executed"] is False
+    assert "execution_error" in result
+    assert called == []
+
+
+def test_execute_local_bounds_and_reports_upstream_failure(fixture_config, monkeypatch):
+    def _raise(*a, **k):
+        raise ConnectionError("connection refused")
+    monkeypatch.setattr(estate_router, "llm_call", _raise, raising=False)
+    import src.llm_core as llm_core
+    monkeypatch.setattr(llm_core, "llm_call", _raise)
+
+    result = estate_router.execute_local("qwen3:8b", "hello", timeout=1.0)
+    assert result["ok"] is False
+    assert "connection refused" in result["error"]

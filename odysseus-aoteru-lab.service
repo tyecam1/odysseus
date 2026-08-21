@@ -1,0 +1,60 @@
+# Dedicated systemd unit for the Aoteru estate's lab-hosted backend
+# instance (svc:odysseus-lab, config/estate.yaml). Deliberately NOT a copy
+# of odysseus-ui.service (that template is generic/unconfigured — this
+# unit is fully concrete for this exact host and this exact deployment):
+#
+#   - User=agent, WorkingDirectory=this checkout
+#     (/home/agent/projects/odysseus-aoteru), this checkout's own venv
+#   - binds 127.0.0.1:7001 ONLY — never 0.0.0.0; tailnet-only reachability
+#     is provided separately by `tailscale serve` (see config/estate.yaml
+#     svc:odysseus-lab notes), not by this unit binding a public interface
+#   - depends on nothing this unit starts itself: the isolated ChromaDB on
+#     127.0.0.1:8101 is a separate, already-running process
+#     (/home/agent/projects/odysseus-chromadb) — this unit does not own or
+#     start it, only expects it reachable (the app itself already handles
+#     a temporarily-unreachable ChromaDB as a runtime condition, not a
+#     startup precondition, so no hard `Requires=` is asserted on a unit
+#     that doesn't exist for it yet)
+#   - Restart=on-failure (not "always"): a clean stop (operator-issued
+#     `systemctl stop`, or a deliberate non-zero exit) should not be
+#     fought by the supervisor; only a crash restarts it
+#
+# Copy to /etc/systemd/system/odysseus-aoteru-lab.service, then:
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now odysseus-aoteru-lab.service
+#
+# This is the one sudo action this repo's automation cannot take itself —
+# everything above it (the command this unit runs, the port/bind, the
+# working directory, the venv) has already been run manually and verified
+# live from this same checkout before this file was written.
+[Unit]
+Description=Odysseus/Aoteru lab backend (svc:odysseus-lab)
+After=network.target
+# Best-effort ordering only (see note above on why this isn't Requires=):
+# start after the isolated ChromaDB service if the operator names it that,
+# without failing this unit's install if no such unit exists yet.
+After=odysseus-chromadb.service
+Wants=odysseus-chromadb.service
+
+[Service]
+Type=simple
+User=agent
+Group=agent
+WorkingDirectory=/home/agent/projects/odysseus-aoteru
+EnvironmentFile=-/home/agent/projects/odysseus-aoteru/.env
+ExecStart=/home/agent/projects/odysseus-aoteru/venv/bin/python -m uvicorn app:app --host 127.0.0.1 --port 7001
+Restart=on-failure
+RestartSec=3
+
+# Hardening: this process should never need to escalate privileges.
+# Deliberately NOT PrivateTmp=true — routes/shell_routes.py and the
+# cookbook/codex runners rely on real, host-visible /tmp paths
+# (/tmp/odysseus-tmux/<session>.log, tmux server sockets) that an operator
+# or another process may need to see too; PrivateTmp would isolate those
+# into a namespace this unit can't verify (no live systemd instance
+# available in this environment to test it against) without a clearer
+# win, so it's left out rather than shipped unverified.
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
