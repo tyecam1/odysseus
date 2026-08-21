@@ -25,11 +25,11 @@ inputs:
   - docs/aoteru-lab-execution-convergence-evidence.md
   - docs/aoteru-systemd-cutover-evidence.md
 outputs:
-  - reproducible local-model benchmark harness/corpus in the existing eval/benchmark authority
+  - reproducible local-model benchmark harness/corpus in the existing Odysseus eval/benchmark authority
   - machine-readable benchmark results with source/model/runtime provenance
   - compact benchmark/promotion evidence document
   - evidence-backed routing/model config changes only where promotion gates pass
-notes: "This file is a work designation/contract, not a second task queue or routing authority. Extend existing benchmark/eval surfaces if they exist."
+notes: "This file is a work designation/contract, not a second task queue, benchmark authority or model router. Extend existing Odysseus benchmark/eval/model-registry surfaces if they exist."
 ---
 # Local-model benchmark + routing — LM1
 
@@ -37,7 +37,9 @@ notes: "This file is a work designation/contract, not a second task queue or rou
 
 Produce the **first reproducible, estate-specific empirical local-model portfolio** for the lab worker, replacing provisional model assumptions with measured evidence while preserving the persistent LAB-FIRST EXECUTION CUTOVER.
 
-Done means: a reusable benchmark corpus/harness exists; installed baselines and the three first-round candidates have been screened on real estate tasks; finalists have repeated evidence; routing/model bindings are changed only where promotion criteria are met; raw results and decisions are durable and reproducible.
+**Odysseus itself is the benchmark authority.** LM1 must exercise and extend the existing Odysseus model inventory/evaluation/execution/routing surfaces rather than build a parallel one-off benchmark system. Hugging Face is an authenticated source of model artefacts and metadata, not a second model registry or routing authority.
+
+Done means: a reusable benchmark corpus/harness exists under the canonical Odysseus authority; installed baselines and the three first-round candidates have been screened on real estate tasks through the production-equivalent local execution path where technically possible; finalists have repeated evidence; routing/model bindings are changed only where promotion criteria are met; raw results and decisions are durable and reproducible.
 
 This is LM1, not the whole continuous-discovery programme. Do not expand into second-round/experimental model exploration unless needed to repair the benchmark system itself.
 
@@ -45,10 +47,32 @@ This is LM1, not the whole continuous-discovery programme. Do not expand into se
 
 1. `git pull --ff-only`; confirm clean `dev`, local/remote ancestry and current service health.
 2. Read this file plus the four inputs above. Do **not** redo the 2026-08-20 model research.
-3. Inspect existing eval/benchmark/model-inventory surfaces before adding files. Reuse/extend; do not create parallel authorities.
+3. Inspect existing Odysseus eval/benchmark/model-inventory/result/telemetry surfaces before adding files. Reuse/extend them; do not create parallel authorities.
 4. Use existing parking/write authority before mutation.
 5. Record live lab runtime/hardware/disk/Ollama state and installed model inventory. Preserve robotics GPU availability; no parallel GPU benchmark workloads.
-6. If `obsidian-PhD` or S2-E1 sources are not local, fetch only the minimum read-only fixtures needed from exact GitHub commits/paths (or a temporary read-only clone). Never mutate those repos during LM1.
+6. Detect Hugging Face tooling/auth non-destructively (`hf auth whoami` or equivalent). Use an existing host-local credential if present; never print, copy or persist the token into repo files/logs/evidence/telemetry/prompts.
+7. If `obsidian-PhD` or S2-E1 sources are not local, fetch only the minimum read-only fixtures needed from exact GitHub commits/paths (or a temporary read-only clone). Never mutate those repos during LM1.
+
+## Execution authority + Hugging Face acquisition
+
+LM1 must use this ownership chain:
+
+`Odysseus benchmark corpus/harness -> Odysseus model inventory/execution path -> local runtime -> deterministic scorer -> Odysseus result/telemetry -> routing promotion decision`
+
+External mechanisms such as `hf`, Ollama and `llama.cpp` may fetch/serve/measure models, but must not become parallel benchmark registries, result authorities or routing policies.
+
+For Hugging Face:
+
+- use the operator's existing **host-local Hugging Face token** if configured for the `agent` user; authenticate via the current `hf` CLI / Hugging Face Hub mechanism, not deprecated `huggingface-cli`;
+- prefer non-secret checks such as `hf auth whoami`; never echo/read the token into benchmark output;
+- if an environment credential such as `HF_TOKEN` already exists, consume it without exposing it; otherwise use the standard user-local Hugging Face credential store;
+- if authentication is absent and a required candidate cannot be acquired anonymously, stop only at the exact secure one-time login action needed from the operator; **never ask for the token in chat or put it on a shell command line**;
+- a token grants access, not licence acceptance. If a model is gated behind terms the operator has not already accepted, treat that as a genuine human/legal gate; do not bypass it;
+- pin acquisition provenance: official upstream repo ID, exact revision/commit where available, artifact/filename, quantisation, runtime/import conversion and licence/model-card reference. Record only that authenticated access was available, never the credential itself;
+- use `hf download ... --revision ...` / the equivalent Hub API for exact artefacts when Hugging Face is the source; use `hf cache verify` or equivalent integrity checks where useful;
+- an Ollama artefact may remain the production runtime representation when appropriate, but provenance must still connect it to an identifiable upstream model/revision or explicitly state when that mapping cannot be proven.
+
+Do not place a long-lived HF token in committed config. Do not broaden service permissions merely to make downloads convenient.
 
 ## Scope
 
@@ -87,12 +111,12 @@ Then evaluate **only the first-round candidates nominated by the saved research*
 - Qwen3.5-9B — `local-agent` / `local-code` candidate;
 - Gemma 4 12B — `local-multimodal` candidate.
 
-Resolve a compatible supported artifact/quant/runtime from the saved primary source anchors and available runtimes. One new model download at a time. Do not download a candidate that fails licence/runtime/hardware/disk preflight; record the blocker and continue.
+Resolve a compatible supported artifact/quant/runtime from the saved primary source anchors and available runtimes. Prefer the official publisher's Hugging Face repository/revision when it provides the required artefact or authoritative source metadata. One new model download at a time. Do not download a candidate that fails licence/runtime/hardware/disk preflight; record the blocker and continue.
 
 ## Benchmark design
 
-Build the smallest reusable harness that captures, per model/task/run:
-- model + artifact + quant;
+Build the smallest reusable **Odysseus-native** harness that captures, per model/task/run:
+- model + upstream repo/revision + artifact + quant;
 - runtime/version;
 - context setting;
 - GPU/CPU placement or offload;
@@ -103,6 +127,8 @@ Build the smallest reusable harness that captures, per model/task/run:
 - retries/failures;
 - source pointers;
 - final pass/fail and reason.
+
+Where Odysseus already has equivalent model-evaluation/result structures, extend those instead of creating a new schema. The same candidate should be invokable through the same local execution abstraction used by production routing wherever technically possible; a lower-level `llama-bench`/runtime measurement is supplemental evidence, not the end-to-end benchmark itself.
 
 Use 8K and 32K screening points where meaningful. Use 64K only for finalists/tasks that genuinely need it. Do not spend LM1 on 128K unless a candidate's value depends on it.
 
@@ -129,7 +155,7 @@ No rename/refactor merely for cosmetic consistency.
 Sonnet 5 medium is the foreman, not the benchmark worker.
 
 Prefer:
-`deterministic harness -> local candidate -> deterministic scoring -> Sonnet synthesis`
+`deterministic Odysseus harness -> local candidate -> deterministic scoring -> Sonnet synthesis`
 
 Rules:
 - no same-model nested Sonnet by default;
@@ -142,16 +168,17 @@ Rules:
 
 ## Work sequence
 
-1. Preserve/inspect live state and existing benchmark infrastructure.
-2. Freeze a compact, provenance-linked estate corpus and deterministic gates.
-3. Implement/reuse the benchmark runner and machine-readable result format.
-4. Benchmark installed baselines first; validate the harness against known behaviour.
-5. Pre-filter, download and screen the three first-round candidates sequentially.
-6. Repeat only plausible finalists/load-bearing task classes.
-7. Compare by task class, not one global winner.
-8. Apply only evidence-backed model/routing changes; otherwise retain incumbents.
-9. Run focused regression tests + one final relevant integration suite; verify live routing still executes successfully and service/private-exposure invariants remain intact.
-10. Commit cohesive work to `dev`, push, and confirm origin/local HEAD match.
+1. Preserve/inspect live state and existing Odysseus benchmark/model infrastructure.
+2. Verify HF authentication/access without exposing credentials; resolve exact upstream revisions/artifacts before download.
+3. Freeze a compact, provenance-linked estate corpus and deterministic gates under the existing benchmark/eval authority.
+4. Implement/reuse the Odysseus benchmark runner and machine-readable result format; validate that it exercises production-equivalent local execution.
+5. Benchmark installed baselines first; validate the harness against known behaviour.
+6. Pre-filter, acquire and screen the three first-round candidates sequentially.
+7. Repeat only plausible finalists/load-bearing task classes.
+8. Compare by task class, not one global winner.
+9. Apply only evidence-backed model/routing changes; otherwise retain incumbents.
+10. Run focused regression tests + one final relevant integration suite; verify live routing still executes successfully and service/private-exposure invariants remain intact.
+11. Commit cohesive work to `dev`, push, and confirm origin/local HEAD match.
 
 ## Stop / handoff
 
@@ -160,6 +187,8 @@ Stop only when:
 - a genuine human-only credential/licence/hardware/storage decision blocks further progress; or
 - resource limits require a checkpoint.
 
+If Hugging Face authentication is the blocker, report only the exact safe login action and what candidate it blocks; never request or display the token.
+
 If interrupted, preserve a salvage manifest: exact HEAD, installed/downloaded artifacts, completed model/task matrix, raw result paths, running processes, remaining candidates and next command. Resume from evidence; do not rerun completed benchmarks without a material reason.
 
 If LM1 reveals a justified second-round need, create **at most one** concise follow-up agent-task pointing to this evidence. Do not start LM2 in this session.
@@ -167,8 +196,8 @@ If LM1 reveals a justified second-round need, create **at most one** concise fol
 ## Final output
 
 Report only:
-- corpus/harness status;
-- models actually evaluated and exact artifacts/quants;
+- Odysseus corpus/harness status;
+- models actually evaluated and exact upstream revisions/artifacts/quants;
 - per-alias/task-class winners or "no promotion";
 - key quality/latency/resource evidence;
 - config/routing changes made;
