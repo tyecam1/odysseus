@@ -65,35 +65,44 @@ correctly reported as such rather than guessed.
 
 ## Restarting the service
 
-Manual (works today, same as before):
+**systemd (installed and enabled 2026-08-21)** — this is now the normal
+path:
 
 ```bash
-# find and stop it
+sudo systemctl restart odysseus-aoteru-lab.service
+systemctl status odysseus-aoteru-lab.service
+```
+
+`odysseus-aoteru-lab.service` is installed at
+`/etc/systemd/system/odysseus-aoteru-lab.service`, `enabled` (survives a
+host reboot), `User=agent`, this checkout's own venv,
+`127.0.0.1:7001` only, never `0.0.0.0`. Confirmed live: correct
+user/bind, `GET /api/health` -> 200, Tailscale Serve mapping and Chroma
+isolation on `8101` both unaffected, SQLite state (`routing_decisions`/
+`park_leases`/`logical_sessions`) intact across a restart cycle, live
+local-model execution smoke test still passes post-restart. Full evidence
+in `docs/aoteru-systemd-cutover-evidence.md`.
+
+`Restart=on-failure` deliberately does not fight a clean stop — verified:
+sending the managed process SIGTERM (a graceful shutdown the app itself
+handles) does **not** trigger an auto-restart, matching the unit's intent
+that only a crash should. A consequence worth knowing operationally: if
+you ever stop the process by signal rather than `systemctl stop`/
+`restart`, the unit goes `inactive` and needs an explicit
+`systemctl start` to resume — it will not silently restart itself in that
+case.
+
+Manual fallback (only if systemd itself is unavailable — this session
+used it once, transiently, before the operator's next
+`systemctl start` re-establishes supervision):
+
+```bash
 ss -tlnp | grep 7001                 # find the PID
 kill <pid>
-# start it again
 cd /home/agent/projects/odysseus-aoteru && source venv/bin/activate
 nohup python -m uvicorn app:app --host 127.0.0.1 --port 7001 > logs/svc-aoteru.log 2>&1 &
 disown
 ```
-
-**One remaining human action**: a dedicated systemd unit for this exact
-deployment — `odysseus-aoteru-lab.service` in this repo root — has been
-prepared and verified (`systemd-analyze verify` clean; `User=agent`,
-this checkout's own venv, `127.0.0.1:7001` only, never `0.0.0.0`,
-`Restart=on-failure`) but **not installed**, deliberately: installing it
-needs `sudo`, which this session doesn't have. This is *not* a copy of
-the generic `odysseus-ui.service` template — it is fully concrete for
-this host/checkout. To install it:
-
-```bash
-sudo cp odysseus-aoteru-lab.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now odysseus-aoteru-lab.service
-```
-
-Until that one command runs, the service still only survives a process
-restart, not a host reboot — flagged, not silently accepted as done.
 
 ## Rollback
 
@@ -145,6 +154,11 @@ findings and fixes.
   "active" phantom sessions.
 - GitHub origin durability: `git push`/`pull` both verified working over
   HTTPS with stored credentials — commits are no longer local-only.
+- Dedicated systemd unit installed and enabled (survives reboot); active
+  immediately after install with correct user/bind, verified restart
+  correctly does not fight a clean stop, SQLite state and live local
+  execution both confirmed intact across a restart cycle — see
+  `docs/aoteru-systemd-cutover-evidence.md`.
 - Fault handling: truthful failure on unavailable/unverified home, auth
   boundaries, service-restart persistence, malformed-config handling,
   telemetry-write resilience — all tested live.
@@ -158,14 +172,20 @@ findings and fixes.
   paid-provider `ModelEndpoint` configured. The execution path built this
   pass is real but local-model-only for that reason, not a limitation of
   the path itself.
-- Automatic service persistence across a host reboot — unit prepared and
-  verified, install needs operator `sudo` (see above).
+- Automatic service persistence across a host reboot — unit **installed
+  and enabled** 2026-08-21 (`systemctl is-enabled` -> `enabled`); an
+  actual reboot has not been performed to prove it (deliberately, per the
+  finalisation contract — not authorized without explicit operator
+  sign-off). One more `sudo systemctl start` is needed right now to
+  re-establish systemd's supervision of the currently-running process
+  (see `docs/aoteru-systemd-cutover-evidence.md` for why).
 - Dual-worker fault tests (split-brain, home-offline-primary) — need the
   home PC to exist first.
 
 Full estate completion requires: the interface/home PCs coming online and
-being live-verified (not assumed), and the systemd unit being installed
-(needs `sudo`, run by the operator). Neither requires redesigning
-anything already built — the schema, registries and routing authority are
-already host-agnostic and were built to extend, not to be rebuilt, once
+being live-verified (not assumed), and an actual reboot proving the
+installed systemd unit's persistence (not yet performed, needs explicit
+operator authorization). Neither requires redesigning anything already
+built — the schema, registries and routing authority are already
+host-agnostic and were built to extend, not to be rebuilt, once
 those dependencies clear.
