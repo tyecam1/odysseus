@@ -1,0 +1,3195 @@
+
+
+=== SOURCE 0: docs/aoteru-model-host-routing-contract.md (repeat 0) ===
+
+---
+title: Aoteru model-host routing contract
+status: target-contract
+owner: odysseus
+as_of: 2026-08-20
+scope: host placement, model routing, token economy, verification, continuous improvement
+---
+
+# Aoteru model-host routing contract
+
+## Aim
+
+Provide one central, provider-neutral routing authority for Aoteru so the user can speak to one persistent conversational front end while Odysseus selects the cheapest adequate execution route across deterministic tools, local models, Codex models and Claude models, on the correct worker host, with explicit verification and bounded escalation.
+
+The contract must optimise quality, token/quota efficiency, latency and locality without fragmenting authority across skills, repositories, hosts or model-specific wrappers.
+
+Target path:
+
+```text
+user -> Aoteru conversational front end -> Odysseus task envelope
+     -> authority/repo -> eligible host -> cheapest adequate mechanism/model
+     -> deterministic verification -> bounded escalation/independent review
+     -> compact result -> Aoteru response
+```
+
+The conversational model owns intent and communication. Odysseus owns routing. Workers are disposable execution resources.
+
+## Invariants
+
+1. One central routing authority in Odysseus. No repo, skill, MCP or worker may create a competing model-selection or host-selection policy.
+2. Resolve authority/repository before execution host; resolve execution host before model.
+3. Deterministic software precedes model inference whenever adequate.
+4. Adequate local inference precedes paid inference when measured quality meets the task quality floor.
+5. Local-first is not local-at-any-cost: paid escalation is required when the local route does not meet the quality or verification requirement.
+6. Routing uses stable capability aliases and live measurements, not permanent vendor/model rankings in business logic.
+7. Home and lab are first-class worker targets. Current unavailability must not be hard-coded into architecture.
+8. Today, lab is the only verified/available worker. Home remains registered but ineligible until live evidence sets verified, healthy and reachable true.
+9. The laptop/interface is the human control surface, not a normal execution worker.
+10. Repo mutation requires the existing Odysseus parking/lease authority. Routing never widens write authority.
+11. Workers receive bounded task/evidence pointers, not whole conversational transcripts or duplicated repository context.
+12. Verification is deterministic first, then independent-model review only when required.
+13. Escalation is evidence-triggered, not based on vague difficulty judgments.
+14. No swarm by default. One worker owns each task unit; parallelism is justified only by independent evidence gathering or deliberately independent verification.
+15. Routing telemetry may improve future choices but cannot silently weaken permissions, domain gates, quality floors or verification requirements.
+
+## Human-facing default
+
+The normal laptop Claude harness should present Aoteru through a strong, efficient conversational model. The current preferred role is Claude Sonnet-class inference at a moderate effort setting, but this is a role rather than a permanent model pin.
+
+Aoteru should normally submit work to Odysseus instead of executing heavy repo/research work in the conversational context merely because the front-end model can do it.
+
+## Host model
+
+```yaml
+hosts:
+  interface:
+    role: controller
+    execution_worker: false
+
+  lab:
+    role: worker
+    execution_worker: true
+    verified: true
+    availability: live
+    routing_eligible: true
+
+  home:
+    role: worker
+    execution_worker: true
+    verified: false
+    availability: unavailable
+    routing_eligible: false
+```
+
+Home becomes eligible only from live discovery proving at minimum:
+
+```text
+verified = true
+healthy = true
+reachable = true
+```
+
+Never infer these states from old documentation.
+
+## Routing dimensions
+
+Every model-required task resolves both:
+
+```text
+WHERE?                         WHAT?
+verified worker host           deterministic mechanism
+                               local-fast
+                               local-strong
+                               Luna-class
+                               Haiku-class
+                               Terra-class
+                               Sonnet-class
+                               Sol-class
+                               Opus-class
+```
+
+A route is therefore an execution tuple, not only a model name:
+
+```yaml
+route:
+  host: lab
+  executor: local | codex | claude | deterministic
+  model_alias: local-fast | local-strong | code-fast | code-strong | reasoning-strong | null
+  concrete_model: resolved_from_live_registry
+```
+
+## Default economic ladder
+
+Use only as a seed policy; P7/live benchmark evidence overrides it.
+
+```text
+0 deterministic software
+1 local-fast
+2 local-strong
+3 Luna/Haiku class
+4 Terra/Sonnet class
+5 Sol class
+6 Opus class
+```
+
+Luna and Haiku largely occupy cheap scout/verification roles. Prefer the provider already native to the active workflow unless cross-provider independence is required.
+
+Terra-class inference is normally the routine implementation worker. Sonnet-class inference is normally the Aoteru conversational foreman and can perform orchestration/reasoning when justified.
+
+Sol-class inference is the normal expensive escalation for difficult engineering, debugging, scientific reasoning and deep review. Opus-class inference is reserved for frontier ambiguity, long-horizon architecture/synthesis, high-consequence arbitration or independent review where its measured advantage justifies the quota cost.
+
+## Model aliases
+
+Business logic must target capability aliases rather than concrete model brands:
+
+```yaml
+aliases:
+  local-fast:
+    purpose: cheap extraction, classification, reconnaissance
+
+  local-strong:
+    purpose: strongest adequate local reasoning/implementation
+
+  code-fast:
+    purpose: routine code work
+
+  code-strong:
+    purpose: difficult code work
+
+  reasoning-strong:
+    purpose: difficult analysis/research/architecture
+
+  vision:
+    purpose: multimodal work
+
+  embedding:
+    purpose: derived semantic indexing
+
+  reranker:
+    purpose: retrieval ranking
+```
+
+Concrete mappings come from live host inventory plus benchmark results.
+
+## Canonical task envelope
+
+```yaml
+task:
+  id:
+  objective:
+  task_class:
+  domain:
+  repo:
+
+  authority:
+  read_scope:
+  write_scope:
+
+  complexity: trivial | routine | hard | frontier
+  consequence: low | medium | high
+  autonomy: read | propose | write
+
+  requirements:
+    capabilities: []
+    context_tokens:
+    data_locality:
+    hardware: []
+
+  placement:
+    requested_host: auto
+    eligible_hosts: []
+    parked_host:
+    fallback_allowed: true
+
+  routing:
+    quality_floor:
+    local_first: true
+    paid_allowed: true
+    cross_provider_required: false
+
+  budget:
+    max_worker_calls:
+    max_paid_calls:
+    max_frontier_calls:
+    max_context_tokens:
+    latency_priority:
+
+  verification:
+    deterministic: []
+    independent_model_required: false
+
+  context:
+    source_pointers: []
+    memory_pointers: []
+```
+
+## Eligibility and scoring
+
+Host eligibility is a hard filter:
+
+```text
+reachable
+healthy
+repo/service available
+parking/write authority available when needed
+required tools/hardware available
+data policy permits execution there
+```
+
+Model/mechanism eligibility is a second hard filter:
+
+```text
+capability match
+quality benchmark at or above task floor
+context capacity sufficient
+provider/runtime available
+quota/budget permits route
+```
+
+Only eligible routes are scored. The implementation may evolve the exact formula, but it must prefer demonstrated success and adequate local execution while accounting for resource cost:
+
+```text
+score =
+    measured_quality
+  + locality/determinism benefit
+  - expected paid-token/quota cost
+  - latency penalty
+  - host-load penalty
+  - observed escalation/retry risk
+```
+
+No score may override a hard authority, security or quality constraint.
+
+## Escalation contract
+
+Escalate only on recorded evidence such as:
+
+```text
+deterministic_gate_failed
+worker_failed
+insufficient_capability
+confidence_below_threshold
+unresolved_ambiguity
+conflicting_evidence
+context_limit
+quality_floor_not_met
+```
+
+Normal pattern:
+
+```text
+cheap adequate worker -> deterministic checks -> done
+                                      |
+                                      +-> evidence-triggered stronger worker
+```
+
+Do not pre-emptively send the same context to multiple expensive models.
+
+## Independent verification
+
+Prefer deterministic checks first: tests, schemas, lint/type checks, git diff checks, source/claim checks and domain gates.
+
+When model independence is materially useful, prefer cross-provider review:
+
+```text
+Codex primary -> Claude verifier
+Claude primary -> Codex verifier
+Sol-class primary <-> Opus-class adversarial review for high-consequence reasoning
+```
+
+A third inference occurs only if disagreement materially affects the outcome.
+
+## Compact worker result contract
+
+```yaml
+status: complete | blocked | failed | needs_escalation
+result:
+  summary:
+evidence: []
+changes: []
+verification: []
+uncertainty: []
+escalation:
+  required: false
+  reason:
+handoff:
+  context_pointers: []
+```
+
+Do not return worker scratchpads to the conversational model.
+
+# Continuous improvement contract
+
+Routing must improve from observed estate performance rather than remain a static hand-authored ranking.
+
+## Telemetry to capture per routed task
+
+At minimum:
+
+```text
+task_class
+complexity/consequence
+host
+mechanism/provider/model alias + concrete model
+input/context size where measurable
+paid/quota consumption where measurable
+latency
+deterministic verification outcomes
+worker self-confidence if available
+retry count
+escalation occurrence and reason
+independent-review outcome
+human correction/rejection where explicitly observed
+final task status
+```
+
+Record source/result pointers rather than sensitive prompt copies where possible.
+
+## Learning loop
+
+```text
+execute
+  -> verify
+  -> record outcome/cost/latency/escalation
+  -> aggregate by task class + host + route
+  -> compare candidate routes against incumbent
+  -> shadow/canary candidate policy
+  -> promote only if quality floor/regression gates hold
+  -> continue measuring
+```
+
+The system should continuously update empirical route estimates such as:
+
+```text
+success probability
+first-pass verification rate
+expected retries/escalations
+latency distribution
+paid-token/quota consumption
+local throughput
+host availability/load
+```
+
+Use recency weighting or equivalent so stale model/hardware results decay rather than permanently dominate routing.
+
+## Safe adaptation boundary
+
+Continuous improvement is not unconstrained self-modification.
+
+The runtime may automatically update ephemeral statistics and select among already-approved eligible routes. Changes to permissions, domain gates, host trust, model allowlists, quality floors, verification requirements or routing-code semantics require the existing governed change process.
+
+Policy/config tuning should follow:
+
+1. collect sufficient evidence;
+2. generate a candidate change with rationale and before/after metrics;
+3. test in replay/shadow mode against a representative task corpus;
+4. run deterministic regressions;
+5. canary where appropriate;
+6. promote only on non-inferior quality with a meaningful cost/latency benefit, or superior quality within the allowed budget;
+7. retain rollback and provenance.
+
+A local estate steward may propose routing improvements and run bounded evaluations, but must not silently relax safety/authority constraints.
+
+## Exploration
+
+Avoid getting permanently stuck on yesterday's best route. Allow small bounded exploration only among routes that already meet the safety/quality eligibility floor. Exploration must be disabled or strongly reduced for high-consequence tasks unless explicitly validated.
+
+New models or newly available home hardware enter as candidates, not automatic defaults. Benchmark them against the real estate task corpus before promotion.
+
+## Home re-entry
+
+Current implementation is lab-first. When home becomes reachable:
+
+1. verify identity and service health live;
+2. inventory CPU/GPU/VRAM/RAM/storage/runtimes/models/repos;
+3. benchmark the same task classes used for lab;
+4. add home routes as candidate eligible routes;
+5. run shadow/comparative evaluation;
+6. promote task classes to home only where measured performance justifies it.
+
+No architecture rewrite should be necessary.
+
+# Implementation acceptance criteria
+
+This contract is implemented only when all of the following are true:
+
+1. One Odysseus-owned routing API accepts the canonical task envelope and returns a host+mechanism+model route.
+2. Routing consumes live estate/model inventory and parking state rather than static prose.
+3. Lab is currently eligible; home fails truthfully as unavailable without blocking lab execution.
+4. Deterministic and local routes can be selected ahead of paid inference when they meet the quality floor.
+5. Codex and Claude workers are invoked through the same provider-neutral job/result contract.
+6. Heavy work can leave the laptop Sonnet conversation and execute next to the parked repo while only compact results return.
+7. Evidence-triggered escalation is enforced and observable.
+8. Per-task routing telemetry is persisted.
+9. A benchmark/replay evaluator can compare incumbent versus candidate routing policies.
+10. Candidate route/policy changes are shadowed/canary-tested before promotion.
+11. Routing statistics adapt with new measured outcomes and decay stale evidence.
+12. Home can be added later through discovery + benchmark + eligibility without changing the task or routing contracts.
+13. No duplicate router, queue, lease authority, model registry or domain-specific routing policy is introduced.
+
+## Implementation placement
+
+Extend existing Odysseus ownership rather than adding another orchestrator. Expected canonical surfaces are:
+
+```text
+config/models.yaml        # capability aliases and approved model candidates
+config/estate.yaml        # hosts/services and live-resolution contract
+config/routing.yaml       # central routing policy/quality floors/budgets
+docs/aoteru-model-host-routing-contract.md
+Odysseus SQLite           # jobs, outcomes, routing telemetry/policy evaluation state
+```
+
+If equivalent existing surfaces already own any of these concerns, extend them instead of duplicating them.
+
+
+=== SOURCE 1: docs/aoteru-lab-local-model-strategy-2026-08-20.md (repeat 0) ===
+
+# Aoteru lab local-model strategy — 2026-08-20
+
+## Purpose
+
+Durable research snapshot for selecting, benchmarking and continuously replacing local models on the Aoteru/Odysseus lab worker. This is tailored to the estate's actual workloads rather than generic chat benchmarks.
+
+This document is **not** a permanent model ranking. Stable routing aliases remain authoritative; named models are incumbents/challengers that must earn promotion from measured estate-task performance.
+
+## Canonical lab hardware
+
+Live OS probes on 2026-08-20 establish:
+
+- host: `dmem-HP-Z2-Tower-G9-Workstation-Desktop-PC`
+- CPU: Intel Core i9-12900K, 16 cores / 24 threads, AVX2 / AVX-VNNI
+- RAM: **128 GB installed/online** (`125 GiB` usable reported by Linux)
+- GPU: NVIDIA GeForce RTX 3080
+- VRAM: **10 GB / 10,240 MiB**
+- driver: 560.35.03
+- CUDA reported by driver: 12.6
+- storage: WD PC SN810 2 TB NVMe; Linux root ~984 GB with ~668 GB free at capture
+- platform: Linux x86_64
+- existing local inference integration: Ollama
+
+The 10 GB GPU is the primary local-model constraint. The 128 GB system RAM makes much larger quantised models feasible through CPU/GPU hybrid placement, but system RAM is not a substitute for VRAM: models that merely load can still be operationally poor because of PCIe and memory-bandwidth latency.
+
+## Estate workloads the local portfolio must optimise for
+
+Benchmarking and routing must represent real work from:
+
+### Odysseus
+
+- routing and host/model selection
+- repository reconnaissance
+- bounded coding and repair
+- tool/function calls
+- schema-valid structured output
+- fault diagnosis
+- compact result synthesis
+- background stewardship/auditing
+
+### `obsidian-PhD`
+
+- source discovery and evidence tracing
+- evidence extraction with provenance
+- literature synthesis
+- scientific reasoning
+- note maintenance and compression
+- long-context retrieval across research artefacts
+
+### J1 / ICAC work
+
+- manuscript critique
+- paper-grounded Q&A
+- source/claim checking
+- presentation evidence checks
+- academic synthesis and independent review
+
+### S2-E1 / robotics development
+
+- ROS 2 repository reconnaissance
+- test and CI repair
+- log interpretation
+- bounded implementation/debugging
+
+Local AI resource use must remain resource-aware so background Aoteru work does not interfere with robotics experiments requiring the RTX 3080.
+
+## Strategic architecture
+
+There should not be one `local_model`. Odysseus should route through stable capability aliases and replace their backing models without downstream skill changes.
+
+Initial alias set:
+
+- `local-small` — high-volume extraction, classification, formatting, cheap review
+- `local-agent` — default local reasoning, tool use, repo scouting
+- `local-multimodal` — documents, screenshots, figures, audio/vision where useful
+- `local-code` — routine bounded coding/editing
+- `local-strong` — harder repo, coding and agentic work
+- `local-deep` — highest-quality local reasoning where latency is acceptable
+- `local-challenger` — canary slot for newer credible candidates
+
+Routing principle:
+
+> An adequate local result beats a paid result; an inadequate local result does not.
+
+Escalation remains:
+
+`deterministic tool -> local-small/local-agent -> local-strong/local-deep -> paid Luna/Haiku -> Terra/Sonnet -> Sol -> Opus`
+
+The exact path is task-specific; multimodal work can branch directly to `local-multimodal`.
+
+## 2026-08-20 research shortlist
+
+### First-round candidates
+
+1. **Gemma 4 E4B**
+   - candidate for `local-small`
+   - likely strong fit for high-volume classification/extraction
+   - Google publishes consumer/workstation-oriented deployment guidance
+
+2. **Qwen3.5-9B**
+   - primary predicted incumbent for `local-agent`
+   - also initial candidate for `local-code`
+   - attractive because it can plausibly remain fully GPU-resident at a useful quantisation/context while offering tool/agent/coding capability
+
+3. **Gemma 4 12B**
+   - primary `local-multimodal` candidate
+   - Google estimates roughly 6.7 GB at Q4_0, making it unusually well matched to 10 GB VRAM
+   - useful differentiator: multimodal capability rather than duplicating Qwen3.5-9B
+
+### Second-round candidates
+
+4. **Qwen3.6-35B-A3B**
+   - strongest initial candidate for `local-strong`
+   - MoE architecture: ~35B total, ~3B active/token
+   - necessarily hybrid on 10 GB VRAM, so actual latency and context behaviour must be measured
+
+5. **NVIDIA Nemotron 3.5 Lightning 30B-A3B**
+   - `local-challenger`
+   - very recent agentic/reasoning candidate with Ampere-compatible deployment paths
+   - must not displace an incumbent from recency alone
+
+6. **Qwen3.8-27B**
+   - primary `local-deep` challenger
+   - dense model; likely slower than MoE alternatives when partially offloaded
+   - valuable if it can avoid expensive cloud escalation on hard reasoning/coding/research tasks
+
+### Experimental, not first-round production candidates
+
+- Qwen3-Coder-Next 80B-class
+- Mistral Small 4 119B-A6B
+- very large GPT-OSS / frontier open checkpoints
+
+The lab has enough RAM to load some of these quantised, but that does not make them good interactive workers. They should only be explored after smaller candidates establish the useful quality/latency frontier.
+
+## Runtime strategy
+
+Keep **Ollama** as the stable Odysseus-facing local API where it performs adequately.
+
+Add **CUDA-enabled `llama.cpp` / `llama-bench`** for controlled benchmarking and specialist hybrid inference because the lab's 10 GB VRAM + 128 GB RAM topology benefits from explicit GPU-layer/offload control.
+
+Do not make vLLM the universal initial runtime on this worker. Reconsider it for models/hardware where its serving model is a better fit.
+
+Record actual processor placement and context during every benchmark. A model benchmarked at 4K with full GPU residency is not equivalent to the same model at 32K/64K with partial CPU placement.
+
+Minimum context benchmark points:
+
+- 8K — bounded subagent work
+- 32K — normal repository/research work
+- 64K — long agent work
+- 128K only where the task/model demonstrably benefits
+
+## Quantisation and residency
+
+Do not default blindly to the smallest quant.
+
+For GPU-fit models, benchmark Q4/Q5/Q6-class variants where available and select the highest-quality quant that preserves useful context while remaining fully or nearly fully GPU resident.
+
+For hybrid models, explicitly sweep GPU offload and context. Record:
+
+- quantisation
+- runtime/version
+- context
+- GPU layers/offload
+- peak VRAM
+- peak RAM
+- prompt tokens/s
+- decode tokens/s
+- time to first token
+- wall time
+- deterministic task success
+- tool-call validity
+- retries
+- escalation rate
+
+## Estate benchmark suite
+
+Use fixed, reproducible tasks derived from real repositories and research workflows. Public leaderboards can nominate candidates but must not promote them.
+
+Required task classes:
+
+1. repository reconnaissance
+2. bounded code edit with deterministic tests
+3. fault diagnosis
+4. tool-call correctness
+5. strict JSON/schema generation
+6. evidence extraction with source provenance
+7. PhD/scientific reasoning
+8. long-context retrieval
+9. document/image understanding
+10. compact summarisation/compression
+11. independent review of another worker's result
+12. ROS/log/test interpretation
+
+Prefer deterministic gates wherever possible. A patch that another LLM likes but that fails tests is a failure.
+
+## Promotion and demotion
+
+Promote a candidate only when repeated estate-task evidence shows one or more of:
+
+- materially higher task success
+- equivalent success with materially lower latency
+- equivalent success with materially less paid escalation
+- a useful capability the incumbent lacks
+
+Hard requirements:
+
+- no regression on permissions/safety/domain gates
+- deterministic success not worse than incumbent
+- repeated trials, not one-off anecdotes
+- low-risk canary period before full promotion
+
+Use recency-weighted telemetry so old benchmark wins decay rather than protecting an incumbent indefinitely.
+
+Routing should learn by **task class**, not force one model to win every alias. A plausible future split could be one model winning extraction, another tool use, another multimodal understanding, another repo repair, and another scientific reasoning.
+
+## Continuous model discovery
+
+Local-model selection is an ongoing estate function, not a one-time P7 exercise.
+
+Lifecycle:
+
+`official release -> metadata/hardware-fit screening -> candidate registry -> download one useful quant -> synthetic estate benchmark -> low-risk canary -> promote/demote/remove -> continuous telemetry`
+
+Discovery should monitor credible publishers such as Qwen, Google/Gemma, NVIDIA, Mistral and other strong open/open-weight model labs. Discovery nominates candidates only; it must not indiscriminately download models.
+
+Candidate pre-filter should consider:
+
+- runtime/architecture support
+- licence acceptability
+- 10 GB VRAM / 128 GB RAM fit
+- useful >=32K context
+- structured output/tool-use support where relevant
+- coding/reasoning capability
+- local quant availability
+- expected operational value over incumbent
+
+## Current predicted portfolio
+
+These are **research predictions to benchmark**, not final routing truth:
+
+- `local-small` -> Gemma 4 E4B
+- `local-agent` -> Qwen3.5-9B
+- `local-multimodal` -> Gemma 4 12B
+- `local-code` -> Qwen3.5-9B initially
+- `local-strong` -> Qwen3.6-35B-A3B if lab benchmark passes
+- `local-deep` -> Qwen3.8-27B if latency is acceptable
+- `local-challenger` -> NVIDIA Nemotron 3.5 Lightning 30B-A3B
+
+The strongest prior is that **Qwen3.5-9B will be the throughput workhorse**, **Gemma 4 12B the best fully GPU-resident multimodal worker**, **Qwen3.6-35B-A3B the most promising hybrid strong-agent candidate**, and **Qwen3.8-27B the most valuable deep local challenger to cloud escalation**. These predictions must be replaced by measured estate evidence when implementation runs.
+
+## Source anchors from the 2026-08-20 research
+
+Primary/current references used to nominate candidates and define runtime constraints:
+
+- Qwen3.5-9B: https://huggingface.co/Qwen/Qwen3.5-9B
+- Qwen3.6-35B-A3B: https://huggingface.co/Qwen/Qwen3.6-35B-A3B
+- Qwen3.8-27B: https://huggingface.co/Qwen/Qwen3.8-27B
+- Qwen3-Coder-Next: https://huggingface.co/Qwen/Qwen3-Coder-Next
+- Gemma 4 model overview: https://ai.google.dev/gemma/docs/core
+- Gemma 4 model card: https://ai.google.dev/gemma/docs/core/model_card_4
+- NVIDIA Nemotron 3.5 Lightning 30B-A3B: https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4
+- Mistral Small 4 119B-A6B: https://huggingface.co/mistralai/Mistral-Small-4-119B-2603
+- Ollama context guidance: https://docs.ollama.com/context-length
+- Ollama running-model/placement API: https://docs.ollama.com/api/ps
+- llama.cpp benchmark tooling: https://github.com/ggml-org/llama.cpp/blob/master/tools/llama-bench/README.md
+- llama.cpp server/offload controls: https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md
+
+## Relationship to routing authority
+
+This document supplies the lab-specific evidence and candidate portfolio for `docs/aoteru-model-host-routing-contract.md`.
+
+The routing contract remains authoritative for host eligibility, quality floors, permissions, verification and continuous improvement. This document exists so future implementations and benchmark cycles understand why particular local candidates were selected and which real estate tasks must determine whether they remain installed.
+
+=== SOURCE 2: docs/aoteru-lab-execution-convergence-evidence.md (repeat 0) ===
+
+---
+title: Aoteru lab execution convergence evidence
+status: compact-evidence
+owner: odysseus
+as_of: 2026-08-21
+parent: docs/aoteru-lab-execution-convergence.md
+---
+
+# Lab execution convergence — evidence
+
+Compact durable record for the independent-review convergence pass
+(`docs/aoteru-lab-execution-convergence.md`). Each numbered finding from
+that contract, what was verified, what was fixed, and the live/test
+evidence.
+
+## 1. GitHub durability
+
+**Verified, not fabricated.** `git pull --ff-only` (start of this
+session) and `git push origin dev --dry-run` both succeeded against
+`https://github.com/tyecam1/odysseus.git` with working stored
+credentials. Corrected in `docs/aoteru-estate-p10-evidence.md` and
+`docs/aoteru-lab-first-operator-guide.md` (both previously claimed "not
+achieved").
+
+## 2. Dedicated lab systemd service
+
+**Prepared and verified, not installed** (needs operator `sudo`).
+`odysseus-aoteru-lab.service` (repo root): `User=agent`,
+`WorkingDirectory=/home/agent/projects/odysseus-aoteru`, this checkout's
+own venv, `127.0.0.1:7001` only (never `0.0.0.0`), `Restart=on-failure`.
+Deliberately not a copy of the generic `odysseus-ui.service` template.
+`systemd-analyze verify` reports no errors specific to this unit (only
+unrelated pre-existing warnings from `snapd.service`/`netplan`, confirmed
+present regardless of this unit). `PrivateTmp` was considered and
+deliberately left out — `routes/shell_routes.py` and the cookbook/codex
+tmux runners depend on host-visible `/tmp` paths this environment has no
+live systemd instance to verify against.
+
+## 3. Host eligibility hardening
+
+**Real defect found and fixed.** `eligible_hosts()`/`host_reachable()`
+checked only role + live reachability — an explicit `verified: false` in
+`config/estate.yaml` (currently only `desktop-in7o23d`) was recorded but
+never actually read anywhere. Fixed in `src/estate_router.host_reachable()`
+(the one shared authority `scripts/agent` also imports): `verified: false`
+is now a hard gate checked before reachability. A host with no `verified`
+key at all still defaults to verified (lab/interface's existing
+convention, not a new category).
+
+Live-verified against the real registry:
+```
+eligible_hosts() -> hz2-workstation: eligible (this host)
+                     desktop-in7o23d: NOT eligible
+                     ("not verified (config/estate.yaml verified: false)
+                      — reachability alone is not sufficient")
+```
+Tests: `test_eligible_hosts_explicit_verified_false_blocks_even_if_reachable`,
+`test_host_reachable_missing_verified_key_defaults_true` (both new,
+passing).
+
+## 4. `LogicalSession` lifecycle
+
+**Real defect found and fixed.** `scripts/agent`'s `cmd_claude` wrote
+`status="active"` at session creation *before* checking whether a native
+process would actually launch, then never updated it on either failure
+path (no `claude` binary; native launch unimplemented) — every dispatch
+attempt in this environment left a permanently "active" row.
+
+Fixed: the real terminal status (`failed`, with a reason) is now written
+at creation time on both known-failure paths instead of "active" then
+never-updated. A `_reconcile_stale_sessions()` backstop sweeps any row
+still `active` with no `claude_session_id` past a 300s staleness window
+(covers a wrapper process dying mid-dispatch, which the creation-time fix
+alone can't cover) — invoked at the start of `agent claude where` and
+before creating a new session.
+
+Live-verified: running `agent claude auto "test task"` wrote the new
+session directly as `failed` (`active` count confirmed 0 afterward), and
+the *same reconciliation run* retroactively cleaned up 6 pre-existing
+rows this exact bug had left `active` since 2026-08-20 P5 testing — real
+production data, not a synthetic fixture.
+
+Tests: `tests/test_agent_cli_session_lifecycle.py` (3 new, passing).
+
+## 5. Parking lease heartbeat/stale handling
+
+**Real defect found and fixed.** `heartbeat_at` was set once at lease
+creation and never renewed by anything; no staleness handling existed at
+all — a crashed/killed `agent park` holder would block the repo forever
+(the unique-index single-writer guarantee was sound but had no
+expiry/renewal on top of it).
+
+Fixed, without a second lease authority:
+- `core.database.PARK_LEASE_STALE_SECONDS` (1800s) + `park_lease_is_stale()`
+  — one shared staleness rule.
+- `agent heartbeat <repo_id>` — new CLI command, renews `heartbeat_at` on
+  the caller's active lease.
+- `agent park` now auto-reclaims (releases) a *stale* active lease before
+  inserting a new one, instead of failing closed forever; a *live*
+  (non-stale) lease still fails closed exactly as before — unchanged
+  single-writer guarantee for real conflicts.
+- `src.estate_router.eligible_hosts()`'s conflicting-lease check now
+  ignores a stale conflicting lease on another host (read-only check;
+  reclaiming the row itself still only happens through `agent park`'s
+  explicit path) — a dead holder no longer blocks routing forever either.
+- `agent where`'s lease report now includes `allowed_write_scope` and a
+  `stale` boolean — the technical write-enforcement signal a caller
+  (human, or a future PreToolUse/git-hook gate) can act on instead of
+  trusting `status == "active"` alone.
+
+Tests: `tests/test_agent_cli_parking_lease.py` (5 new, passing) —
+heartbeat renewal, stale-lease reclaim, live-lease still-fails-closed,
+and `eligible_hosts()` ignoring a stale conflicting lease.
+
+## 6. Execution gap (major)
+
+**Real, major gap found and fixed.** `estate_router.resolve_route()`
+answered WHERE+WHAT but never called a model; `scripts/agent`'s
+`cmd_claude` explicitly stopped before native launch. Nothing in the
+system actually ran a task end to end.
+
+Fixed: `src.estate_router.execute_local()` + `run_task()`. `run_task()`
+calls the existing `resolve_route()` unchanged (deterministic-first and
+parking/domain gates untouched), then — only when the resolved executor
+is `local`, the one executor with a live runtime in this environment —
+actually executes via `src.llm_core.llm_call` (the existing provider-call
+layer; no second HTTP client), bounded by a timeout, with every failure
+mode caught and returned as a clean result rather than a raised
+exception. Applies a minimal, non-fabricated deterministic gate
+(non-empty response) and persists the real outcome (`status`,
+`deterministic_gate`, `latency_ms`, `escalation_reason` where relevant)
+back onto the *same* `routing_decisions` row `resolve_route()` already
+created — one row per routed task, not a second telemetry authority.
+Wired at the HTTP layer as `POST /api/estate/run` (same auth boundary as
+its `/route` sibling — verified 401 without a cookie after restart).
+
+Deliberately does not invent Claude/Codex execution — no binary/paid
+endpoint exists in this environment, and `run_task()` reports a
+`needs_escalation` route as unexecuted for the same honest reason
+`resolve_route()` already gives.
+
+**Live end-to-end evidence** (real Ollama, not mocked):
+```
+run_task({"task_class": "smoke-test",
+          "objective": "Reply with exactly the single word: pong",
+          "requirements": {"capabilities": ["local-fast"]}})
+->  route: host=hz2-workstation, executor=local, concrete_model=qwen3:8b
+    executed: true
+    execution: {"ok": true, "output": "pong", "latency_ms": 12957}
+    deterministic_gate: "pass"
+
+routing_decisions row (same decision_id, re-queried after execution):
+    status=complete, deterministic_gate=pass, latency_ms=12957,
+    escalation_reason=None
+```
+This is the full target chain: task envelope -> authority/host/model
+resolution -> local model execution -> deterministic verification/result
+-> persisted telemetry, genuinely working, live, on this host.
+
+Tests: 6 new in `tests/test_estate_router.py` (mocked — execution
+success/failure gating, deterministic/needs_escalation routes correctly
+left unexecuted, no-objective guard, bounded upstream-failure handling).
+
+## 7. Routing depth (minimum next layer)
+
+**Real gaps found and fixed**, scoped to exactly what the finding asked
+for — no scoring/ranking system invented:
+
+- **All requested capabilities validated**, not just the first:
+  `resolve_route()` now resolves every alias in
+  `requirements.capabilities` and only reports the route resolved when
+  *all* of them are; `capability_resolutions` (full list) is returned
+  alongside the existing `alias_resolution` (first, kept for backward
+  compatibility).
+- **Explicit host constraint respected**: `placement.requested_host`
+  (when not `"auto"`) narrows eligibility to that host and fails
+  truthfully (`"requested host ... is not eligible"`) rather than
+  silently substituting a different eligible host — the previous
+  behavior silently ignored this field entirely.
+- **Quality floor never fabricated**: an explicit `routing.quality_floor`
+  always fails truthfully (`quality_floor_error`) — `config/models.yaml`
+  carries no benchmarked numeric quality score to check it against, and
+  none is invented.
+- **Context capacity checked where evidence exists**:
+  `requirements.context_tokens`, when a local alias resolves, is checked
+  against `src.model_context.get_context_length_known()`'s *known* window
+  (reusing that module's own known-vs-fallback distinction); exceeding a
+  known window fails truthfully (`context_error`), an unknown window is
+  reported (`context_note`) rather than silently assumed adequate either
+  way.
+- **Budget constraints surfaced, not silently ignored**: no call/quota
+  accounting exists yet in this slice; any `budget.*` field present in
+  the envelope is now echoed back under `unverified_constraints` so a
+  caller can see plainly it wasn't actually enforced, instead of the
+  previous behavior of accepting-and-ignoring it silently.
+
+Tests: 8 new in `tests/test_estate_router.py`, all passing; full 27-test
+file re-verified live against the real `config/estate.yaml`/`models.yaml`
+afterward (unchanged real-config behavior for the unaffected paths).
+
+## 8. Full test suite + live e2e smoke
+
+Ran the actual repository suite, not only the routing-focused tests:
+**4885 passed, 4 skipped, 11 failed** (`python -m pytest -q`, ~118s).
+All 11 failures independently confirmed pre-existing and unrelated by
+re-running them against unmodified `dev` HEAD (`git stash` /
+`git stash pop`) before this session's changes were applied — same 11
+failures, same errors, on the untouched baseline:
+- 10× `AttributeError: 'Server' object has no attribute 'list_tools'` —
+  an MCP SDK version mismatch affecting `mcp_servers/email_server.py`,
+  `memory_server.py`, `rag_server.py` (4 collection errors +
+  `tests/test_imap_leak_fixes.py`'s 10 tests) — nothing this pass touched.
+- 1× `test_upload_handler_atomicity.py::test_smoke_info_lookup_after_bak_recovery`
+  — pre-existing, unrelated to routing/parking/execution changes (on
+  baseline this file actually failed 2/2, not 1/2 — filesystem-state
+  flakiness, not a regression from this session).
+
+Zero regressions attributable to this session's changes. Live e2e smoke
+is finding #6's evidence above (real task envelope through real Ollama
+execution with persisted telemetry) — not repeated here.
+
+## 9. Labelling reconciliation
+
+`docs/aoteru-estate-p10-evidence.md` corrected in place (original record
+kept, corrections called out inline, not silently rewritten): origin
+durability "not achieved" -> achieved; the local-worker chain segment
+upgraded from "routes only" to "routes AND executes"; title/label
+upgraded from `LAB-FIRST CUTOVER` to `LAB-FIRST EXECUTION CUTOVER`,
+justified by finding #6's live evidence, per the convergence contract's
+explicit instruction not to use that label unless the path genuinely
+works. `docs/aoteru-lab-first-operator-guide.md` rewritten to match
+current CLI surface (`agent heartbeat`, `/api/estate/run`), current gaps
+(only the systemd `sudo` install remains), and current verified-live
+bullet list.
+
+## 10. Deferred items preserved
+
+Confirmed no regression: `docs/aoteru-estate-p6-evidence.md` (mobile)
+still `DEFERRED`; `docs/aoteru-estate-p8-evidence.md`'s `obsidian-PhD`
+cross-repo dependency still recorded `## Deferred`. Neither file was
+touched this pass; nothing in this pass's fixes depends on or claims
+progress on either.
+
+## 11. Local-model strategy
+
+Read and retained (`docs/aoteru-lab-local-model-strategy-2026-08-20.md`).
+No models downloaded this pass — `config/models.yaml`'s existing bound
+aliases (`qwen3:8b`, `gpt-oss:20b`, `qwen3-embedding:8b`, the reranker)
+were reused as-is for finding #6's execution evidence. The benchmark
+programme in that strategy doc remains the next bounded work package,
+unstarted by design (execution plumbing had to exist first, and now
+does).
+
+## Net state
+
+All 11 findings verified and, where real, fixed with live evidence and
+passing tests. `LAB-FIRST EXECUTION CUTOVER` reached: the full chain
+(task envelope -> authority/host/model resolution -> local model
+execution -> deterministic verification/result -> persisted telemetry)
+is genuinely live on this host, not merely resolved-but-inert as the
+2026-08-20 record had it. Full-estate completion remains explicitly not
+claimed — home/interface PCs and Claude/Codex execution remain correctly
+deferred, unavailable dependencies, not fabricated.
+
+One human action remains: `sudo` to install
+`odysseus-aoteru-lab.service` (see `docs/aoteru-lab-first-operator-guide.md`).
+
+
+=== SOURCE 3: docs/aoteru-systemd-cutover-evidence.md (repeat 0) ===
+
+---
+title: Aoteru systemd cutover evidence — GATE CLOSED
+status: compact-evidence
+owner: odysseus
+as_of: 2026-08-21
+parent: docs/aoteru-systemd-cutover-finalisation.md
+---
+
+# systemd cutover — evidence
+
+Compact durable record for `docs/aoteru-systemd-cutover-finalisation.md`.
+The operator installed `odysseus-aoteru-lab.service` and, later this same
+pass, ran the one follow-up `sudo systemctl start` this session flagged
+after its own restart-behavior test took the unit out of supervision
+(this session lacks passwordless sudo throughout — every privileged step
+below was done by the operator, not this session).
+
+> **Gate closed.** All items in "Gate status" below are now true —
+> supervision was re-established and independently re-verified (new
+> `MainPID`, fresh health check, fresh live execution smoke test, fresh
+> regression run) after the operator's follow-up command. See "Gate
+> re-verification after supervision was re-established" for the second
+> round of live evidence.
+
+## Install verification (immediately after `enable --now`)
+
+All confirmed live:
+
+```
+systemctl is-enabled odysseus-aoteru-lab.service -> enabled
+systemctl is-active  odysseus-aoteru-lab.service -> active
+process: agent  /home/agent/projects/odysseus-aoteru/venv/bin/python -m uvicorn app:app --host 127.0.0.1 --port 7001
+listener: 127.0.0.1:7001 only (no 0.0.0.0)
+GET /api/health -> 200 {"status":"healthy",...}
+tailscale serve status --json -> Web handler only, proxy -> http://127.0.0.1:7001
+tailscale funnel status -> "(tailnet only)" on both hostnames, no Funnel
+chroma listeners: 127.0.0.1:8101 (isolated, this deployment) and
+                  127.0.0.1:8100 (upstream, untouched) — confirmed separate
+```
+
+## Restart-behavior test and an honest operational note
+
+To exercise `Restart=on-failure` without rebooting the host, this session
+sent the managed process (PID 1933592) a plain `kill` (SIGTERM) — the
+smallest bounded test available without further sudo. The app catches
+SIGTERM and performs its own graceful shutdown (logged "Application
+shutdown complete", exit reason `code=killed, signal=TERM` but a clean
+shutdown sequence), which systemd's `Restart=on-failure` correctly
+classifies as *not* a failure — matching the unit's own documented intent
+("a clean stop... should not be fought by the supervisor; only a crash
+restarts it") — so it did **not** auto-restart, and the unit went
+`inactive (dead)`.
+
+This is a genuine, useful finding (the "don't fight a clean stop" half of
+`Restart=on-failure` is confirmed working exactly as designed), but it
+has two consequences worth stating plainly rather than glossing over:
+
+1. **It does not prove the "restarts on crash" half.** A graceful SIGTERM
+   is not a crash; verifying that half needs either an actual crash
+   (SIGKILL, or an unhandled exception path) or another supervised
+   restart cycle — not attempted a second time this pass to avoid
+   repeating the same outage without a clearer plan (see below).
+2. **It took the *systemd-managed* instance down**, and this session
+   cannot bring it back up itself — `systemctl start`/`restart` both
+   require the same interactive sudo authentication `sudo -n true`
+   already established is unavailable here. Service continuity was
+   restored immediately via the same non-privileged manual-launch method
+   used before this cutover (`nohup .../venv/bin/python -m uvicorn ...`,
+   PID 1934571, same user, same bind, health-checked 200 immediately
+   after) — there is **no current outage** — but the running instance is
+   presently *not* under systemd's supervision again.
+
+**SQLite state survived the whole cycle intact** (same values before the
+kill and after the manual relaunch): `routing_decisions`: 10,
+`park_leases`: 4, `logical_sessions`: 7.
+
+**Live end-to-end local execution smoke test, run against the recovered
+instance** (real Ollama, not mocked):
+```
+run_task({"task_class": "systemd-cutover-smoke",
+          "objective": "Reply with exactly the single word: pong",
+          "requirements": {"capabilities": ["local-fast"]}})
+-> route: host=hz2-workstation, executor=local, concrete_model=qwen3:8b
+   executed: true, execution.output="pong", latency_ms=6347
+   deterministic_gate="pass"
+```
+`POST /api/estate/run` without a session cookie -> `401` (auth boundary
+unaffected). `GET /api/health` -> `200`.
+
+Focused regressions: `tests/test_estate_router.py`,
+`tests/test_agent_cli_session_lifecycle.py`,
+`tests/test_agent_cli_parking_lease.py`,
+`tests/test_auth_session_revocation.py` — 42 passed, 0 failed.
+
+## Gate re-verification after supervision was re-established
+
+The operator ran `sudo systemctl start odysseus-aoteru-lab.service`
+(handing the port back from the transient manual-fallback process this
+session had started). Re-verified independently, live, after that:
+
+```
+systemctl is-enabled odysseus-aoteru-lab.service -> enabled
+systemctl is-active  odysseus-aoteru-lab.service -> active
+                     since Fri 2026-08-21 11:21:43 BST
+                     MainPID=1937714 (new PID — confirms a real restart,
+                     not the same stale process being re-observed)
+process: agent  .../venv/bin/python -m uvicorn app:app --host 127.0.0.1 --port 7001
+listener: 127.0.0.1:7001 only (no 0.0.0.0)
+GET /api/health -> 200 {"status":"healthy",...}
+tailscale serve/funnel status -> unchanged (tailnet-only, no Funnel)
+chroma: 8101 (isolated) / 8100 (upstream) unchanged
+```
+
+SQLite state: `routing_decisions`: 11 (10 baseline + 1 from the earlier
+smoke test — expected growth, not loss), `park_leases`: 4,
+`logical_sessions`: 7 — consistent throughout the whole cutover, no data
+loss at any point.
+
+Fresh live end-to-end local execution smoke test, run against the
+re-supervised instance (real Ollama, not mocked):
+```
+run_task({"task_class": "systemd-cutover-gate-close-smoke",
+          "objective": "Reply with exactly the single word: pong",
+          "requirements": {"capabilities": ["local-fast"]}})
+-> executed: true, execution.output="pong", latency_ms=4327
+   deterministic_gate="pass"
+```
+`POST /api/estate/run` without a cookie -> `401` (auth boundary
+unaffected); `0.0.0.0:7001` listener count -> `0`. Focused regressions
+re-run: `tests/test_estate_router.py`,
+`tests/test_agent_cli_session_lifecycle.py`,
+`tests/test_agent_cli_parking_lease.py`,
+`tests/test_auth_session_revocation.py` — 42 passed, 0 failed.
+
+## Gate status against docs/aoteru-systemd-cutover-finalisation.md
+
+- [x] dedicated unit installed and enabled
+- [x] service active *under systemd* — re-verified with a new `MainPID`
+  after the operator's follow-up `systemctl start`, not merely assumed
+  from the earlier (since-lapsed) install-time check
+- [x] backend healthy
+- [x] app binds loopback only
+- [x] private Tailscale exposure unchanged, no Funnel/public route
+- [x] local routing/execution still works (fresh smoke test above)
+- [x] durable evidence current (this document)
+- [x] no new regression introduced (42/42 focused tests, no code changed
+  this pass)
+
+**All gates true — persistence step declared complete.** Reboot
+persistence itself (as opposed to `enabled` + a proven supervised
+restart) was, per the finalisation contract, deliberately not tested by
+an actual host reboot without explicit operator authorization — that
+remains the one item beyond this gate's scope, not a gap in what was
+verified.
+
+## What the restart-behavior test actually proved, net of the detour
+
+`Restart=on-failure` correctly does not fight a clean stop (verified: a
+graceful SIGTERM-triggered shutdown does not auto-restart). The
+crash-restart half was not separately proven by an intentional crash this
+pass — the operator's own `systemctl start` re-established supervision
+regardless, which is the property that actually matters operationally
+(the unit is enabled and controllable), so a further contrived-crash test
+was judged not worth another manual round-trip. If future confidence in
+crash-auto-restart specifically is wanted, the bounded test is: `sudo kill
+-KILL $(systemctl show odysseus-aoteru-lab.service -p MainPID --value)`,
+then `systemctl is-active` a few seconds later expecting `active` with a
+new `MainPID` — uncaught SIGKILL cannot be gracefully handled by the app,
+so unlike this pass's SIGTERM test it should trigger `Restart=on-failure`
+in one step. Not performed here to avoid a third round-trip once the
+declared gate was already satisfied.
+
+
+=== SOURCE 4: docs/aoteru-estate-p7-evidence.md (repeat 0) ===
+
+---
+title: Aoteru estate P7 evidence
+status: compact-evidence
+owner: odysseus
+as_of: 2026-08-20
+parent: docs/aoteru-estate-execution-contract.md
+---
+
+# P7 — lab hardware inventory + initial benchmark (lab-first slice)
+
+Compact durable record. Do not reread unless a dependency changes.
+
+## Lab hardware (measured, not assumed)
+
+- CPU: Intel i9-12900K (24 logical via hyperthreading)
+- RAM: 125 GiB
+- GPU: NVIDIA RTX 3080, 10 GiB VRAM, driver 560.35.03, CUDA 12.6
+- Disk: 984 GB total / 668 GB free at repo root
+- Ollama 0.19.0 already running (port 11434), already has 6 models
+  installed (no new downloads performed this phase): `gpt-oss:20b` (13.8GB,
+  MXFP4 — matches plan §9's own "GPT-OSS 20B" candidate exactly),
+  `qwen3:30b` (18.6GB Q4_K_M), `qwen3:8b` (5.2GB), `qwen3-embedding:8b`
+  (4.7GB), `dengcao/Qwen3-Reranker-8B` (5.0GB), plus a pre-existing custom
+  `dmem-box-attest-20260802:sentinel` (7.6B) unrelated to this programme.
+
+**10 GiB VRAM is the binding constraint**: none of plan §9's larger named
+candidates (Qwen3.6-35B-A3B ~24GB Q4, Qwen3.6-27B ~17GB Q4,
+Qwen3-Coder-Next ~52GB Q4) fit in VRAM on this GPU at their stated
+quantization — they'd run substantially CPU-offloaded. Recorded as real
+hardware evidence, not assumed from spec sheets.
+
+## Initial measured benchmark (bounded — not the full plan corpus)
+
+Real Ollama `/api/generate` runs, 8K context, single representative coding
+prompt (not yet the full "real PhD/coding/memory/Misumi work" corpus plan
+§7 wants — that needs obsidian-PhD, which per P0 isn't cloned on this
+host):
+
+| model | load_s | prompt tok/s | decode tok/s | VRAM behavior |
+|---|---|---|---|---|
+| gpt-oss:20b | 2.7 | 220.0 | 23.6 | exceeds 10GB VRAM — partial CPU offload, still 23.6 tok/s decode |
+| qwen3:8b | 1.8 | 1369.2 | 106.1 | fits fully in VRAM (`ollama ps` confirmed 100% GPU, 6.6GB used) |
+
+Both completed successfully (`done: true`), no errors, no quality/tool-use
+scoring done yet (out of scope for this bounded pass).
+
+## Deferred (genuinely out of scope for this bounded pass, not skipped silently)
+
+- Full representative benchmark corpus (real PhD/coding/memory/Misumi
+  tasks) — needs `obsidian-PhD`, absent from this host.
+- 32K/64K context testing — not run this pass; larger context on a
+  partially-offloaded 20B+ model would take substantially longer than this
+  session's remaining budget allows for a first pass.
+- Quality / tool-success / structured-output scoring — not attempted.
+- Downloading plan §9's other named candidates (GLM-4.7-Flash-30B-A3B,
+  Devstral-Small-2-24B, Qwen3.6 family, Qwen3-Coder-Next) — deliberately
+  not done speculatively; each is a multi-GB download decision better made
+  with explicit direction than grabbed autonomously.
+- Dual-host comparison — no second host, per lab-first.
+- `config/models.yaml` capability-alias bindings — left `null`; this one
+  bounded pass isn't enough evidence to commit to a binding yet.
+
+## Gate
+
+Plan §12 P7 gate: "defaults are evidence-based per host/task; local-first
+does not weaken required verification; second-host verification works
+independently."
+
+- [x] real hardware inventory recorded (not assumed)
+- [x] at least one real, measured benchmark data point exists (not zero
+      evidence, per the resource-policy rule against selecting models
+      before benchmark evidence exists)
+- [ ] full evidence-based default selection — needs the fuller corpus above
+- [ ] second-host verification — no second host
+
+**P7: PARTIAL.** Real hardware + a first real (bounded) benchmark data
+point exist. Full model-selection evidence and dual-host verification
+remain open, honestly deferred rather than rushed to a premature default.
+
+
+=== SOURCE 0: docs/aoteru-model-host-routing-contract.md (repeat 1) ===
+
+---
+title: Aoteru model-host routing contract
+status: target-contract
+owner: odysseus
+as_of: 2026-08-20
+scope: host placement, model routing, token economy, verification, continuous improvement
+---
+
+# Aoteru model-host routing contract
+
+## Aim
+
+Provide one central, provider-neutral routing authority for Aoteru so the user can speak to one persistent conversational front end while Odysseus selects the cheapest adequate execution route across deterministic tools, local models, Codex models and Claude models, on the correct worker host, with explicit verification and bounded escalation.
+
+The contract must optimise quality, token/quota efficiency, latency and locality without fragmenting authority across skills, repositories, hosts or model-specific wrappers.
+
+Target path:
+
+```text
+user -> Aoteru conversational front end -> Odysseus task envelope
+     -> authority/repo -> eligible host -> cheapest adequate mechanism/model
+     -> deterministic verification -> bounded escalation/independent review
+     -> compact result -> Aoteru response
+```
+
+The conversational model owns intent and communication. Odysseus owns routing. Workers are disposable execution resources.
+
+## Invariants
+
+1. One central routing authority in Odysseus. No repo, skill, MCP or worker may create a competing model-selection or host-selection policy.
+2. Resolve authority/repository before execution host; resolve execution host before model.
+3. Deterministic software precedes model inference whenever adequate.
+4. Adequate local inference precedes paid inference when measured quality meets the task quality floor.
+5. Local-first is not local-at-any-cost: paid escalation is required when the local route does not meet the quality or verification requirement.
+6. Routing uses stable capability aliases and live measurements, not permanent vendor/model rankings in business logic.
+7. Home and lab are first-class worker targets. Current unavailability must not be hard-coded into architecture.
+8. Today, lab is the only verified/available worker. Home remains registered but ineligible until live evidence sets verified, healthy and reachable true.
+9. The laptop/interface is the human control surface, not a normal execution worker.
+10. Repo mutation requires the existing Odysseus parking/lease authority. Routing never widens write authority.
+11. Workers receive bounded task/evidence pointers, not whole conversational transcripts or duplicated repository context.
+12. Verification is deterministic first, then independent-model review only when required.
+13. Escalation is evidence-triggered, not based on vague difficulty judgments.
+14. No swarm by default. One worker owns each task unit; parallelism is justified only by independent evidence gathering or deliberately independent verification.
+15. Routing telemetry may improve future choices but cannot silently weaken permissions, domain gates, quality floors or verification requirements.
+
+## Human-facing default
+
+The normal laptop Claude harness should present Aoteru through a strong, efficient conversational model. The current preferred role is Claude Sonnet-class inference at a moderate effort setting, but this is a role rather than a permanent model pin.
+
+Aoteru should normally submit work to Odysseus instead of executing heavy repo/research work in the conversational context merely because the front-end model can do it.
+
+## Host model
+
+```yaml
+hosts:
+  interface:
+    role: controller
+    execution_worker: false
+
+  lab:
+    role: worker
+    execution_worker: true
+    verified: true
+    availability: live
+    routing_eligible: true
+
+  home:
+    role: worker
+    execution_worker: true
+    verified: false
+    availability: unavailable
+    routing_eligible: false
+```
+
+Home becomes eligible only from live discovery proving at minimum:
+
+```text
+verified = true
+healthy = true
+reachable = true
+```
+
+Never infer these states from old documentation.
+
+## Routing dimensions
+
+Every model-required task resolves both:
+
+```text
+WHERE?                         WHAT?
+verified worker host           deterministic mechanism
+                               local-fast
+                               local-strong
+                               Luna-class
+                               Haiku-class
+                               Terra-class
+                               Sonnet-class
+                               Sol-class
+                               Opus-class
+```
+
+A route is therefore an execution tuple, not only a model name:
+
+```yaml
+route:
+  host: lab
+  executor: local | codex | claude | deterministic
+  model_alias: local-fast | local-strong | code-fast | code-strong | reasoning-strong | null
+  concrete_model: resolved_from_live_registry
+```
+
+## Default economic ladder
+
+Use only as a seed policy; P7/live benchmark evidence overrides it.
+
+```text
+0 deterministic software
+1 local-fast
+2 local-strong
+3 Luna/Haiku class
+4 Terra/Sonnet class
+5 Sol class
+6 Opus class
+```
+
+Luna and Haiku largely occupy cheap scout/verification roles. Prefer the provider already native to the active workflow unless cross-provider independence is required.
+
+Terra-class inference is normally the routine implementation worker. Sonnet-class inference is normally the Aoteru conversational foreman and can perform orchestration/reasoning when justified.
+
+Sol-class inference is the normal expensive escalation for difficult engineering, debugging, scientific reasoning and deep review. Opus-class inference is reserved for frontier ambiguity, long-horizon architecture/synthesis, high-consequence arbitration or independent review where its measured advantage justifies the quota cost.
+
+## Model aliases
+
+Business logic must target capability aliases rather than concrete model brands:
+
+```yaml
+aliases:
+  local-fast:
+    purpose: cheap extraction, classification, reconnaissance
+
+  local-strong:
+    purpose: strongest adequate local reasoning/implementation
+
+  code-fast:
+    purpose: routine code work
+
+  code-strong:
+    purpose: difficult code work
+
+  reasoning-strong:
+    purpose: difficult analysis/research/architecture
+
+  vision:
+    purpose: multimodal work
+
+  embedding:
+    purpose: derived semantic indexing
+
+  reranker:
+    purpose: retrieval ranking
+```
+
+Concrete mappings come from live host inventory plus benchmark results.
+
+## Canonical task envelope
+
+```yaml
+task:
+  id:
+  objective:
+  task_class:
+  domain:
+  repo:
+
+  authority:
+  read_scope:
+  write_scope:
+
+  complexity: trivial | routine | hard | frontier
+  consequence: low | medium | high
+  autonomy: read | propose | write
+
+  requirements:
+    capabilities: []
+    context_tokens:
+    data_locality:
+    hardware: []
+
+  placement:
+    requested_host: auto
+    eligible_hosts: []
+    parked_host:
+    fallback_allowed: true
+
+  routing:
+    quality_floor:
+    local_first: true
+    paid_allowed: true
+    cross_provider_required: false
+
+  budget:
+    max_worker_calls:
+    max_paid_calls:
+    max_frontier_calls:
+    max_context_tokens:
+    latency_priority:
+
+  verification:
+    deterministic: []
+    independent_model_required: false
+
+  context:
+    source_pointers: []
+    memory_pointers: []
+```
+
+## Eligibility and scoring
+
+Host eligibility is a hard filter:
+
+```text
+reachable
+healthy
+repo/service available
+parking/write authority available when needed
+required tools/hardware available
+data policy permits execution there
+```
+
+Model/mechanism eligibility is a second hard filter:
+
+```text
+capability match
+quality benchmark at or above task floor
+context capacity sufficient
+provider/runtime available
+quota/budget permits route
+```
+
+Only eligible routes are scored. The implementation may evolve the exact formula, but it must prefer demonstrated success and adequate local execution while accounting for resource cost:
+
+```text
+score =
+    measured_quality
+  + locality/determinism benefit
+  - expected paid-token/quota cost
+  - latency penalty
+  - host-load penalty
+  - observed escalation/retry risk
+```
+
+No score may override a hard authority, security or quality constraint.
+
+## Escalation contract
+
+Escalate only on recorded evidence such as:
+
+```text
+deterministic_gate_failed
+worker_failed
+insufficient_capability
+confidence_below_threshold
+unresolved_ambiguity
+conflicting_evidence
+context_limit
+quality_floor_not_met
+```
+
+Normal pattern:
+
+```text
+cheap adequate worker -> deterministic checks -> done
+                                      |
+                                      +-> evidence-triggered stronger worker
+```
+
+Do not pre-emptively send the same context to multiple expensive models.
+
+## Independent verification
+
+Prefer deterministic checks first: tests, schemas, lint/type checks, git diff checks, source/claim checks and domain gates.
+
+When model independence is materially useful, prefer cross-provider review:
+
+```text
+Codex primary -> Claude verifier
+Claude primary -> Codex verifier
+Sol-class primary <-> Opus-class adversarial review for high-consequence reasoning
+```
+
+A third inference occurs only if disagreement materially affects the outcome.
+
+## Compact worker result contract
+
+```yaml
+status: complete | blocked | failed | needs_escalation
+result:
+  summary:
+evidence: []
+changes: []
+verification: []
+uncertainty: []
+escalation:
+  required: false
+  reason:
+handoff:
+  context_pointers: []
+```
+
+Do not return worker scratchpads to the conversational model.
+
+# Continuous improvement contract
+
+Routing must improve from observed estate performance rather than remain a static hand-authored ranking.
+
+## Telemetry to capture per routed task
+
+At minimum:
+
+```text
+task_class
+complexity/consequence
+host
+mechanism/provider/model alias + concrete model
+input/context size where measurable
+paid/quota consumption where measurable
+latency
+deterministic verification outcomes
+worker self-confidence if available
+retry count
+escalation occurrence and reason
+independent-review outcome
+human correction/rejection where explicitly observed
+final task status
+```
+
+Record source/result pointers rather than sensitive prompt copies where possible.
+
+## Learning loop
+
+```text
+execute
+  -> verify
+  -> record outcome/cost/latency/escalation
+  -> aggregate by task class + host + route
+  -> compare candidate routes against incumbent
+  -> shadow/canary candidate policy
+  -> promote only if quality floor/regression gates hold
+  -> continue measuring
+```
+
+The system should continuously update empirical route estimates such as:
+
+```text
+success probability
+first-pass verification rate
+expected retries/escalations
+latency distribution
+paid-token/quota consumption
+local throughput
+host availability/load
+```
+
+Use recency weighting or equivalent so stale model/hardware results decay rather than permanently dominate routing.
+
+## Safe adaptation boundary
+
+Continuous improvement is not unconstrained self-modification.
+
+The runtime may automatically update ephemeral statistics and select among already-approved eligible routes. Changes to permissions, domain gates, host trust, model allowlists, quality floors, verification requirements or routing-code semantics require the existing governed change process.
+
+Policy/config tuning should follow:
+
+1. collect sufficient evidence;
+2. generate a candidate change with rationale and before/after metrics;
+3. test in replay/shadow mode against a representative task corpus;
+4. run deterministic regressions;
+5. canary where appropriate;
+6. promote only on non-inferior quality with a meaningful cost/latency benefit, or superior quality within the allowed budget;
+7. retain rollback and provenance.
+
+A local estate steward may propose routing improvements and run bounded evaluations, but must not silently relax safety/authority constraints.
+
+## Exploration
+
+Avoid getting permanently stuck on yesterday's best route. Allow small bounded exploration only among routes that already meet the safety/quality eligibility floor. Exploration must be disabled or strongly reduced for high-consequence tasks unless explicitly validated.
+
+New models or newly available home hardware enter as candidates, not automatic defaults. Benchmark them against the real estate task corpus before promotion.
+
+## Home re-entry
+
+Current implementation is lab-first. When home becomes reachable:
+
+1. verify identity and service health live;
+2. inventory CPU/GPU/VRAM/RAM/storage/runtimes/models/repos;
+3. benchmark the same task classes used for lab;
+4. add home routes as candidate eligible routes;
+5. run shadow/comparative evaluation;
+6. promote task classes to home only where measured performance justifies it.
+
+No architecture rewrite should be necessary.
+
+# Implementation acceptance criteria
+
+This contract is implemented only when all of the following are true:
+
+1. One Odysseus-owned routing API accepts the canonical task envelope and returns a host+mechanism+model route.
+2. Routing consumes live estate/model inventory and parking state rather than static prose.
+3. Lab is currently eligible; home fails truthfully as unavailable without blocking lab execution.
+4. Deterministic and local routes can be selected ahead of paid inference when they meet the quality floor.
+5. Codex and Claude workers are invoked through the same provider-neutral job/result contract.
+6. Heavy work can leave the laptop Sonnet conversation and execute next to the parked repo while only compact results return.
+7. Evidence-triggered escalation is enforced and observable.
+8. Per-task routing telemetry is persisted.
+9. A benchmark/replay evaluator can compare incumbent versus candidate routing policies.
+10. Candidate route/policy changes are shadowed/canary-tested before promotion.
+11. Routing statistics adapt with new measured outcomes and decay stale evidence.
+12. Home can be added later through discovery + benchmark + eligibility without changing the task or routing contracts.
+13. No duplicate router, queue, lease authority, model registry or domain-specific routing policy is introduced.
+
+## Implementation placement
+
+Extend existing Odysseus ownership rather than adding another orchestrator. Expected canonical surfaces are:
+
+```text
+config/models.yaml        # capability aliases and approved model candidates
+config/estate.yaml        # hosts/services and live-resolution contract
+config/routing.yaml       # central routing policy/quality floors/budgets
+docs/aoteru-model-host-routing-contract.md
+Odysseus SQLite           # jobs, outcomes, routing telemetry/policy evaluation state
+```
+
+If equivalent existing surfaces already own any of these concerns, extend them instead of duplicating them.
+
+
+=== SOURCE 1: docs/aoteru-lab-local-model-strategy-2026-08-20.md (repeat 1) ===
+
+# Aoteru lab local-model strategy — 2026-08-20
+
+## Purpose
+
+Durable research snapshot for selecting, benchmarking and continuously replacing local models on the Aoteru/Odysseus lab worker. This is tailored to the estate's actual workloads rather than generic chat benchmarks.
+
+This document is **not** a permanent model ranking. Stable routing aliases remain authoritative; named models are incumbents/challengers that must earn promotion from measured estate-task performance.
+
+## Canonical lab hardware
+
+Live OS probes on 2026-08-20 establish:
+
+- host: `dmem-HP-Z2-Tower-G9-Workstation-Desktop-PC`
+- CPU: Intel Core i9-12900K, 16 cores / 24 threads, AVX2 / AVX-VNNI
+- RAM: **128 GB installed/online** (`125 GiB` usable reported by Linux)
+- GPU: NVIDIA GeForce RTX 3080
+- VRAM: **10 GB / 10,240 MiB**
+- driver: 560.35.03
+- CUDA reported by driver: 12.6
+- storage: WD PC SN810 2 TB NVMe; Linux root ~984 GB with ~668 GB free at capture
+- platform: Linux x86_64
+- existing local inference integration: Ollama
+
+The 10 GB GPU is the primary local-model constraint. The 128 GB system RAM makes much larger quantised models feasible through CPU/GPU hybrid placement, but system RAM is not a substitute for VRAM: models that merely load can still be operationally poor because of PCIe and memory-bandwidth latency.
+
+## Estate workloads the local portfolio must optimise for
+
+Benchmarking and routing must represent real work from:
+
+### Odysseus
+
+- routing and host/model selection
+- repository reconnaissance
+- bounded coding and repair
+- tool/function calls
+- schema-valid structured output
+- fault diagnosis
+- compact result synthesis
+- background stewardship/auditing
+
+### `obsidian-PhD`
+
+- source discovery and evidence tracing
+- evidence extraction with provenance
+- literature synthesis
+- scientific reasoning
+- note maintenance and compression
+- long-context retrieval across research artefacts
+
+### J1 / ICAC work
+
+- manuscript critique
+- paper-grounded Q&A
+- source/claim checking
+- presentation evidence checks
+- academic synthesis and independent review
+
+### S2-E1 / robotics development
+
+- ROS 2 repository reconnaissance
+- test and CI repair
+- log interpretation
+- bounded implementation/debugging
+
+Local AI resource use must remain resource-aware so background Aoteru work does not interfere with robotics experiments requiring the RTX 3080.
+
+## Strategic architecture
+
+There should not be one `local_model`. Odysseus should route through stable capability aliases and replace their backing models without downstream skill changes.
+
+Initial alias set:
+
+- `local-small` — high-volume extraction, classification, formatting, cheap review
+- `local-agent` — default local reasoning, tool use, repo scouting
+- `local-multimodal` — documents, screenshots, figures, audio/vision where useful
+- `local-code` — routine bounded coding/editing
+- `local-strong` — harder repo, coding and agentic work
+- `local-deep` — highest-quality local reasoning where latency is acceptable
+- `local-challenger` — canary slot for newer credible candidates
+
+Routing principle:
+
+> An adequate local result beats a paid result; an inadequate local result does not.
+
+Escalation remains:
+
+`deterministic tool -> local-small/local-agent -> local-strong/local-deep -> paid Luna/Haiku -> Terra/Sonnet -> Sol -> Opus`
+
+The exact path is task-specific; multimodal work can branch directly to `local-multimodal`.
+
+## 2026-08-20 research shortlist
+
+### First-round candidates
+
+1. **Gemma 4 E4B**
+   - candidate for `local-small`
+   - likely strong fit for high-volume classification/extraction
+   - Google publishes consumer/workstation-oriented deployment guidance
+
+2. **Qwen3.5-9B**
+   - primary predicted incumbent for `local-agent`
+   - also initial candidate for `local-code`
+   - attractive because it can plausibly remain fully GPU-resident at a useful quantisation/context while offering tool/agent/coding capability
+
+3. **Gemma 4 12B**
+   - primary `local-multimodal` candidate
+   - Google estimates roughly 6.7 GB at Q4_0, making it unusually well matched to 10 GB VRAM
+   - useful differentiator: multimodal capability rather than duplicating Qwen3.5-9B
+
+### Second-round candidates
+
+4. **Qwen3.6-35B-A3B**
+   - strongest initial candidate for `local-strong`
+   - MoE architecture: ~35B total, ~3B active/token
+   - necessarily hybrid on 10 GB VRAM, so actual latency and context behaviour must be measured
+
+5. **NVIDIA Nemotron 3.5 Lightning 30B-A3B**
+   - `local-challenger`
+   - very recent agentic/reasoning candidate with Ampere-compatible deployment paths
+   - must not displace an incumbent from recency alone
+
+6. **Qwen3.8-27B**
+   - primary `local-deep` challenger
+   - dense model; likely slower than MoE alternatives when partially offloaded
+   - valuable if it can avoid expensive cloud escalation on hard reasoning/coding/research tasks
+
+### Experimental, not first-round production candidates
+
+- Qwen3-Coder-Next 80B-class
+- Mistral Small 4 119B-A6B
+- very large GPT-OSS / frontier open checkpoints
+
+The lab has enough RAM to load some of these quantised, but that does not make them good interactive workers. They should only be explored after smaller candidates establish the useful quality/latency frontier.
+
+## Runtime strategy
+
+Keep **Ollama** as the stable Odysseus-facing local API where it performs adequately.
+
+Add **CUDA-enabled `llama.cpp` / `llama-bench`** for controlled benchmarking and specialist hybrid inference because the lab's 10 GB VRAM + 128 GB RAM topology benefits from explicit GPU-layer/offload control.
+
+Do not make vLLM the universal initial runtime on this worker. Reconsider it for models/hardware where its serving model is a better fit.
+
+Record actual processor placement and context during every benchmark. A model benchmarked at 4K with full GPU residency is not equivalent to the same model at 32K/64K with partial CPU placement.
+
+Minimum context benchmark points:
+
+- 8K — bounded subagent work
+- 32K — normal repository/research work
+- 64K — long agent work
+- 128K only where the task/model demonstrably benefits
+
+## Quantisation and residency
+
+Do not default blindly to the smallest quant.
+
+For GPU-fit models, benchmark Q4/Q5/Q6-class variants where available and select the highest-quality quant that preserves useful context while remaining fully or nearly fully GPU resident.
+
+For hybrid models, explicitly sweep GPU offload and context. Record:
+
+- quantisation
+- runtime/version
+- context
+- GPU layers/offload
+- peak VRAM
+- peak RAM
+- prompt tokens/s
+- decode tokens/s
+- time to first token
+- wall time
+- deterministic task success
+- tool-call validity
+- retries
+- escalation rate
+
+## Estate benchmark suite
+
+Use fixed, reproducible tasks derived from real repositories and research workflows. Public leaderboards can nominate candidates but must not promote them.
+
+Required task classes:
+
+1. repository reconnaissance
+2. bounded code edit with deterministic tests
+3. fault diagnosis
+4. tool-call correctness
+5. strict JSON/schema generation
+6. evidence extraction with source provenance
+7. PhD/scientific reasoning
+8. long-context retrieval
+9. document/image understanding
+10. compact summarisation/compression
+11. independent review of another worker's result
+12. ROS/log/test interpretation
+
+Prefer deterministic gates wherever possible. A patch that another LLM likes but that fails tests is a failure.
+
+## Promotion and demotion
+
+Promote a candidate only when repeated estate-task evidence shows one or more of:
+
+- materially higher task success
+- equivalent success with materially lower latency
+- equivalent success with materially less paid escalation
+- a useful capability the incumbent lacks
+
+Hard requirements:
+
+- no regression on permissions/safety/domain gates
+- deterministic success not worse than incumbent
+- repeated trials, not one-off anecdotes
+- low-risk canary period before full promotion
+
+Use recency-weighted telemetry so old benchmark wins decay rather than protecting an incumbent indefinitely.
+
+Routing should learn by **task class**, not force one model to win every alias. A plausible future split could be one model winning extraction, another tool use, another multimodal understanding, another repo repair, and another scientific reasoning.
+
+## Continuous model discovery
+
+Local-model selection is an ongoing estate function, not a one-time P7 exercise.
+
+Lifecycle:
+
+`official release -> metadata/hardware-fit screening -> candidate registry -> download one useful quant -> synthetic estate benchmark -> low-risk canary -> promote/demote/remove -> continuous telemetry`
+
+Discovery should monitor credible publishers such as Qwen, Google/Gemma, NVIDIA, Mistral and other strong open/open-weight model labs. Discovery nominates candidates only; it must not indiscriminately download models.
+
+Candidate pre-filter should consider:
+
+- runtime/architecture support
+- licence acceptability
+- 10 GB VRAM / 128 GB RAM fit
+- useful >=32K context
+- structured output/tool-use support where relevant
+- coding/reasoning capability
+- local quant availability
+- expected operational value over incumbent
+
+## Current predicted portfolio
+
+These are **research predictions to benchmark**, not final routing truth:
+
+- `local-small` -> Gemma 4 E4B
+- `local-agent` -> Qwen3.5-9B
+- `local-multimodal` -> Gemma 4 12B
+- `local-code` -> Qwen3.5-9B initially
+- `local-strong` -> Qwen3.6-35B-A3B if lab benchmark passes
+- `local-deep` -> Qwen3.8-27B if latency is acceptable
+- `local-challenger` -> NVIDIA Nemotron 3.5 Lightning 30B-A3B
+
+The strongest prior is that **Qwen3.5-9B will be the throughput workhorse**, **Gemma 4 12B the best fully GPU-resident multimodal worker**, **Qwen3.6-35B-A3B the most promising hybrid strong-agent candidate**, and **Qwen3.8-27B the most valuable deep local challenger to cloud escalation**. These predictions must be replaced by measured estate evidence when implementation runs.
+
+## Source anchors from the 2026-08-20 research
+
+Primary/current references used to nominate candidates and define runtime constraints:
+
+- Qwen3.5-9B: https://huggingface.co/Qwen/Qwen3.5-9B
+- Qwen3.6-35B-A3B: https://huggingface.co/Qwen/Qwen3.6-35B-A3B
+- Qwen3.8-27B: https://huggingface.co/Qwen/Qwen3.8-27B
+- Qwen3-Coder-Next: https://huggingface.co/Qwen/Qwen3-Coder-Next
+- Gemma 4 model overview: https://ai.google.dev/gemma/docs/core
+- Gemma 4 model card: https://ai.google.dev/gemma/docs/core/model_card_4
+- NVIDIA Nemotron 3.5 Lightning 30B-A3B: https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4
+- Mistral Small 4 119B-A6B: https://huggingface.co/mistralai/Mistral-Small-4-119B-2603
+- Ollama context guidance: https://docs.ollama.com/context-length
+- Ollama running-model/placement API: https://docs.ollama.com/api/ps
+- llama.cpp benchmark tooling: https://github.com/ggml-org/llama.cpp/blob/master/tools/llama-bench/README.md
+- llama.cpp server/offload controls: https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md
+
+## Relationship to routing authority
+
+This document supplies the lab-specific evidence and candidate portfolio for `docs/aoteru-model-host-routing-contract.md`.
+
+The routing contract remains authoritative for host eligibility, quality floors, permissions, verification and continuous improvement. This document exists so future implementations and benchmark cycles understand why particular local candidates were selected and which real estate tasks must determine whether they remain installed.
+
+>>> The unique canary value for this run is ODYSSEUS-NEEDLE-47281. <<<
+
+
+
+=== SOURCE 2: docs/aoteru-lab-execution-convergence-evidence.md (repeat 1) ===
+
+---
+title: Aoteru lab execution convergence evidence
+status: compact-evidence
+owner: odysseus
+as_of: 2026-08-21
+parent: docs/aoteru-lab-execution-convergence.md
+---
+
+# Lab execution convergence — evidence
+
+Compact durable record for the independent-review convergence pass
+(`docs/aoteru-lab-execution-convergence.md`). Each numbered finding from
+that contract, what was verified, what was fixed, and the live/test
+evidence.
+
+## 1. GitHub durability
+
+**Verified, not fabricated.** `git pull --ff-only` (start of this
+session) and `git push origin dev --dry-run` both succeeded against
+`https://github.com/tyecam1/odysseus.git` with working stored
+credentials. Corrected in `docs/aoteru-estate-p10-evidence.md` and
+`docs/aoteru-lab-first-operator-guide.md` (both previously claimed "not
+achieved").
+
+## 2. Dedicated lab systemd service
+
+**Prepared and verified, not installed** (needs operator `sudo`).
+`odysseus-aoteru-lab.service` (repo root): `User=agent`,
+`WorkingDirectory=/home/agent/projects/odysseus-aoteru`, this checkout's
+own venv, `127.0.0.1:7001` only (never `0.0.0.0`), `Restart=on-failure`.
+Deliberately not a copy of the generic `odysseus-ui.service` template.
+`systemd-analyze verify` reports no errors specific to this unit (only
+unrelated pre-existing warnings from `snapd.service`/`netplan`, confirmed
+present regardless of this unit). `PrivateTmp` was considered and
+deliberately left out — `routes/shell_routes.py` and the cookbook/codex
+tmux runners depend on host-visible `/tmp` paths this environment has no
+live systemd instance to verify against.
+
+## 3. Host eligibility hardening
+
+**Real defect found and fixed.** `eligible_hosts()`/`host_reachable()`
+checked only role + live reachability — an explicit `verified: false` in
+`config/estate.yaml` (currently only `desktop-in7o23d`) was recorded but
+never actually read anywhere. Fixed in `src/estate_router.host_reachable()`
+(the one shared authority `scripts/agent` also imports): `verified: false`
+is now a hard gate checked before reachability. A host with no `verified`
+key at all still defaults to verified (lab/interface's existing
+convention, not a new category).
+
+Live-verified against the real registry:
+```
+eligible_hosts() -> hz2-workstation: eligible (this host)
+                     desktop-in7o23d: NOT eligible
+                     ("not verified (config/estate.yaml verified: false)
+                      — reachability alone is not sufficient")
+```
+Tests: `test_eligible_hosts_explicit_verified_false_blocks_even_if_reachable`,
+`test_host_reachable_missing_verified_key_defaults_true` (both new,
+passing).
+
+## 4. `LogicalSession` lifecycle
+
+**Real defect found and fixed.** `scripts/agent`'s `cmd_claude` wrote
+`status="active"` at session creation *before* checking whether a native
+process would actually launch, then never updated it on either failure
+path (no `claude` binary; native launch unimplemented) — every dispatch
+attempt in this environment left a permanently "active" row.
+
+Fixed: the real terminal status (`failed`, with a reason) is now written
+at creation time on both known-failure paths instead of "active" then
+never-updated. A `_reconcile_stale_sessions()` backstop sweeps any row
+still `active` with no `claude_session_id` past a 300s staleness window
+(covers a wrapper process dying mid-dispatch, which the creation-time fix
+alone can't cover) — invoked at the start of `agent claude where` and
+before creating a new session.
+
+Live-verified: running `agent claude auto "test task"` wrote the new
+session directly as `failed` (`active` count confirmed 0 afterward), and
+the *same reconciliation run* retroactively cleaned up 6 pre-existing
+rows this exact bug had left `active` since 2026-08-20 P5 testing — real
+production data, not a synthetic fixture.
+
+Tests: `tests/test_agent_cli_session_lifecycle.py` (3 new, passing).
+
+## 5. Parking lease heartbeat/stale handling
+
+**Real defect found and fixed.** `heartbeat_at` was set once at lease
+creation and never renewed by anything; no staleness handling existed at
+all — a crashed/killed `agent park` holder would block the repo forever
+(the unique-index single-writer guarantee was sound but had no
+expiry/renewal on top of it).
+
+Fixed, without a second lease authority:
+- `core.database.PARK_LEASE_STALE_SECONDS` (1800s) + `park_lease_is_stale()`
+  — one shared staleness rule.
+- `agent heartbeat <repo_id>` — new CLI command, renews `heartbeat_at` on
+  the caller's active lease.
+- `agent park` now auto-reclaims (releases) a *stale* active lease before
+  inserting a new one, instead of failing closed forever; a *live*
+  (non-stale) lease still fails closed exactly as before — unchanged
+  single-writer guarantee for real conflicts.
+- `src.estate_router.eligible_hosts()`'s conflicting-lease check now
+  ignores a stale conflicting lease on another host (read-only check;
+  reclaiming the row itself still only happens through `agent park`'s
+  explicit path) — a dead holder no longer blocks routing forever either.
+- `agent where`'s lease report now includes `allowed_write_scope` and a
+  `stale` boolean — the technical write-enforcement signal a caller
+  (human, or a future PreToolUse/git-hook gate) can act on instead of
+  trusting `status == "active"` alone.
+
+Tests: `tests/test_agent_cli_parking_lease.py` (5 new, passing) —
+heartbeat renewal, stale-lease reclaim, live-lease still-fails-closed,
+and `eligible_hosts()` ignoring a stale conflicting lease.
+
+## 6. Execution gap (major)
+
+**Real, major gap found and fixed.** `estate_router.resolve_route()`
+answered WHERE+WHAT but never called a model; `scripts/agent`'s
+`cmd_claude` explicitly stopped before native launch. Nothing in the
+system actually ran a task end to end.
+
+Fixed: `src.estate_router.execute_local()` + `run_task()`. `run_task()`
+calls the existing `resolve_route()` unchanged (deterministic-first and
+parking/domain gates untouched), then — only when the resolved executor
+is `local`, the one executor with a live runtime in this environment —
+actually executes via `src.llm_core.llm_call` (the existing provider-call
+layer; no second HTTP client), bounded by a timeout, with every failure
+mode caught and returned as a clean result rather than a raised
+exception. Applies a minimal, non-fabricated deterministic gate
+(non-empty response) and persists the real outcome (`status`,
+`deterministic_gate`, `latency_ms`, `escalation_reason` where relevant)
+back onto the *same* `routing_decisions` row `resolve_route()` already
+created — one row per routed task, not a second telemetry authority.
+Wired at the HTTP layer as `POST /api/estate/run` (same auth boundary as
+its `/route` sibling — verified 401 without a cookie after restart).
+
+Deliberately does not invent Claude/Codex execution — no binary/paid
+endpoint exists in this environment, and `run_task()` reports a
+`needs_escalation` route as unexecuted for the same honest reason
+`resolve_route()` already gives.
+
+**Live end-to-end evidence** (real Ollama, not mocked):
+```
+run_task({"task_class": "smoke-test",
+          "objective": "Reply with exactly the single word: pong",
+          "requirements": {"capabilities": ["local-fast"]}})
+->  route: host=hz2-workstation, executor=local, concrete_model=qwen3:8b
+    executed: true
+    execution: {"ok": true, "output": "pong", "latency_ms": 12957}
+    deterministic_gate: "pass"
+
+routing_decisions row (same decision_id, re-queried after execution):
+    status=complete, deterministic_gate=pass, latency_ms=12957,
+    escalation_reason=None
+```
+This is the full target chain: task envelope -> authority/host/model
+resolution -> local model execution -> deterministic verification/result
+-> persisted telemetry, genuinely working, live, on this host.
+
+Tests: 6 new in `tests/test_estate_router.py` (mocked — execution
+success/failure gating, deterministic/needs_escalation routes correctly
+left unexecuted, no-objective guard, bounded upstream-failure handling).
+
+## 7. Routing depth (minimum next layer)
+
+**Real gaps found and fixed**, scoped to exactly what the finding asked
+for — no scoring/ranking system invented:
+
+- **All requested capabilities validated**, not just the first:
+  `resolve_route()` now resolves every alias in
+  `requirements.capabilities` and only reports the route resolved when
+  *all* of them are; `capability_resolutions` (full list) is returned
+  alongside the existing `alias_resolution` (first, kept for backward
+  compatibility).
+- **Explicit host constraint respected**: `placement.requested_host`
+  (when not `"auto"`) narrows eligibility to that host and fails
+  truthfully (`"requested host ... is not eligible"`) rather than
+  silently substituting a different eligible host — the previous
+  behavior silently ignored this field entirely.
+- **Quality floor never fabricated**: an explicit `routing.quality_floor`
+  always fails truthfully (`quality_floor_error`) — `config/models.yaml`
+  carries no benchmarked numeric quality score to check it against, and
+  none is invented.
+- **Context capacity checked where evidence exists**:
+  `requirements.context_tokens`, when a local alias resolves, is checked
+  against `src.model_context.get_context_length_known()`'s *known* window
+  (reusing that module's own known-vs-fallback distinction); exceeding a
+  known window fails truthfully (`context_error`), an unknown window is
+  reported (`context_note`) rather than silently assumed adequate either
+  way.
+- **Budget constraints surfaced, not silently ignored**: no call/quota
+  accounting exists yet in this slice; any `budget.*` field present in
+  the envelope is now echoed back under `unverified_constraints` so a
+  caller can see plainly it wasn't actually enforced, instead of the
+  previous behavior of accepting-and-ignoring it silently.
+
+Tests: 8 new in `tests/test_estate_router.py`, all passing; full 27-test
+file re-verified live against the real `config/estate.yaml`/`models.yaml`
+afterward (unchanged real-config behavior for the unaffected paths).
+
+## 8. Full test suite + live e2e smoke
+
+Ran the actual repository suite, not only the routing-focused tests:
+**4885 passed, 4 skipped, 11 failed** (`python -m pytest -q`, ~118s).
+All 11 failures independently confirmed pre-existing and unrelated by
+re-running them against unmodified `dev` HEAD (`git stash` /
+`git stash pop`) before this session's changes were applied — same 11
+failures, same errors, on the untouched baseline:
+- 10× `AttributeError: 'Server' object has no attribute 'list_tools'` —
+  an MCP SDK version mismatch affecting `mcp_servers/email_server.py`,
+  `memory_server.py`, `rag_server.py` (4 collection errors +
+  `tests/test_imap_leak_fixes.py`'s 10 tests) — nothing this pass touched.
+- 1× `test_upload_handler_atomicity.py::test_smoke_info_lookup_after_bak_recovery`
+  — pre-existing, unrelated to routing/parking/execution changes (on
+  baseline this file actually failed 2/2, not 1/2 — filesystem-state
+  flakiness, not a regression from this session).
+
+Zero regressions attributable to this session's changes. Live e2e smoke
+is finding #6's evidence above (real task envelope through real Ollama
+execution with persisted telemetry) — not repeated here.
+
+## 9. Labelling reconciliation
+
+`docs/aoteru-estate-p10-evidence.md` corrected in place (original record
+kept, corrections called out inline, not silently rewritten): origin
+durability "not achieved" -> achieved; the local-worker chain segment
+upgraded from "routes only" to "routes AND executes"; title/label
+upgraded from `LAB-FIRST CUTOVER` to `LAB-FIRST EXECUTION CUTOVER`,
+justified by finding #6's live evidence, per the convergence contract's
+explicit instruction not to use that label unless the path genuinely
+works. `docs/aoteru-lab-first-operator-guide.md` rewritten to match
+current CLI surface (`agent heartbeat`, `/api/estate/run`), current gaps
+(only the systemd `sudo` install remains), and current verified-live
+bullet list.
+
+## 10. Deferred items preserved
+
+Confirmed no regression: `docs/aoteru-estate-p6-evidence.md` (mobile)
+still `DEFERRED`; `docs/aoteru-estate-p8-evidence.md`'s `obsidian-PhD`
+cross-repo dependency still recorded `## Deferred`. Neither file was
+touched this pass; nothing in this pass's fixes depends on or claims
+progress on either.
+
+## 11. Local-model strategy
+
+Read and retained (`docs/aoteru-lab-local-model-strategy-2026-08-20.md`).
+No models downloaded this pass — `config/models.yaml`'s existing bound
+aliases (`qwen3:8b`, `gpt-oss:20b`, `qwen3-embedding:8b`, the reranker)
+were reused as-is for finding #6's execution evidence. The benchmark
+programme in that strategy doc remains the next bounded work package,
+unstarted by design (execution plumbing had to exist first, and now
+does).
+
+## Net state
+
+All 11 findings verified and, where real, fixed with live evidence and
+passing tests. `LAB-FIRST EXECUTION CUTOVER` reached: the full chain
+(task envelope -> authority/host/model resolution -> local model
+execution -> deterministic verification/result -> persisted telemetry)
+is genuinely live on this host, not merely resolved-but-inert as the
+2026-08-20 record had it. Full-estate completion remains explicitly not
+claimed — home/interface PCs and Claude/Codex execution remain correctly
+deferred, unavailable dependencies, not fabricated.
+
+One human action remains: `sudo` to install
+`odysseus-aoteru-lab.service` (see `docs/aoteru-lab-first-operator-guide.md`).
+
+
+=== SOURCE 3: docs/aoteru-systemd-cutover-evidence.md (repeat 1) ===
+
+---
+title: Aoteru systemd cutover evidence — GATE CLOSED
+status: compact-evidence
+owner: odysseus
+as_of: 2026-08-21
+parent: docs/aoteru-systemd-cutover-finalisation.md
+---
+
+# systemd cutover — evidence
+
+Compact durable record for `docs/aoteru-systemd-cutover-finalisation.md`.
+The operator installed `odysseus-aoteru-lab.service` and, later this same
+pass, ran the one follow-up `sudo systemctl start` this session flagged
+after its own restart-behavior test took the unit out of supervision
+(this session lacks passwordless sudo throughout — every privileged step
+below was done by the operator, not this session).
+
+> **Gate closed.** All items in "Gate status" below are now true —
+> supervision was re-established and independently re-verified (new
+> `MainPID`, fresh health check, fresh live execution smoke test, fresh
+> regression run) after the operator's follow-up command. See "Gate
+> re-verification after supervision was re-established" for the second
+> round of live evidence.
+
+## Install verification (immediately after `enable --now`)
+
+All confirmed live:
+
+```
+systemctl is-enabled odysseus-aoteru-lab.service -> enabled
+systemctl is-active  odysseus-aoteru-lab.service -> active
+process: agent  /home/agent/projects/odysseus-aoteru/venv/bin/python -m uvicorn app:app --host 127.0.0.1 --port 7001
+listener: 127.0.0.1:7001 only (no 0.0.0.0)
+GET /api/health -> 200 {"status":"healthy",...}
+tailscale serve status --json -> Web handler only, proxy -> http://127.0.0.1:7001
+tailscale funnel status -> "(tailnet only)" on both hostnames, no Funnel
+chroma listeners: 127.0.0.1:8101 (isolated, this deployment) and
+                  127.0.0.1:8100 (upstream, untouched) — confirmed separate
+```
+
+## Restart-behavior test and an honest operational note
+
+To exercise `Restart=on-failure` without rebooting the host, this session
+sent the managed process (PID 1933592) a plain `kill` (SIGTERM) — the
+smallest bounded test available without further sudo. The app catches
+SIGTERM and performs its own graceful shutdown (logged "Application
+shutdown complete", exit reason `code=killed, signal=TERM` but a clean
+shutdown sequence), which systemd's `Restart=on-failure` correctly
+classifies as *not* a failure — matching the unit's own documented intent
+("a clean stop... should not be fought by the supervisor; only a crash
+restarts it") — so it did **not** auto-restart, and the unit went
+`inactive (dead)`.
+
+This is a genuine, useful finding (the "don't fight a clean stop" half of
+`Restart=on-failure` is confirmed working exactly as designed), but it
+has two consequences worth stating plainly rather than glossing over:
+
+1. **It does not prove the "restarts on crash" half.** A graceful SIGTERM
+   is not a crash; verifying that half needs either an actual crash
+   (SIGKILL, or an unhandled exception path) or another supervised
+   restart cycle — not attempted a second time this pass to avoid
+   repeating the same outage without a clearer plan (see below).
+2. **It took the *systemd-managed* instance down**, and this session
+   cannot bring it back up itself — `systemctl start`/`restart` both
+   require the same interactive sudo authentication `sudo -n true`
+   already established is unavailable here. Service continuity was
+   restored immediately via the same non-privileged manual-launch method
+   used before this cutover (`nohup .../venv/bin/python -m uvicorn ...`,
+   PID 1934571, same user, same bind, health-checked 200 immediately
+   after) — there is **no current outage** — but the running instance is
+   presently *not* under systemd's supervision again.
+
+**SQLite state survived the whole cycle intact** (same values before the
+kill and after the manual relaunch): `routing_decisions`: 10,
+`park_leases`: 4, `logical_sessions`: 7.
+
+**Live end-to-end local execution smoke test, run against the recovered
+instance** (real Ollama, not mocked):
+```
+run_task({"task_class": "systemd-cutover-smoke",
+          "objective": "Reply with exactly the single word: pong",
+          "requirements": {"capabilities": ["local-fast"]}})
+-> route: host=hz2-workstation, executor=local, concrete_model=qwen3:8b
+   executed: true, execution.output="pong", latency_ms=6347
+   deterministic_gate="pass"
+```
+`POST /api/estate/run` without a session cookie -> `401` (auth boundary
+unaffected). `GET /api/health` -> `200`.
+
+Focused regressions: `tests/test_estate_router.py`,
+`tests/test_agent_cli_session_lifecycle.py`,
+`tests/test_agent_cli_parking_lease.py`,
+`tests/test_auth_session_revocation.py` — 42 passed, 0 failed.
+
+## Gate re-verification after supervision was re-established
+
+The operator ran `sudo systemctl start odysseus-aoteru-lab.service`
+(handing the port back from the transient manual-fallback process this
+session had started). Re-verified independently, live, after that:
+
+```
+systemctl is-enabled odysseus-aoteru-lab.service -> enabled
+systemctl is-active  odysseus-aoteru-lab.service -> active
+                     since Fri 2026-08-21 11:21:43 BST
+                     MainPID=1937714 (new PID — confirms a real restart,
+                     not the same stale process being re-observed)
+process: agent  .../venv/bin/python -m uvicorn app:app --host 127.0.0.1 --port 7001
+listener: 127.0.0.1:7001 only (no 0.0.0.0)
+GET /api/health -> 200 {"status":"healthy",...}
+tailscale serve/funnel status -> unchanged (tailnet-only, no Funnel)
+chroma: 8101 (isolated) / 8100 (upstream) unchanged
+```
+
+SQLite state: `routing_decisions`: 11 (10 baseline + 1 from the earlier
+smoke test — expected growth, not loss), `park_leases`: 4,
+`logical_sessions`: 7 — consistent throughout the whole cutover, no data
+loss at any point.
+
+Fresh live end-to-end local execution smoke test, run against the
+re-supervised instance (real Ollama, not mocked):
+```
+run_task({"task_class": "systemd-cutover-gate-close-smoke",
+          "objective": "Reply with exactly the single word: pong",
+          "requirements": {"capabilities": ["local-fast"]}})
+-> executed: true, execution.output="pong", latency_ms=4327
+   deterministic_gate="pass"
+```
+`POST /api/estate/run` without a cookie -> `401` (auth boundary
+unaffected); `0.0.0.0:7001` listener count -> `0`. Focused regressions
+re-run: `tests/test_estate_router.py`,
+`tests/test_agent_cli_session_lifecycle.py`,
+`tests/test_agent_cli_parking_lease.py`,
+`tests/test_auth_session_revocation.py` — 42 passed, 0 failed.
+
+## Gate status against docs/aoteru-systemd-cutover-finalisation.md
+
+- [x] dedicated unit installed and enabled
+- [x] service active *under systemd* — re-verified with a new `MainPID`
+  after the operator's follow-up `systemctl start`, not merely assumed
+  from the earlier (since-lapsed) install-time check
+- [x] backend healthy
+- [x] app binds loopback only
+- [x] private Tailscale exposure unchanged, no Funnel/public route
+- [x] local routing/execution still works (fresh smoke test above)
+- [x] durable evidence current (this document)
+- [x] no new regression introduced (42/42 focused tests, no code changed
+  this pass)
+
+**All gates true — persistence step declared complete.** Reboot
+persistence itself (as opposed to `enabled` + a proven supervised
+restart) was, per the finalisation contract, deliberately not tested by
+an actual host reboot without explicit operator authorization — that
+remains the one item beyond this gate's scope, not a gap in what was
+verified.
+
+## What the restart-behavior test actually proved, net of the detour
+
+`Restart=on-failure` correctly does not fight a clean stop (verified: a
+graceful SIGTERM-triggered shutdown does not auto-restart). The
+crash-restart half was not separately proven by an intentional crash this
+pass — the operator's own `systemctl start` re-established supervision
+regardless, which is the property that actually matters operationally
+(the unit is enabled and controllable), so a further contrived-crash test
+was judged not worth another manual round-trip. If future confidence in
+crash-auto-restart specifically is wanted, the bounded test is: `sudo kill
+-KILL $(systemctl show odysseus-aoteru-lab.service -p MainPID --value)`,
+then `systemctl is-active` a few seconds later expecting `active` with a
+new `MainPID` — uncaught SIGKILL cannot be gracefully handled by the app,
+so unlike this pass's SIGTERM test it should trigger `Restart=on-failure`
+in one step. Not performed here to avoid a third round-trip once the
+declared gate was already satisfied.
+
+
+=== SOURCE 4: docs/aoteru-estate-p7-evidence.md (repeat 1) ===
+
+---
+title: Aoteru estate P7 evidence
+status: compact-evidence
+owner: odysseus
+as_of: 2026-08-20
+parent: docs/aoteru-estate-execution-contract.md
+---
+
+# P7 — lab hardware inventory + initial benchmark (lab-first slice)
+
+Compact durable record. Do not reread unless a dependency changes.
+
+## Lab hardware (measured, not assumed)
+
+- CPU: Intel i9-12900K (24 logical via hyperthreading)
+- RAM: 125 GiB
+- GPU: NVIDIA RTX 3080, 10 GiB VRAM, driver 560.35.03, CUDA 12.6
+- Disk: 984 GB total / 668 GB free at repo root
+- Ollama 0.19.0 already running (port 11434), already has 6 models
+  installed (no new downloads performed this phase): `gpt-oss:20b` (13.8GB,
+  MXFP4 — matches plan §9's own "GPT-OSS 20B" candidate exactly),
+  `qwen3:30b` (18.6GB Q4_K_M), `qwen3:8b` (5.2GB), `qwen3-embedding:8b`
+  (4.7GB), `dengcao/Qwen3-Reranker-8B` (5.0GB), plus a pre-existing custom
+  `dmem-box-attest-20260802:sentinel` (7.6B) unrelated to this programme.
+
+**10 GiB VRAM is the binding constraint**: none of plan §9's larger named
+candidates (Qwen3.6-35B-A3B ~24GB Q4, Qwen3.6-27B ~17GB Q4,
+Qwen3-Coder-Next ~52GB Q4) fit in VRAM on this GPU at their stated
+quantization — they'd run substantially CPU-offloaded. Recorded as real
+hardware evidence, not assumed from spec sheets.
+
+## Initial measured benchmark (bounded — not the full plan corpus)
+
+Real Ollama `/api/generate` runs, 8K context, single representative coding
+prompt (not yet the full "real PhD/coding/memory/Misumi work" corpus plan
+§7 wants — that needs obsidian-PhD, which per P0 isn't cloned on this
+host):
+
+| model | load_s | prompt tok/s | decode tok/s | VRAM behavior |
+|---|---|---|---|---|
+| gpt-oss:20b | 2.7 | 220.0 | 23.6 | exceeds 10GB VRAM — partial CPU offload, still 23.6 tok/s decode |
+| qwen3:8b | 1.8 | 1369.2 | 106.1 | fits fully in VRAM (`ollama ps` confirmed 100% GPU, 6.6GB used) |
+
+Both completed successfully (`done: true`), no errors, no quality/tool-use
+scoring done yet (out of scope for this bounded pass).
+
+## Deferred (genuinely out of scope for this bounded pass, not skipped silently)
+
+- Full representative benchmark corpus (real PhD/coding/memory/Misumi
+  tasks) — needs `obsidian-PhD`, absent from this host.
+- 32K/64K context testing — not run this pass; larger context on a
+  partially-offloaded 20B+ model would take substantially longer than this
+  session's remaining budget allows for a first pass.
+- Quality / tool-success / structured-output scoring — not attempted.
+- Downloading plan §9's other named candidates (GLM-4.7-Flash-30B-A3B,
+  Devstral-Small-2-24B, Qwen3.6 family, Qwen3-Coder-Next) — deliberately
+  not done speculatively; each is a multi-GB download decision better made
+  with explicit direction than grabbed autonomously.
+- Dual-host comparison — no second host, per lab-first.
+- `config/models.yaml` capability-alias bindings — left `null`; this one
+  bounded pass isn't enough evidence to commit to a binding yet.
+
+## Gate
+
+Plan §12 P7 gate: "defaults are evidence-based per host/task; local-first
+does not weaken required verification; second-host verification works
+independently."
+
+- [x] real hardware inventory recorded (not assumed)
+- [x] at least one real, measured benchmark data point exists (not zero
+      evidence, per the resource-policy rule against selecting models
+      before benchmark evidence exists)
+- [ ] full evidence-based default selection — needs the fuller corpus above
+- [ ] second-host verification — no second host
+
+**P7: PARTIAL.** Real hardware + a first real (bounded) benchmark data
+point exist. Full model-selection evidence and dual-host verification
+remain open, honestly deferred rather than rushed to a premature default.
+
+
+=== SOURCE 0: docs/aoteru-model-host-routing-contract.md (repeat 2) ===
+
+---
+title: Aoteru model-host routing contract
+status: target-contract
+owner: odysseus
+as_of: 2026-08-20
+scope: host placement, model routing, token economy, verification, continuous improvement
+---
+
+# Aoteru model-host routing contract
+
+## Aim
+
+Provide one central, provider-neutral routing authority for Aoteru so the user can speak to one persistent conversational front end while Odysseus selects the cheapest adequate execution route across deterministic tools, local models, Codex models and Claude models, on the correct worker host, with explicit verification and bounded escalation.
+
+The contract must optimise quality, token/quota efficiency, latency and locality without fragmenting authority across skills, repositories, hosts or model-specific wrappers.
+
+Target path:
+
+```text
+user -> Aoteru conversational front end -> Odysseus task envelope
+     -> authority/repo -> eligible host -> cheapest adequate mechanism/model
+     -> deterministic verification -> bounded escalation/independent review
+     -> compact result -> Aoteru response
+```
+
+The conversational model owns intent and communication. Odysseus owns routing. Workers are disposable execution resources.
+
+## Invariants
+
+1. One central routing authority in Odysseus. No repo, skill, MCP or worker may create a competing model-selection or host-selection policy.
+2. Resolve authority/repository before execution host; resolve execution host before model.
+3. Deterministic software precedes model inference whenever adequate.
+4. Adequate local inference precedes paid inference when measured quality meets the task quality floor.
+5. Local-first is not local-at-any-cost: paid escalation is required when the local route does not meet the quality or verification requirement.
+6. Routing uses stable capability aliases and live measurements, not permanent vendor/model rankings in business logic.
+7. Home and lab are first-class worker targets. Current unavailability must not be hard-coded into architecture.
+8. Today, lab is the only verified/available worker. Home remains registered but ineligible until live evidence sets verified, healthy and reachable true.
+9. The laptop/interface is the human control surface, not a normal execution worker.
+10. Repo mutation requires the existing Odysseus parking/lease authority. Routing never widens write authority.
+11. Workers receive bounded task/evidence pointers, not whole conversational transcripts or duplicated repository context.
+12. Verification is deterministic first, then independent-model review only when required.
+13. Escalation is evidence-triggered, not based on vague difficulty judgments.
+14. No swarm by default. One worker owns each task unit; parallelism is justified only by independent evidence gathering or deliberately independent verification.
+15. Routing telemetry may improve future choices but cannot silently weaken permissions, domain gates, quality floors or verification requirements.
+
+## Human-facing default
+
+The normal laptop Claude harness should present Aoteru through a strong, efficient conversational model. The current preferred role is Claude Sonnet-class inference at a moderate effort setting, but this is a role rather than a permanent model pin.
+
+Aoteru should normally submit work to Odysseus instead of executing heavy repo/research work in the conversational context merely because the front-end model can do it.
+
+## Host model
+
+```yaml
+hosts:
+  interface:
+    role: controller
+    execution_worker: false
+
+  lab:
+    role: worker
+    execution_worker: true
+    verified: true
+    availability: live
+    routing_eligible: true
+
+  home:
+    role: worker
+    execution_worker: true
+    verified: false
+    availability: unavailable
+    routing_eligible: false
+```
+
+Home becomes eligible only from live discovery proving at minimum:
+
+```text
+verified = true
+healthy = true
+reachable = true
+```
+
+Never infer these states from old documentation.
+
+## Routing dimensions
+
+Every model-required task resolves both:
+
+```text
+WHERE?                         WHAT?
+verified worker host           deterministic mechanism
+                               local-fast
+                               local-strong
+                               Luna-class
+                               Haiku-class
+                               Terra-class
+                               Sonnet-class
+                               Sol-class
+                               Opus-class
+```
+
+A route is therefore an execution tuple, not only a model name:
+
+```yaml
+route:
+  host: lab
+  executor: local | codex | claude | deterministic
+  model_alias: local-fast | local-strong | code-fast | code-strong | reasoning-strong | null
+  concrete_model: resolved_from_live_registry
+```
+
+## Default economic ladder
+
+Use only as a seed policy; P7/live benchmark evidence overrides it.
+
+```text
+0 deterministic software
+1 local-fast
+2 local-strong
+3 Luna/Haiku class
+4 Terra/Sonnet class
+5 Sol class
+6 Opus class
+```
+
+Luna and Haiku largely occupy cheap scout/verification roles. Prefer the provider already native to the active workflow unless cross-provider independence is required.
+
+Terra-class inference is normally the routine implementation worker. Sonnet-class inference is normally the Aoteru conversational foreman and can perform orchestration/reasoning when justified.
+
+Sol-class inference is the normal expensive escalation for difficult engineering, debugging, scientific reasoning and deep review. Opus-class inference is reserved for frontier ambiguity, long-horizon architecture/synthesis, high-consequence arbitration or independent review where its measured advantage justifies the quota cost.
+
+## Model aliases
+
+Business logic must target capability aliases rather than concrete model brands:
+
+```yaml
+aliases:
+  local-fast:
+    purpose: cheap extraction, classification, reconnaissance
+
+  local-strong:
+    purpose: strongest adequate local reasoning/implementation
+
+  code-fast:
+    purpose: routine code work
+
+  code-strong:
+    purpose: difficult code work
+
+  reasoning-strong:
+    purpose: difficult analysis/research/architecture
+
+  vision:
+    purpose: multimodal work
+
+  embedding:
+    purpose: derived semantic indexing
+
+  reranker:
+    purpose: retrieval ranking
+```
+
+Concrete mappings come from live host inventory plus benchmark results.
+
+## Canonical task envelope
+
+```yaml
+task:
+  id:
+  objective:
+  task_class:
+  domain:
+  repo:
+
+  authority:
+  read_scope:
+  write_scope:
+
+  complexity: trivial | routine | hard | frontier
+  consequence: low | medium | high
+  autonomy: read | propose | write
+
+  requirements:
+    capabilities: []
+    context_tokens:
+    data_locality:
+    hardware: []
+
+  placement:
+    requested_host: auto
+    eligible_hosts: []
+    parked_host:
+    fallback_allowed: true
+
+  routing:
+    quality_floor:
+    local_first: true
+    paid_allowed: true
+    cross_provider_required: false
+
+  budget:
+    max_worker_calls:
+    max_paid_calls:
+    max_frontier_calls:
+    max_context_tokens:
+    latency_priority:
+
+  verification:
+    deterministic: []
+    independent_model_required: false
+
+  context:
+    source_pointers: []
+    memory_pointers: []
+```
+
+## Eligibility and scoring
+
+Host eligibility is a hard filter:
+
+```text
+reachable
+healthy
+repo/service available
+parking/write authority available when needed
+required tools/hardware available
+data policy permits execution there
+```
+
+Model/mechanism eligibility is a second hard filter:
+
+```text
+capability match
+quality benchmark at or above task floor
+context capacity sufficient
+provider/runtime available
+quota/budget permits route
+```
+
+Only eligible routes are scored. The implementation may evolve the exact formula, but it must prefer demonstrated success and adequate local execution while accounting for resource cost:
+
+```text
+score =
+    measured_quality
+  + locality/determinism benefit
+  - expected paid-token/quota cost
+  - latency penalty
+  - host-load penalty
+  - observed escalation/retry risk
+```
+
+No score may override a hard authority, security or quality constraint.
+
+## Escalation contract
+
+Escalate only on recorded evidence such as:
+
+```text
+deterministic_gate_failed
+worker_failed
+insufficient_capability
+confidence_below_threshold
+unresolved_ambiguity
+conflicting_evidence
+context_limit
+quality_floor_not_met
+```
+
+Normal pattern:
+
+```text
+cheap adequate worker -> deterministic checks -> done
+                                      |
+                                      +-> evidence-triggered stronger worker
+```
+
+Do not pre-emptively send the same context to multiple expensive models.
+
+## Independent verification
+
+Prefer deterministic checks first: tests, schemas, lint/type checks, git diff checks, source/claim checks and domain gates.
+
+When model independence is materially useful, prefer cross-provider review:
+
+```text
+Codex primary -> Claude verifier
+Claude primary -> Codex verifier
+Sol-class primary <-> Opus-class adversarial review for high-consequence reasoning
+```
+
+A third inference occurs only if disagreement materially affects the outcome.
+
+## Compact worker result contract
+
+```yaml
+status: complete | blocked | failed | needs_escalation
+result:
+  summary:
+evidence: []
+changes: []
+verification: []
+uncertainty: []
+escalation:
+  required: false
+  reason:
+handoff:
+  context_pointers: []
+```
+
+Do not return worker scratchpads to the conversational model.
+
+# Continuous improvement contract
+
+Routing must improve from observed estate performance rather than remain a static hand-authored ranking.
+
+## Telemetry to capture per routed task
+
+At minimum:
+
+```text
+task_class
+complexity/consequence
+host
+mechanism/provider/model alias + concrete model
+input/context size where measurable
+paid/quota consumption where measurable
+latency
+deterministic verification outcomes
+worker self-confidence if available
+retry count
+escalation occurrence and reason
+independent-review outcome
+human correction/rejection where explicitly observed
+final task status
+```
+
+Record source/result pointers rather than sensitive prompt copies where possible.
+
+## Learning loop
+
+```text
+execute
+  -> verify
+  -> record outcome/cost/latency/escalation
+  -> aggregate by task class + host + route
+  -> compare candidate routes against incumbent
+  -> shadow/canary candidate policy
+  -> promote only if quality floor/regression gates hold
+  -> continue measuring
+```
+
+The system should continuously update empirical route estimates such as:
+
+```text
+success probability
+first-pass verification rate
+expected retries/escalations
+latency distribution
+paid-token/quota consumption
+local throughput
+host availability/load
+```
+
+Use recency weighting or equivalent so stale model/hardware results decay rather than permanently dominate routing.
+
+## Safe adaptation boundary
+
+Continuous improvement is not unconstrained self-modification.
+
+The runtime may automatically update ephemeral statistics and select among already-approved eligible routes. Changes to permissions, domain gates, host trust, model allowlists, quality floors, verification requirements or routing-code semantics require the existing governed change process.
+
+Policy/config tuning should follow:
+
+1. collect sufficient evidence;
+2. generate a candidate change with rationale and before/after metrics;
+3. test in replay/shadow mode against a representative task corpus;
+4. run deterministic regressions;
+5. canary where appropriate;
+6. promote only on non-inferior quality with a meaningful cost/latency benefit, or superior quality within the allowed budget;
+7. retain rollback and provenance.
+
+A local estate steward may propose routing improvements and run bounded evaluations, but must not silently relax safety/authority constraints.
+
+## Exploration
+
+Avoid getting permanently stuck on yesterday's best route. Allow small bounded exploration only among routes that already meet the safety/quality eligibility floor. Exploration must be disabled or strongly reduced for high-consequence tasks unless explicitly validated.
+
+New models or newly available home hardware enter as candidates, not automatic defaults. Benchmark them against the real estate task corpus before promotion.
+
+## Home re-entry
+
+Current implementation is lab-first. When home becomes reachable:
+
+1. verify identity and service health live;
+2. inventory CPU/GPU/VRAM/RAM/storage/runtimes/models/repos;
+3. benchmark the same task classes used for lab;
+4. add home routes as candidate eligible routes;
+5. run shadow/comparative evaluation;
+6. promote task classes to home only where measured performance justifies it.
+
+No architecture rewrite should be necessary.
+
+# Implementation acceptance criteria
+
+This contract is implemented only when all of the following are true:
+
+1. One Odysseus-owned routing API accepts the canonical task envelope and returns a host+mechanism+model route.
+2. Routing consumes live estate/model inventory and parking state rather than static prose.
+3. Lab is currently eligible; home fails truthfully as unavailable without blocking lab execution.
+4. Deterministic and local routes can be selected ahead of paid inference when they meet the quality floor.
+5. Codex and Claude workers are invoked through the same provider-neutral job/result contract.
+6. Heavy work can leave the laptop Sonnet conversation and execute next to the parked repo while only compact results return.
+7. Evidence-triggered escalation is enforced and observable.
+8. Per-task routing telemetry is persisted.
+9. A benchmark/replay evaluator can compare incumbent versus candidate routing policies.
+10. Candidate route/policy changes are shadowed/canary-tested before promotion.
+11. Routing statistics adapt with new measured outcomes and decay stale evidence.
+12. Home can be added later through discovery + benchmark + eligibility without changing the task or routing contracts.
+13. No duplicate router, queue, lease authority, model registry or domain-specific routing policy is introduced.
+
+## Implementation placement
+
+Extend existing Odysseus ownership rather than adding another orchestrator. Expected canonical surfaces are:
+
+```text
+config/models.yaml        # capability aliases and approved model candidates
+config/estate.yaml        # hosts/services and live-resolution contract
+config/routing.yaml       # central routing policy/quality floors/budgets
+docs/aoteru-model-host-routing-contract.md
+Odysseus SQLite           # jobs, outcomes, routing telemetry/policy evaluation state
+```
+
+If equivalent existing surfaces already own any of these concerns, extend them instead of duplicating them.
+
+
+=== SOURCE 1: docs/aoteru-lab-local-model-strategy-2026-08-20.md (repeat 2) ===
+
+# Aoteru lab local-model strategy — 2026-08-20
+
+## Purpose
+
+Durable research snapshot for selecting, benchmarking and continuously replacing local models on the Aoteru/Odysseus lab worker. This is tailored to the estate's actual workloads rather than generic chat benchmarks.
+
+This document is **not** a permanent model ranking. Stable routing aliases remain authoritative; named models are incumbents/challengers that must earn promotion from measured estate-task performance.
+
+## Canonical lab hardware
+
+Live OS probes on 2026-08-20 establish:
+
+- host: `dmem-HP-Z2-Tower-G9-Workstation-Desktop-PC`
+- CPU: Intel Core i9-12900K, 16 cores / 24 threads, AVX2 / AVX-VNNI
+- RAM: **128 GB installed/online** (`125 GiB` usable reported by Linux)
+- GPU: NVIDIA GeForce RTX 3080
+- VRAM: **10 GB / 10,240 MiB**
+- driver: 560.35.03
+- CUDA reported by driver: 12.6
+- storage: WD PC SN810 2 TB NVMe; Linux root ~984 GB with ~668 GB free at capture
+- platform: Linux x86_64
+- existing local inference integration: Ollama
+
+The 10 GB GPU is the primary local-model constraint. The 128 GB system RAM makes much larger quantised models feasible through CPU/GPU hybrid placement, but system RAM is not a substitute for VRAM: models that merely load can still be operationally poor because of PCIe and memory-bandwidth latency.
+
+## Estate workloads the local portfolio must optimise for
+
+Benchmarking and routing must represent real work from:
+
+### Odysseus
+
+- routing and host/model selection
+- repository reconnaissance
+- bounded coding and repair
+- tool/function calls
+- schema-valid structured output
+- fault diagnosis
+- compact result synthesis
+- background stewardship/auditing
+
+### `obsidian-PhD`
+
+- source discovery and evidence tracing
+- evidence extraction with provenance
+- literature synthesis
+- scientific reasoning
+- note maintenance and compression
+- long-context retrieval across research artefacts
+
+### J1 / ICAC work
+
+- manuscript critique
+- paper-grounded Q&A
+- source/claim checking
+- presentation evidence checks
+- academic synthesis and independent review
+
+### S2-E1 / robotics development
+
+- ROS 2 repository reconnaissance
+- test and CI repair
+- log interpretation
+- bounded implementation/debugging
+
+Local AI resource use must remain resource-aware so background Aoteru work does not interfere with robotics experiments requiring the RTX 3080.
+
+## Strategic architecture
+
+There should not be one `local_model`. Odysseus should route through stable capability aliases and replace their backing models without downstream skill changes.
+
+Initial alias set:
+
+- `local-small` — high-volume extraction, classification, formatting, cheap review
+- `local-agent` — default local reasoning, tool use, repo scouting
+- `local-multimodal` — documents, screenshots, figures, audio/vision where useful
+- `local-code` — routine bounded coding/editing
+- `local-strong` — harder repo, coding and agentic work
+- `local-deep` — highest-quality local reasoning where latency is acceptable
+- `local-challenger` — canary slot for newer credible candidates
+
+Routing principle:
+
+> An adequate local result beats a paid result; an inadequate local result does not.
+
+Escalation remains:
+
+`deterministic tool -> local-small/local-agent -> local-strong/local-deep -> paid Luna/Haiku -> Terra/Sonnet -> Sol -> Opus`
+
+The exact path is task-specific; multimodal work can branch directly to `local-multimodal`.
+
+## 2026-08-20 research shortlist
+
+### First-round candidates
+
+1. **Gemma 4 E4B**
+   - candidate for `local-small`
+   - likely strong fit for high-volume classification/extraction
+   - Google publishes consumer/workstation-oriented deployment guidance
+
+2. **Qwen3.5-9B**
+   - primary predicted incumbent for `local-agent`
+   - also initial candidate for `local-code`
+   - attractive because it can plausibly remain fully GPU-resident at a useful quantisation/context while offering tool/agent/coding capability
+
+3. **Gemma 4 12B**
+   - primary `local-multimodal` candidate
+   - Google estimates roughly 6.7 GB at Q4_0, making it unusually well matched to 10 GB VRAM
+   - useful differentiator: multimodal capability rather than duplicating Qwen3.5-9B
+
+### Second-round candidates
+
+4. **Qwen3.6-35B-A3B**
+   - strongest initial candidate for `local-strong`
+   - MoE architecture: ~35B total, ~3B active/token
+   - necessarily hybrid on 10 GB VRAM, so actual latency and context behaviour must be measured
+
+5. **NVIDIA Nemotron 3.5 Lightning 30B-A3B**
+   - `local-challenger`
+   - very recent agentic/reasoning candidate with Ampere-compatible deployment paths
+   - must not displace an incumbent from recency alone
+
+6. **Qwen3.8-27B**
+   - primary `local-deep` challenger
+   - dense model; likely slower than MoE alternatives when partially offloaded
+   - valuable if it can avoid expensive cloud escalation on hard reasoning/coding/research tasks
+
+### Experimental, not first-round production candidates
+
+- Qwen3-Coder-Next 80B-class
+- Mistral Small 4 119B-A6B
+- very large GPT-OSS / frontier open checkpoints
+
+The lab has enough RAM to load some of these quantised, but that does not make them good interactive workers. They should only be explored after smaller candidates establish the useful quality/latency frontier.
+
+## Runtime strategy
+
+Keep **Ollama** as the stable Odysseus-facing local API where it performs adequately.
+
+Add **CUDA-enabled `llama.cpp` / `llama-bench`** for controlled benchmarking and specialist hybrid inference because the lab's 10 GB VRAM + 128 GB RAM topology benefits from explicit GPU-layer/offload control.
+
+Do not make vLLM the universal initial runtime on this worker. Reconsider it for models/hardware where its serving model is a better fit.
+
+Record actual processor placement and context during every benchmark. A model benchmarked at 4K with full GPU residency is not equivalent to the same model at 32K/64K with partial CPU placement.
+
+Minimum context benchmark points:
+
+- 8K — bounded subagent work
+- 32K — normal repository/research work
+- 64K — long agent work
+- 128K only where the task/model demonstrably benefits
+
+## Quantisation and residency
+
+Do not default blindly to the smallest quant.
+
+For GPU-fit models, benchmark Q4/Q5/Q6-class variants where available and select the highest-quality quant that preserves useful context while remaining fully or nearly fully GPU resident.
+
+For hybrid models, explicitly sweep GPU offload and context. Record:
+
+- quantisation
+- runtime/version
+- context
+- GPU layers/offload
+- peak VRAM
+- peak RAM
+- prompt tokens/s
+- decode tokens/s
+- time to first token
+- wall time
+- deterministic task success
+- tool-call validity
+- retries
+- escalation rate
+
+## Estate benchmark suite
+
+Use fixed, reproducible tasks derived from real repositories and research workflows. Public leaderboards can nominate candidates but must not promote them.
+
+Required task classes:
+
+1. repository reconnaissance
+2. bounded code edit with deterministic tests
+3. fault diagnosis
+4. tool-call correctness
+5. strict JSON/schema generation
+6. evidence extraction with source provenance
+7. PhD/scientific reasoning
+8. long-context retrieval
+9. document/image understanding
+10. compact summarisation/compression
+11. independent review of another worker's result
+12. ROS/log/test interpretation
+
+Prefer deterministic gates wherever possible. A patch that another LLM likes but that fails tests is a failure.
+
+## Promotion and demotion
+
+Promote a candidate only when repeated estate-task evidence shows one or more of:
+
+- materially higher task success
+- equivalent success with materially lower latency
+- equivalent success with materially less paid escalation
+- a useful capability the incumbent lacks
+
+Hard requirements:
+
+- no regression on permissions/safety/domain gates
+- deterministic success not worse than incumbent
+- repeated trials, not one-off anecdotes
+- low-risk canary period before full promotion
+
+Use recency-weighted telemetry so old benchmark wins decay rather than protecting an incumbent indefinitely.
+
+Routing should learn by **task class**, not force one model to win every alias. A plausible future split could be one model winning extraction, another tool use, another multimodal understanding, another repo repair, and another scientific reasoning.
+
+## Continuous model discovery
+
+Local-model selection is an ongoing estate function, not a one-time P7 exercise.
+
+Lifecycle:
+
+`official release -> metadata/hardware-fit screening -> candidate registry -> download one useful quant -> synthetic estate benchmark -> low-risk canary -> promote/demote/remove -> continuous telemetry`
+
+Discovery should monitor credible publishers such as Qwen, Google/Gemma, NVIDIA, Mistral and other strong open/open-weight model labs. Discovery nominates candidates only; it must not indiscriminately download models.
+
+Candidate pre-filter should consider:
+
+- runtime/architecture support
+- licence acceptability
+- 10 GB VRAM / 128 GB RAM fit
+- useful >=32K context
+- structured output/tool-use support where relevant
+- coding/reasoning capability
+- local quant availability
+- expected operational value over incumbent
+
+## Current predicted portfolio
+
+These are **research predictions to benchmark**, not final routing truth:
+
+- `local-small` -> Gemma 4 E4B
+- `local-agent` -> Qwen3.5-9B
+- `local-multimodal` -> Gemma 4 12B
+- `local-code` -> Qwen3.5-9B initially
+- `local-strong` -> Qwen3.6-35B-A3B if lab benchmark passes
+- `local-deep` -> Qwen3.8-27B if latency is acceptable
+- `local-challenger` -> NVIDIA Nemotron 3.5 Lightning 30B-A3B
+
+The strongest prior is that **Qwen3.5-9B will be the throughput workhorse**, **Gemma 4 12B the best fully GPU-resident multimodal worker**, **Qwen3.6-35B-A3B the most promising hybrid strong-agent candidate**, and **Qwen3.8-27B the most valuable deep local challenger to cloud escalation**. These predictions must be replaced by measured estate evidence when implementation runs.
+
+## Source anchors from the 2026-08-20 research
+
+Primary/current references used to nominate candidates and define runtime constraints:
+
+- Qwen3.5-9B: https://huggingface.co/Qwen/Qwen3.5-9B
+- Qwen3.6-35B-A3B: https://huggingface.co/Qwen/Qwen3.6-35B-A3B
+- Qwen3.8-27B: https://huggingface.co/Qwen/Qwen3.8-27B
+- Qwen3-Coder-Next: https://huggingface.co/Qwen/Qwen3-Coder-Next
+- Gemma 4 model overview: https://ai.google.dev/gemma/docs/core
+- Gemma 4 model card: https://ai.google.dev/gemma/docs/core/model_card_4
+- NVIDIA Nemotron 3.5 Lightning 30B-A3B: https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4
+- Mistral Small 4 119B-A6B: https://huggingface.co/mistralai/Mistral-Small-4-119B-2603
+- Ollama context guidance: https://docs.ollama.com/context-length
+- Ollama running-model/placement API: https://docs.ollama.com/api/ps
+- llama.cpp benchmark tooling: https://github.com/ggml-org/llama.cpp/blob/master/tools/llama-bench/README.md
+- llama.cpp server/offload controls: https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md
+
+## Relationship to routing authority
+
+This document supplies the lab-specific evidence and candidate portfolio for `docs/aoteru-model-host-routing-contract.md`.
+
+The routing contract remains authoritative for host eligibility, quality floors, permissions, verification and continuous improvement. This document exists so future implementations and benchmark cycles understand why particular local candidates were selected and which real estate tasks must determine whether they remain installed.

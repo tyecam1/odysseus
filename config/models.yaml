@@ -11,6 +11,22 @@
 # exactly the kind of unearned "false completion" the execution contract
 # forbids. Bound aliases below are backed by the P7 measurements, not
 # vendor claims.
+#
+# LM1 (docs/aoteru-local-model-benchmark-routing-evidence.md, 2026-08-21)
+# screened the three docs/aoteru-lab-local-model-strategy-2026-08-20.md
+# first-round candidates through the reusable evals/local_models/ harness.
+# Net result: zero binding changes below — every candidate either lost to
+# an incumbent on measured evidence, or (Gemma 4 E4B / Gemma 4 12B) cannot
+# be bound at all yet because production Ollama (0.19.0) has no `gemma4`
+# architecture support; both only ran on a temporary, non-production
+# second Ollama instance this pass, torn down at the end of LM1. See that
+# evidence doc for the full per-task-class comparison and the exact
+# operator action that unblocks Gemma 4. Candidate strategy-doc alias
+# names (local-small/local-agent/local-multimodal/local-code/local-deep)
+# map onto this file's live aliases as: local-small -> local-fast,
+# local-agent/local-code -> code-fast, local-multimodal -> vision,
+# local-strong/local-deep -> local-strong/reasoning-strong — recorded here
+# so a future pass doesn't invent a second alias vocabulary.
 
 capabilities:
   - alias: local-fast
@@ -45,21 +61,30 @@ capabilities:
 # Candidates under consideration per the canonical plan — not selections.
 # None of these are installed; downloading them is a deliberate resource
 # decision (multi-GB each), not something to grab speculatively.
+#
+# Corrected by LM1 (2026-08-21) to match the *current* second-round
+# shortlist in docs/aoteru-lab-local-model-strategy-2026-08-20.md — the
+# previous list here (Qwen3.6-35B-A3B, Qwen3.6-27B, GLM-4.7-Flash-30B-A3B,
+# Devstral-Small-2-24B, Qwen3-Coder-Next) was a stale P7-era list that had
+# drifted from the actual research doc; explicitly out of LM1's own scope
+# (second-round), left for a future pass, not evaluated here.
 benchmark_candidates:
-  - Qwen3.6-35B-A3B
-  - Qwen3.6-27B
-  - GLM-4.7-Flash-30B-A3B
-  - Devstral-Small-2-24B
-  - Qwen3-Coder-Next
+  - Qwen3.6-35B-A3B       # local-strong challenger
+  - Nemotron-3.5-Lightning-30B-A3B  # local-challenger
+  - Qwen3.8-27B           # local-deep challenger
 
 # Already installed and available for further benchmarking without any
-# new download (docs/aoteru-estate-p7-evidence.md):
+# new download (docs/aoteru-estate-p7-evidence.md, LM1 evidence doc for
+# the three added this pass):
 installed_candidates:
   - qwen3:8b
   - gpt-oss:20b
   - qwen3:30b
   - qwen3-embedding:8b
   - dengcao/Qwen3-Reranker-8B:Q4_K_M
+  - qwen3.5:9b   # LM1: installed on production Ollama, screened, not promoted (evidence doc)
+  - gemma4:e4b   # LM1: screened (3 trials), but NOT installed on production Ollama — see blocker note above
+  - gemma4:12b   # LM1: screened (3 trials), but NOT installed on production Ollama — see blocker note above
 
 # Economic ladder — seed policy only; P7/live benchmark evidence overrides
 # it (docs/aoteru-model-host-routing-contract.md "Default economic ladder").

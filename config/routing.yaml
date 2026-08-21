@@ -36,6 +36,13 @@ escalation_triggers:
 # (beyond P7's single-prompt measurements) supports a number — an
 # unevidenced floor would just be a made-up gate that looks rigorous
 # without being true.
+#
+# LM1 (2026-08-21, docs/aoteru-local-model-benchmark-routing-evidence.md)
+# considered deriving per-task-class floors from evals/local_models/
+# corpus.json's pass/fail results but deliberately did not: single/triple
+# binary pass-fail trials per model per task are enough to compare a
+# handful of named candidates, not enough to defend a numeric floor any
+# future model would be judged against. Left null on purpose.
 quality_floors:
   default: null
 

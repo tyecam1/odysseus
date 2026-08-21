@@ -1,0 +1,115 @@
+{
+  "corpus_id": "lm1-2026-08-21",
+  "frozen_at_commit": "ac295b76626b4dd362ec21ec8905f60e969f2f2b",
+  "repo": "tyecam1/odysseus",
+  "notes": "LM1 estate benchmark corpus (docs/aoteru-local-model-benchmark-routing.agent-task.md). One task per required task class. obsidian-PhD and S2-E1 have no registered remote (config/repositories.yaml: remote: null as of this freeze) so classes 7 and 12 use real Odysseus-repo content as an explicitly-noted proxy rather than fabricated ROS/PhD fixtures.",
+  "tasks": [
+    {
+      "task_id": "recon-01",
+      "task_class": "repo_reconnaissance",
+      "source_pointer": "tyecam1/odysseus@ac295b7:src/estate_router.py#L424-L464",
+      "context_point": 8000,
+      "prompt": "You are reconnoitring an unfamiliar repository. Here is the exact contents of src/estate_router.py's run_task() function:\n\n```python\ndef run_task(task: dict) -> dict:\n    route = resolve_route(task)\n    executor = (route.get(\"route\") or {}).get(\"executor\")\n    if executor != \"local\":\n        return {**route, \"executed\": False}\n\n    concrete_model = route[\"route\"][\"concrete_model\"]\n    objective = task.get(\"objective\")\n    if not objective:\n        return {**route, \"executed\": False, \"execution_error\": \"no objective provided to execute\"}\n\n    result = execute_local(concrete_model, objective)\n    gate = \"pass\" if result.get(\"ok\") and (result.get(\"output\") or \"\").strip() else \"fail\"\n    _update_decision_outcome(\n        route[\"decision_id\"],\n        status=\"complete\" if gate == \"pass\" else \"failed\",\n        deterministic_gate=gate,\n        latency_ms=result.get(\"latency_ms\"),\n        escalation_reason=None if gate == \"pass\" else \"worker_failed\",\n    )\n    return {**route, \"executed\": True, \"execution\": result, \"deterministic_gate\": gate}\n```\n\nWhich function does run_task() call to actually invoke the model, and which function does it call afterward to persist the pass/fail outcome? Answer with just the two function names.",
+      "scoring": {"type": "keyword_all", "keywords": ["execute_local", "_update_decision_outcome"]}
+    },
+    {
+      "task_id": "recon-02",
+      "task_class": "repo_reconnaissance",
+      "source_pointer": "tyecam1/odysseus@ac295b7:core/database.py#L788-L793",
+      "context_point": 8000,
+      "prompt": "You are reconnoitring an unfamiliar repository. Here is the exact contents of core/database.py lines 788-793:\n\n```python\nPARK_LEASE_STALE_SECONDS = 1800  # 30 min without a heartbeat renewal\n\n\ndef park_lease_is_stale(lease: \"ParkLease\", *, now: Optional[datetime] = None) -> bool:\n    now = now or utcnow_naive()\n    return (now - lease.heartbeat_at).total_seconds() > PARK_LEASE_STALE_SECONDS\n```\n\nWhat is the module-level constant's name, and its integer value in seconds?",
+      "scoring": {"type": "keyword_all", "keywords": ["PARK_LEASE_STALE_SECONDS", "1800"]}
+    },
+    {
+      "task_id": "code_repair-01",
+      "task_class": "bounded_code_repair",
+      "source_pointer": "tyecam1/odysseus@ac295b7:core/database.py#L788-L793 (fixture: evals/local_models/fixtures/code_repair_01/lease.py)",
+      "context_point": 8000,
+      "prompt": "The Python function below has one bug that makes its comparison operator backwards, which makes all three pytest tests below it fail. Return ONLY the corrected full contents of park_lease_is_stale (as a Python code block) with the single-line fix — do not change its signature or any other function.\n\n```python\nfrom datetime import datetime\n\nPARK_LEASE_STALE_SECONDS = 1800  # 30 min without a heartbeat renewal\n\n\nclass Lease:\n    def __init__(self, heartbeat_at: datetime):\n        self.heartbeat_at = heartbeat_at\n\n\ndef park_lease_is_stale(lease: \"Lease\", *, now: \"datetime | None\" = None) -> bool:\n    \"\"\"Return True when `lease` has gone stale (no heartbeat renewal within\n    PARK_LEASE_STALE_SECONDS).\"\"\"\n    now = now or datetime.utcnow()\n    return (now - lease.heartbeat_at).total_seconds() < PARK_LEASE_STALE_SECONDS\n```\n\nFailing tests (for context only, do not restate them):\n- a lease with a heartbeat 60s ago must NOT be stale\n- a lease with a heartbeat (PARK_LEASE_STALE_SECONDS + 60)s ago MUST be stale\n- a lease with a heartbeat (PARK_LEASE_STALE_SECONDS - 5)s ago must NOT be stale",
+      "scoring": {"type": "pytest_fixture", "fixture_dir": "evals/local_models/fixtures/code_repair_01", "target_file": "lease.py", "test_file": "test_lease.py"}
+    },
+    {
+      "task_id": "fault_diagnosis-01",
+      "task_class": "fault_diagnosis",
+      "source_pointer": "tyecam1/odysseus@ac295b7:docs/aoteru-lab-execution-convergence-evidence.md#L201-L217",
+      "context_point": 8000,
+      "prompt": "A full pytest run on this repo reports: '10x AttributeError: Server object has no attribute list_tools -- an MCP SDK version mismatch affecting mcp_servers/email_server.py, memory_server.py, rag_server.py (4 collection errors + tests/test_imap_leak_fixes.py's 10 tests)'. In one sentence, what is the actual root cause category of this failure (not a list of symptoms), and is it something the routing/execution changes in this repo would have caused?",
+      "scoring": {"type": "keyword_all", "keywords": ["mcp"], "keyword_any": ["sdk", "version"]}
+    },
+    {
+      "task_id": "tool_call-01",
+      "task_class": "tool_function_call_correctness",
+      "source_pointer": "synthetic-schema (derived from config/estate.yaml host fields)",
+      "context_point": 8000,
+      "prompt": "You have exactly one tool available:\n\n{\"name\": \"check_host_health\", \"parameters\": {\"type\": \"object\", \"properties\": {\"host_id\": {\"type\": \"string\"}, \"timeout_s\": {\"type\": \"integer\"}}, \"required\": [\"host_id\"]}}\n\nThe user says: \"Check whether hz2-workstation is healthy, give it 5 seconds.\"\n\nRespond with ONLY a single JSON object (no prose, no markdown fences) of the form {\"name\": ..., \"arguments\": {...}} representing the exact tool call you would make.",
+      "scoring": {"type": "json_tool_call", "expected_name": "check_host_health", "required_arguments": {"host_id": "hz2-workstation"}, "optional_arguments": {"timeout_s": 5}}
+    },
+    {
+      "task_id": "json_schema-01",
+      "task_class": "strict_json_schema_output",
+      "source_pointer": "tyecam1/odysseus@ac295b7:docs/aoteru-model-host-routing-contract.md#L165-L215 (canonical task envelope, subset)",
+      "context_point": 8000,
+      "prompt": "Produce ONLY a single JSON object (no prose, no markdown fences) with exactly these keys and types: \"task_class\" (string), \"complexity\" (one of \"trivial\", \"routine\", \"hard\", \"frontier\"), \"autonomy\" (one of \"read\", \"propose\", \"write\"), \"local_first\" (boolean). Fill it in to describe: a routine bounded code-repair task that should try local models first and is allowed to write files.",
+      "scoring": {"type": "json_schema", "required_keys": {"task_class": "str", "complexity": ["trivial", "routine", "hard", "frontier"], "autonomy": ["read", "propose", "write"], "local_first": "bool"}, "expected_values": {"complexity": "routine", "autonomy": "write", "local_first": true}}
+    },
+    {
+      "task_id": "evidence_extraction-01",
+      "task_class": "evidence_extraction_provenance",
+      "source_pointer": "tyecam1/odysseus@ac295b7:docs/aoteru-estate-p7-evidence.md#L39-L45",
+      "context_point": 8000,
+      "prompt": "Source text:\n\n\"| model | load_s | prompt tok/s | decode tok/s | VRAM behavior |\\n|---|---|---|---|---|\\n| gpt-oss:20b | 2.7 | 220.0 | 23.6 | exceeds 10GB VRAM -- partial CPU offload, still 23.6 tok/s decode |\\n| qwen3:8b | 1.8 | 1369.2 | 106.1 | fits fully in VRAM (ollama ps confirmed 100% GPU, 6.6GB used) |\"\n\nWhat was qwen3:8b's measured decode tok/s, and how much VRAM did it use according to this exact table? Answer with just the two numbers.",
+      "scoring": {"type": "keyword_all", "keywords": ["106.1", "6.6"]}
+    },
+    {
+      "task_id": "scientific_reasoning-01",
+      "task_class": "phd_scientific_reasoning",
+      "source_pointer": "tyecam1/odysseus@ac295b7:docs/aoteru-lab-local-model-strategy-2026-08-20.md#L152-L170 (proxy: obsidian-PhD unavailable, remote unregistered)",
+      "context_point": 8000,
+      "prompt": "A 10GB-VRAM GPU is paired with 128GB of system RAM. A 20B-parameter model quantized to ~13GB does not fit in VRAM and must be partially offloaded to CPU/system RAM. Explain in 2-3 sentences why this model can still produce useful (if slower) output rather than failing outright, and why raw system RAM capacity being large does not make the resulting latency equivalent to a fully GPU-resident smaller model.",
+      "scoring": {"type": "keyword_all", "keywords": ["offload"], "keyword_any": ["bandwidth", "pcie", "latency", "slower"]}
+    },
+    {
+      "task_id": "long_context-01",
+      "task_class": "long_context_retrieval",
+      "source_pointer": "tyecam1/odysseus@ac295b7:docs/aoteru-model-host-routing-contract.md + docs/aoteru-lab-local-model-strategy-2026-08-20.md (concatenated, needle inserted)",
+      "context_point": 32000,
+      "needle": "The unique canary value for this run is ODYSSEUS-NEEDLE-47281.",
+      "prompt": "__LONG_CONTEXT_HAYSTACK__\n\nWhat is the unique canary value stated somewhere above?",
+      "scoring": {"type": "keyword_all", "keywords": ["ODYSSEUS-NEEDLE-47281"]}
+    },
+    {
+      "task_id": "doc_image-01",
+      "task_class": "document_image_understanding",
+      "source_pointer": "evals/local_models/fixtures/doc_image_01.png (synthetic, generated this pass)",
+      "context_point": 8000,
+      "requires_vision": true,
+      "image_path": "evals/local_models/fixtures/doc_image_01.png",
+      "prompt": "Read the numbers on this status image. What is the 'Peak VRAM this run' value shown, in MiB?",
+      "scoring": {"type": "keyword_all", "keywords": ["7421"]}
+    },
+    {
+      "task_id": "summarisation-01",
+      "task_class": "compact_summarisation",
+      "source_pointer": "tyecam1/odysseus@ac295b7:docs/aoteru-systemd-cutover-evidence.md#L41-L53",
+      "context_point": 8000,
+      "prompt": "Summarise the following in 40 words or fewer, keeping the key factual outcome:\n\n\"To exercise Restart=on-failure without rebooting the host, this session sent the managed process a plain kill (SIGTERM). The app catches SIGTERM and performs its own graceful shutdown, which systemd's Restart=on-failure correctly classifies as not a failure, so it did not auto-restart, and the unit went inactive (dead). This proves the 'do not fight a clean stop' half of Restart=on-failure works, but does not prove the crash-restart half, and this session could not itself bring the systemd-managed instance back up because it lacks passwordless sudo.\"",
+      "scoring": {"type": "summary", "max_words": 40, "keyword_any": ["sigterm", "restart=on-failure", "graceful"], "keyword_all": ["sudo"]}
+    },
+    {
+      "task_id": "independent_review-01",
+      "task_class": "independent_review",
+      "source_pointer": "synthetic worker-result (derived from src/estate_router.py execute_local contract)",
+      "context_point": 8000,
+      "prompt": "A worker reports this result for a routing task: {\"status\": \"complete\", \"execution\": {\"ok\": true, \"output\": \"\"}, \"deterministic_gate\": \"pass\"}. Odysseus's actual gate rule is: deterministic_gate is only \"pass\" when result.ok is true AND the output is a non-empty, non-whitespace string. Is this worker result internally consistent with that rule? Answer YES or NO and say specifically which field contradicts which.",
+      "scoring": {"type": "keyword_all", "keywords": ["no"], "keyword_any": ["empty", "output"]}
+    },
+    {
+      "task_id": "ros_log_test-01",
+      "task_class": "ros_log_test_interpretation",
+      "source_pointer": "tyecam1/odysseus@ac295b7:docs/aoteru-lab-execution-convergence-evidence.md#L201-L216 (proxy: S2-E1/ROS repo unavailable, remote unregistered)",
+      "context_point": 8000,
+      "prompt": "A CI/test log excerpt reads: '4885 passed, 4 skipped, 11 failed (~118s). All 11 failures independently confirmed pre-existing and unrelated by re-running them against unmodified dev HEAD before this session's changes were applied -- same 11 failures, same errors, on the untouched baseline.' Based only on this excerpt, should this session's own code changes be considered the cause of the 11 failures? Answer YES or NO and give the one-clause reason stated in the excerpt.",
+      "scoring": {"type": "keyword_all", "keywords": ["no"], "keyword_any": ["baseline", "pre-existing", "unrelated"]}
+    }
+  ]
+}

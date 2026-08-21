@@ -1760,9 +1760,22 @@ def normalize_model_id(
     return None
 
 def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LLMConfig.DEFAULT_TEMPERATURE,
-             max_tokens: int = LLMConfig.DEFAULT_MAX_TOKENS, headers: Optional[Dict] = None, 
-             timeout: int = LLMConfig.DEFAULT_TIMEOUT, prompt_type: Optional[str] = None) -> str:
-    """Synchronous LLM call with optional prompt type enhancement."""
+             max_tokens: int = LLMConfig.DEFAULT_MAX_TOKENS, headers: Optional[Dict] = None,
+             timeout: int = LLMConfig.DEFAULT_TIMEOUT, prompt_type: Optional[str] = None,
+             num_ctx: Optional[int] = None) -> str:
+    """Synchronous LLM call with optional prompt type enhancement.
+
+    ``num_ctx`` (Ollama only): explicit context-window override. When
+    omitted, behaviour is unchanged — the Ollama branch discovers and
+    requests the model's full advertised window via
+    ``get_context_length()``, same as before this parameter existed. A
+    caller that knows its actual prompt size (e.g. a benchmark harness
+    screening at a fixed context point) can pass it directly instead of
+    always paying for a model's full window — Qwen3.5-9B advertises
+    262144, so an un-bounded 8K-prompt call still allocates a 262144-token
+    KV cache, which is real, measured LM1 evidence (see
+    docs/aoteru-local-model-benchmark-routing.agent-task.md), not a
+    hypothetical."""
     h = _provider_headers(_detect_provider(url))
     # Tolerate headers that arrive as a JSON string (some sessions stored them
     # double-encoded) — otherwise h.update() throws "dictionary update sequence
@@ -1805,7 +1818,7 @@ def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LL
         target_url = _normalize_ollama_url(url)
         payload = _build_ollama_payload(
             model, messages_copy, temperature, max_tokens,
-            stream=False, num_ctx=get_context_length(url, model),
+            stream=False, num_ctx=(num_ctx if num_ctx is not None else get_context_length(url, model)),
         )
     else:
         target_url = _normalize_openai_chat_url(url)

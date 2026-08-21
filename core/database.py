@@ -913,6 +913,55 @@ class RoutingDecision(TimestampMixin, Base):
     )
 
 
+class BenchmarkResult(TimestampMixin, Base):
+    """Per-model/task-class local benchmark evidence (LM1,
+    docs/aoteru-local-model-benchmark-routing.agent-task.md). Extends the
+    same SQLite/telemetry authority `RoutingDecision` already lives in
+    rather than creating a second model-evaluation store — deliberately
+    a different table because a benchmark run compares several concrete
+    models against one frozen task deterministically (offline candidate
+    screening), while `RoutingDecision` records one live routed
+    production decision; conflating the two would make routing telemetry
+    (real traffic) indistinguishable from benchmark sweeps (synthetic
+    comparison runs).
+
+    One row per (run_id, model, task_id[, context_point]) execution.
+    `run_id` groups everything produced by one `scripts/run_local_model_
+    benchmark.py` invocation so a screening pass and a later repeat pass
+    over the same corpus stay distinguishable without a second table.
+    """
+    __tablename__ = "benchmark_results"
+
+    id                 = Column(String, primary_key=True, index=True)
+    run_id             = Column(String, nullable=False, index=True)
+    corpus_id          = Column(String, nullable=False)
+    task_id            = Column(String, nullable=False, index=True)
+    task_class         = Column(String, nullable=False, index=True)
+    source_pointer     = Column(String, nullable=True)
+    concrete_model     = Column(String, nullable=False, index=True)
+    upstream_repo      = Column(String, nullable=True)
+    upstream_revision  = Column(String, nullable=True)
+    artifact           = Column(String, nullable=True)
+    quantization       = Column(String, nullable=True)
+    runtime            = Column(String, nullable=False, default="ollama")
+    runtime_version    = Column(String, nullable=True)
+    runtime_base_url   = Column(String, nullable=True)
+    context_point      = Column(Integer, nullable=True)
+    gpu_placement       = Column(String, nullable=True)  # e.g. "100% GPU" | "partial CPU offload" | "unknown"
+    peak_vram_mb        = Column(Integer, nullable=True)
+    wall_time_ms         = Column(Integer, nullable=True)
+    score              = Column(String, nullable=True)  # scorer-specific compact string, e.g. "pass"/"fail"/"3/3"
+    schema_valid       = Column(Boolean, nullable=True)
+    retries            = Column(Integer, nullable=False, default=0)
+    status             = Column(String, nullable=False)  # pass | fail | na | error
+    reason             = Column(Text, nullable=True)
+    raw_output_pointer = Column(String, nullable=True)  # path to the raw result file, not the transcript itself
+
+    __table_args__ = (
+        Index('ix_benchmark_results_run_model_task', 'run_id', 'concrete_model', 'task_id'),
+    )
+
+
 class Memory(Base):
     """
     SQLAlchemy model for Memory table.

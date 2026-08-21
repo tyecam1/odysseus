@@ -1,0 +1,71 @@
+{
+  "models": {
+    "qwen3:8b": {
+      "concrete_model": "qwen3:8b",
+      "base_url": "http://127.0.0.1:11434",
+      "role": "baseline (installed, currently bound to local-fast — config/models.yaml)",
+      "runtime": "ollama",
+      "runtime_version": "0.19.0",
+      "upstream_repo": "Qwen/Qwen3-8B",
+      "upstream_revision": "unproven-ollama-library-mapping",
+      "artifact": "ollama library qwen3:8b",
+      "quantization": "Q4_K_M"
+    },
+    "gpt-oss:20b": {
+      "concrete_model": "gpt-oss:20b",
+      "base_url": "http://127.0.0.1:11434",
+      "role": "baseline (installed, currently bound to local-strong — config/models.yaml)",
+      "runtime": "ollama",
+      "runtime_version": "0.19.0",
+      "upstream_repo": "openai/gpt-oss-20b",
+      "upstream_revision": "unproven-ollama-library-mapping",
+      "artifact": "ollama library gpt-oss:20b",
+      "quantization": "MXFP4"
+    },
+    "qwen3:30b": {
+      "concrete_model": "qwen3:30b",
+      "base_url": "http://127.0.0.1:11434",
+      "role": "baseline (installed, unbound)",
+      "runtime": "ollama",
+      "runtime_version": "0.19.0",
+      "upstream_repo": "Qwen/Qwen3-30B-A3B",
+      "upstream_revision": "unproven-ollama-library-mapping",
+      "artifact": "ollama library qwen3:30b",
+      "quantization": "Q4_K_M"
+    },
+    "qwen3.5:9b": {
+      "concrete_model": "qwen3.5:9b",
+      "base_url": "http://127.0.0.1:11434",
+      "role": "LM1 first-round candidate: local-agent / local-code",
+      "runtime": "ollama",
+      "runtime_version": "0.19.0",
+      "upstream_repo": "Qwen/Qwen3.5-9B",
+      "upstream_revision": "unproven-ollama-library-mapping (HF source anchor: https://huggingface.co/Qwen/Qwen3.5-9B, apache-2.0, not gated, confirmed live this pass)",
+      "artifact": "ollama library qwen3.5:9b, pulled 2026-08-21 this pass",
+      "quantization": "Q4_K_M"
+    },
+    "gemma4:e4b": {
+      "concrete_model": "gemma4:e4b",
+      "base_url": "http://127.0.0.1:11435",
+      "role": "LM1 first-round candidate: local-small",
+      "runtime": "ollama",
+      "runtime_version": "0.32.15 (second, user-local instance — production Ollama 0.19.0 lacks gemma4 architecture support, see blocker note)",
+      "upstream_repo": "google/gemma-4-E4B-it",
+      "upstream_revision": "unproven-ollama-library-mapping (HF source anchors: google/gemma-4-e4b, google/gemma-4-E4B-it-qat-q4_0-gguf, apache-2.0, not gated, confirmed live this pass)",
+      "artifact": "ollama library gemma4:e4b, pulled 2026-08-21 this pass via second Ollama instance",
+      "quantization": "unverified (ollama-library-packaged, not the HF QAT Q4_0 file directly)"
+    },
+    "gemma4:12b": {
+      "concrete_model": "gemma4:12b",
+      "base_url": "http://127.0.0.1:11435",
+      "role": "LM1 first-round candidate: local-multimodal",
+      "runtime": "ollama",
+      "runtime_version": "0.32.15 (second, user-local instance)",
+      "upstream_repo": "google/gemma-4-12B-it",
+      "upstream_revision": "unproven-ollama-library-mapping (HF source anchors: google/gemma-4-12b, google/gemma-4-12B-it-qat-q4_0-gguf, apache-2.0, not gated, confirmed live this pass)",
+      "artifact": "ollama library gemma4:12b, pulled 2026-08-21 this pass via second Ollama instance",
+      "quantization": "unverified (ollama-library-packaged, not the HF QAT Q4_0 file directly)",
+      "vision": true
+    }
+  }
+}
