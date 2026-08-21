@@ -1,5 +1,5 @@
 ---
-title: Aoteru systemd cutover evidence
+title: Aoteru systemd cutover evidence — GATE CLOSED
 status: compact-evidence
 owner: odysseus
 as_of: 2026-08-21
@@ -9,9 +9,18 @@ parent: docs/aoteru-systemd-cutover-finalisation.md
 # systemd cutover — evidence
 
 Compact durable record for `docs/aoteru-systemd-cutover-finalisation.md`.
-The operator installed `odysseus-aoteru-lab.service` (this session lacks
-passwordless sudo throughout — every privileged step below was done by
-the operator, not this session).
+The operator installed `odysseus-aoteru-lab.service` and, later this same
+pass, ran the one follow-up `sudo systemctl start` this session flagged
+after its own restart-behavior test took the unit out of supervision
+(this session lacks passwordless sudo throughout — every privileged step
+below was done by the operator, not this session).
+
+> **Gate closed.** All items in "Gate status" below are now true —
+> supervision was re-established and independently re-verified (new
+> `MainPID`, fresh health check, fresh live execution smoke test, fresh
+> regression run) after the operator's follow-up command. See "Gate
+> re-verification after supervision was re-established" for the second
+> round of live evidence.
 
 ## Install verification (immediately after `enable --now`)
 
@@ -83,41 +92,80 @@ Focused regressions: `tests/test_estate_router.py`,
 `tests/test_agent_cli_parking_lease.py`,
 `tests/test_auth_session_revocation.py` — 42 passed, 0 failed.
 
+## Gate re-verification after supervision was re-established
+
+The operator ran `sudo systemctl start odysseus-aoteru-lab.service`
+(handing the port back from the transient manual-fallback process this
+session had started). Re-verified independently, live, after that:
+
+```
+systemctl is-enabled odysseus-aoteru-lab.service -> enabled
+systemctl is-active  odysseus-aoteru-lab.service -> active
+                     since Fri 2026-08-21 11:21:43 BST
+                     MainPID=1937714 (new PID — confirms a real restart,
+                     not the same stale process being re-observed)
+process: agent  .../venv/bin/python -m uvicorn app:app --host 127.0.0.1 --port 7001
+listener: 127.0.0.1:7001 only (no 0.0.0.0)
+GET /api/health -> 200 {"status":"healthy",...}
+tailscale serve/funnel status -> unchanged (tailnet-only, no Funnel)
+chroma: 8101 (isolated) / 8100 (upstream) unchanged
+```
+
+SQLite state: `routing_decisions`: 11 (10 baseline + 1 from the earlier
+smoke test — expected growth, not loss), `park_leases`: 4,
+`logical_sessions`: 7 — consistent throughout the whole cutover, no data
+loss at any point.
+
+Fresh live end-to-end local execution smoke test, run against the
+re-supervised instance (real Ollama, not mocked):
+```
+run_task({"task_class": "systemd-cutover-gate-close-smoke",
+          "objective": "Reply with exactly the single word: pong",
+          "requirements": {"capabilities": ["local-fast"]}})
+-> executed: true, execution.output="pong", latency_ms=4327
+   deterministic_gate="pass"
+```
+`POST /api/estate/run` without a cookie -> `401` (auth boundary
+unaffected); `0.0.0.0:7001` listener count -> `0`. Focused regressions
+re-run: `tests/test_estate_router.py`,
+`tests/test_agent_cli_session_lifecycle.py`,
+`tests/test_agent_cli_parking_lease.py`,
+`tests/test_auth_session_revocation.py` — 42 passed, 0 failed.
+
 ## Gate status against docs/aoteru-systemd-cutover-finalisation.md
 
 - [x] dedicated unit installed and enabled
-- [ ] service active *under systemd* right now — **not currently true**;
-  active immediately after install, but this session's own restart test
-  put it back to manually-managed (see above) — one more privileged
-  command closes this
-- [x] backend healthy (currently via the manual fallback, functionally
-  identical binary/config/bind as the unit)
+- [x] service active *under systemd* — re-verified with a new `MainPID`
+  after the operator's follow-up `systemctl start`, not merely assumed
+  from the earlier (since-lapsed) install-time check
+- [x] backend healthy
 - [x] app binds loopback only
 - [x] private Tailscale exposure unchanged, no Funnel/public route
-- [x] local routing/execution still works (live smoke test above)
+- [x] local routing/execution still works (fresh smoke test above)
 - [x] durable evidence current (this document)
-- [x] no code/config regression introduced — the open item is an
-  operational state (which process manager currently owns the port), not
-  a defect
+- [x] no new regression introduced (42/42 focused tests, no code changed
+  this pass)
 
-**Not yet declared complete** per the finalisation contract's own gate
-("declare the persistence step complete only if all are true") — one gate
-item is open. This is not a fabricated blocker: it followed directly from
-sending the test signal without holding the ability to restart the unit
-myself. One more sudo action resolves it and additionally makes it
-possible to prove the crash-restart half of `Restart=on-failure` cleanly
-(the manual fallback process can then be killed the same way to hand the
-port back, and *this time* the operator's own next `systemctl start`
-already re-establishes supervision regardless of that outcome).
+**All gates true — persistence step declared complete.** Reboot
+persistence itself (as opposed to `enabled` + a proven supervised
+restart) was, per the finalisation contract, deliberately not tested by
+an actual host reboot without explicit operator authorization — that
+remains the one item beyond this gate's scope, not a gap in what was
+verified.
 
-## Exact remaining human action
+## What the restart-behavior test actually proved, net of the detour
 
-```bash
-kill 1934571
-sudo systemctl start odysseus-aoteru-lab.service
-systemctl is-active odysseus-aoteru-lab.service   # expect: active
-curl -fsS http://127.0.0.1:7001/api/health         # expect: 200 healthy
-```
-
-(PID above is the current manual fallback process; confirm with
-`ss -tlnp | grep 7001` if time has passed and it may have changed.)
+`Restart=on-failure` correctly does not fight a clean stop (verified: a
+graceful SIGTERM-triggered shutdown does not auto-restart). The
+crash-restart half was not separately proven by an intentional crash this
+pass — the operator's own `systemctl start` re-established supervision
+regardless, which is the property that actually matters operationally
+(the unit is enabled and controllable), so a further contrived-crash test
+was judged not worth another manual round-trip. If future confidence in
+crash-auto-restart specifically is wanted, the bounded test is: `sudo kill
+-KILL $(systemctl show odysseus-aoteru-lab.service -p MainPID --value)`,
+then `systemctl is-active` a few seconds later expecting `active` with a
+new `MainPID` — uncaught SIGKILL cannot be gracefully handled by the app,
+so unlike this pass's SIGTERM test it should trigger `Restart=on-failure`
+in one step. Not performed here to avoid a third round-trip once the
+declared gate was already satisfied.

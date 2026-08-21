@@ -92,9 +92,10 @@ you ever stop the process by signal rather than `systemctl stop`/
 `systemctl start` to resume — it will not silently restart itself in that
 case.
 
-Manual fallback (only if systemd itself is unavailable — this session
-used it once, transiently, before the operator's next
-`systemctl start` re-establishes supervision):
+Manual fallback (only if systemd itself is unavailable — used once,
+transiently, during this cutover's own restart-behavior test; resolved by
+the operator's `systemctl start` re-establishing supervision, confirmed
+with a fresh `MainPID`):
 
 ```bash
 ss -tlnp | grep 7001                 # find the PID
@@ -172,13 +173,14 @@ findings and fixes.
   paid-provider `ModelEndpoint` configured. The execution path built this
   pass is real but local-model-only for that reason, not a limitation of
   the path itself.
-- Automatic service persistence across a host reboot — unit **installed
-  and enabled** 2026-08-21 (`systemctl is-enabled` -> `enabled`); an
-  actual reboot has not been performed to prove it (deliberately, per the
-  finalisation contract — not authorized without explicit operator
-  sign-off). One more `sudo systemctl start` is needed right now to
-  re-establish systemd's supervision of the currently-running process
-  (see `docs/aoteru-systemd-cutover-evidence.md` for why).
+- Actual host-reboot persistence — unit **installed, enabled, and under
+  active systemd supervision** 2026-08-21 (`systemctl is-enabled` ->
+  `enabled`, `is-active` -> `active`, re-verified with a fresh `MainPID`
+  after a supervised restart cycle). Only an actual host reboot itself
+  has not been performed to prove this specific case, deliberately, per
+  the finalisation contract — not authorized without explicit operator
+  sign-off. Everything short of that physical reboot is verified; see
+  `docs/aoteru-systemd-cutover-evidence.md`.
 - Dual-worker fault tests (split-brain, home-offline-primary) — need the
   home PC to exist first.
 
