@@ -407,12 +407,18 @@ def execute_local(concrete_model: str, objective: str, *, timeout: float = 60.0)
     from fastapi import HTTPException
 
     from src.llm_core import llm_call
+    from src.model_context import select_bounded_context
 
     import time
     messages = [{"role": "user", "content": objective}]
     started = time.monotonic()
+    # Bound the context request to what this actual objective needs (see
+    # select_bounded_context) rather than the model's full advertised window —
+    # requesting the full window regardless of prompt size is real, measured
+    # LM1 evidence of production overhead/timeouts, not a hypothetical.
+    num_ctx = select_bounded_context(_OLLAMA_BASE, concrete_model, messages)
     try:
-        output = llm_call(_OLLAMA_BASE, concrete_model, messages, timeout=int(timeout))
+        output = llm_call(_OLLAMA_BASE, concrete_model, messages, timeout=int(timeout), num_ctx=num_ctx)
     except HTTPException as e:
         return {"ok": False, "error": f"{e.status_code}: {e.detail}",
                 "latency_ms": int((time.monotonic() - started) * 1000)}

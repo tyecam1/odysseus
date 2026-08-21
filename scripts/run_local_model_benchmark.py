@@ -60,7 +60,75 @@ def unload_all(base_url: str) -> None:
 CORPUS_PATH = REPO_ROOT / "evals" / "local_models" / "corpus.json"
 MANIFEST_PATH = REPO_ROOT / "evals" / "local_models" / "model_manifest.json"
 RESULTS_DIR = REPO_ROOT / "evals" / "local_models" / "results"
+ARTIFACTS_DIR = RESULTS_DIR / "artifacts"
 FIXTURES_DIR = REPO_ROOT / "evals" / "local_models" / "fixtures"
+
+
+def write_artifact(run_id: str, corpus_id: str, model_key: str, task: dict, model_cfg: dict, result: dict) -> tuple[str, str]:
+    """Persist one execution's exact output as an immutable per-run artefact
+    (LM1 audit-repair: `raw_output` was previously discarded after scoring —
+    stripped from the JSONL export and never written to
+    `BenchmarkResult.raw_output_pointer` — so no independent rescoring or
+    dispute-resolution was possible after the fact).
+
+    Returns (pointer, sha256) where ``pointer`` is a repo-relative path.
+    The artefact is a small self-contained JSON document carrying enough
+    corpus/source/model/runtime provenance to independently rescore the
+    output without needing the SQLite row at all; SQLite only keeps the
+    pointer + hash, not the transcript, per the task's "keep telemetry
+    compact" requirement.
+
+    Immutable: a pre-existing artefact for the same (run_id, model_key,
+    task_id[, context_point]) is never silently overwritten. If the new
+    output's hash disagrees with what's already on disk, that is a data
+    integrity conflict and raises rather than corrupting prior evidence.
+    """
+    import hashlib
+
+    output = result.get("raw_output") or ""
+    sha256 = hashlib.sha256(output.encode("utf-8")).hexdigest()
+
+    ctx = result.get("context_point")
+    filename = f"{task['task_id']}__{ctx}.json" if ctx else f"{task['task_id']}.json"
+    model_dir = ARTIFACTS_DIR / run_id / model_key
+    model_dir.mkdir(parents=True, exist_ok=True)
+    path = model_dir / filename
+
+    if path.exists():
+        existing = json.loads(path.read_text(encoding="utf-8"))
+        if existing.get("output_sha256") != sha256:
+            raise RuntimeError(
+                f"benchmark artefact integrity conflict at {path}: existing "
+                f"sha256={existing.get('output_sha256')} != new sha256={sha256} "
+                "(artefacts are immutable; use a new run_id for a genuine rerun)"
+            )
+        pointer = str(path.relative_to(REPO_ROOT))
+        return pointer, sha256
+
+    artifact = {
+        "run_id": run_id,
+        "task_id": task["task_id"],
+        "task_class": task["task_class"],
+        "corpus_id": corpus_id,
+        "source_pointer": task.get("source_pointer"),
+        "model_key": model_key,
+        "concrete_model": model_cfg.get("concrete_model"),
+        "upstream_repo": model_cfg.get("upstream_repo"),
+        "upstream_revision": model_cfg.get("upstream_revision"),
+        "artifact": model_cfg.get("artifact"),
+        "quantization": model_cfg.get("quantization"),
+        "runtime": model_cfg.get("runtime", "ollama"),
+        "runtime_version": model_cfg.get("runtime_version"),
+        "runtime_base_url": model_cfg.get("base_url"),
+        "context_point": ctx,
+        "status": result.get("status"),
+        "score": result.get("score"),
+        "output_sha256": sha256,
+        "raw_output": output,
+    }
+    path.write_text(json.dumps(artifact, indent=2), encoding="utf-8")
+    pointer = str(path.relative_to(REPO_ROOT))
+    return pointer, sha256
 
 
 def load_json(path: Path) -> dict:
@@ -218,6 +286,7 @@ def run_one(model_cfg: dict, task: dict, run_id: str, corpus_id: str,
 
 
 def persist(run_id: str, corpus_id: str, task: dict, model_key: str, model_cfg: dict, result: dict):
+    raw_output_pointer, raw_output_sha256 = write_artifact(run_id, corpus_id, model_key, task, model_cfg, result)
     db = SessionLocal()
     try:
         row = BenchmarkResult(
@@ -240,6 +309,8 @@ def persist(run_id: str, corpus_id: str, task: dict, model_key: str, model_cfg: 
             score=result.get("score"),
             status=result["status"],
             reason=(result.get("reason") or "")[:2000],
+            raw_output_pointer=raw_output_pointer,
+            raw_output_sha256=raw_output_sha256,
         )
         db.add(row)
         db.commit()

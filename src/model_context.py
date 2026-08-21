@@ -518,3 +518,35 @@ def estimate_tokens(messages: List[Dict]) -> int:
                 total += 4  # per tool-call overhead (id, type, wrapper)
                 total += int((len(str(name)) + len(args)) * 0.3)
     return total
+
+
+# Buckets a local Ollama backend can allocate cheaply. Selecting the smallest
+# bucket that covers the actual prompt (with headroom) keeps KV-cache
+# allocation proportional to real usage instead of a model's full advertised
+# window regardless of prompt size.
+CONTEXT_BUCKETS: Tuple[int, ...] = (4096, 8192, 16384, 32768, 65536, 131072, 262144)
+_CONTEXT_HEADROOM = 512  # fixed safety margin for prompt-estimate error + response tokens
+
+
+def select_bounded_context(endpoint_url: str, model: str, messages: List[Dict], *,
+                            max_tokens: int = 0) -> int:
+    """Choose the smallest context bucket that covers this actual prompt,
+    capped at the model's real/advertised window — this can only shrink the
+    allocation ``get_context_length`` would already return, never grant a
+    model more context than before, so genuinely long-context tasks still
+    get the full window when the estimated need exceeds every bucket.
+
+    Exists because requesting a model's full advertised window on every call
+    regardless of prompt size is real, measured overhead: qwen3.5:9b
+    advertises 262144, so an 8K-token prompt still allocated a
+    quarter-million-token KV cache and caused real production-path timeouts
+    (docs/aoteru-local-model-benchmark-routing-evidence.md). This is the one
+    canonical context-selection policy — callers needing a bounded ``num_ctx``
+    should use this rather than re-deriving their own heuristic.
+    """
+    needed = estimate_tokens(messages) + max(max_tokens, 0) + _CONTEXT_HEADROOM
+    window = get_context_length(endpoint_url, model)
+    for bucket in CONTEXT_BUCKETS:
+        if bucket >= needed:
+            return min(bucket, window)
+    return window

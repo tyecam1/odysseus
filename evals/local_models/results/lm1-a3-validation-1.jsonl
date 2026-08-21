@@ -1,0 +1,2 @@
+{"run_id": "lm1-a3-validation-1", "model": "qwen3:8b", "task_id": "scientific_reasoning-01", "status": "pass", "reason": "pass", "score": "pass", "wall_time_ms": 6894, "context_point": 8000}
+{"run_id": "lm1-a3-validation-1", "model": "qwen3:8b", "task_id": "ros_log_test-01", "status": "pass", "reason": "pass", "score": "pass", "wall_time_ms": 3145, "context_point": 8000}

@@ -956,6 +956,8 @@ class BenchmarkResult(TimestampMixin, Base):
     status             = Column(String, nullable=False)  # pass | fail | na | error
     reason             = Column(Text, nullable=True)
     raw_output_pointer = Column(String, nullable=True)  # path to the raw result file, not the transcript itself
+    raw_output_sha256  = Column(String, nullable=True)  # SHA-256 of the exact artefact contents, for integrity
+                                                          # verification without duplicating the transcript here
 
     __table_args__ = (
         Index('ix_benchmark_results_run_model_task', 'run_id', 'concrete_model', 'task_id'),
@@ -1243,6 +1245,31 @@ def _migrate_add_model_endpoint_refresh_columns():
             conn.close()
         except Exception:
             pass
+
+def _migrate_add_benchmark_raw_output_sha256_column():
+    """Add raw_output_sha256 to benchmark_results if it doesn't exist (LM1
+    audit-repair: pairs with the existing raw_output_pointer so a stored
+    artefact's integrity can be verified without duplicating the transcript
+    in SQLite, per docs/aoteru-lm1-audit-repair-lm2-design.agent-task.md)."""
+    import sqlite3
+    db_path = DATABASE_URL.replace("sqlite:///", "")
+    if not os.path.exists(db_path):
+        return
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.execute("PRAGMA table_info(benchmark_results)")
+        columns = [row[1] for row in cursor.fetchall()]
+        if columns and "raw_output_sha256" not in columns:
+            conn.execute("ALTER TABLE benchmark_results ADD COLUMN raw_output_sha256 TEXT")
+            conn.commit()
+            logging.getLogger(__name__).info("Migrated: added 'raw_output_sha256' column to benchmark_results")
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"benchmark_results raw_output_sha256 migration failed: {e}")
+    finally:
+        if conn:
+            conn.close()
+
 
 def _migrate_add_task_run_model_column():
     """Add model column to task_runs if it doesn't exist (records which model ran)."""
@@ -2155,6 +2182,7 @@ def init_db():
     _migrate_add_provider_auth_id_column()
     _migrate_add_supports_tools_column()
     _migrate_add_task_run_model_column()
+    _migrate_add_benchmark_raw_output_sha256_column()
     _migrate_add_owner_column()
     _migrate_add_document_archived_column()
     _migrate_add_last_message_at_column()

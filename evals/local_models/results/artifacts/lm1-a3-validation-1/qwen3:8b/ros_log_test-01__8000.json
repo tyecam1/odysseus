@@ -1,0 +1,21 @@
+{
+  "run_id": "lm1-a3-validation-1",
+  "task_id": "ros_log_test-01",
+  "task_class": "ros_log_test_interpretation",
+  "corpus_id": "lm1-2026-08-21",
+  "source_pointer": "tyecam1/s2-e1-ros2-measurement-spine@6c4efdf:docs/ros2_measurement_graph.md#L9-L13;tests/test_manifest_validation.py#L59-L69",
+  "model_key": "qwen3:8b",
+  "concrete_model": "qwen3:8b",
+  "upstream_repo": "Qwen/Qwen3-8B",
+  "upstream_revision": "unproven-ollama-library-mapping",
+  "artifact": "ollama library qwen3:8b",
+  "quantization": "Q4_K_M",
+  "runtime": "ollama",
+  "runtime_version": "0.19.0",
+  "runtime_base_url": "http://127.0.0.1:11434",
+  "context_point": 8000,
+  "status": "pass",
+  "score": "pass",
+  "output_sha256": "1ca9cd28d9ee50b28343a74a188e86d9e20cb7b1517213b51fd02f5414f19406",
+  "raw_output": "(1) The E1a synthetic publisher uses the ROS 2 topic name `/s2_e1/e1a/static_token_observation` with the message type `std_msgs/String`.  \n\n(2) The `self.assertIn(...)` checks for the substring `\"does not match expected\"` in the raised exception's message."
+}

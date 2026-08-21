@@ -63,10 +63,10 @@
     {
       "task_id": "scientific_reasoning-01",
       "task_class": "phd_scientific_reasoning",
-      "source_pointer": "tyecam1/odysseus@ac295b7:docs/aoteru-lab-local-model-strategy-2026-08-20.md#L152-L170 (proxy: obsidian-PhD unavailable, remote unregistered)",
+      "source_pointer": "tyecam1/obsidian-PhD@731fcd8:01-research-plan/00-RC/evidence requirements.md#L2-L7,L56-L62",
       "context_point": 8000,
-      "prompt": "A 10GB-VRAM GPU is paired with 128GB of system RAM. A 20B-parameter model quantized to ~13GB does not fit in VRAM and must be partially offloaded to CPU/system RAM. Explain in 2-3 sentences why this model can still produce useful (if slower) output rather than failing outright, and why raw system RAM capacity being large does not make the resulting latency equivalent to a fully GPU-resident smaller model.",
-      "scoring": {"type": "keyword_all", "keywords": ["offload"], "keyword_any": ["bandwidth", "pcie", "latency", "slower"]}
+      "prompt": "The following is verbatim from a PhD researcher's real human-robot-collaboration (HRC) research-plan evidence rubric, plus one of their load-bearing claims:\n\n# 6 Load Bearing Claims\nEach one requires\n- Authoritative source\n- Peer-reviewed synthesis (Survey/ Review)\n- Implementation/ reality check. (industry implementation, case study, or systematic review)\nIf these can't be found, the claim is too strong.\n\n## C3 Safety governance, liability, and conformity assessment define a feasibility envelope that limits interaction and slows deployment, especially for adaptive or learning-enabled behaviour.\nWhat it must show: standards and certification expectations create constraints; learning/adaptation increases assurance burden; firms respond by restricting capability or avoiding deployment.\n\n- Authoritative: core safety standards and guidance defining risk assessment, collaborative operation, and system integration obligations.\n- Synthesis: review of safety in collaborative robotics and assurance for adaptive systems.\n- Reality check: industrial conformity assessment narratives, certification case studies, or papers reporting how safety process constrained design.\n\nPer the rubric above, a load-bearing claim requires evidence from three source tiers. Name the three tiers. Then, for Claim C3 above, state which ONE of those three tiers a paper describing 'a real industrial conformity-assessment case where a certifier forced a manufacturer to reduce a cobot's autonomy before sign-off' would satisfy.",
+      "scoring": {"type": "keyword_all", "keywords": ["authoritative", "synthesis"], "keyword_any": ["reality check", "reality-check", "implementation"]}
     },
     {
       "task_id": "long_context-01",
@@ -106,10 +106,10 @@
     {
       "task_id": "ros_log_test-01",
       "task_class": "ros_log_test_interpretation",
-      "source_pointer": "tyecam1/odysseus@ac295b7:docs/aoteru-lab-execution-convergence-evidence.md#L201-L216 (proxy: S2-E1/ROS repo unavailable, remote unregistered)",
+      "source_pointer": "tyecam1/s2-e1-ros2-measurement-spine@6c4efdf:docs/ros2_measurement_graph.md#L9-L13;tests/test_manifest_validation.py#L59-L69",
       "context_point": 8000,
-      "prompt": "A CI/test log excerpt reads: '4885 passed, 4 skipped, 11 failed (~118s). All 11 failures independently confirmed pre-existing and unrelated by re-running them against unmodified dev HEAD before this session's changes were applied -- same 11 failures, same errors, on the untouched baseline.' Based only on this excerpt, should this session's own code changes be considered the cause of the 11 failures? Answer YES or NO and give the one-clause reason stated in the excerpt.",
-      "scoring": {"type": "keyword_all", "keywords": ["no"], "keyword_any": ["baseline", "pre-existing", "unrelated"]}
+      "prompt": "The following is a real ROS 2 topic table and a real pytest unit test from an S2-E1 robotics repository's measurement-spine test suite:\n\n| Source | Topic | Payload |\n| --- | --- | --- |\n| Validated manifest chain | `/s2_e1/run_context` | Run/setup/calibration identity, evidence class, commit, and SHA-256 hashes. |\n| E1a synthetic publisher | `/s2_e1/e1a/static_token_observation` | Deterministic `std_msgs/String` JSON matching E1a CSV fields. |\n| E1b synthetic publisher | `/s2_e1/e1b/mobile_pose_observation` | Deterministic `std_msgs/String` JSON matching E1b CSV fields. |\n\n    def test_manifest_chain_rejects_cross_experiment_launch(self):\n        with tempfile.TemporaryDirectory() as temp_dir:\n            path = self.materialize(temp_dir, \"e1b\")\n            with self.assertRaises(ManifestValidationError) as caught:\n                validate_manifest_chain(\n                    path,\n                    profile=\"simulation\",\n                    expected_experiment=\"e1a\",\n                    repo_root=ROOT,\n                )\n            self.assertIn(\"does not match expected\", str(caught.exception))\n\nBased only on the material above, answer: (1) what exact ROS 2 topic name and message type does the E1a synthetic publisher use? (2) In the test, what exact substring does `self.assertIn(...)` check for in the raised exception's message?",
+      "scoring": {"type": "keyword_all", "keywords": ["/s2_e1/e1a/static_token_observation", "does not match expected", "std_msgs"]}
     }
   ]
 }

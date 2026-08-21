@@ -100,6 +100,17 @@ across every file that calls `llm_call` still pass, and a live
 `run_task()` smoke test against production Ollama after the change
 returned `pong` normally (4090ms, `deterministic_gate: pass`).
 
+**Correction (2026-08-21 audit-repair pass,
+`docs/aoteru-lm1-audit-repair-lm2-design.agent-task.md`):** this section's
+heading overstated the fix. What actually shipped here was the optional
+`num_ctx` *parameter* plus the harness passing it — production
+`src.estate_router.execute_local()` still called `llm_call()` without
+`num_ctx`, so the live smoke test above ran with the same unbounded
+full-window request this section describes as the bug, and every real
+routed task hit it until the audit-repair pass. See that task's evidence
+for the actual production fix
+(`src.model_context.select_bounded_context`, wired into `execute_local`).
+
 ### A second real production-adjacent bug found and fixed mid-run
 
 The lab's single RTX 3080 is shared between production Ollama (11434) and
@@ -326,6 +337,107 @@ defend a numeric floor any future model would be judged against.
 - `gpt-oss:20b`'s `code_repair-01` corpus-wording ambiguity — worth a
   corpus wording fix in LM2, not urgent (it doesn't affect any promotion
   decision this pass).
+
+## Audit-repair pass (2026-08-21,
+docs/aoteru-lm1-audit-repair-lm2-design.agent-task.md)
+
+A follow-up audit found four real validity/reproducibility gaps in the LM1
+pass above. All four confirmed and repaired; LM1 is now closed.
+
+- **A1 — production context sizing.** Confirmed:
+  `src.estate_router.execute_local()` still called `llm_call()` without
+  `num_ctx`, so every real routed task (not just this harness before its
+  own fix) requested a model's full advertised window regardless of
+  prompt size — see the correction note on the "real production bug"
+  section above. Fixed by adding `src.model_context.select_bounded_context()`
+  (the one canonical context-selection policy: smallest context bucket
+  that covers the actual prompt + headroom, capped at the model's real
+  window so long-context tasks are unaffected) and wiring it into
+  `execute_local`. Live-verified: `run_task(local-fast)` against
+  production Ollama now shows `context_length: 4096` in `ollama ps`
+  for a short prompt on `qwen3:8b` (advertised/known window far larger),
+  where it previously requested the full window. 3 new focused tests
+  (`tests/test_estate_router.py`), all passing.
+- **A2 — benchmark-output reproducibility.** Confirmed:
+  `scripts/run_local_model_benchmark.py` stripped `raw_output` from the
+  JSONL export (correct) but never populated
+  `BenchmarkResult.raw_output_pointer` (bug) — every one of this pass's
+  140 raw model outputs was discarded after scoring, with no way to
+  independently rescore or dispute a result afterward. Fixed by adding
+  `write_artifact()`: an immutable, self-contained per-(run_id, model,
+  task_id[, context_point]) JSON artefact under
+  `evals/local_models/results/artifacts/` carrying the exact output, its
+  SHA-256, and full corpus/source/model/runtime provenance; SQLite keeps
+  only the pointer + hash (`raw_output_sha256`, new column, additive
+  migration) via a new `raw_output_pointer`/`raw_output_sha256` pair on
+  every future row. Re-running the same (run_id, task) is idempotent; a
+  hash mismatch on an existing artefact raises rather than silently
+  overwriting prior evidence. This pass's 140 historical rows (whose raw
+  outputs were never captured, so cannot be reconstructed) are now
+  explicitly labelled `raw_output_pointer = "output-unavailable"` rather
+  than left ambiguously `null` — not re-run, per the audit task's
+  instruction. 6 new focused tests (`tests/test_local_model_benchmark.py`)
+  plus a live validation run (see A3) confirming the mechanism end-to-end.
+- **A3 — estate corpus fidelity.** Confirmed: `phd_scientific_reasoning`
+  and `ros_log_test_interpretation` used explicitly-labelled proxy content
+  (this repo's own docs), not real `obsidian-PhD`/S2-E1 material, because
+  both repos were genuinely unregistered (`config/repositories.yaml`
+  `remote: null`) at LM1 time. GitHub read access to both
+  (`tyecam1/obsidian-PhD`, `tyecam1/s2-e1-ros2-measurement-spine`) was
+  available this pass. Replaced both fixtures in place with frozen,
+  real-source excerpts and a rubric/atom defined before any candidate
+  output was seen: `scientific_reasoning-01` now quotes the user's real
+  PhD evidence-tier rubric and Claim C3 verbatim
+  (`tyecam1/obsidian-PhD@731fcd8:01-research-plan/00-RC/evidence
+  requirements.md#L2-L7,L56-L62`) and requires naming the three real
+  evidence tiers; `ros_log_test-01` now quotes a real ROS 2 topic table
+  and a real pytest unit test verbatim
+  (`tyecam1/s2-e1-ros2-measurement-spine@6c4efdf:docs/ros2_measurement_
+  graph.md#L9-L13;tests/test_manifest_validation.py#L59-L69`) and requires
+  exact topic/message-type/error-substring recall. Both repos read-only,
+  neither mutated. Validation run against the `local-fast` incumbent
+  (`qwen3:8b`, run_id `lm1-a3-validation-1`): both pass, with genuinely
+  on-topic answers (verified by reading the stored output artefacts, not
+  just the pass/fail gate). Old proxy results for these two tasks are not
+  reinterpreted as evidence for the new, stronger task classes — the prior
+  screening pass's `phd_scientific_reasoning`/`ros_log_test_interpretation`
+  rows remain proxy-only evidence for whatever they actually measured.
+- **A4 — inventory semantics.** Confirmed: `config/models.yaml`'s
+  `installed_candidates` mixed two different states — models genuinely
+  pullable/runnable on production Ollama, and Gemma 4 E4B/12B, which were
+  only ever run through a temporary, already-torn-down second Ollama
+  instance and cannot currently be routed to at all — under one list
+  literally named "installed", disambiguated only by an inline comment.
+  No code was found reading this field (`src.estate_router.resolve_alias`
+  reads only `capabilities:`), so the fix is config-only: each entry is
+  now `{model, state, note?}` with `state` one of `production-installed`
+  / `benchmark-only` / `candidate` / `unavailable`, reusing the existing
+  list-of-dicts registry shape rather than adding a parallel registry.
+  Gemma 4 E4B/12B are now explicitly `state: benchmark-only`.
+
+Verification after all four repairs: focused tests for every touched file
+pass; full suite `python -m pytest -q --continue-on-collection-errors` ->
+**4901 passed, 4 skipped, 11 failed, 4 collection errors (118s)** — the
+same pre-existing, independently-confirmed-unrelated failure set as
+before this pass (10x MCP SDK `list_tools` AttributeError across 3
+servers + the already-documented `test_upload_handler_atomicity.py`
+filesystem-state flake); none of the 15 failing/erroring test paths
+overlap this pass's changed files. Live e2e smoke, production Ollama,
+after all repairs: `run_task({"task_class": "lm1-a5-closure-smoke",
+"objective": "Reply with exactly the single word: pong", "requirements":
+{"capabilities": ["local-fast"]}})` -> `executed: true`, `output: "pong"`,
+`latency_ms: 2610`, `deterministic_gate: pass`.
+`systemctl is-active odysseus-aoteru-lab.service` -> `active`;
+`GET /api/health` -> `200`; `127.0.0.1:7001`/`127.0.0.1:11434` only, zero
+`0.0.0.0` listeners.
+
+**LM1 is closed as of this audit-repair pass.** The full LM1 benchmark
+matrix was not re-run: none of the four repairs invalidate a promotion
+decision made above (the zero-binding-changes conclusion stands; A1's
+context-sizing fix changes production `execute_local` behaviour going
+forward but does not change which model wins any task-class comparison
+recorded above, since the harness itself already passed explicit
+`context_point` values per task before this repair).
 
 ## Final HEAD
 

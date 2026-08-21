@@ -335,6 +335,9 @@ def test_run_task_local_route_without_objective_does_not_execute(fixture_config,
 
 
 def test_execute_local_bounds_and_reports_upstream_failure(fixture_config, monkeypatch):
+    import src.model_context as model_context
+    monkeypatch.setattr(model_context, "_query_context_length", lambda url, model: (131072, True))
+
     def _raise(*a, **k):
         raise ConnectionError("connection refused")
     monkeypatch.setattr(estate_router, "llm_call", _raise, raising=False)
@@ -344,3 +347,52 @@ def test_execute_local_bounds_and_reports_upstream_failure(fixture_config, monke
     result = estate_router.execute_local("qwen3:8b", "hello", timeout=1.0)
     assert result["ok"] is False
     assert "connection refused" in result["error"]
+
+
+def test_execute_local_uses_bounded_context_not_full_window(fixture_config, monkeypatch):
+    """A1 repair: production execute_local must not blindly request a
+    model's full advertised window regardless of prompt size — this is the
+    exact production bug LM1 found and fixed only in the benchmark harness,
+    leaving `execute_local` (the real production call path) unfixed."""
+    import src.model_context as model_context
+    monkeypatch.setattr(model_context, "_query_context_length", lambda url, model: (262144, True))
+
+    captured = {}
+
+    def fake_llm_call(url, model, messages, **kwargs):
+        captured.update(kwargs)
+        return "pong"
+    import src.llm_core as llm_core
+    monkeypatch.setattr(llm_core, "llm_call", fake_llm_call)
+
+    result = estate_router.execute_local("qwen3.5:9b", "hello", timeout=5.0)
+    assert result["ok"] is True
+    assert captured["num_ctx"] < 262144, "must not request the full advertised window for a short prompt"
+    assert captured["num_ctx"] >= 4096
+
+
+def test_run_task_end_to_end_uses_bounded_context(fixture_config, monkeypatch):
+    """Same repair, exercised through the full run_task -> execute_local ->
+    llm_call production path, not just execute_local in isolation."""
+    monkeypatch.setattr(estate_router, "_record_decision", lambda *a, **k: "fake-decision-id")
+    monkeypatch.setattr(estate_router, "_ollama_model_live", lambda model, timeout=3.0: (True, "live"))
+    monkeypatch.setattr(estate_router, "_update_decision_outcome", lambda *a, **k: None)
+
+    import src.model_context as model_context
+    monkeypatch.setattr(model_context, "_query_context_length", lambda url, model: (262144, True))
+
+    captured = {}
+
+    def fake_llm_call(url, model, messages, **kwargs):
+        captured.update(kwargs)
+        return "pong"
+    import src.llm_core as llm_core
+    monkeypatch.setattr(llm_core, "llm_call", fake_llm_call)
+
+    result = estate_router.run_task({
+        "task_class": "coding", "objective": "say pong",
+        "requirements": {"capabilities": ["local-fast"]},
+    })
+    assert result["executed"] is True
+    assert result["execution"]["output"] == "pong"
+    assert captured["num_ctx"] < 262144

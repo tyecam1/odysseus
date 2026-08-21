@@ -73,18 +73,46 @@ benchmark_candidates:
   - Nemotron-3.5-Lightning-30B-A3B  # local-challenger
   - Qwen3.8-27B           # local-deep challenger
 
-# Already installed and available for further benchmarking without any
-# new download (docs/aoteru-estate-p7-evidence.md, LM1 evidence doc for
-# the three added this pass):
+# Already benchmarked and available for further evaluation without any new
+# download (docs/aoteru-estate-p7-evidence.md, LM1 evidence doc for the
+# three added this pass). Each entry carries an explicit `state` rather
+# than letting "present in this list" be read as "production-runnable" —
+# LM1 audit found Gemma 4 E4B/12B recorded here with only an inline
+# comment explaining they were never actually installed on production,
+# which is exactly the kind of state code could misread. `state` is one
+# of: production-installed (pullable/runnable via config/estate.yaml's
+# production Ollama, 127.0.0.1:11434) | benchmark-only (real, measured
+# LM1 evidence, but not reachable through production execute_local) |
+# candidate (not yet downloaded/run — see benchmark_candidates below) |
+# unavailable (blocked, e.g. licence/runtime/hardware).
 installed_candidates:
-  - qwen3:8b
-  - gpt-oss:20b
-  - qwen3:30b
-  - qwen3-embedding:8b
-  - dengcao/Qwen3-Reranker-8B:Q4_K_M
-  - qwen3.5:9b   # LM1: installed on production Ollama, screened, not promoted (evidence doc)
-  - gemma4:e4b   # LM1: screened (3 trials), but NOT installed on production Ollama — see blocker note above
-  - gemma4:12b   # LM1: screened (3 trials), but NOT installed on production Ollama — see blocker note above
+  - model: qwen3:8b
+    state: production-installed
+  - model: gpt-oss:20b
+    state: production-installed
+  - model: qwen3:30b
+    state: production-installed
+  - model: qwen3-embedding:8b
+    state: production-installed
+  - model: dengcao/Qwen3-Reranker-8B:Q4_K_M
+    state: production-installed
+  - model: qwen3.5:9b
+    state: production-installed
+    note: "LM1: installed on production Ollama, screened, not promoted (evidence doc)"
+  - model: gemma4:e4b
+    state: benchmark-only
+    note: >-
+      LM1: screened (3 trials) via a temporary, non-production second
+      Ollama instance, since torn down. NOT installed on production
+      Ollama (0.19.0 has no gemma4 architecture support) and cannot be
+      routed to yet — see evidence doc blocker/operator action.
+  - model: gemma4:12b
+    state: benchmark-only
+    note: >-
+      LM1: screened (3 trials) via a temporary, non-production second
+      Ollama instance, since torn down. NOT installed on production
+      Ollama (0.19.0 has no gemma4 architecture support) and cannot be
+      routed to yet — see evidence doc blocker/operator action.
 
 # Economic ladder — seed policy only; P7/live benchmark evidence overrides
 # it (docs/aoteru-model-host-routing-contract.md "Default economic ladder").
