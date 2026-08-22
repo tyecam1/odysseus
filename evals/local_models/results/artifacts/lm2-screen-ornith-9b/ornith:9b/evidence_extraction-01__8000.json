@@ -1,0 +1,21 @@
+{
+  "run_id": "lm2-screen-ornith-9b",
+  "task_id": "evidence_extraction-01",
+  "task_class": "evidence_extraction_provenance",
+  "corpus_id": "lm1-2026-08-21",
+  "source_pointer": "tyecam1/odysseus@ac295b7:docs/aoteru-estate-p7-evidence.md#L39-L45",
+  "model_key": "ornith:9b",
+  "concrete_model": "ornith:9b",
+  "upstream_repo": "deepreinforce-ai/Ornith-1.0-9B",
+  "upstream_revision": "ollama library ornith:9b default tag (MIT license, verified non-gated)",
+  "artifact": "ollama library ornith:9b, pulled 2026-08-22 this pass via second Ollama instance",
+  "quantization": "Q4_K_M (confirmed via `ollama show`)",
+  "runtime": "ollama",
+  "runtime_version": "0.32.15 (second, user-local instance -- same 412 version blocker as lfm2.5:8b)",
+  "runtime_base_url": "http://127.0.0.1:11435",
+  "context_point": 8000,
+  "status": "pass",
+  "score": "pass",
+  "output_sha256": "b64d43ba73b2956d5db5c58bc4fc63484a19b92cbcda797713df8c2174512169",
+  "raw_output": "qwen3:8b decode tok/s: **106.1**\nVRAM used: **6.6GB**"
+}

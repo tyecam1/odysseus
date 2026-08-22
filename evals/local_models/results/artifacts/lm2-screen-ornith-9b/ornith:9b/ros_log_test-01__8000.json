@@ -1,0 +1,21 @@
+{
+  "run_id": "lm2-screen-ornith-9b",
+  "task_id": "ros_log_test-01",
+  "task_class": "ros_log_test_interpretation",
+  "corpus_id": "lm1-2026-08-21",
+  "source_pointer": "tyecam1/s2-e1-ros2-measurement-spine@6c4efdf:docs/ros2_measurement_graph.md#L9-L13;tests/test_manifest_validation.py#L59-L69",
+  "model_key": "ornith:9b",
+  "concrete_model": "ornith:9b",
+  "upstream_repo": "deepreinforce-ai/Ornith-1.0-9B",
+  "upstream_revision": "ollama library ornith:9b default tag (MIT license, verified non-gated)",
+  "artifact": "ollama library ornith:9b, pulled 2026-08-22 this pass via second Ollama instance",
+  "quantization": "Q4_K_M (confirmed via `ollama show`)",
+  "runtime": "ollama",
+  "runtime_version": "0.32.15 (second, user-local instance -- same 412 version blocker as lfm2.5:8b)",
+  "runtime_base_url": "http://127.0.0.1:11435",
+  "context_point": 8000,
+  "status": "pass",
+  "score": "pass",
+  "output_sha256": "761a5a350e6e96a6bde30b9c94c28e173ce0521e6f3248277aba4e773fd3b748",
+  "raw_output": "**Answer:**\n\n**(1) E1a synthetic publisher topic:**\n- **Topic:** `/s2_e1/e1a/static_token_observation`\n- **Message type:** `std_msgs/String` (deterministic JSON payload matching E1a CSV fields)\n\n**(2) Test assertion substring:**\nThe `self.assertIn(...)` checks for the substring `\"does not match expected\"` in the string representation of the caught `ManifestValidationError`."
+}

@@ -1,0 +1,21 @@
+{
+  "run_id": "lm2-screen-nemotron-30b",
+  "task_id": "scientific_reasoning-01",
+  "task_class": "phd_scientific_reasoning",
+  "corpus_id": "lm1-2026-08-21",
+  "source_pointer": "tyecam1/obsidian-PhD@731fcd8:01-research-plan/00-RC/evidence requirements.md#L2-L7,L56-L62",
+  "model_key": "nemotron-3.5-lightning:30b-a3b",
+  "concrete_model": "nemotron-3.5-lightning:30b-a3b",
+  "upstream_repo": "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16",
+  "upstream_revision": "ollama library nemotron-3.5-lightning:30b-a3b default tag (OpenMDW-1.1, verified non-gated), GGUF Q4_K_M per the B3 NVFP4 caveat -- not NVFP4",
+  "artifact": "ollama library nemotron-3.5-lightning:30b-a3b, pulled 2026-08-22 this pass via second Ollama instance",
+  "quantization": "Q4_K_M (confirmed via `ollama show`)",
+  "runtime": "ollama",
+  "runtime_version": "0.32.15 (second, user-local instance -- same 412 version blocker as lfm2.5:8b)",
+  "runtime_base_url": "http://127.0.0.1:11435",
+  "context_point": 8000,
+  "status": "pass",
+  "score": "pass",
+  "output_sha256": "650b5856c93eacd6f05615e79623e59bacb63ecd4105f78c2aaf9cc90994f28d",
+  "raw_output": "The three evidence tiers required for each load-bearing claim, per the rubric, are:\n\n1. **Authoritative source**  \n2. **Peer-reviewed synthesis (Survey/Review)**  \n3. **Implementation/ reality check** (industry implementation, case study, or systematic review)\n\nA paper describing *\"a real industrial conformity-assessment case where a certifier forced a manufacturer to reduce a cobot's autonomy before sign-off\"* would satisfy the **Implementation/ reality check** tier. It directly matches the rubric's own description of this tier: *\"industrial conformity assessment narratives, certification case studies, or papers reporting how safety process constrained design.\"* This is a specific industry case study demonstrating how conformity assessment operationalizes the feasibility envelope described in Claim C3, rather than a standards document (Tier 1) or a broad survey of the field (Tier 2)."
+}

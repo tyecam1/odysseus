@@ -66,6 +66,107 @@
       "artifact": "ollama library gemma4:12b, pulled 2026-08-21 this pass via second Ollama instance",
       "quantization": "unverified (ollama-library-packaged, not the HF QAT Q4_0 file directly)",
       "vision": true
+    },
+    "lfm2.5:8b": {
+      "concrete_model": "lfm2.5:8b",
+      "base_url": "http://127.0.0.1:11435",
+      "role": "LM2 candidate: local-agent (second, architecturally distinct contender)",
+      "runtime": "ollama",
+      "runtime_version": "0.32.15 (second, user-local instance -- production Ollama 0.19.0 returned 412 'requires a newer version of Ollama' on this manifest, same class of blocker as LM1's gemma4 finding but broader)",
+      "upstream_repo": "LiquidAI/LFM2.5-8B-A1B",
+      "upstream_revision": "ollama library lfm2.5:8b default tag (LFM Open License v1.0, verified non-gated, verified license terms this pass)",
+      "artifact": "ollama library lfm2.5:8b, pulled 2026-08-22 this pass via second Ollama instance",
+      "quantization": "Q4_K_M (confirmed via `ollama show`)",
+      "total_params": "8.5B (8.3B total / 1.5B active, lfm2moe architecture, per `ollama show`)",
+      "active_params": "1.5B"
+    },
+    "ornith:9b": {
+      "concrete_model": "ornith:9b",
+      "base_url": "http://127.0.0.1:11435",
+      "role": "LM2 candidate: compact agentic/coding challenger",
+      "runtime": "ollama",
+      "runtime_version": "0.32.15 (second, user-local instance -- same 412 version blocker as lfm2.5:8b)",
+      "upstream_repo": "deepreinforce-ai/Ornith-1.0-9B",
+      "upstream_revision": "ollama library ornith:9b default tag (MIT license, verified non-gated)",
+      "artifact": "ollama library ornith:9b, pulled 2026-08-22 this pass via second Ollama instance",
+      "quantization": "Q4_K_M (confirmed via `ollama show`)",
+      "total_params": "9.0B dense, qwen35 architecture lineage (per `ollama show`)"
+    },
+    "qwen3.6:35b": {
+      "concrete_model": "qwen3.6:35b",
+      "base_url": "http://127.0.0.1:11434",
+      "role": "LM2 candidate: local-strong challenger",
+      "runtime": "ollama",
+      "runtime_version": "0.19.0 (production -- pulled cleanly, no version blocker for this family)",
+      "upstream_repo": "Qwen/Qwen3.6-35B-A3B",
+      "upstream_revision": "ollama library qwen3.6:35b default tag (apache-2.0, verified non-gated)",
+      "artifact": "ollama library qwen3.6:35b, pulled 2026-08-22 this pass onto production Ollama",
+      "quantization": "Q4_K_M (confirmed via `ollama show`)",
+      "total_params": "36.0B total / ~3B active, qwen35moe architecture (per `ollama show`)",
+      "active_params": "3B"
+    },
+    "qwen3.8:27b": {
+      "concrete_model": "qwen3.8:27b",
+      "base_url": "http://127.0.0.1:11435",
+      "role": "LM2 candidate: dense deep baseline/challenger (reasoning-strong)",
+      "runtime": "ollama",
+      "runtime_version": "0.32.15 (second, user-local instance -- same 412 version blocker as lfm2.5:8b)",
+      "upstream_repo": "Qwen/Qwen3.8-27B",
+      "upstream_revision": "ollama library qwen3.8:27b default tag (apache-2.0, verified non-gated)",
+      "artifact": "ollama library qwen3.8:27b, pulled 2026-08-22 this pass via second Ollama instance",
+      "quantization": "Q4_K_M (confirmed via `ollama show`)",
+      "total_params": "27.3B dense, qwen35 architecture (per `ollama show`)",
+      "vision": true
+    },
+    "gemma4-e4b-qat-gguf-direct": {
+      "concrete_model": "/home/agent/.claude/jobs/f73b3fea/tmp/gguf/gemma-4-E4B_q4_0-it.gguf",
+      "base_url": "http://127.0.0.1:8091/v1",
+      "role": "LM2: official-QAT-GGUF-direct comparison for local-small/local-fast (B3's unresolved 'QAT vs Ollama-library-packaged' question)",
+      "runtime": "llama.cpp",
+      "runtime_version": "b10586, prebuilt ubuntu-vulkan-x64 release binary",
+      "upstream_repo": "google/gemma-4-E4B-it-qat-q4_0-gguf",
+      "upstream_revision": "official HF repo, exact files gemma-4-E4B_q4_0-it.gguf + gemma-4-E4B-it-mmproj.gguf, downloaded 2026-08-22 this pass (Gemma licence, verified non-gated)",
+      "artifact": "gemma-4-E4B_q4_0-it.gguf (5.15GB) + gemma-4-E4B-it-mmproj.gguf (0.99GB), official QAT",
+      "quantization": "Q4_0 (official QAT)",
+      "vision": true
+    },
+    "gemma4-26b-a4b-qat-gguf-direct": {
+      "concrete_model": "/home/agent/.claude/jobs/f73b3fea/tmp/gguf/gemma-4-26B_q4_0-it.gguf",
+      "base_url": "http://127.0.0.1:8092/v1",
+      "role": "LM2: hybrid MoE/QAT candidate, never tested by LM1",
+      "runtime": "llama.cpp",
+      "runtime_version": "b10586, prebuilt ubuntu-vulkan-x64 release binary. -ngl 8 (heavy CPU offload, necessary at 10GB VRAM -- ngl 20/99 both hit ErrorOutOfDeviceMemory under Vulkan, which has higher per-layer overhead than CUDA; 8 was the highest value found to load cleanly at 8K context)",
+      "upstream_repo": "google/gemma-4-26B-A4B-it-qat-q4_0-gguf",
+      "upstream_revision": "official HF repo, exact files gemma-4-26B_q4_0-it.gguf + gemma-4-26B-it-mmproj.gguf (mmproj not loaded this pass -- vision not exercised for this row, text-only screening), downloaded 2026-08-22 this pass (Gemma licence, verified non-gated)",
+      "artifact": "gemma-4-26B_q4_0-it.gguf (14.44GB), official QAT",
+      "quantization": "Q4_0 (official QAT)",
+      "total_params": "25.2B total / 3.8B active MoE"
+    },
+    "gemma4-12b-qat-gguf-direct": {
+      "concrete_model": "/home/agent/.claude/jobs/f73b3fea/tmp/gguf/gemma-4-12b-it-qat-q4_0.gguf",
+      "base_url": "http://127.0.0.1:8090/v1",
+      "role": "LM2: official-QAT-GGUF-direct comparison for local-multimodal/vision (B3's unresolved 'QAT vs Ollama-library-packaged' question)",
+      "runtime": "llama.cpp",
+      "runtime_version": "b10586, prebuilt ubuntu-vulkan-x64 release binary (no CUDA toolkit/nvcc available on this host -- Vulkan backend against the NVIDIA driver's Vulkan ICD is the GPU-accelerated path used instead of a CUDA build, same GPU, same class of evidence B4 asks for)",
+      "upstream_repo": "google/gemma-4-12B-it-qat-q4_0-gguf",
+      "upstream_revision": "official HF repo, exact files gemma-4-12b-it-qat-q4_0.gguf + mmproj-gemma-4-12b-it-qat-q4_0.gguf, downloaded 2026-08-22 this pass (Gemma licence, verified non-gated)",
+      "artifact": "gemma-4-12b-it-qat-q4_0.gguf (6.98GB) + mmproj-gemma-4-12b-it-qat-q4_0.gguf (0.18GB), official QAT",
+      "quantization": "Q4_0 (official QAT, per repo name and file metadata: ftype Q4_0, n_params 11.9B, size 6.96GB)",
+      "total_params": "11.9B dense",
+      "vision": true
+    },
+    "nemotron-3.5-lightning:30b-a3b": {
+      "concrete_model": "nemotron-3.5-lightning:30b-a3b",
+      "base_url": "http://127.0.0.1:11435",
+      "role": "LM2 candidate: local-challenger",
+      "runtime": "ollama",
+      "runtime_version": "0.32.15 (second, user-local instance -- same 412 version blocker as lfm2.5:8b)",
+      "upstream_repo": "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16",
+      "upstream_revision": "ollama library nemotron-3.5-lightning:30b-a3b default tag (OpenMDW-1.1, verified non-gated), GGUF Q4_K_M per the B3 NVFP4 caveat -- not NVFP4",
+      "artifact": "ollama library nemotron-3.5-lightning:30b-a3b, pulled 2026-08-22 this pass via second Ollama instance",
+      "quantization": "Q4_K_M (confirmed via `ollama show`)",
+      "total_params": "32.9B total, nemotron_h_moe hybrid Mamba-2+MoE+Attention architecture (per `ollama show`)",
+      "active_params": "~3B"
     }
   }
 }

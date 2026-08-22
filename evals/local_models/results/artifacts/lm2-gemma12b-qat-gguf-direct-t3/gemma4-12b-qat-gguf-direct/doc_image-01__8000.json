@@ -1,0 +1,21 @@
+{
+  "run_id": "lm2-gemma12b-qat-gguf-direct-t3",
+  "task_id": "doc_image-01",
+  "task_class": "document_image_understanding",
+  "corpus_id": "lm1-2026-08-21",
+  "source_pointer": "evals/local_models/fixtures/doc_image_01.png (synthetic, generated this pass)",
+  "model_key": "gemma4-12b-qat-gguf-direct",
+  "concrete_model": "/home/agent/.claude/jobs/f73b3fea/tmp/gguf/gemma-4-12b-it-qat-q4_0.gguf",
+  "upstream_repo": "google/gemma-4-12B-it-qat-q4_0-gguf",
+  "upstream_revision": "official HF repo, exact files gemma-4-12b-it-qat-q4_0.gguf + mmproj-gemma-4-12b-it-qat-q4_0.gguf, downloaded 2026-08-22 this pass (Gemma licence, verified non-gated)",
+  "artifact": "gemma-4-12b-it-qat-q4_0.gguf (6.98GB) + mmproj-gemma-4-12b-it-qat-q4_0.gguf (0.18GB), official QAT",
+  "quantization": "Q4_0 (official QAT, per repo name and file metadata: ftype Q4_0, n_params 11.9B, size 6.96GB)",
+  "runtime": "llama.cpp",
+  "runtime_version": "b10586, prebuilt ubuntu-vulkan-x64 release binary (no CUDA toolkit/nvcc available on this host -- Vulkan backend against the NVIDIA driver's Vulkan ICD is the GPU-accelerated path used instead of a CUDA build, same GPU, same class of evidence B4 asks for)",
+  "runtime_base_url": "http://127.0.0.1:8090/v1",
+  "context_point": 8000,
+  "status": "pass",
+  "score": "pass",
+  "output_sha256": "edc3a0c5ca2f10d682530acd90d7bb0250d237b70aa6402c1a6e3975d8998a6e",
+  "raw_output": "The 'Peak VRAM this run' value shown is 7421 MiB."
+}

@@ -1,0 +1,21 @@
+{
+  "run_id": "lm2-screen-ornith-9b",
+  "task_id": "independent_review-01",
+  "task_class": "independent_review",
+  "corpus_id": "lm1-2026-08-21",
+  "source_pointer": "synthetic worker-result (derived from src/estate_router.py execute_local contract)",
+  "model_key": "ornith:9b",
+  "concrete_model": "ornith:9b",
+  "upstream_repo": "deepreinforce-ai/Ornith-1.0-9B",
+  "upstream_revision": "ollama library ornith:9b default tag (MIT license, verified non-gated)",
+  "artifact": "ollama library ornith:9b, pulled 2026-08-22 this pass via second Ollama instance",
+  "quantization": "Q4_K_M (confirmed via `ollama show`)",
+  "runtime": "ollama",
+  "runtime_version": "0.32.15 (second, user-local instance -- same 412 version blocker as lfm2.5:8b)",
+  "runtime_base_url": "http://127.0.0.1:11435",
+  "context_point": 8000,
+  "status": "pass",
+  "score": "pass",
+  "output_sha256": "84110b0b2f98b895440e215bfae38dfe6fc47de3c2724a330fc4e7f0e2e60506",
+  "raw_output": "NO. The field that contradicts is `deterministic_gate` \u2014 it is \"pass\", but `execution.output` is `\"\"`, which is empty. Odysseus requires output to be non-empty and non-whitespace for a \"pass\" gate."
+}

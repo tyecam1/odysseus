@@ -1,0 +1,21 @@
+{
+  "run_id": "lm2-finalist-ornith-9b-t3",
+  "task_id": "scientific_reasoning-01",
+  "task_class": "phd_scientific_reasoning",
+  "corpus_id": "lm1-2026-08-21",
+  "source_pointer": "tyecam1/obsidian-PhD@731fcd8:01-research-plan/00-RC/evidence requirements.md#L2-L7,L56-L62",
+  "model_key": "ornith:9b",
+  "concrete_model": "ornith:9b",
+  "upstream_repo": "deepreinforce-ai/Ornith-1.0-9B",
+  "upstream_revision": "ollama library ornith:9b default tag (MIT license, verified non-gated)",
+  "artifact": "ollama library ornith:9b, pulled 2026-08-22 this pass via second Ollama instance",
+  "quantization": "Q4_K_M (confirmed via `ollama show`)",
+  "runtime": "ollama",
+  "runtime_version": "0.32.15 (second, user-local instance -- same 412 version blocker as lfm2.5:8b)",
+  "runtime_base_url": "http://127.0.0.1:11435",
+  "context_point": 8000,
+  "status": "pass",
+  "score": "pass",
+  "output_sha256": "f63b443188467b45919020cde45acb3d5eb7c2f27ecc8c2249a59eae3d536b62",
+  "raw_output": "**Three Tiers:**\n1. **Authoritative** \u2014 standards, regulations, and guidance documents\n2. **Synthesis** \u2014 peer-reviewed surveys/reviews\n3. **Reality check** \u2014 industry case studies, certification narratives, or papers on real-world design constraints\n\n**Matching Tier:** The described paper satisfies the **Reality check** tier \u2014 it falls squarely on the \"industrial conformity assessment narratives\" and \"papers reporting how safety process constrained design\" dimension, which is exactly what the paper describes."
+}

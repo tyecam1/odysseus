@@ -1,0 +1,21 @@
+{
+  "run_id": "lm2-gemma12b-qat-gguf-direct-t2",
+  "task_id": "long_context-01",
+  "task_class": "long_context_retrieval",
+  "corpus_id": "lm1-2026-08-21",
+  "source_pointer": "tyecam1/odysseus@ac295b7:docs/aoteru-model-host-routing-contract.md + docs/aoteru-lab-local-model-strategy-2026-08-20.md (concatenated, needle inserted)",
+  "model_key": "gemma4-12b-qat-gguf-direct",
+  "concrete_model": "/home/agent/.claude/jobs/f73b3fea/tmp/gguf/gemma-4-12b-it-qat-q4_0.gguf",
+  "upstream_repo": "google/gemma-4-12B-it-qat-q4_0-gguf",
+  "upstream_revision": "official HF repo, exact files gemma-4-12b-it-qat-q4_0.gguf + mmproj-gemma-4-12b-it-qat-q4_0.gguf, downloaded 2026-08-22 this pass (Gemma licence, verified non-gated)",
+  "artifact": "gemma-4-12b-it-qat-q4_0.gguf (6.98GB) + mmproj-gemma-4-12b-it-qat-q4_0.gguf (0.18GB), official QAT",
+  "quantization": "Q4_0 (official QAT, per repo name and file metadata: ftype Q4_0, n_params 11.9B, size 6.96GB)",
+  "runtime": "llama.cpp",
+  "runtime_version": "b10586, prebuilt ubuntu-vulkan-x64 release binary (no CUDA toolkit/nvcc available on this host -- Vulkan backend against the NVIDIA driver's Vulkan ICD is the GPU-accelerated path used instead of a CUDA build, same GPU, same class of evidence B4 asks for)",
+  "runtime_base_url": "http://127.0.0.1:8090/v1",
+  "context_point": 32000,
+  "status": "fail",
+  "score": "fail",
+  "output_sha256": "06fc314ff2ca0b7a5067fe93e7c64b93940396108bda113f8f7207509fb7bdd9",
+  "raw_output": "The user is asking for a \"unique canary value\" stated in the provided source text.\n\n    *   Source 0: `docs/aoteru-model-host-routing-contract.md` (repeated)\n    *   Source 1: `docs/aoteru-lab-local-model-strategy-2026-08-20.md` (repeated)\n    *   Source 2: `docs/aoteru-lab-execution-convergence-evidence.md` (repeated)\n    *   Source 3: `docs/aoteru-systemd-cutover-evidence.md` (repeated)\n    *   Source 4: `docs/aoteru-estate-p7-evidence.md` (repeated)\n\n    *   Looking at the top of each"
+}

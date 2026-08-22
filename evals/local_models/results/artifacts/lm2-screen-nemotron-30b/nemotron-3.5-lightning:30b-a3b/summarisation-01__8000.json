@@ -1,0 +1,21 @@
+{
+  "run_id": "lm2-screen-nemotron-30b",
+  "task_id": "summarisation-01",
+  "task_class": "compact_summarisation",
+  "corpus_id": "lm1-2026-08-21",
+  "source_pointer": "tyecam1/odysseus@ac295b7:docs/aoteru-systemd-cutover-evidence.md#L41-L53",
+  "model_key": "nemotron-3.5-lightning:30b-a3b",
+  "concrete_model": "nemotron-3.5-lightning:30b-a3b",
+  "upstream_repo": "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16",
+  "upstream_revision": "ollama library nemotron-3.5-lightning:30b-a3b default tag (OpenMDW-1.1, verified non-gated), GGUF Q4_K_M per the B3 NVFP4 caveat -- not NVFP4",
+  "artifact": "ollama library nemotron-3.5-lightning:30b-a3b, pulled 2026-08-22 this pass via second Ollama instance",
+  "quantization": "Q4_K_M (confirmed via `ollama show`)",
+  "runtime": "ollama",
+  "runtime_version": "0.32.15 (second, user-local instance -- same 412 version blocker as lfm2.5:8b)",
+  "runtime_base_url": "http://127.0.0.1:11435",
+  "context_point": 8000,
+  "status": "pass",
+  "score": "pass",
+  "output_sha256": "08af32b23822af14549352b879c51510ca019e22fb2a5b4cdca98d958e582a9b",
+  "raw_output": "A graceful SIGTERM shutdown made systemd's `Restart=on-failure` classify the event as non-fatal, preventing auto-restart and leaving the unit inactive. This proves the directive's \"clean stop\" behavior but not its crash-restart function."
+}

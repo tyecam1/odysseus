@@ -1,0 +1,21 @@
+{
+  "run_id": "lm2-finalist-nemotron-30b-t2",
+  "task_id": "recon-02",
+  "task_class": "repo_reconnaissance",
+  "corpus_id": "lm1-2026-08-21",
+  "source_pointer": "tyecam1/odysseus@ac295b7:core/database.py#L788-L793",
+  "model_key": "nemotron-3.5-lightning:30b-a3b",
+  "concrete_model": "nemotron-3.5-lightning:30b-a3b",
+  "upstream_repo": "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16",
+  "upstream_revision": "ollama library nemotron-3.5-lightning:30b-a3b default tag (OpenMDW-1.1, verified non-gated), GGUF Q4_K_M per the B3 NVFP4 caveat -- not NVFP4",
+  "artifact": "ollama library nemotron-3.5-lightning:30b-a3b, pulled 2026-08-22 this pass via second Ollama instance",
+  "quantization": "Q4_K_M (confirmed via `ollama show`)",
+  "runtime": "ollama",
+  "runtime_version": "0.32.15 (second, user-local instance -- same 412 version blocker as lfm2.5:8b)",
+  "runtime_base_url": "http://127.0.0.1:11435",
+  "context_point": 8000,
+  "status": "pass",
+  "score": "pass",
+  "output_sha256": "9a71360454395ea7faa49b0d6422cebfe071d3e1fccef91d31b9cac98937873d",
+  "raw_output": "The module-level constant is **`PARK_LEASE_STALE_SECONDS`** with an integer value of **`1800`** seconds (equivalent to 30 minutes, as noted in the comment)."
+}

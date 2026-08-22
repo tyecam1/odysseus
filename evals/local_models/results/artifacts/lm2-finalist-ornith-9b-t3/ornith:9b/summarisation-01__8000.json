@@ -1,0 +1,21 @@
+{
+  "run_id": "lm2-finalist-ornith-9b-t3",
+  "task_id": "summarisation-01",
+  "task_class": "compact_summarisation",
+  "corpus_id": "lm1-2026-08-21",
+  "source_pointer": "tyecam1/odysseus@ac295b7:docs/aoteru-systemd-cutover-evidence.md#L41-L53",
+  "model_key": "ornith:9b",
+  "concrete_model": "ornith:9b",
+  "upstream_repo": "deepreinforce-ai/Ornith-1.0-9B",
+  "upstream_revision": "ollama library ornith:9b default tag (MIT license, verified non-gated)",
+  "artifact": "ollama library ornith:9b, pulled 2026-08-22 this pass via second Ollama instance",
+  "quantization": "Q4_K_M (confirmed via `ollama show`)",
+  "runtime": "ollama",
+  "runtime_version": "0.32.15 (second, user-local instance -- same 412 version blocker as lfm2.5:8b)",
+  "runtime_base_url": "http://127.0.0.1:11435",
+  "context_point": 8000,
+  "status": "pass",
+  "score": "pass",
+  "output_sha256": "d066f326e12b40b2166fef8c2034cc1f069ff35e08c904aed89822e912ecf5b5",
+  "raw_output": "Verified SIGTERM graceful shutdown prevents unwanted restart under Restart=on-failure, proving the clean-stop rule works but requiring privileged access to test crash-restart."
+}

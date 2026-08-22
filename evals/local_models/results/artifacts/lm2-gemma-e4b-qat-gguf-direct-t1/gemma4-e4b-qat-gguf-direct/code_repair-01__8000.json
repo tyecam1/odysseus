@@ -1,0 +1,21 @@
+{
+  "run_id": "lm2-gemma-e4b-qat-gguf-direct-t1",
+  "task_id": "code_repair-01",
+  "task_class": "bounded_code_repair",
+  "corpus_id": "lm1-2026-08-21",
+  "source_pointer": "tyecam1/odysseus@ac295b7:core/database.py#L788-L793 (fixture: evals/local_models/fixtures/code_repair_01/lease.py)",
+  "model_key": "gemma4-e4b-qat-gguf-direct",
+  "concrete_model": "/home/agent/.claude/jobs/f73b3fea/tmp/gguf/gemma-4-E4B_q4_0-it.gguf",
+  "upstream_repo": "google/gemma-4-E4B-it-qat-q4_0-gguf",
+  "upstream_revision": "official HF repo, exact files gemma-4-E4B_q4_0-it.gguf + gemma-4-E4B-it-mmproj.gguf, downloaded 2026-08-22 this pass (Gemma licence, verified non-gated)",
+  "artifact": "gemma-4-E4B_q4_0-it.gguf (5.15GB) + gemma-4-E4B-it-mmproj.gguf (0.99GB), official QAT",
+  "quantization": "Q4_0 (official QAT)",
+  "runtime": "llama.cpp",
+  "runtime_version": "b10586, prebuilt ubuntu-vulkan-x64 release binary",
+  "runtime_base_url": "http://127.0.0.1:8091/v1",
+  "context_point": 8000,
+  "status": "pass",
+  "score": "pass",
+  "output_sha256": "438f00f7b31c1c5539b9f6c28788d12d753461f0e7b6cfc7d5acae4c589a93d8",
+  "raw_output": "```python\nfrom datetime import datetime\n\nPARK_LEASE_STALE_SECONDS = 1800  # 30 min without a heartbeat renewal\n\n\nclass Lease:\n    def __init__(self, heartbeat_at: datetime):\n        self.heartbeat_at = heartbeat_at\n\n\ndef park_lease_is_stale(lease: \"Lease\", *, now: \"datetime | None\" = None) -> bool:\n    \"\"\"Return True when `lease` has gone stale (no heartbeat renewal within\n    PARK_LEASE_STALE_SECONDS).\"\"\"\n    now = now or datetime.utcnow()\n    return (now - lease.heartbeat_at).total_seconds() >= PARK_LEASE_STALE_SECONDS\n```"
+}

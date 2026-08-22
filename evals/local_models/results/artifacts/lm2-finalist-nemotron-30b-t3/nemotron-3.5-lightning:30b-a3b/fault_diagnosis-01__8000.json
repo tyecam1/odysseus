@@ -1,0 +1,21 @@
+{
+  "run_id": "lm2-finalist-nemotron-30b-t3",
+  "task_id": "fault_diagnosis-01",
+  "task_class": "fault_diagnosis",
+  "corpus_id": "lm1-2026-08-21",
+  "source_pointer": "tyecam1/odysseus@ac295b7:docs/aoteru-lab-execution-convergence-evidence.md#L201-L217",
+  "model_key": "nemotron-3.5-lightning:30b-a3b",
+  "concrete_model": "nemotron-3.5-lightning:30b-a3b",
+  "upstream_repo": "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16",
+  "upstream_revision": "ollama library nemotron-3.5-lightning:30b-a3b default tag (OpenMDW-1.1, verified non-gated), GGUF Q4_K_M per the B3 NVFP4 caveat -- not NVFP4",
+  "artifact": "ollama library nemotron-3.5-lightning:30b-a3b, pulled 2026-08-22 this pass via second Ollama instance",
+  "quantization": "Q4_K_M (confirmed via `ollama show`)",
+  "runtime": "ollama",
+  "runtime_version": "0.32.15 (second, user-local instance -- same 412 version blocker as lfm2.5:8b)",
+  "runtime_base_url": "http://127.0.0.1:11435",
+  "context_point": 8000,
+  "status": "pass",
+  "score": "pass",
+  "output_sha256": "312e072cd117294dc870048c056f0981c0c7e4058dec84271c9c76192947a4a5",
+  "raw_output": "The root cause category is an MCP SDK version incompatibility where mismatched library versions stripped the `list_tools` attribute from the Server object, and this is not caused by routing or execution changes in the repo but rather by a dependency version mismatch that recent imports or server initialization likely exposed."
+}

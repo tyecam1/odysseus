@@ -1,0 +1,21 @@
+{
+  "run_id": "lm2-gemma12b-qat-gguf-direct-t2",
+  "task_id": "scientific_reasoning-01",
+  "task_class": "phd_scientific_reasoning",
+  "corpus_id": "lm1-2026-08-21",
+  "source_pointer": "tyecam1/obsidian-PhD@731fcd8:01-research-plan/00-RC/evidence requirements.md#L2-L7,L56-L62",
+  "model_key": "gemma4-12b-qat-gguf-direct",
+  "concrete_model": "/home/agent/.claude/jobs/f73b3fea/tmp/gguf/gemma-4-12b-it-qat-q4_0.gguf",
+  "upstream_repo": "google/gemma-4-12B-it-qat-q4_0-gguf",
+  "upstream_revision": "official HF repo, exact files gemma-4-12b-it-qat-q4_0.gguf + mmproj-gemma-4-12b-it-qat-q4_0.gguf, downloaded 2026-08-22 this pass (Gemma licence, verified non-gated)",
+  "artifact": "gemma-4-12b-it-qat-q4_0.gguf (6.98GB) + mmproj-gemma-4-12b-it-qat-q4_0.gguf (0.18GB), official QAT",
+  "quantization": "Q4_0 (official QAT, per repo name and file metadata: ftype Q4_0, n_params 11.9B, size 6.96GB)",
+  "runtime": "llama.cpp",
+  "runtime_version": "b10586, prebuilt ubuntu-vulkan-x64 release binary (no CUDA toolkit/nvcc available on this host -- Vulkan backend against the NVIDIA driver's Vulkan ICD is the GPU-accelerated path used instead of a CUDA build, same GPU, same class of evidence B4 asks for)",
+  "runtime_base_url": "http://127.0.0.1:8090/v1",
+  "context_point": 8000,
+  "status": "pass",
+  "score": "pass",
+  "output_sha256": "8ffdcb1cf8657835176a0bd3d659e9e7165fa38b6c0e0d01606c2fc9d32454fe",
+  "raw_output": "The three tiers required for a load-bearing claim are:\n\n1.  **Authoritative source**\n2.  **Peer-reviewed synthesis (Survey/ Review)**\n3.  **Implementation/ reality check** (industry implementation, case study, or systematic review)\n\nFor Claim C3, a paper describing \"a real industrial conformity-assessment case where a certifier forced a manufacturer to reduce a cobot's autonomy before sign-off\" would satisfy the **Reality check** tier."
+}

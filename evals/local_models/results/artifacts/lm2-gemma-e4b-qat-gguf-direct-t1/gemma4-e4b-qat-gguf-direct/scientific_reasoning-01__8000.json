@@ -1,0 +1,21 @@
+{
+  "run_id": "lm2-gemma-e4b-qat-gguf-direct-t1",
+  "task_id": "scientific_reasoning-01",
+  "task_class": "phd_scientific_reasoning",
+  "corpus_id": "lm1-2026-08-21",
+  "source_pointer": "tyecam1/obsidian-PhD@731fcd8:01-research-plan/00-RC/evidence requirements.md#L2-L7,L56-L62",
+  "model_key": "gemma4-e4b-qat-gguf-direct",
+  "concrete_model": "/home/agent/.claude/jobs/f73b3fea/tmp/gguf/gemma-4-E4B_q4_0-it.gguf",
+  "upstream_repo": "google/gemma-4-E4B-it-qat-q4_0-gguf",
+  "upstream_revision": "official HF repo, exact files gemma-4-E4B_q4_0-it.gguf + gemma-4-E4B-it-mmproj.gguf, downloaded 2026-08-22 this pass (Gemma licence, verified non-gated)",
+  "artifact": "gemma-4-E4B_q4_0-it.gguf (5.15GB) + gemma-4-E4B-it-mmproj.gguf (0.99GB), official QAT",
+  "quantization": "Q4_0 (official QAT)",
+  "runtime": "llama.cpp",
+  "runtime_version": "b10586, prebuilt ubuntu-vulkan-x64 release binary",
+  "runtime_base_url": "http://127.0.0.1:8091/v1",
+  "context_point": 8000,
+  "status": "pass",
+  "score": "pass",
+  "output_sha256": "bcfca2a991645002b008907d44c49d31eded1be47e0b73584b7d5921d67d70d4",
+  "raw_output": "The three required source tiers are:\n1. **Authoritative source**\n2. **Peer-reviewed synthesis** (Survey/Review)\n3. **Implementation/reality check** (Industry implementation, case study, or systematic review)\n\nThe paper describing 'a real industrial conformity-assessment case where a certifier forced a manufacturer to reduce a cobot's autonomy before sign-off' would satisfy the **Implementation/reality check** tier."
+}

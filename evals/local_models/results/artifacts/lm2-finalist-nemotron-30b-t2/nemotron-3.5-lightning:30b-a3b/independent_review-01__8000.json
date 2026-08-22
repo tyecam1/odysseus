@@ -1,0 +1,21 @@
+{
+  "run_id": "lm2-finalist-nemotron-30b-t2",
+  "task_id": "independent_review-01",
+  "task_class": "independent_review",
+  "corpus_id": "lm1-2026-08-21",
+  "source_pointer": "synthetic worker-result (derived from src/estate_router.py execute_local contract)",
+  "model_key": "nemotron-3.5-lightning:30b-a3b",
+  "concrete_model": "nemotron-3.5-lightning:30b-a3b",
+  "upstream_repo": "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16",
+  "upstream_revision": "ollama library nemotron-3.5-lightning:30b-a3b default tag (OpenMDW-1.1, verified non-gated), GGUF Q4_K_M per the B3 NVFP4 caveat -- not NVFP4",
+  "artifact": "ollama library nemotron-3.5-lightning:30b-a3b, pulled 2026-08-22 this pass via second Ollama instance",
+  "quantization": "Q4_K_M (confirmed via `ollama show`)",
+  "runtime": "ollama",
+  "runtime_version": "0.32.15 (second, user-local instance -- same 412 version blocker as lfm2.5:8b)",
+  "runtime_base_url": "http://127.0.0.1:11435",
+  "context_point": 8000,
+  "status": "pass",
+  "score": "pass",
+  "output_sha256": "2e2949ad8505bc5b1a66ff4a9b5fa3a1a297b3952bb9fd1642208fcd3988e7b6",
+  "raw_output": "NO. \n\nThe `output` field is an empty string (`\"\"`), which directly contradicts the rule's requirement that the output must be a **non-empty, non-whitespace string** for `deterministic_gate` to be `\"pass\"`. While `ok: true` satisfies the first condition, the empty output fails the second, making the result internally inconsistent with the gate rule."
+}

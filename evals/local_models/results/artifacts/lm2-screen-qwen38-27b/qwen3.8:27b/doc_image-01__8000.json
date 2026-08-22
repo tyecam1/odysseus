@@ -1,0 +1,21 @@
+{
+  "run_id": "lm2-screen-qwen38-27b",
+  "task_id": "doc_image-01",
+  "task_class": "document_image_understanding",
+  "corpus_id": "lm1-2026-08-21",
+  "source_pointer": "evals/local_models/fixtures/doc_image_01.png (synthetic, generated this pass)",
+  "model_key": "qwen3.8:27b",
+  "concrete_model": "qwen3.8:27b",
+  "upstream_repo": "Qwen/Qwen3.8-27B",
+  "upstream_revision": "ollama library qwen3.8:27b default tag (apache-2.0, verified non-gated)",
+  "artifact": "ollama library qwen3.8:27b, pulled 2026-08-22 this pass via second Ollama instance",
+  "quantization": "Q4_K_M (confirmed via `ollama show`)",
+  "runtime": "ollama",
+  "runtime_version": "0.32.15 (second, user-local instance -- same 412 version blocker as lfm2.5:8b)",
+  "runtime_base_url": "http://127.0.0.1:11435",
+  "context_point": 8000,
+  "status": "pass",
+  "score": "pass",
+  "output_sha256": "be8acef727f8dcd352ba823dfe10f8470e131b65b3322af9fe26be2e62a16476",
+  "raw_output": "7421 MiB"
+}

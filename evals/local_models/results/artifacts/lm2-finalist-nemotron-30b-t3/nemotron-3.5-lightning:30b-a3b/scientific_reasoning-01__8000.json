@@ -1,0 +1,21 @@
+{
+  "run_id": "lm2-finalist-nemotron-30b-t3",
+  "task_id": "scientific_reasoning-01",
+  "task_class": "phd_scientific_reasoning",
+  "corpus_id": "lm1-2026-08-21",
+  "source_pointer": "tyecam1/obsidian-PhD@731fcd8:01-research-plan/00-RC/evidence requirements.md#L2-L7,L56-L62",
+  "model_key": "nemotron-3.5-lightning:30b-a3b",
+  "concrete_model": "nemotron-3.5-lightning:30b-a3b",
+  "upstream_repo": "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16",
+  "upstream_revision": "ollama library nemotron-3.5-lightning:30b-a3b default tag (OpenMDW-1.1, verified non-gated), GGUF Q4_K_M per the B3 NVFP4 caveat -- not NVFP4",
+  "artifact": "ollama library nemotron-3.5-lightning:30b-a3b, pulled 2026-08-22 this pass via second Ollama instance",
+  "quantization": "Q4_K_M (confirmed via `ollama show`)",
+  "runtime": "ollama",
+  "runtime_version": "0.32.15 (second, user-local instance -- same 412 version blocker as lfm2.5:8b)",
+  "runtime_base_url": "http://127.0.0.1:11435",
+  "context_point": 8000,
+  "status": "pass",
+  "score": "pass",
+  "output_sha256": "3656d0fae38cf6731a70c0968c10dc3a46a288ee78bc85b7db4daa6bc80c7e3a",
+  "raw_output": "The three tiers, as listed in the rubric under \"Each one requires,\" are:\n1. **Authoritative source**\n2. **Peer-reviewed synthesis (Survey/Review)**\n3. **Implementation/ reality check (industry implementation, case study, or systematic review)**\n\nThe described paper \u2014 \"a real industrial conformity-assessment case where a certifier forced a manufacturer to reduce a cobot's autonomy before sign-off\" \u2014 satisfies the **Implementation/ reality check** tier. It directly matches the rubric's C3-specific elaboration under that tier: *\"industrial conformity assessment narratives, certification case studies, or papers reporting how safety process constrained design.\"* This tier is purpose-built for grounded, real-world evidence of how safety governance and conformity procedures actually shape and restrict HRC deployment, rather than abstract standards or review syntheses."
+}

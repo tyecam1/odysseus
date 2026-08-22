@@ -1,0 +1,21 @@
+{
+  "run_id": "lm2-gemma-e4b-qat-gguf-direct-t1",
+  "task_id": "recon-01",
+  "task_class": "repo_reconnaissance",
+  "corpus_id": "lm1-2026-08-21",
+  "source_pointer": "tyecam1/odysseus@ac295b7:src/estate_router.py#L424-L464",
+  "model_key": "gemma4-e4b-qat-gguf-direct",
+  "concrete_model": "/home/agent/.claude/jobs/f73b3fea/tmp/gguf/gemma-4-E4B_q4_0-it.gguf",
+  "upstream_repo": "google/gemma-4-E4B-it-qat-q4_0-gguf",
+  "upstream_revision": "official HF repo, exact files gemma-4-E4B_q4_0-it.gguf + gemma-4-E4B-it-mmproj.gguf, downloaded 2026-08-22 this pass (Gemma licence, verified non-gated)",
+  "artifact": "gemma-4-E4B_q4_0-it.gguf (5.15GB) + gemma-4-E4B-it-mmproj.gguf (0.99GB), official QAT",
+  "quantization": "Q4_0 (official QAT)",
+  "runtime": "llama.cpp",
+  "runtime_version": "b10586, prebuilt ubuntu-vulkan-x64 release binary",
+  "runtime_base_url": "http://127.0.0.1:8091/v1",
+  "context_point": 8000,
+  "status": "pass",
+  "score": "pass",
+  "output_sha256": "2ebbb7848e99a6128468a3eadb755163321a1eca81a51fb4c07c759dbada04c7",
+  "raw_output": "execute_local\n_update_decision_outcome"
+}

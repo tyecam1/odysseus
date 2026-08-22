@@ -1,0 +1,21 @@
+{
+  "run_id": "lm2-screen-qwen38-27b",
+  "task_id": "recon-01",
+  "task_class": "repo_reconnaissance",
+  "corpus_id": "lm1-2026-08-21",
+  "source_pointer": "tyecam1/odysseus@ac295b7:src/estate_router.py#L424-L464",
+  "model_key": "qwen3.8:27b",
+  "concrete_model": "qwen3.8:27b",
+  "upstream_repo": "Qwen/Qwen3.8-27B",
+  "upstream_revision": "ollama library qwen3.8:27b default tag (apache-2.0, verified non-gated)",
+  "artifact": "ollama library qwen3.8:27b, pulled 2026-08-22 this pass via second Ollama instance",
+  "quantization": "Q4_K_M (confirmed via `ollama show`)",
+  "runtime": "ollama",
+  "runtime_version": "0.32.15 (second, user-local instance -- same 412 version blocker as lfm2.5:8b)",
+  "runtime_base_url": "http://127.0.0.1:11435",
+  "context_point": 8000,
+  "status": "pass",
+  "score": "pass",
+  "output_sha256": "2fa7119585cc76b95050d8677a5307a5ffb337462043fbf2ac917d5d273ab387",
+  "raw_output": "`execute_local`, `_update_decision_outcome`"
+}

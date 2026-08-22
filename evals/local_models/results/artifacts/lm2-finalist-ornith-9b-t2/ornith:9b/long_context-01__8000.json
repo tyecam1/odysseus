@@ -1,0 +1,21 @@
+{
+  "run_id": "lm2-finalist-ornith-9b-t2",
+  "task_id": "long_context-01",
+  "task_class": "long_context_retrieval",
+  "corpus_id": "lm1-2026-08-21",
+  "source_pointer": "tyecam1/odysseus@ac295b7:docs/aoteru-model-host-routing-contract.md + docs/aoteru-lab-local-model-strategy-2026-08-20.md (concatenated, needle inserted)",
+  "model_key": "ornith:9b",
+  "concrete_model": "ornith:9b",
+  "upstream_repo": "deepreinforce-ai/Ornith-1.0-9B",
+  "upstream_revision": "ollama library ornith:9b default tag (MIT license, verified non-gated)",
+  "artifact": "ollama library ornith:9b, pulled 2026-08-22 this pass via second Ollama instance",
+  "quantization": "Q4_K_M (confirmed via `ollama show`)",
+  "runtime": "ollama",
+  "runtime_version": "0.32.15 (second, user-local instance -- same 412 version blocker as lfm2.5:8b)",
+  "runtime_base_url": "http://127.0.0.1:11435",
+  "context_point": 8000,
+  "status": "pass",
+  "score": "pass",
+  "output_sha256": "bc135220a6ad9b29c6afecf964fc7ba0a4eedc99f64dc7d40d9eb521cc7711cc",
+  "raw_output": "The unique canary value stated in the document is:\n\n**ODYSSEUS-NEEDLE-47281**\n\nIt is declared at the very top of the first source:\n\n> >>> The unique canary value for this run is ODYSSEUS-NEEDLE-47281. <<"
+}

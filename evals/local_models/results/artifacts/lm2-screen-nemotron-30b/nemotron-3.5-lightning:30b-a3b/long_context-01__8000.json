@@ -1,0 +1,21 @@
+{
+  "run_id": "lm2-screen-nemotron-30b",
+  "task_id": "long_context-01",
+  "task_class": "long_context_retrieval",
+  "corpus_id": "lm1-2026-08-21",
+  "source_pointer": "tyecam1/odysseus@ac295b7:docs/aoteru-model-host-routing-contract.md + docs/aoteru-lab-local-model-strategy-2026-08-20.md (concatenated, needle inserted)",
+  "model_key": "nemotron-3.5-lightning:30b-a3b",
+  "concrete_model": "nemotron-3.5-lightning:30b-a3b",
+  "upstream_repo": "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16",
+  "upstream_revision": "ollama library nemotron-3.5-lightning:30b-a3b default tag (OpenMDW-1.1, verified non-gated), GGUF Q4_K_M per the B3 NVFP4 caveat -- not NVFP4",
+  "artifact": "ollama library nemotron-3.5-lightning:30b-a3b, pulled 2026-08-22 this pass via second Ollama instance",
+  "quantization": "Q4_K_M (confirmed via `ollama show`)",
+  "runtime": "ollama",
+  "runtime_version": "0.32.15 (second, user-local instance -- same 412 version blocker as lfm2.5:8b)",
+  "runtime_base_url": "http://127.0.0.1:11435",
+  "context_point": 8000,
+  "status": "pass",
+  "score": "pass",
+  "output_sha256": "8956b7704e6a2f1dda0653fc70c2e59bc3ea1ef100f28efc62249946dac4aa92",
+  "raw_output": "ODYSSEUS-NEEDLE-47281"
+}

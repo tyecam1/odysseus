@@ -1,0 +1,21 @@
+{
+  "run_id": "lm2-finalist-lfm25-8b-t2",
+  "task_id": "scientific_reasoning-01",
+  "task_class": "phd_scientific_reasoning",
+  "corpus_id": "lm1-2026-08-21",
+  "source_pointer": "tyecam1/obsidian-PhD@731fcd8:01-research-plan/00-RC/evidence requirements.md#L2-L7,L56-L62",
+  "model_key": "lfm2.5:8b",
+  "concrete_model": "lfm2.5:8b",
+  "upstream_repo": "LiquidAI/LFM2.5-8B-A1B",
+  "upstream_revision": "ollama library lfm2.5:8b default tag (LFM Open License v1.0, verified non-gated, verified license terms this pass)",
+  "artifact": "ollama library lfm2.5:8b, pulled 2026-08-22 this pass via second Ollama instance",
+  "quantization": "Q4_K_M (confirmed via `ollama show`)",
+  "runtime": "ollama",
+  "runtime_version": "0.32.15 (second, user-local instance -- production Ollama 0.19.0 returned 412 'requires a newer version of Ollama' on this manifest, same class of blocker as LM1's gemma4 finding but broader)",
+  "runtime_base_url": "http://127.0.0.1:11435",
+  "context_point": 8000,
+  "status": "pass",
+  "score": "pass",
+  "output_sha256": "fa91c199066958d02431796380152280f94bb2c875cf97e7d9a9c9ffe8537e06",
+  "raw_output": "**The three evidentiary tiers required for a load\u2011bearing claim are:**  \n\n1. **Authoritative source** \u2013 core safety standards or guidance that define risk assessment, collaborative operation, and system\u2011integration obligations.  \n2. **Peer\u2011reviewed synthesis (survey/review)** \u2013 a scholarly review or survey of existing literature on safety in collaborative robotics and assurance for adaptive systems.  \n3. **Implementation / reality\u2011check** \u2013 real\u2011world industrial evidence such as conformity\u2011assessment narratives, certification case studies, or systematic reviews showing how safety processes constrain design (e.g., a certifier forcing a reduction in cobot autonomy).\n\nFor Claim\u202fC3, the described paper\u2014*a real industrial conformity\u2011assessment case where a certifier forced a manufacturer to reduce a cobot\u2019s autonomy before sign\u2011off*\u2014provides exactly this type of **implementation/reality\u2011check** evidence.  \n\nThus, the paper satisfies the **Implementation/Reality Check** tier of the rubric."
+}

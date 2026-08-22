@@ -1,0 +1,21 @@
+{
+  "run_id": "lm2-finalist-lfm25-8b-t2",
+  "task_id": "independent_review-01",
+  "task_class": "independent_review",
+  "corpus_id": "lm1-2026-08-21",
+  "source_pointer": "synthetic worker-result (derived from src/estate_router.py execute_local contract)",
+  "model_key": "lfm2.5:8b",
+  "concrete_model": "lfm2.5:8b",
+  "upstream_repo": "LiquidAI/LFM2.5-8B-A1B",
+  "upstream_revision": "ollama library lfm2.5:8b default tag (LFM Open License v1.0, verified non-gated, verified license terms this pass)",
+  "artifact": "ollama library lfm2.5:8b, pulled 2026-08-22 this pass via second Ollama instance",
+  "quantization": "Q4_K_M (confirmed via `ollama show`)",
+  "runtime": "ollama",
+  "runtime_version": "0.32.15 (second, user-local instance -- production Ollama 0.19.0 returned 412 'requires a newer version of Ollama' on this manifest, same class of blocker as LM1's gemma4 finding but broader)",
+  "runtime_base_url": "http://127.0.0.1:11435",
+  "context_point": 8000,
+  "status": "pass",
+  "score": "pass",
+  "output_sha256": "c4cb1d082294c197c0754921542b13bfe2464c1db9dc827fec8a1a8cfb0c6d91",
+  "raw_output": "NO \u2013 the `\"deterministic_gate\"` field does **not** satisfy the rule because it is set to `\"pass\"` while `result.ok` is true but `output` is an empty string (the rule requires a non\u2011empty, non\u2011whitespace value). The mismatched value of `\"deterministic_gate\"` directly contradicts the required condition."
+}

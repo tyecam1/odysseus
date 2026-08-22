@@ -1,0 +1,21 @@
+{
+  "run_id": "lm2-screen-lfm25-8b",
+  "task_id": "independent_review-01",
+  "task_class": "independent_review",
+  "corpus_id": "lm1-2026-08-21",
+  "source_pointer": "synthetic worker-result (derived from src/estate_router.py execute_local contract)",
+  "model_key": "lfm2.5:8b",
+  "concrete_model": "lfm2.5:8b",
+  "upstream_repo": "LiquidAI/LFM2.5-8B-A1B",
+  "upstream_revision": "ollama library lfm2.5:8b default tag (LFM Open License v1.0, verified non-gated, verified license terms this pass)",
+  "artifact": "ollama library lfm2.5:8b, pulled 2026-08-22 this pass via second Ollama instance",
+  "quantization": "Q4_K_M (confirmed via `ollama show`)",
+  "runtime": "ollama",
+  "runtime_version": "0.32.15 (second, user-local instance -- production Ollama 0.19.0 returned 412 'requires a newer version of Ollama' on this manifest, same class of blocker as LM1's gemma4 finding but broader)",
+  "runtime_base_url": "http://127.0.0.1:11435",
+  "context_point": 8000,
+  "status": "pass",
+  "score": "pass",
+  "output_sha256": "cb5fa0e7807c62e27567a6fee54e5fe92d23b03a9c12d69947ed1abdace6b287",
+  "raw_output": "**NO** \u2013 the value of `deterministic_gate` does not satisfy Odysseus\u2019s rule.  \nThe rule requires `\"deterministic_gate\": \"pass\"` only when `result.ok` is **true** **and** `output` is a non\u2011empty, non\u2011whitespace string. In this result:\n\n- `ok`\u202f=\u202ftrue \u2013 satisfies the first condition.  \n- `output`\u202f=\u202f\"\" (empty) \u2013 violates the \u201cnon\u2011empty, non\u2011whitespace\u201d requirement.\n\nThus `deterministic_gate: \"pass\"` **contradicts** the rule because the output field fails to meet the criteria for a successful gate."
+}

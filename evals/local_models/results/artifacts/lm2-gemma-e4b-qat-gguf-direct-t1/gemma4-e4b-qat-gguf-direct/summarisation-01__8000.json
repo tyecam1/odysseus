@@ -1,0 +1,21 @@
+{
+  "run_id": "lm2-gemma-e4b-qat-gguf-direct-t1",
+  "task_id": "summarisation-01",
+  "task_class": "compact_summarisation",
+  "corpus_id": "lm1-2026-08-21",
+  "source_pointer": "tyecam1/odysseus@ac295b7:docs/aoteru-systemd-cutover-evidence.md#L41-L53",
+  "model_key": "gemma4-e4b-qat-gguf-direct",
+  "concrete_model": "/home/agent/.claude/jobs/f73b3fea/tmp/gguf/gemma-4-E4B_q4_0-it.gguf",
+  "upstream_repo": "google/gemma-4-E4B-it-qat-q4_0-gguf",
+  "upstream_revision": "official HF repo, exact files gemma-4-E4B_q4_0-it.gguf + gemma-4-E4B-it-mmproj.gguf, downloaded 2026-08-22 this pass (Gemma licence, verified non-gated)",
+  "artifact": "gemma-4-E4B_q4_0-it.gguf (5.15GB) + gemma-4-E4B-it-mmproj.gguf (0.99GB), official QAT",
+  "quantization": "Q4_0 (official QAT)",
+  "runtime": "llama.cpp",
+  "runtime_version": "b10586, prebuilt ubuntu-vulkan-x64 release binary",
+  "runtime_base_url": "http://127.0.0.1:8091/v1",
+  "context_point": 8000,
+  "status": "pass",
+  "score": "pass",
+  "output_sha256": "e71b0ce071c76011c5f52a55d74ea844b050597bd29ae8024d4a3a282dad64c5",
+  "raw_output": "The test proved Restart=on-failure correctly handles graceful shutdowns. When sent a SIGTERM, the managed process shut down cleanly. Systemd did not restart the process, demonstrating that the unit correctly recognizes and respects a clean stop."
+}

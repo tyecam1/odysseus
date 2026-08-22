@@ -1,0 +1,21 @@
+{
+  "run_id": "lm2-gemma-e4b-qat-gguf-direct-t1",
+  "task_id": "fault_diagnosis-01",
+  "task_class": "fault_diagnosis",
+  "corpus_id": "lm1-2026-08-21",
+  "source_pointer": "tyecam1/odysseus@ac295b7:docs/aoteru-lab-execution-convergence-evidence.md#L201-L217",
+  "model_key": "gemma4-e4b-qat-gguf-direct",
+  "concrete_model": "/home/agent/.claude/jobs/f73b3fea/tmp/gguf/gemma-4-E4B_q4_0-it.gguf",
+  "upstream_repo": "google/gemma-4-E4B-it-qat-q4_0-gguf",
+  "upstream_revision": "official HF repo, exact files gemma-4-E4B_q4_0-it.gguf + gemma-4-E4B-it-mmproj.gguf, downloaded 2026-08-22 this pass (Gemma licence, verified non-gated)",
+  "artifact": "gemma-4-E4B_q4_0-it.gguf (5.15GB) + gemma-4-E4B-it-mmproj.gguf (0.99GB), official QAT",
+  "quantization": "Q4_0 (official QAT)",
+  "runtime": "llama.cpp",
+  "runtime_version": "b10586, prebuilt ubuntu-vulkan-x64 release binary",
+  "runtime_base_url": "http://127.0.0.1:8091/v1",
+  "context_point": 8000,
+  "status": "fail",
+  "score": "fail",
+  "output_sha256": "46867232f56df21015e76cd9b2578e323ad82070e04cbb656a9fe2b7ea334f16",
+  "raw_output": "The root cause category is an **API/Dependency version mismatch** (the code expects a method, `list_tools`, that is absent in the installed SDK version). It is highly probable that the routing or execution changes in the repository **are not the fundamental cause**, but if they involved updating dependency versions or altering the environment setup, they could be the proximate change that revealed or triggered the mismatch."
+}

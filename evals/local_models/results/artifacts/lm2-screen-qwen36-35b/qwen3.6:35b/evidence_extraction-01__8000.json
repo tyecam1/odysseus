@@ -1,0 +1,21 @@
+{
+  "run_id": "lm2-screen-qwen36-35b",
+  "task_id": "evidence_extraction-01",
+  "task_class": "evidence_extraction_provenance",
+  "corpus_id": "lm1-2026-08-21",
+  "source_pointer": "tyecam1/odysseus@ac295b7:docs/aoteru-estate-p7-evidence.md#L39-L45",
+  "model_key": "qwen3.6:35b",
+  "concrete_model": "qwen3.6:35b",
+  "upstream_repo": "Qwen/Qwen3.6-35B-A3B",
+  "upstream_revision": "ollama library qwen3.6:35b default tag (apache-2.0, verified non-gated)",
+  "artifact": "ollama library qwen3.6:35b, pulled 2026-08-22 this pass onto production Ollama",
+  "quantization": "Q4_K_M (confirmed via `ollama show`)",
+  "runtime": "ollama",
+  "runtime_version": "0.19.0 (production -- pulled cleanly, no version blocker for this family)",
+  "runtime_base_url": "http://127.0.0.1:11434",
+  "context_point": 8000,
+  "status": "pass",
+  "score": "pass",
+  "output_sha256": "162427912201636b19c9de0a077eb2d91b84a0315da44faee308041246174c8d",
+  "raw_output": "106.1 6.6"
+}

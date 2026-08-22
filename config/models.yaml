@@ -113,6 +113,66 @@ installed_candidates:
       Ollama instance, since torn down. NOT installed on production
       Ollama (0.19.0 has no gemma4 architecture support) and cannot be
       routed to yet — see evidence doc blocker/operator action.
+  - model: qwen3.6:35b
+    state: production-installed
+    note: >-
+      LM2: pulled cleanly onto production Ollama (0.19.0 accepted this
+      manifest, unlike most LM2 candidates). Screened (11/13 pass, 1
+      timeout on 32K context under hybrid CPU/GPU offload); rejected for
+      local-strong on latency (avg 93.2s/call vs gpt-oss:20b's 15.2s) —
+      see LM2 evidence doc. Installed but not bound to any capability.
+  - model: qwen3.8:27b
+    state: benchmark-only
+    note: >-
+      LM2: screened (12/14 pass) via the temporary second Ollama instance
+      (production 0.19.0 returns 412 "requires a newer version of Ollama"
+      on this manifest). Rejected for reasoning-strong on latency (avg
+      55.5s/call, one 32K timeout) vs. Nemotron 3.5 Lightning's clean run
+      — see LM2 evidence doc. Not installed on production, not bound.
+  - model: lfm2.5:8b
+    state: benchmark-only
+    note: >-
+      LM2: screened + 3-trial finalist sweep via the temporary second
+      Ollama instance (production 0.19.0 412s on this manifest — same
+      class of blocker LM1 found for Gemma 4, broader this pass). 38/39
+      pass across 3 trials, avg 2.5-2.8s/call. Strong evidence for
+      code-fast but Ornith-1.0-9B has a perfect record at comparable
+      latency and this repo has only one code-oriented alias slot; not
+      bound. Cannot bind to production execute_local until the operator
+      upgrades production Ollama regardless — see LM2 evidence doc.
+  - model: ornith:9b
+    state: benchmark-only
+    note: >-
+      LM2: screened + 3-trial finalist sweep via the temporary second
+      Ollama instance (production 0.19.0 412s on this manifest, same
+      blocker class as Gemma 4/lfm2.5:8b above). Perfect 39/39 across 3
+      trials, avg 3.6-6.1s/call — the strongest evidence any LM2
+      candidate produced. capabilities.code-fast intentionally stays null
+      because production execute_local cannot reach this model yet; see
+      "Exact safe action" in the LM2 evidence doc for the unblock.
+  - model: gemma4:12b-qat-gguf-direct
+    state: benchmark-only
+    note: >-
+      LM2: official QAT Q4_0 GGUF (google/gemma-4-12B-it-qat-q4_0-gguf)
+      run directly via a scratch llama.cpp server (Vulkan backend, no
+      production Ollama involved at all) -- the specific "QAT vs
+      Ollama-library" comparison LM1 flagged as unresolved. 3 trials =
+      37/42 (88.1%), vision (doc_image-01) passed all 3 -- beats LM1's
+      gemma4:12b Ollama-library result (11/13). capabilities.vision stays
+      null: this evidence used neither production Ollama nor the second
+      scratch Ollama instance, so it cannot bind either; see LM2 evidence
+      doc for the unblock (same production Ollama upgrade action as the
+      other benchmark-only rows above, followed by pulling gemma4:12b
+      directly onto production once unblocked).
+  - model: nemotron-3.5-lightning:30b-a3b
+    state: benchmark-only
+    note: >-
+      LM2: screened + 3-trial finalist sweep via the temporary second
+      Ollama instance (production 0.19.0 412s on this manifest). 36/39
+      pass across 3 trials (92.3%), no errors/timeouts; reasoning-strong
+      has zero incumbent so this clears the bar on evidence alone, but
+      capabilities.reasoning-strong stays null for the same production
+      Ollama version reason as ornith:9b/lfm2.5:8b — see LM2 evidence doc.
 
 # Economic ladder — seed policy only; P7/live benchmark evidence overrides
 # it (docs/aoteru-model-host-routing-contract.md "Default economic ladder").

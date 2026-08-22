@@ -1,0 +1,21 @@
+{
+  "run_id": "lm2-finalist-lfm25-8b-t2",
+  "task_id": "ros_log_test-01",
+  "task_class": "ros_log_test_interpretation",
+  "corpus_id": "lm1-2026-08-21",
+  "source_pointer": "tyecam1/s2-e1-ros2-measurement-spine@6c4efdf:docs/ros2_measurement_graph.md#L9-L13;tests/test_manifest_validation.py#L59-L69",
+  "model_key": "lfm2.5:8b",
+  "concrete_model": "lfm2.5:8b",
+  "upstream_repo": "LiquidAI/LFM2.5-8B-A1B",
+  "upstream_revision": "ollama library lfm2.5:8b default tag (LFM Open License v1.0, verified non-gated, verified license terms this pass)",
+  "artifact": "ollama library lfm2.5:8b, pulled 2026-08-22 this pass via second Ollama instance",
+  "quantization": "Q4_K_M (confirmed via `ollama show`)",
+  "runtime": "ollama",
+  "runtime_version": "0.32.15 (second, user-local instance -- production Ollama 0.19.0 returned 412 'requires a newer version of Ollama' on this manifest, same class of blocker as LM1's gemma4 finding but broader)",
+  "runtime_base_url": "http://127.0.0.1:11435",
+  "context_point": 8000,
+  "status": "pass",
+  "score": "pass",
+  "output_sha256": "d4f99306b00b27fa19469566c5ad85f3b78f595c9c29ace3537462c15e14261e",
+  "raw_output": "**Answer**\n\n1. **E1a synthetic publisher topic & message type**  \n   - Topic name: **/s2_e1/e1a/static_token_observation**  \n   - Message type: **`std_msgs/String`**\n\n2. **Substring checked by the test assertion**  \n   The `self.assertIn(\"does not match expected\", str(caught.exception))` call verifies that the exception\u2019s message contains the exact phrase  \n\n   **`\"does not match expected\"`**."
+}

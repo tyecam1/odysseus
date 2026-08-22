@@ -1,0 +1,21 @@
+{
+  "run_id": "lm2-screen-qwen38-27b",
+  "task_id": "scientific_reasoning-01",
+  "task_class": "phd_scientific_reasoning",
+  "corpus_id": "lm1-2026-08-21",
+  "source_pointer": "tyecam1/obsidian-PhD@731fcd8:01-research-plan/00-RC/evidence requirements.md#L2-L7,L56-L62",
+  "model_key": "qwen3.8:27b",
+  "concrete_model": "qwen3.8:27b",
+  "upstream_repo": "Qwen/Qwen3.8-27B",
+  "upstream_revision": "ollama library qwen3.8:27b default tag (apache-2.0, verified non-gated)",
+  "artifact": "ollama library qwen3.8:27b, pulled 2026-08-22 this pass via second Ollama instance",
+  "quantization": "Q4_K_M (confirmed via `ollama show`)",
+  "runtime": "ollama",
+  "runtime_version": "0.32.15 (second, user-local instance -- same 412 version blocker as lfm2.5:8b)",
+  "runtime_base_url": "http://127.0.0.1:11435",
+  "context_point": 8000,
+  "status": "pass",
+  "score": "pass",
+  "output_sha256": "cc5b33db38035a6873ad0145ad9a72c25fa47c7c4383440ccfeea30e26949aa6",
+  "raw_output": "## The Three Tiers\n\nThe rubric requires every load-bearing claim to be supported by evidence drawn from three distinct source tiers:\n\n1. **Authoritative source** \u2013 the primary standards, regulations, or guidance documents that define the obligations.\n2. **Peer-reviewed synthesis (Survey / Review)** \u2013 a scholarly review or survey that consolidates and interprets the state of the art on the relevant topic.\n3. **Implementation / Reality check** \u2013 an industry implementation account, a certification case study, or a systematic review of how the claim manifests in practice.\n\n## Which Tier the Described Paper Satisfies\n\nThe paper you describe \u2014 *\"a real industrial conformity-assessment case where a certifier forced a manufacturer to reduce a cobot's autonomy before sign-off\"* \u2014 sits squarely in the **third tier: the Implementation / Reality check**.\n\nClaim C3's rubric lists that tier as:\n\n> *\"industrial conformity assessment narratives, certification case studies, or papers reporting how safety process constrained design.\"*\n\nThe described paper is, by its own description, a **certification case study** documenting a concrete instance in which a conformity-assessment process (the certifier's review) directly constrained the cobot's autonomy (the design capability was reduced before sign-off). That is precisely the \"reality check\" function: it shows the abstract governance-and-liability burden named in the claim operating in a real, documented industrial episode. It is not a standard or guideline (tier 1), nor a literature review synthesising the field (tier 2); it is an empirical, practice-level account, which is the defining characteristic of tier 3."
+}

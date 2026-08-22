@@ -1,0 +1,21 @@
+{
+  "run_id": "lm2-screen-ornith-9b",
+  "task_id": "fault_diagnosis-01",
+  "task_class": "fault_diagnosis",
+  "corpus_id": "lm1-2026-08-21",
+  "source_pointer": "tyecam1/odysseus@ac295b7:docs/aoteru-lab-execution-convergence-evidence.md#L201-L217",
+  "model_key": "ornith:9b",
+  "concrete_model": "ornith:9b",
+  "upstream_repo": "deepreinforce-ai/Ornith-1.0-9B",
+  "upstream_revision": "ollama library ornith:9b default tag (MIT license, verified non-gated)",
+  "artifact": "ollama library ornith:9b, pulled 2026-08-22 this pass via second Ollama instance",
+  "quantization": "Q4_K_M (confirmed via `ollama show`)",
+  "runtime": "ollama",
+  "runtime_version": "0.32.15 (second, user-local instance -- same 412 version blocker as lfm2.5:8b)",
+  "runtime_base_url": "http://127.0.0.1:11435",
+  "context_point": 8000,
+  "status": "pass",
+  "score": "pass",
+  "output_sha256": "81926bd8444363ca7d6774ef33d922074c7daa6e2733f2ccce95f5b5ee67d724",
+  "raw_output": "The root cause is **an MCP SDK version upgrade that introduced a breaking API change** (the `Server` object no longer exposes `list_tools` in the new SDK), which is unrelated to any routing/execution changes in the repo\u2014this is a dependency-instability issue, not a code-change issue."
+}

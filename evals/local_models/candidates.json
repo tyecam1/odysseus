@@ -1,0 +1,124 @@
+{
+  "registry_id": "lm2-2026-08-22",
+  "notes": "LM2 candidate registry (docs/aoteru-lm2-quant-runtime-discovery.agent-task.md, B7). Durable pre-execution record of the eight candidate rows plus the two incumbent controls, updated in place as each row moves through the funnel. state vocabulary reuses config/models.yaml's A4 vocabulary: candidate -> screening -> finalist -> promoted/rejected/blocked.",
+  "rows": [
+    {
+      "id": "qwen3-8b-incumbent",
+      "family": "Qwen3-8B",
+      "role": "incumbent control, local-fast",
+      "state": "promoted",
+      "note": "already installed/screened (LM1); not re-screened this pass"
+    },
+    {
+      "id": "gpt-oss-20b-incumbent",
+      "family": "gpt-oss-20B",
+      "role": "incumbent control, local-strong",
+      "state": "promoted",
+      "note": "already installed/screened (LM1); not re-screened this pass"
+    },
+    {
+      "id": "gemma4-e4b-e2b",
+      "family": "Gemma 4 E2B/E4B",
+      "role": "local-small/local-fast challenger",
+      "official_repo": "google/gemma-4-E4B-it-qat-q4_0-gguf",
+      "licence": "Gemma licence (verified non-gated on HF, standard Gemma terms, acceptable for this estate's internal/research use)",
+      "architecture": "dense, official QAT",
+      "screening_quant": "official QAT Q4_0 GGUF, via prebuilt llama.cpp b10586 Vulkan-backend binary",
+      "state": "rejected",
+      "correction": "LM1 only ran the Ollama-library gemma4:e4b artifact with an unproven HF mapping; LM2 ran the official QAT GGUF directly instead",
+      "screening_result": "1 trial via llama.cpp server (127.0.0.1:8091, real llm_call path): 12/14 pass (85.7%) -- fail on fault_diagnosis-01 (missing 'mcp' keyword) and long_context-01@32000 (missed needle). doc_image-01 (vision) passed. avg wall_time 8.2s/call, max 17.6s -- comparable to but not clearly better than qwen3:8b local-fast incumbent (avg 5.8s in LM1's own corpus run). Does not displace local-fast; rejected as a cheap-stage screening decision (B5 point 4), not swept to 3 trials since local-small isn't a live alias and local-fast already has a faster, evidence-backed incumbent."
+    },
+    {
+      "id": "qwen3.5-9b-incumbent-of-record",
+      "family": "Qwen3.5-9B",
+      "role": "local-agent/code-fast incumbent-of-record",
+      "official_repo": "Qwen/Qwen3.5-9B",
+      "licence": "apache-2.0",
+      "architecture": "9.7B dense",
+      "state": "promoted",
+      "note": "already installed and screened by LM1 (3-trial evidence carried forward, not re-run)"
+    },
+    {
+      "id": "lfm2.5-8b-a1b",
+      "family": "LFM2.5-8B-A1B",
+      "role": "second, architecturally distinct local-agent contender",
+      "official_repo": "LiquidAI/LFM2.5-8B-A1B",
+      "licence": "LFM Open License v1.0 (verified via LICENSE file on HF: permits Commercial Use below a $10M annual revenue Threshold, and Non-Commercial/Research Purposes without limit -- this estate is a personal/research deployment, not a >$10M-revenue commercial product, so this clears the licence prefilter; recorded explicitly per the task's 'verify commercial-use terms' instruction rather than assuming apache)",
+      "architecture": "hybrid MoE: 8.3B total / 1.5B active (corrected from prior research's ~1B), 18 conv (\"LIV\") blocks + 6 GQA layers",
+      "screening_quant": "official GGUF, Q4_K_M-class (ollama library lfm2.5:8b default tag)",
+      "state": "blocked",
+      "screening_result": "run_id=lm2-screen-lfm25-8b: 12/13 pass, 1 fail (scientific_reasoning-01, missed keyword_any), 1 na (vision, expected). avg wall_time 2.5s/call, max 6.1s -- dramatically faster than Qwen3.5-9B incumbent-of-record (avg 38.1s in LM1's own corpus run). Finalist: 3 trials total = 38/39 pass (1 fail was screening-only, both repeats 13/13), avg wall_time 2.5-2.8s. Strong evidence, but Ornith-1.0-9B has a perfect 39/39 record at comparable latency, so this promotes as evidence-backed but unbound -- no second code-oriented alias slot exists in config/models.yaml to bind it to."
+    },
+    {
+      "id": "ornith-1.0-9b",
+      "family": "Ornith-1.0-9B",
+      "role": "compact agentic/coding challenger",
+      "official_repo": "deepreinforce-ai/Ornith-1.0-9B",
+      "licence": "MIT",
+      "architecture": "9B dense, Gemma-4/Qwen-3.5 lineage, self-scaffolding RL for agentic coding",
+      "screening_quant": "Q4_K_M (ollama library ornith:9b default tag)",
+      "state": "blocked",
+      "note": "publisher benchmark claims (SWE-Bench/Terminal-Bench/NL2Repo) are marketing, not admissible LM2 evidence -- re-measured on the frozen estate corpus only",
+      "screening_result": "run_id=lm2-screen-ornith-9b: 13/13 pass (perfect), 1 na (vision, expected). avg wall_time 6.1s/call, max 34.1s -- much faster than Qwen3.5-9B incumbent-of-record (avg 38.1s). Finalist: 3 trials total = 39/39 pass (perfect), avg wall_time 3.6-6.1s.",
+      "promotion": "EVIDENCE-BACKED PROMOTION for code-fast, BLOCKED FROM BINDING: perfect 39/39 across 3 trials, ~6-10x lower latency than the Qwen3.5-9B incumbent-of-record, MIT licence, no regression on any gate -- but ornith:9b was only ever pulled/run through the temporary second Ollama instance (127.0.0.1:11435, v0.32.15), because production Ollama (0.19.0, 127.0.0.1:11434) returns `412: requires a newer version of Ollama` on this manifest, the same class of blocker LM1 hit for Gemma 4. Since production execute_local only ever calls 127.0.0.1:11434, config/models.yaml's capabilities.code-fast binding cannot be set to ornith:9b until the operator upgrades production Ollama. Recorded in config/models.yaml as installed_candidates state=benchmark-only, same convention as LM1's Gemma 4 rows -- not a silent binding."
+    },
+    {
+      "id": "gemma4-12b",
+      "family": "Gemma 4 12B",
+      "role": "local-multimodal/vision (pending Ollama arch blocker)",
+      "official_repo": "google/gemma-4-12B-it-qat-q4_0-gguf",
+      "licence": "Gemma licence",
+      "architecture": "11.9B dense, official QAT, vision-capable",
+      "screening_quant": "official QAT Q4_0 GGUF, via prebuilt llama.cpp b10586 Vulkan-backend binary (no CUDA toolkit/nvcc on this host; Vulkan against the NVIDIA driver's ICD is the GPU-accelerated substitute -- same physical GPU, same class of runtime evidence)",
+      "state": "blocked",
+      "note": "LM1 already ran the Ollama-library gemma4:12b comparison (3 trials, 11/13 text tasks) -- LM2 adds the QAT-GGUF-direct leg via llama.cpp.",
+      "screening_result": "3 trials via llama.cpp server (127.0.0.1:8090, OpenAI-compatible, exercised through the real src.llm_core.llm_call path): 13/14, 12/14, 12/14 = 37/42 (88.1%). doc_image-01 (vision) PASSED all 3 trials -- this is the first LM1/LM2 evidence of Gemma 4 actually resolving the vision task correctly and repeatably. Beats LM1's Ollama-library gemma4:12b result (11/13, 84.6%, unproven artifact mapping) on both pass rate and provenance certainty. avg wall_time 14.2s/call, max 39.1s -- fully GPU-resident (9.55GB/10GB), faster than gpt-oss:20b local-strong incumbent (15.2s).",
+      "promotion": "EVIDENCE-BACKED PROMOTION for vision, BLOCKED FROM BINDING: same production Ollama version wall as the rest of this pass -- this evidence came from a scratch llama.cpp server (127.0.0.1:8090), not production execute_local (which only calls Ollama on 127.0.0.1:11434). Two independent paths (Ollama-library via LM1's second instance, and official-QAT-GGUF-direct via llama.cpp this pass) now agree Gemma 4 12B is a strong vision candidate. capabilities.vision stays null until the operator upgrades production Ollama and gemma4:12b is pulled directly onto 127.0.0.1:11434 -- see 'Exact safe action' in the LM2 evidence doc."
+    },
+    {
+      "id": "qwen3.6-35b-a3b",
+      "family": "Qwen3.6-35B-A3B",
+      "role": "local-strong challenger",
+      "official_repo": "Qwen/Qwen3.6-35B-A3B",
+      "licence": "apache-2.0",
+      "architecture": "MoE: 35B total / 3B active, 262K native context",
+      "screening_quant": "Q4_K_M, necessarily hybrid offload on 10GB VRAM (ollama library qwen3.6:35b default tag)",
+      "state": "rejected",
+      "screening_result": "run_id=lm2-screen-qwen36-35b: 11/13 pass, 1 fail (code_repair-01 -- model returned only the function body, not the full file the pytest fixture needs; same failure mode as Nemotron/Qwen3.8, a genuine instruction-following gap on all three larger candidates), 1 error (32K long-context timed out at 180s), 1 na (vision). avg wall_time 93.2s/call, max 180.1s (timeout) -- ~6x slower than gpt-oss:20b local-strong incumbent (avg 15.2s in the same corpus, LM1). Rejected for local-strong on latency with no quality edge to justify the regression; not swept further (B5 point 4, cheap-stage rejection)."
+    },
+    {
+      "id": "nemotron-3.5-lightning-30b-a3b",
+      "family": "NVIDIA Nemotron 3.5 Lightning 30B-A3B",
+      "role": "local-challenger",
+      "official_repo": "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16",
+      "licence": "OpenMDW-1.1 (verified via LICENSE file on HF: unrestricted use/modify/distribute, essentially MIT-equivalent, no commercial threshold)",
+      "architecture": "hybrid Mamba-2 + MoE + Attention: 30B total / 3B active",
+      "screening_quant": "GGUF Q4_K_M via production Ollama (ollama library nemotron-3.5-lightning:30b-a3b default tag), NOT NVFP4 for the first pass per the NVFP4 caveat (Ampere lacks native FP4 tensor-core path -- memory-fit win only, not a throughput win)",
+      "state": "blocked",
+      "screening_result": "run_id=lm2-screen-nemotron-30b: 12/13 pass, 1 fail (code_repair-01, same full-file-vs-function-body gap as Qwen3.6/Qwen3.8), 1 na (vision), no timeouts. avg wall_time 28.7s/call, max 125.8s -- slower than gpt-oss:20b local-strong incumbent (avg 15.2s) so not a local-strong displacement. Finalist: 3 trials = 12/13, 11/13, 13/13 (36/39, 92.3%) -- code_repair-01 specifically flips pass/fail across trials (instruction-following variance, not a crash/error), rest of the corpus stable.",
+      "promotion": "EVIDENCE-BACKED PROMOTION for reasoning-strong, BLOCKED FROM BINDING: reasoning-strong had zero incumbent so there is no regression to weigh against; 92.3% aggregate pass rate (36/39) with zero errors/timeouts across 3 trials clears the bar for a previously-null alias, latency (avg ~29s) recorded as a known cost not a gate failure. Same production-Ollama-version blocker as ornith:9b/lfm2.5:8b above -- nemotron-3.5-lightning:30b-a3b only ran through the second, non-production Ollama instance (production 0.19.0 also 412s on this manifest). Recorded as installed_candidates state=benchmark-only, capabilities.reasoning-strong stays null until the operator upgrades production Ollama."
+    },
+    {
+      "id": "gemma4-26b-a4b",
+      "family": "Gemma 4 26B-A4B",
+      "role": "hybrid MoE/QAT candidate",
+      "official_repo": "google/gemma-4-26B-A4B-it-qat-q4_0-gguf",
+      "licence": "Gemma licence",
+      "architecture": "MoE: 25.2B total / 3.8B active, official QAT",
+      "screening_quant": "official QAT Q4_0 GGUF, via prebuilt llama.cpp b10586 Vulkan-backend binary, -ngl 8 (heavy CPU offload -- ngl 20/99 both hit ErrorOutOfDeviceMemory under Vulkan)",
+      "state": "rejected",
+      "screening_result": "1 trial: 10/13 applicable pass, 1 fail (code_repair-01, same full-file-vs-function-body gap as the other larger candidates), 2 config-limited errors (long_context-01 @8K and @32K both exceeded the 8192-token context window this pass allocated to keep the heavy CPU-offloaded model resident in 10GB VRAM -- a harness/VRAM-budget constraint, not a model quality failure, but real and reportable: this family cannot practically get a large context window on this lab's hardware at this offload level). Text-only (mmproj not loaded, vision not exercised this pass). avg wall_time 41.1s/call, max 123.2s. Rejected: worse VRAM/context-capacity trade-off than Gemma 4 12B (which is fully GPU-resident with a 32K window) for no measured quality advantage; not swept further given the config ceiling."
+    },
+    {
+      "id": "qwen3.8-27b",
+      "family": "Qwen3.8-27B",
+      "role": "dense deep baseline/challenger",
+      "official_repo": "Qwen/Qwen3.8-27B",
+      "licence": "apache-2.0",
+      "architecture": "dense, 5120 hidden / 64 layers, hybrid Gated-DeltaNet + Attention, native vision, 262K context, MTP-trained",
+      "screening_quant": "Q4_K_M, dense 27B will not be fully GPU-resident on 10GB (ollama library qwen3.8:27b default tag)",
+      "state": "rejected",
+      "screening_result": "run_id=lm2-screen-qwen38-27b: 12/14 pass (vision task passes -- this family is natively vision-capable), 1 fail (code_repair-01, same full-file-vs-function-body gap), 1 error (32K long-context timed out at 180s). avg wall_time 55.5s/call, max 180.0s (timeout) -- ~3.6x slower than gpt-oss:20b (avg 15.2s) and ~2x slower than Nemotron 3.5 Lightning, which passed the same corpus cleanly with no timeouts. Rejected for reasoning-strong in favour of Nemotron on latency; not swept further (B5 point 4)."
+    }
+  ]
+}

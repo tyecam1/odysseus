@@ -1,0 +1,21 @@
+{
+  "run_id": "lm2-screen-qwen38-27b",
+  "task_id": "independent_review-01",
+  "task_class": "independent_review",
+  "corpus_id": "lm1-2026-08-21",
+  "source_pointer": "synthetic worker-result (derived from src/estate_router.py execute_local contract)",
+  "model_key": "qwen3.8:27b",
+  "concrete_model": "qwen3.8:27b",
+  "upstream_repo": "Qwen/Qwen3.8-27B",
+  "upstream_revision": "ollama library qwen3.8:27b default tag (apache-2.0, verified non-gated)",
+  "artifact": "ollama library qwen3.8:27b, pulled 2026-08-22 this pass via second Ollama instance",
+  "quantization": "Q4_K_M (confirmed via `ollama show`)",
+  "runtime": "ollama",
+  "runtime_version": "0.32.15 (second, user-local instance -- same 412 version blocker as lfm2.5:8b)",
+  "runtime_base_url": "http://127.0.0.1:11435",
+  "context_point": 8000,
+  "status": "pass",
+  "score": "pass",
+  "output_sha256": "91c1476b7bc63b2a7b51608bbfefbc4e7653d8c09c6fd1956a6f903bf8fd4fcc",
+  "raw_output": "**NO.**\n\nThe result is internally inconsistent. Specifically:\n\n- **`execution.output` is `\"\"` (an empty string)**, which fails the rule's requirement that the output be a *non-empty, non-whitespace string*.\n- Yet **`deterministic_gate` is set to `\"pass\"`**, which (per Odysseus's rule) requires *both* `ok: true` *and* a non-empty, non-whitespace output.\n\nBecause the output is empty, the gate condition is not satisfied, so `deterministic_gate` should **not** be `\"pass\"`. The field `deterministic_gate: \"pass\"` directly contradicts the field `execution.output: \"\"` under the stated rule."
+}

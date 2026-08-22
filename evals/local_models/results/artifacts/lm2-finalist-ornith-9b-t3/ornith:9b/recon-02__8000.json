@@ -1,0 +1,21 @@
+{
+  "run_id": "lm2-finalist-ornith-9b-t3",
+  "task_id": "recon-02",
+  "task_class": "repo_reconnaissance",
+  "corpus_id": "lm1-2026-08-21",
+  "source_pointer": "tyecam1/odysseus@ac295b7:core/database.py#L788-L793",
+  "model_key": "ornith:9b",
+  "concrete_model": "ornith:9b",
+  "upstream_repo": "deepreinforce-ai/Ornith-1.0-9B",
+  "upstream_revision": "ollama library ornith:9b default tag (MIT license, verified non-gated)",
+  "artifact": "ollama library ornith:9b, pulled 2026-08-22 this pass via second Ollama instance",
+  "quantization": "Q4_K_M (confirmed via `ollama show`)",
+  "runtime": "ollama",
+  "runtime_version": "0.32.15 (second, user-local instance -- same 412 version blocker as lfm2.5:8b)",
+  "runtime_base_url": "http://127.0.0.1:11435",
+  "context_point": 8000,
+  "status": "pass",
+  "score": "pass",
+  "output_sha256": "a73339e6cba57e12b46c1316a480288c9d24fc08bbe408d117369a4b1b460d9d",
+  "raw_output": "The module-level constant is **`PARK_LEASE_STALE_SECONDS`** with a value of **1800** seconds."
+}

@@ -1,0 +1,21 @@
+{
+  "run_id": "lm2-screen-qwen36-35b",
+  "task_id": "recon-02",
+  "task_class": "repo_reconnaissance",
+  "corpus_id": "lm1-2026-08-21",
+  "source_pointer": "tyecam1/odysseus@ac295b7:core/database.py#L788-L793",
+  "model_key": "qwen3.6:35b",
+  "concrete_model": "qwen3.6:35b",
+  "upstream_repo": "Qwen/Qwen3.6-35B-A3B",
+  "upstream_revision": "ollama library qwen3.6:35b default tag (apache-2.0, verified non-gated)",
+  "artifact": "ollama library qwen3.6:35b, pulled 2026-08-22 this pass onto production Ollama",
+  "quantization": "Q4_K_M (confirmed via `ollama show`)",
+  "runtime": "ollama",
+  "runtime_version": "0.19.0 (production -- pulled cleanly, no version blocker for this family)",
+  "runtime_base_url": "http://127.0.0.1:11434",
+  "context_point": 8000,
+  "status": "pass",
+  "score": "pass",
+  "output_sha256": "5df08d024c31b48aeaaffeeddde7545332a0e13ed8878554fdca9f82a05a1614",
+  "raw_output": "- **Name:** `PARK_LEASE_STALE_SECONDS`\n- **Integer value:** `1800` (seconds)"
+}

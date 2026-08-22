@@ -1,0 +1,21 @@
+{
+  "run_id": "lm2-finalist-ornith-9b-t2",
+  "task_id": "scientific_reasoning-01",
+  "task_class": "phd_scientific_reasoning",
+  "corpus_id": "lm1-2026-08-21",
+  "source_pointer": "tyecam1/obsidian-PhD@731fcd8:01-research-plan/00-RC/evidence requirements.md#L2-L7,L56-L62",
+  "model_key": "ornith:9b",
+  "concrete_model": "ornith:9b",
+  "upstream_repo": "deepreinforce-ai/Ornith-1.0-9B",
+  "upstream_revision": "ollama library ornith:9b default tag (MIT license, verified non-gated)",
+  "artifact": "ollama library ornith:9b, pulled 2026-08-22 this pass via second Ollama instance",
+  "quantization": "Q4_K_M (confirmed via `ollama show`)",
+  "runtime": "ollama",
+  "runtime_version": "0.32.15 (second, user-local instance -- same 412 version blocker as lfm2.5:8b)",
+  "runtime_base_url": "http://127.0.0.1:11435",
+  "context_point": 8000,
+  "status": "pass",
+  "score": "pass",
+  "output_sha256": "be9a5de8dd9008a85d66ec3b1ed768821cdf08ed540de6cae44f067d3b2dbb10",
+  "raw_output": "## The Three Source Tiers\n\nThe rubric names these three tiers:\n\n1. **Authoritative** \u2014 standards, regulations, and authoritative guidance (e.g., ISO/TS 15066, safety legislation, regulatory frameworks).\n2. **Synthesis** \u2014 peer-reviewed reviews, surveys, or papers synthesizing the literature on a topic.\n3. **Reality check** \u2014 concrete evidence of how the research topic manifests in practice: case studies, industrial narratives, implementation examples, or empirical evidence of consequences.\n\n## Tier Classification for the Paper\n\nThe described paper \u2014 *\"a real industrial conformity-assessment case where a certifier forced a manufacturer to reduce a cobot's autonomy before sign-off\"* \u2014 would satisfy **Reality check**.\n\nReasoning: it is a specific, empirical account of an event or outcome in real-world practice (an industrial certification decision), which is exactly what the \"reality check\" tier demands: evidence from industry implementation, case studies, or papers reporting how processes constrain design."
+}

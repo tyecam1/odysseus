@@ -1,0 +1,21 @@
+{
+  "run_id": "lm2-screen-qwen38-27b",
+  "task_id": "fault_diagnosis-01",
+  "task_class": "fault_diagnosis",
+  "corpus_id": "lm1-2026-08-21",
+  "source_pointer": "tyecam1/odysseus@ac295b7:docs/aoteru-lab-execution-convergence-evidence.md#L201-L217",
+  "model_key": "qwen3.8:27b",
+  "concrete_model": "qwen3.8:27b",
+  "upstream_repo": "Qwen/Qwen3.8-27B",
+  "upstream_revision": "ollama library qwen3.8:27b default tag (apache-2.0, verified non-gated)",
+  "artifact": "ollama library qwen3.8:27b, pulled 2026-08-22 this pass via second Ollama instance",
+  "quantization": "Q4_K_M (confirmed via `ollama show`)",
+  "runtime": "ollama",
+  "runtime_version": "0.32.15 (second, user-local instance -- same 412 version blocker as lfm2.5:8b)",
+  "runtime_base_url": "http://127.0.0.1:11435",
+  "context_point": 8000,
+  "status": "pass",
+  "score": "pass",
+  "output_sha256": "92e71cfd739ccb7ac6f3079e2590f96d80473c94fb055624dc41427e6672db5c",
+  "raw_output": "**Root-cause category (one sentence):** This is a **third-party dependency API drift** \u2014 the repo's three server modules were written against an MCP-SDK version whose `Server` class exposed a `list_tools` attribute/method, but the version of the `mcp` package actually installed in the test environment no longer provides that symbol on the base class (it was renamed, moved to a mixin, or the tool-registration pattern was restructured), so every import/instantiation path that touches it raises `AttributeError` before any logic executes.\n\n**Would the repo's routing/execution changes have caused it?** No. An `AttributeError` on a method that simply *does not exist* on a third-party class is a static signature incompatibility; no in-repo change to how messages are routed, how servers are dispatched, or how execution order is sequenced can add or remove an attribute from an externally-provided class. The failure is entirely determined by the `mcp` package version pinned (or floating) in `requirements.txt` / `pyproject.toml` versus the API the three `*_server.py` files assume, and it would reproduce identically on a clean checkout with no local routing changes applied."
+}

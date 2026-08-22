@@ -1,0 +1,21 @@
+{
+  "run_id": "lm2-finalist-lfm25-8b-t2",
+  "task_id": "summarisation-01",
+  "task_class": "compact_summarisation",
+  "corpus_id": "lm1-2026-08-21",
+  "source_pointer": "tyecam1/odysseus@ac295b7:docs/aoteru-systemd-cutover-evidence.md#L41-L53",
+  "model_key": "lfm2.5:8b",
+  "concrete_model": "lfm2.5:8b",
+  "upstream_repo": "LiquidAI/LFM2.5-8B-A1B",
+  "upstream_revision": "ollama library lfm2.5:8b default tag (LFM Open License v1.0, verified non-gated, verified license terms this pass)",
+  "artifact": "ollama library lfm2.5:8b, pulled 2026-08-22 this pass via second Ollama instance",
+  "quantization": "Q4_K_M (confirmed via `ollama show`)",
+  "runtime": "ollama",
+  "runtime_version": "0.32.15 (second, user-local instance -- production Ollama 0.19.0 returned 412 'requires a newer version of Ollama' on this manifest, same class of blocker as LM1's gemma4 finding but broader)",
+  "runtime_base_url": "http://127.0.0.1:11435",
+  "context_point": 8000,
+  "status": "pass",
+  "score": "pass",
+  "output_sha256": "29503d678e2741453e54f2e2057707624c574cb49b9d2f7c91cfbffcb6502fe2",
+  "raw_output": "Restart=on-failure didn\u2019t auto\u2011restart after a graceful SIGTERM shutdown; systemd saw it as success, leaving the unit inactive, confirming the non\u2011crash half works, but couldn\u2019t trigger a crash restart due to missing passwordless sudo."
+}

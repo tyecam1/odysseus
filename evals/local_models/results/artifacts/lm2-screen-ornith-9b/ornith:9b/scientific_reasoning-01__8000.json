@@ -1,0 +1,21 @@
+{
+  "run_id": "lm2-screen-ornith-9b",
+  "task_id": "scientific_reasoning-01",
+  "task_class": "phd_scientific_reasoning",
+  "corpus_id": "lm1-2026-08-21",
+  "source_pointer": "tyecam1/obsidian-PhD@731fcd8:01-research-plan/00-RC/evidence requirements.md#L2-L7,L56-L62",
+  "model_key": "ornith:9b",
+  "concrete_model": "ornith:9b",
+  "upstream_repo": "deepreinforce-ai/Ornith-1.0-9B",
+  "upstream_revision": "ollama library ornith:9b default tag (MIT license, verified non-gated)",
+  "artifact": "ollama library ornith:9b, pulled 2026-08-22 this pass via second Ollama instance",
+  "quantization": "Q4_K_M (confirmed via `ollama show`)",
+  "runtime": "ollama",
+  "runtime_version": "0.32.15 (second, user-local instance -- same 412 version blocker as lfm2.5:8b)",
+  "runtime_base_url": "http://127.0.0.1:11435",
+  "context_point": 8000,
+  "status": "pass",
+  "score": "pass",
+  "output_sha256": "b78672942162725e859193dc7666a482f5fd51afb89a2e536bd2c0b839cbe052",
+  "raw_output": "## Three Evidence Tiers (per rubric)\n\n| Tier | Definition |\n|---|---|\n| **1. Authoritative** | Core safety standards, certification guidance, and obligations that define risk assessment and system integration. |\n| **2. Synthesis** | Peer-reviewed surveys/reviews synthesising safety in collaborative robotics and assurance for adaptive/learning-enabled systems. |\n| **3. Reality check** | Industrial conformity-assessment narratives, certification case studies, or papers reporting how safety processes constrained actual design or deployment. |\n\n## Tier Satisfied by the Described Paper\n\nA paper describing *a real industrial conformity-assessment case where a certifier forced a manufacturer to reduce a cobot's autonomy before sign-off* satisfies **Tier 3: Reality check**.\n\nIt is explicitly a certification case study reporting how the safety process constrained design (the certifier's forced reduction of autonomy), which maps directly to the reality-check tier's scope: *\"industrial conformity assessment narratives, certification case studies, or papers reporting how safety process constrained design.\"*"
+}

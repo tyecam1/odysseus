@@ -1,0 +1,21 @@
+{
+  "run_id": "lm2-screen-qwen38-27b",
+  "task_id": "tool_call-01",
+  "task_class": "tool_function_call_correctness",
+  "corpus_id": "lm1-2026-08-21",
+  "source_pointer": "synthetic-schema (derived from config/estate.yaml host fields)",
+  "model_key": "qwen3.8:27b",
+  "concrete_model": "qwen3.8:27b",
+  "upstream_repo": "Qwen/Qwen3.8-27B",
+  "upstream_revision": "ollama library qwen3.8:27b default tag (apache-2.0, verified non-gated)",
+  "artifact": "ollama library qwen3.8:27b, pulled 2026-08-22 this pass via second Ollama instance",
+  "quantization": "Q4_K_M (confirmed via `ollama show`)",
+  "runtime": "ollama",
+  "runtime_version": "0.32.15 (second, user-local instance -- same 412 version blocker as lfm2.5:8b)",
+  "runtime_base_url": "http://127.0.0.1:11435",
+  "context_point": 8000,
+  "status": "pass",
+  "score": "pass",
+  "output_sha256": "5bc1f149ab6d9e2153e7e4486206d2181296df15af6f548ad75bb01428736fc2",
+  "raw_output": "{\"name\":\"check_host_health\",\"arguments\":{\"host_id\":\"hz2-workstation\",\"timeout_s\":5}}"
+}

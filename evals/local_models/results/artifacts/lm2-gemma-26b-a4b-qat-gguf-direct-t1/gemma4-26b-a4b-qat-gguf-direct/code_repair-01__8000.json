@@ -1,0 +1,21 @@
+{
+  "run_id": "lm2-gemma-26b-a4b-qat-gguf-direct-t1",
+  "task_id": "code_repair-01",
+  "task_class": "bounded_code_repair",
+  "corpus_id": "lm1-2026-08-21",
+  "source_pointer": "tyecam1/odysseus@ac295b7:core/database.py#L788-L793 (fixture: evals/local_models/fixtures/code_repair_01/lease.py)",
+  "model_key": "gemma4-26b-a4b-qat-gguf-direct",
+  "concrete_model": "/home/agent/.claude/jobs/f73b3fea/tmp/gguf/gemma-4-26B_q4_0-it.gguf",
+  "upstream_repo": "google/gemma-4-26B-A4B-it-qat-q4_0-gguf",
+  "upstream_revision": "official HF repo, exact files gemma-4-26B_q4_0-it.gguf + gemma-4-26B-it-mmproj.gguf (mmproj not loaded this pass -- vision not exercised for this row, text-only screening), downloaded 2026-08-22 this pass (Gemma licence, verified non-gated)",
+  "artifact": "gemma-4-26B_q4_0-it.gguf (14.44GB), official QAT",
+  "quantization": "Q4_0 (official QAT)",
+  "runtime": "llama.cpp",
+  "runtime_version": "b10586, prebuilt ubuntu-vulkan-x64 release binary. -ngl 8 (heavy CPU offload, necessary at 10GB VRAM -- ngl 20/99 both hit ErrorOutOfDeviceMemory under Vulkan, which has higher per-layer overhead than CUDA; 8 was the highest value found to load cleanly at 8K context)",
+  "runtime_base_url": "http://127.0.0.1:8092/v1",
+  "context_point": 8000,
+  "status": "fail",
+  "score": "fail",
+  "output_sha256": "aa62194f45fe1e3abed9df3ebfa6120437690a5299369cfacd168dc24ec8d0e0",
+  "raw_output": "```python\ndef park_lease_is_stale(lease: \"Lease\", *, now: \"datetime | None\" = None) -> bool:\n    \"\"\"Return True when `lease` has gone stale (no heartbeat renewal within\n    PARK_LEASE_STALE_SECONDS).\"\"\"\n    now = now or datetime.utcnow()\n    return (now - lease.heartbeat_at).total_seconds() > PARK_LEASE_STALE_SECONDS\n```"
+}

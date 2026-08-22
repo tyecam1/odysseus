@@ -1,0 +1,21 @@
+{
+  "run_id": "lm2-screen-lfm25-8b",
+  "task_id": "code_repair-01",
+  "task_class": "bounded_code_repair",
+  "corpus_id": "lm1-2026-08-21",
+  "source_pointer": "tyecam1/odysseus@ac295b7:core/database.py#L788-L793 (fixture: evals/local_models/fixtures/code_repair_01/lease.py)",
+  "model_key": "lfm2.5:8b",
+  "concrete_model": "lfm2.5:8b",
+  "upstream_repo": "LiquidAI/LFM2.5-8B-A1B",
+  "upstream_revision": "ollama library lfm2.5:8b default tag (LFM Open License v1.0, verified non-gated, verified license terms this pass)",
+  "artifact": "ollama library lfm2.5:8b, pulled 2026-08-22 this pass via second Ollama instance",
+  "quantization": "Q4_K_M (confirmed via `ollama show`)",
+  "runtime": "ollama",
+  "runtime_version": "0.32.15 (second, user-local instance -- production Ollama 0.19.0 returned 412 'requires a newer version of Ollama' on this manifest, same class of blocker as LM1's gemma4 finding but broader)",
+  "runtime_base_url": "http://127.0.0.1:11435",
+  "context_point": 8000,
+  "status": "pass",
+  "score": "pass",
+  "output_sha256": "438f00f7b31c1c5539b9f6c28788d12d753461f0e7b6cfc7d5acae4c589a93d8",
+  "raw_output": "```python\nfrom datetime import datetime\n\nPARK_LEASE_STALE_SECONDS = 1800  # 30 min without a heartbeat renewal\n\n\nclass Lease:\n    def __init__(self, heartbeat_at: datetime):\n        self.heartbeat_at = heartbeat_at\n\n\ndef park_lease_is_stale(lease: \"Lease\", *, now: \"datetime | None\" = None) -> bool:\n    \"\"\"Return True when `lease` has gone stale (no heartbeat renewal within\n    PARK_LEASE_STALE_SECONDS).\"\"\"\n    now = now or datetime.utcnow()\n    return (now - lease.heartbeat_at).total_seconds() >= PARK_LEASE_STALE_SECONDS\n```"
+}

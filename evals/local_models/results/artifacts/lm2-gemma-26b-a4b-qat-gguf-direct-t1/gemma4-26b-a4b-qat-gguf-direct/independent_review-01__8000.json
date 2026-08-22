@@ -1,0 +1,21 @@
+{
+  "run_id": "lm2-gemma-26b-a4b-qat-gguf-direct-t1",
+  "task_id": "independent_review-01",
+  "task_class": "independent_review",
+  "corpus_id": "lm1-2026-08-21",
+  "source_pointer": "synthetic worker-result (derived from src/estate_router.py execute_local contract)",
+  "model_key": "gemma4-26b-a4b-qat-gguf-direct",
+  "concrete_model": "/home/agent/.claude/jobs/f73b3fea/tmp/gguf/gemma-4-26B_q4_0-it.gguf",
+  "upstream_repo": "google/gemma-4-26B-A4B-it-qat-q4_0-gguf",
+  "upstream_revision": "official HF repo, exact files gemma-4-26B_q4_0-it.gguf + gemma-4-26B-it-mmproj.gguf (mmproj not loaded this pass -- vision not exercised for this row, text-only screening), downloaded 2026-08-22 this pass (Gemma licence, verified non-gated)",
+  "artifact": "gemma-4-26B_q4_0-it.gguf (14.44GB), official QAT",
+  "quantization": "Q4_0 (official QAT)",
+  "runtime": "llama.cpp",
+  "runtime_version": "b10586, prebuilt ubuntu-vulkan-x64 release binary. -ngl 8 (heavy CPU offload, necessary at 10GB VRAM -- ngl 20/99 both hit ErrorOutOfDeviceMemory under Vulkan, which has higher per-layer overhead than CUDA; 8 was the highest value found to load cleanly at 8K context)",
+  "runtime_base_url": "http://127.0.0.1:8092/v1",
+  "context_point": 8000,
+  "status": "pass",
+  "score": "pass",
+  "output_sha256": "938441a4b44082306358e383f9cd5fd8a83d9dfb1d2796917d30a4cc4cabfd54",
+  "raw_output": "NO. The `deterministic_gate` value (\"pass\") contradicts the `execution.output` value (\"\"), because according to the rule, a \"pass\" requires a non-empty, non-whitespace output."
+}

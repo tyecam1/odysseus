@@ -1,0 +1,21 @@
+{
+  "run_id": "lm2-finalist-nemotron-30b-t3",
+  "task_id": "code_repair-01",
+  "task_class": "bounded_code_repair",
+  "corpus_id": "lm1-2026-08-21",
+  "source_pointer": "tyecam1/odysseus@ac295b7:core/database.py#L788-L793 (fixture: evals/local_models/fixtures/code_repair_01/lease.py)",
+  "model_key": "nemotron-3.5-lightning:30b-a3b",
+  "concrete_model": "nemotron-3.5-lightning:30b-a3b",
+  "upstream_repo": "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16",
+  "upstream_revision": "ollama library nemotron-3.5-lightning:30b-a3b default tag (OpenMDW-1.1, verified non-gated), GGUF Q4_K_M per the B3 NVFP4 caveat -- not NVFP4",
+  "artifact": "ollama library nemotron-3.5-lightning:30b-a3b, pulled 2026-08-22 this pass via second Ollama instance",
+  "quantization": "Q4_K_M (confirmed via `ollama show`)",
+  "runtime": "ollama",
+  "runtime_version": "0.32.15 (second, user-local instance -- same 412 version blocker as lfm2.5:8b)",
+  "runtime_base_url": "http://127.0.0.1:11435",
+  "context_point": 8000,
+  "status": "pass",
+  "score": "pass",
+  "output_sha256": "438f00f7b31c1c5539b9f6c28788d12d753461f0e7b6cfc7d5acae4c589a93d8",
+  "raw_output": "```python\nfrom datetime import datetime\n\nPARK_LEASE_STALE_SECONDS = 1800  # 30 min without a heartbeat renewal\n\n\nclass Lease:\n    def __init__(self, heartbeat_at: datetime):\n        self.heartbeat_at = heartbeat_at\n\n\ndef park_lease_is_stale(lease: \"Lease\", *, now: \"datetime | None\" = None) -> bool:\n    \"\"\"Return True when `lease` has gone stale (no heartbeat renewal within\n    PARK_LEASE_STALE_SECONDS).\"\"\"\n    now = now or datetime.utcnow()\n    return (now - lease.heartbeat_at).total_seconds() >= PARK_LEASE_STALE_SECONDS\n```"
+}

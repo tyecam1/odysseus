@@ -1,0 +1,21 @@
+{
+  "run_id": "lm2-finalist-ornith-9b-t3",
+  "task_id": "recon-01",
+  "task_class": "repo_reconnaissance",
+  "corpus_id": "lm1-2026-08-21",
+  "source_pointer": "tyecam1/odysseus@ac295b7:src/estate_router.py#L424-L464",
+  "model_key": "ornith:9b",
+  "concrete_model": "ornith:9b",
+  "upstream_repo": "deepreinforce-ai/Ornith-1.0-9B",
+  "upstream_revision": "ollama library ornith:9b default tag (MIT license, verified non-gated)",
+  "artifact": "ollama library ornith:9b, pulled 2026-08-22 this pass via second Ollama instance",
+  "quantization": "Q4_K_M (confirmed via `ollama show`)",
+  "runtime": "ollama",
+  "runtime_version": "0.32.15 (second, user-local instance -- same 412 version blocker as lfm2.5:8b)",
+  "runtime_base_url": "http://127.0.0.1:11435",
+  "context_point": 8000,
+  "status": "pass",
+  "score": "pass",
+  "output_sha256": "18a986de9c196617184fa8efbf75b6d26e3d89fbb95ee74980ccb6660d4e5158",
+  "raw_output": "The two functions are:\n\n1. **`execute_local`** \u2014 called to actually invoke the model.\n2. **`_update_decision_outcome`** \u2014 called afterward to persist the pass/fail outcome."
+}

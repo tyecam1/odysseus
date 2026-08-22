@@ -1,0 +1,21 @@
+{
+  "run_id": "lm2-screen-qwen38-27b",
+  "task_id": "ros_log_test-01",
+  "task_class": "ros_log_test_interpretation",
+  "corpus_id": "lm1-2026-08-21",
+  "source_pointer": "tyecam1/s2-e1-ros2-measurement-spine@6c4efdf:docs/ros2_measurement_graph.md#L9-L13;tests/test_manifest_validation.py#L59-L69",
+  "model_key": "qwen3.8:27b",
+  "concrete_model": "qwen3.8:27b",
+  "upstream_repo": "Qwen/Qwen3.8-27B",
+  "upstream_revision": "ollama library qwen3.8:27b default tag (apache-2.0, verified non-gated)",
+  "artifact": "ollama library qwen3.8:27b, pulled 2026-08-22 this pass via second Ollama instance",
+  "quantization": "Q4_K_M (confirmed via `ollama show`)",
+  "runtime": "ollama",
+  "runtime_version": "0.32.15 (second, user-local instance -- same 412 version blocker as lfm2.5:8b)",
+  "runtime_base_url": "http://127.0.0.1:11435",
+  "context_point": 8000,
+  "status": "pass",
+  "score": "pass",
+  "output_sha256": "281eabe4834150a4429aa5b39c3acdfb5619c5026b4eeeb1f833919e0c301114",
+  "raw_output": "## Answers\n\n**(1) E1a synthetic publisher \u2013 topic and message type**\n\n- **Topic name:** `/s2_e1/e1a/static_token_observation`\n- **Message type:** `std_msgs/String` (the payload is a deterministic JSON string whose fields mirror the E1a CSV columns).\n\n**(2) Exact substring asserted in the test**\n\nThe line\n\n```python\nself.assertIn(\"does not match expected\", str(caught.exception))\n```\n\nchecks that the raised `ManifestValidationError` message contains the literal substring:\n\n```\ndoes not match expected\n```\n\nThis confirms that the manifest-chain validator rejects a launch where the materialized experiment (here `\"e1b\"`) does not match the caller's `expected_experiment` argument (here `\"e1a\"`), producing an error message that explicitly states the mismatch."
+}

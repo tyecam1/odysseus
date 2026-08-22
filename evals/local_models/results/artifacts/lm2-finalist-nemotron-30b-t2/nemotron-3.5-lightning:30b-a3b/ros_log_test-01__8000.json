@@ -1,0 +1,21 @@
+{
+  "run_id": "lm2-finalist-nemotron-30b-t2",
+  "task_id": "ros_log_test-01",
+  "task_class": "ros_log_test_interpretation",
+  "corpus_id": "lm1-2026-08-21",
+  "source_pointer": "tyecam1/s2-e1-ros2-measurement-spine@6c4efdf:docs/ros2_measurement_graph.md#L9-L13;tests/test_manifest_validation.py#L59-L69",
+  "model_key": "nemotron-3.5-lightning:30b-a3b",
+  "concrete_model": "nemotron-3.5-lightning:30b-a3b",
+  "upstream_repo": "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16",
+  "upstream_revision": "ollama library nemotron-3.5-lightning:30b-a3b default tag (OpenMDW-1.1, verified non-gated), GGUF Q4_K_M per the B3 NVFP4 caveat -- not NVFP4",
+  "artifact": "ollama library nemotron-3.5-lightning:30b-a3b, pulled 2026-08-22 this pass via second Ollama instance",
+  "quantization": "Q4_K_M (confirmed via `ollama show`)",
+  "runtime": "ollama",
+  "runtime_version": "0.32.15 (second, user-local instance -- same 412 version blocker as lfm2.5:8b)",
+  "runtime_base_url": "http://127.0.0.1:11435",
+  "context_point": 8000,
+  "status": "pass",
+  "score": "pass",
+  "output_sha256": "3f5da8950c4c788ccd2c6460f81188670df661498b7b6d6a775b1a0da7a255e6",
+  "raw_output": "(1) The E1a synthetic publisher uses the ROS 2 topic `/s2_e1/e1a/static_token_observation` with message type `std_msgs/String`.\n\n(2) The exact substring checked is `does not match expected`."
+}

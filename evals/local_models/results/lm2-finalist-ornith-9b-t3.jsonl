@@ -1,0 +1,14 @@
+{"run_id": "lm2-finalist-ornith-9b-t3", "model": "ornith:9b", "task_id": "recon-01", "status": "pass", "reason": "pass", "score": "pass", "wall_time_ms": 5042, "context_point": 8000}
+{"run_id": "lm2-finalist-ornith-9b-t3", "model": "ornith:9b", "task_id": "recon-02", "status": "pass", "reason": "pass", "score": "pass", "wall_time_ms": 961, "context_point": 8000}
+{"run_id": "lm2-finalist-ornith-9b-t3", "model": "ornith:9b", "task_id": "code_repair-01", "status": "pass", "reason": "pass", "score": "pass", "wall_time_ms": 2327, "context_point": 8000}
+{"run_id": "lm2-finalist-ornith-9b-t3", "model": "ornith:9b", "task_id": "fault_diagnosis-01", "status": "pass", "reason": "pass", "score": "pass", "wall_time_ms": 4779, "context_point": 8000}
+{"run_id": "lm2-finalist-ornith-9b-t3", "model": "ornith:9b", "task_id": "tool_call-01", "status": "pass", "reason": "pass", "score": "pass", "wall_time_ms": 780, "context_point": 8000}
+{"run_id": "lm2-finalist-ornith-9b-t3", "model": "ornith:9b", "task_id": "json_schema-01", "status": "pass", "reason": "pass", "score": "pass", "wall_time_ms": 1704, "context_point": 8000}
+{"run_id": "lm2-finalist-ornith-9b-t3", "model": "ornith:9b", "task_id": "evidence_extraction-01", "status": "pass", "reason": "pass", "score": "pass", "wall_time_ms": 4175, "context_point": 8000}
+{"run_id": "lm2-finalist-ornith-9b-t3", "model": "ornith:9b", "task_id": "scientific_reasoning-01", "status": "pass", "reason": "pass", "score": "pass", "wall_time_ms": 3344, "context_point": 8000}
+{"run_id": "lm2-finalist-ornith-9b-t3", "model": "ornith:9b", "task_id": "long_context-01", "status": "pass", "reason": "pass", "score": "pass", "wall_time_ms": 3188, "context_point": 8000}
+{"run_id": "lm2-finalist-ornith-9b-t3", "model": "ornith:9b", "task_id": "long_context-01", "status": "pass", "reason": "pass", "score": "pass", "wall_time_ms": 15918, "context_point": 32000}
+{"run_id": "lm2-finalist-ornith-9b-t3", "model": "ornith:9b", "task_id": "doc_image-01", "status": "na", "reason": "model has no vision capability", "score": "na", "wall_time_ms": null}
+{"run_id": "lm2-finalist-ornith-9b-t3", "model": "ornith:9b", "task_id": "summarisation-01", "status": "pass", "reason": "pass", "score": "pass", "wall_time_ms": 4762, "context_point": 8000}
+{"run_id": "lm2-finalist-ornith-9b-t3", "model": "ornith:9b", "task_id": "independent_review-01", "status": "pass", "reason": "pass", "score": "pass", "wall_time_ms": 2045, "context_point": 8000}
+{"run_id": "lm2-finalist-ornith-9b-t3", "model": "ornith:9b", "task_id": "ros_log_test-01", "status": "pass", "reason": "pass", "score": "pass", "wall_time_ms": 2426, "context_point": 8000}

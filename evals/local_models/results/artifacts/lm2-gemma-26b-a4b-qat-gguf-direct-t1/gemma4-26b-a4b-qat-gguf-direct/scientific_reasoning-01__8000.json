@@ -1,0 +1,21 @@
+{
+  "run_id": "lm2-gemma-26b-a4b-qat-gguf-direct-t1",
+  "task_id": "scientific_reasoning-01",
+  "task_class": "phd_scientific_reasoning",
+  "corpus_id": "lm1-2026-08-21",
+  "source_pointer": "tyecam1/obsidian-PhD@731fcd8:01-research-plan/00-RC/evidence requirements.md#L2-L7,L56-L62",
+  "model_key": "gemma4-26b-a4b-qat-gguf-direct",
+  "concrete_model": "/home/agent/.claude/jobs/f73b3fea/tmp/gguf/gemma-4-26B_q4_0-it.gguf",
+  "upstream_repo": "google/gemma-4-26B-A4B-it-qat-q4_0-gguf",
+  "upstream_revision": "official HF repo, exact files gemma-4-26B_q4_0-it.gguf + gemma-4-26B-it-mmproj.gguf (mmproj not loaded this pass -- vision not exercised for this row, text-only screening), downloaded 2026-08-22 this pass (Gemma licence, verified non-gated)",
+  "artifact": "gemma-4-26B_q4_0-it.gguf (14.44GB), official QAT",
+  "quantization": "Q4_0 (official QAT)",
+  "runtime": "llama.cpp",
+  "runtime_version": "b10586, prebuilt ubuntu-vulkan-x64 release binary. -ngl 8 (heavy CPU offload, necessary at 10GB VRAM -- ngl 20/99 both hit ErrorOutOfDeviceMemory under Vulkan, which has higher per-layer overhead than CUDA; 8 was the highest value found to load cleanly at 8K context)",
+  "runtime_base_url": "http://127.0.0.1:8092/v1",
+  "context_point": 8000,
+  "status": "pass",
+  "score": "pass",
+  "output_sha256": "c77bfb1aa811bc7c09374d8e27de4c31f8a43c30d109b41b8470f7fd0ea06a99",
+  "raw_output": "Based on the rubric provided, the three tiers required for a load-bearing claim are:\n\n1.  **Authoritative source**\n2.  **Peer-reviewed synthesis** (Survey/Review)\n3.  **Implementation/reality check** (Industry implementation, case study, or systematic review)\n\nFor Claim C3, the paper describing \"a real industrial conformity-assessment case where a certifier forced a manufacturer to reduce a cobot's autonomy before sign-off\" would satisfy the **Implementation/reality check** tier."
+}

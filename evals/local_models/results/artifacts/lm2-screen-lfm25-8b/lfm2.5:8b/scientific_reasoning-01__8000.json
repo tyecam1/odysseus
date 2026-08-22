@@ -1,0 +1,21 @@
+{
+  "run_id": "lm2-screen-lfm25-8b",
+  "task_id": "scientific_reasoning-01",
+  "task_class": "phd_scientific_reasoning",
+  "corpus_id": "lm1-2026-08-21",
+  "source_pointer": "tyecam1/obsidian-PhD@731fcd8:01-research-plan/00-RC/evidence requirements.md#L2-L7,L56-L62",
+  "model_key": "lfm2.5:8b",
+  "concrete_model": "lfm2.5:8b",
+  "upstream_repo": "LiquidAI/LFM2.5-8B-A1B",
+  "upstream_revision": "ollama library lfm2.5:8b default tag (LFM Open License v1.0, verified non-gated, verified license terms this pass)",
+  "artifact": "ollama library lfm2.5:8b, pulled 2026-08-22 this pass via second Ollama instance",
+  "quantization": "Q4_K_M (confirmed via `ollama show`)",
+  "runtime": "ollama",
+  "runtime_version": "0.32.15 (second, user-local instance -- production Ollama 0.19.0 returned 412 'requires a newer version of Ollama' on this manifest, same class of blocker as LM1's gemma4 finding but broader)",
+  "runtime_base_url": "http://127.0.0.1:11435",
+  "context_point": 8000,
+  "status": "fail",
+  "score": "fail",
+  "output_sha256": "f94e9003d81afecb84e44a84f84d6e14370df2eed2cb2346a929f9dcf5904301",
+  "raw_output": "**Three required source tiers for a load\u2011bearing claim**\n\n1. **Authoritative source** \u2013 core safety standards or guidance that defines risk\u2011assessment, collaborative operation, and system\u2011integration obligations.  \n2. **Synthesis (review) source** \u2013 peer\u2011reviewed synthesis or survey that evaluates safety in collaborative robotics and the assurance requirements for adaptive/learning systems.  \n3. **Reality\u2011check source** \u2013 industrial conformity\u2011assessment narratives, certification case studies, or published reports that document how safety processes have constrained design or deployment.\n\n---\n\n### Applying these tiers to Claim\u202fC3  \n\nThe paper you describe \u2013 *\u201ca real industrial conformity\u2011assessment case where a certifier forced a manufacturer to reduce a cobot\u2019s autonomy before sign\u2011off\u201d* \u2013 is an **industrial conformity\u2011assessment narrative**. This matches the definition of the **Reality\u2011check tier** (the third required tier).\n\n**Therefore, the paper satisfies the Reality\u2011check source tier.**"
+}
