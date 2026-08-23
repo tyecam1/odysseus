@@ -474,3 +474,35 @@ class PersonalDocsManager:
         
         logger.info(f"Indexing complete: {success_count} succeeded, {failure_count} failed")
         return {"success": success_count, "failed": failure_count}
+
+    def rebuild_index_from_authoritative_state(self) -> Dict[str, Any]:
+        """Chroma disaster-recovery entrypoint (Workstream J: 'Chroma rebuild
+        from authoritative state'). `rag_manager.rebuild_index()` only wipes
+        the vector collection — it was never wired to anything that
+        repopulates it, and `index_all_directories()` (the repopulation half,
+        already keyed off `indexed_directories.json`, the actual
+        authoritative source of truth for what belongs in the index) had
+        zero callers and zero test coverage before this. Composing them here
+        as one auditable action, rather than leaving operators to remember
+        the two-step manually, matches the #1660 lesson in
+        `remove_directory()` above: an unwired wipe is exactly how a
+        catastrophic, silent index loss happens.
+
+        Returns a truthful outcome even on partial failure — a rebuild that
+        wipes the collection but then fails to repopulate must be reported,
+        not swallowed."""
+        if not self.rag_manager:
+            return {"wiped": False, "reindexed": None, "error": "no RAG manager available"}
+
+        try:
+            wiped = self.rag_manager.rebuild_index()
+        except Exception as e:
+            logger.error(f"Chroma rebuild_index failed: {e}")
+            return {"wiped": False, "reindexed": None, "error": str(e)}
+
+        if not wiped:
+            return {"wiped": False, "reindexed": None, "error": "rebuild_index reported failure"}
+
+        reindexed = self.index_all_directories()
+        self.refresh_index()
+        return {"wiped": True, "reindexed": reindexed}
