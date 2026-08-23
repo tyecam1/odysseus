@@ -349,6 +349,46 @@ def test_run_task_does_not_execute_needs_escalation_route(fixture_config, monkey
     assert called == []
 
 
+def test_run_task_does_not_escalate_to_paid_without_opt_in(fixture_config, monkeypatch):
+    """P12.3: a needs_escalation route stays unexecuted unless the caller
+    explicitly opts in via routing.allow_paid_escalation — evidence
+    triggered escalation, not automatic paid fallback for every task."""
+    monkeypatch.setattr(estate_router, "_record_decision", lambda *a, **k: "fake-decision-id")
+    called = []
+    monkeypatch.setattr(estate_router, "execute_codex", lambda *a, **k: called.append(1))
+
+    result = estate_router.run_task({
+        "task_class": "research", "objective": "prove P=NP",
+        "requirements": {"capabilities": ["reasoning-strong"]},
+    })
+    assert result["executed"] is False
+    assert called == []
+
+
+def test_run_task_escalates_to_codex_when_opted_in(fixture_config, monkeypatch):
+    """P12.3: an unbound local alias (e.g. code-strong) with explicit
+    routing.allow_paid_escalation executes against the provider-neutral
+    paid worker and updates the same RoutingDecision row (executor=codex,
+    escalated=True) rather than writing a second telemetry row."""
+    monkeypatch.setattr(estate_router, "_record_decision", lambda *a, **k: "fake-decision-id")
+    monkeypatch.setattr(estate_router, "execute_codex",
+                         lambda objective, **k: {"ok": True, "provider": "codex", "output": "done", "latency_ms": 99})
+    recorded = {}
+    monkeypatch.setattr(estate_router, "_update_decision_outcome", lambda decision_id, **k: recorded.update(k))
+
+    result = estate_router.run_task({
+        "task_class": "coding", "objective": "fix the bug",
+        "requirements": {"capabilities": ["code-strong"]},
+        "routing": {"allow_paid_escalation": True},
+    })
+    assert result["executed"] is True
+    assert result["ok"] is True
+    assert result["route"]["executor"] == "codex"
+    assert result["execution"]["output"] == "done"
+    assert recorded["executor"] == "codex"
+    assert recorded["escalated"] is True
+
+
 def test_run_task_local_route_without_objective_does_not_execute(fixture_config, monkeypatch):
     monkeypatch.setattr(estate_router, "_record_decision", lambda *a, **k: "fake-decision-id")
     monkeypatch.setattr(estate_router, "_ollama_model_live", lambda model, timeout=3.0: (True, "live"))

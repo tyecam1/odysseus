@@ -364,7 +364,8 @@ def resolve_route(task: dict) -> dict:
 
 
 def _update_decision_outcome(decision_id: str, *, status: str, deterministic_gate: str,
-                             latency_ms: Optional[int] = None, escalation_reason: Optional[str] = None) -> None:
+                             latency_ms: Optional[int] = None, escalation_reason: Optional[str] = None,
+                             executor: Optional[str] = None, escalated: Optional[bool] = None) -> None:
     """Execution happens after `resolve_route()` already wrote its
     decision row — update that same row with the real outcome rather than
     writing a second telemetry row for one routed task (`RoutingDecision`
@@ -385,6 +386,10 @@ def _update_decision_outcome(decision_id: str, *, status: str, deterministic_gat
                     row.latency_ms = latency_ms
                 if escalation_reason is not None:
                     row.escalation_reason = escalation_reason
+                if executor is not None:
+                    row.executor = executor
+                if escalated is not None:
+                    row.escalated = escalated
     except Exception:
         import logging
         logging.getLogger(__name__).exception("routing_decisions outcome update failed; execution result is unaffected")
@@ -440,19 +445,97 @@ def execute_local(concrete_model: str, objective: "str | list[dict]", *, timeout
     return {"ok": True, "output": output, "latency_ms": int((time.monotonic() - started) * 1000)}
 
 
+def _codex_available() -> tuple[bool, str]:
+    """Host-local credential/runtime check for the `codex` CLI paid
+    worker (P12.3, docs/aoteru-p12-active-estate-convergence.md). Never
+    prints/reads the credential contents — only that `codex` is on PATH
+    and `~/.codex/auth.json` exists, the same "host-local auth, no
+    secrets moved between hosts" discipline as every other credential
+    check in this codebase."""
+    import shutil
+    binary = shutil.which("codex")
+    if not binary:
+        return False, "codex binary not found on PATH"
+    auth_path = Path.home() / ".codex" / "auth.json"
+    if not auth_path.exists():
+        return False, "no ~/.codex/auth.json on this host — codex is not logged in"
+    return True, binary
+
+
+def execute_codex(objective: str, *, timeout: float = 180.0, cwd: Optional[str] = None) -> dict:
+    """The provider-neutral paid worker mechanism (P12.3): smallest
+    extension of the existing `codex` CLI already installed/authenticated
+    on this host, selected by this router the same way `execute_local`
+    is — not a second orchestrator. Runs bounded and read-only
+    (`--sandbox read-only`, `--ephemeral`, no persisted session state) so
+    a paid escalation can never itself become an unreviewed mutation;
+    P3's parking/lease authority still gates any real repo mutation a
+    human/task later decides to make from codex's answer. Every failure
+    mode (binary missing, not authenticated, timeout, non-zero exit) is
+    returned as a clean `{"ok": False, "error": ...}`, matching
+    `execute_local`'s truthful-failure convention rather than raising."""
+    import subprocess
+    import tempfile
+    import time
+
+    available, detail = _codex_available()
+    if not available:
+        return {"ok": False, "error": f"codex unavailable: {detail}", "provider": "codex"}
+
+    started = time.monotonic()
+    with tempfile.TemporaryDirectory(prefix="p12-codex-") as scratch:
+        out_path = str(Path(scratch) / "codex-last-message.txt")
+        try:
+            proc = subprocess.run(
+                [
+                    "codex", "exec",
+                    "--sandbox", "read-only",
+                    "--ephemeral",
+                    "--skip-git-repo-check",
+                    "-C", cwd or scratch,
+                    "-o", out_path,
+                    objective,
+                ],
+                capture_output=True, text=True, timeout=timeout,
+            )
+            latency_ms = int((time.monotonic() - started) * 1000)
+            if proc.returncode != 0:
+                return {
+                    "ok": False, "provider": "codex", "latency_ms": latency_ms,
+                    "error": f"codex exec exited {proc.returncode}: {(proc.stderr or '')[-500:]}",
+                }
+            output = Path(out_path).read_text().strip() if Path(out_path).exists() else ""
+            return {"ok": True, "provider": "codex", "output": output, "latency_ms": latency_ms}
+        except subprocess.TimeoutExpired:
+            return {"ok": False, "provider": "codex", "error": f"codex exec timed out after {timeout}s",
+                    "latency_ms": int((time.monotonic() - started) * 1000)}
+        except Exception as e:
+            return {"ok": False, "provider": "codex", "error": str(e),
+                    "latency_ms": int((time.monotonic() - started) * 1000)}
+
+
 def run_task(task: dict) -> dict:
     """Closes the execution gap: `resolve_route()` alone only answers
     WHERE+WHAT, it never calls a model. `run_task()` routes first (same
     `resolve_route()`, unchanged — deterministic-first and parking/domain
     gates are untouched), then actually executes when the resolved
-    executor is `local`, the only executor with a real, live runtime in
-    this environment. A `deterministic` route has no model to call and is
-    returned as `executed: False` (there was nothing to execute — the
+    executor is `local`. A `deterministic` route has no model to call and
+    is returned as `executed: False` (there was nothing to execute — the
     route itself already is the answer, same as before this function
-    existed); a `needs_escalation` route is returned unexecuted for the
-    same honest reason `resolve_route()` already gives — no adequate
-    route exists yet, and this module does not invent a Claude/Codex
-    execution path where none is available.
+    existed).
+
+    P12.3: a `needs_escalation` route (typically an unbound/unavailable
+    local capability, e.g. `code-strong`) is executed against the
+    provider-neutral paid worker (`execute_codex`, currently the only
+    paid mechanism with a live host-local credential — see
+    `_codex_available`) only when the caller opts in via
+    `task["routing"]["allow_paid_escalation"]: true`. This is
+    evidence-triggered escalation, not automatic paid fallback for every
+    routine task (invariant 11, escalation_triggers in
+    config/routing.yaml) — a caller that does not ask for paid escalation
+    still gets the prior honest `executed: False` result. Preserves the
+    economic ladder (deterministic -> qualified local -> paid): this
+    branch is only reached once the local route has already failed.
 
     The deterministic gate applied to a local execution result is
     intentionally minimal and does not fabricate a quality floor (that
@@ -470,6 +553,25 @@ def run_task(task: dict) -> dict:
     route = resolve_route(task)
     executor = (route.get("route") or {}).get("executor")
     if executor != "local":
+        allow_paid = (task.get("routing") or {}).get("allow_paid_escalation")
+        if route.get("route", {}).get("executor") == "none" and route.get("decision_id") \
+                and allow_paid and (task.get("objective") is not None):
+            objective = task.get("objective")
+            paid_objective = objective if isinstance(objective, str) else str(objective)
+            result = execute_codex(paid_objective)
+            gate = "pass" if result.get("ok") and (result.get("output") or "").strip() else "fail"
+            _update_decision_outcome(
+                route["decision_id"],
+                status="complete" if gate == "pass" else "failed",
+                deterministic_gate=gate,
+                latency_ms=result.get("latency_ms"),
+                escalation_reason="insufficient_capability" if gate == "pass" else "worker_failed",
+                executor="codex",
+                escalated=True,
+            )
+            route = {**route, "ok": gate == "pass",
+                     "route": {**route["route"], "executor": "codex", "concrete_model": "codex-cli"}}
+            return {**route, "executed": True, "execution": result, "deterministic_gate": gate}
         return {**route, "executed": False}
 
     concrete_model = route["route"]["concrete_model"]
