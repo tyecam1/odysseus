@@ -708,3 +708,41 @@ def test_model_config_change_and_rollback_both_take_effect_live(fixture_config):
     # forward change.
     models_path.write_text(yaml.safe_dump(original))
     assert estate_router.resolve_alias("local-fast")["concrete_model"] == "test-model-fast"
+
+
+class TestResolveCodexBinary:
+    """docs/aoteru-final-convergence-activation.agent-task.md item 4:
+    'prefer fixing/updating tooling over disabling the sandbox'. The
+    system codex-cli on this host was running against an incompatible
+    bubblewrap version; a user-local install (no root needed) fixed it.
+    _resolve_codex_binary must prefer that local install when present,
+    without ever changing the --sandbox invocation itself."""
+
+    def test_prefers_user_local_install_when_present(self, monkeypatch, tmp_path):
+        fake_home = tmp_path
+        local_bin = fake_home / ".local" / "codex-cli" / "node_modules" / ".bin" / "codex"
+        local_bin.parent.mkdir(parents=True)
+        local_bin.write_text("#!/bin/sh\n")
+        monkeypatch.setattr(estate_router.Path, "home", lambda: fake_home)
+
+        binary, source = estate_router._resolve_codex_binary()
+        assert binary == str(local_bin)
+        assert "user-local" in source
+
+    def test_falls_back_to_system_path_when_no_local_install(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(estate_router.Path, "home", lambda: tmp_path)  # empty — no ~/.local/codex-cli
+        import shutil as _shutil
+        monkeypatch.setattr(_shutil, "which", lambda name: "/usr/bin/codex")
+
+        binary, source = estate_router._resolve_codex_binary()
+        assert binary == "/usr/bin/codex"
+        assert source == "system PATH"
+
+    def test_returns_none_when_neither_exists(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(estate_router.Path, "home", lambda: tmp_path)
+        import shutil as _shutil
+        monkeypatch.setattr(_shutil, "which", lambda name: None)
+
+        binary, source = estate_router._resolve_codex_binary()
+        assert binary is None
+        assert "not found" in source

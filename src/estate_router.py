@@ -562,17 +562,43 @@ def execute_local(concrete_model: str, objective: "str | list[dict]", *, timeout
     return last_error  # pragma: no cover — loop always returns above
 
 
+def _resolve_codex_binary() -> tuple[Optional[str], str]:
+    """Which `codex` binary to actually invoke (docs/aoteru-final-
+    convergence-activation.agent-task.md item 4: "prefer fixing/updating
+    tooling over disabling the sandbox"). The system PATH copy on this
+    host (apt bubblewrap 0.6.1 + an old global npm codex-cli 0.116.0) was
+    confirmed broken — `bwrap: Unknown option --argv0` — because the
+    installed codex-cli predates upstream's current bubblewrap-
+    compatibility path, NOT because sandboxing itself is unsafe here.
+    Global npm upgrade requires root (EACCES, confirmed) and was not
+    attempted with sudo/bypass. A user-local install
+    (`npm install --prefix ~/.local/codex-cli @openai/codex@latest`, no
+    root needed) fixed it — confirmed live: codex-cli 0.149.0 read this
+    repo's real files under the exact same `--sandbox read-only`
+    invocation with no bwrap error. Prefer that local install if present;
+    fall back to the system PATH copy otherwise (still `--sandbox
+    read-only` either way — this only changes which binary answers the
+    same call, never the flags/isolation)."""
+    local_candidate = Path.home() / ".local" / "codex-cli" / "node_modules" / ".bin" / "codex"
+    if local_candidate.exists():
+        return str(local_candidate), "user-local (~/.local/codex-cli, no sudo/global-policy change)"
+    import shutil
+    system_candidate = shutil.which("codex")
+    if system_candidate:
+        return system_candidate, "system PATH"
+    return None, "not found (checked user-local and system PATH)"
+
+
 def _codex_available() -> tuple[bool, str]:
     """Host-local credential/runtime check for the `codex` CLI paid
     worker (P12.3, docs/aoteru-p12-active-estate-convergence.md). Never
-    prints/reads the credential contents — only that `codex` is on PATH
-    and `~/.codex/auth.json` exists, the same "host-local auth, no
-    secrets moved between hosts" discipline as every other credential
-    check in this codebase."""
-    import shutil
-    binary = shutil.which("codex")
+    prints/reads the credential contents — only that a `codex` binary
+    resolves (see `_resolve_codex_binary`) and `~/.codex/auth.json`
+    exists, the same "host-local auth, no secrets moved between hosts"
+    discipline as every other credential check in this codebase."""
+    binary, _source = _resolve_codex_binary()
     if not binary:
-        return False, "codex binary not found on PATH"
+        return False, "codex binary not found (checked user-local install and system PATH)"
     auth_path = Path.home() / ".codex" / "auth.json"
     if not auth_path.exists():
         return False, "no ~/.codex/auth.json on this host — codex is not logged in"
@@ -598,6 +624,7 @@ def execute_codex(objective: str, *, timeout: float = 180.0, cwd: Optional[str] 
     available, detail = _codex_available()
     if not available:
         return {"ok": False, "error": f"codex unavailable: {detail}", "provider": "codex"}
+    codex_binary = detail  # _codex_available() returns the resolved binary path on success
 
     started = time.monotonic()
     with tempfile.TemporaryDirectory(prefix="p12-codex-") as scratch:
@@ -605,7 +632,7 @@ def execute_codex(objective: str, *, timeout: float = 180.0, cwd: Optional[str] 
         try:
             proc = subprocess.run(
                 [
-                    "codex", "exec",
+                    codex_binary, "exec",
                     "--sandbox", "read-only",
                     "--ephemeral",
                     "--skip-git-repo-check",
@@ -620,9 +647,11 @@ def execute_codex(objective: str, *, timeout: float = 180.0, cwd: Optional[str] 
                 return {
                     "ok": False, "provider": "codex", "latency_ms": latency_ms,
                     "error": f"codex exec exited {proc.returncode}: {(proc.stderr or '')[-500:]}",
+                    "codex_binary": codex_binary,
                 }
             output = Path(out_path).read_text().strip() if Path(out_path).exists() else ""
-            return {"ok": True, "provider": "codex", "output": output, "latency_ms": latency_ms}
+            return {"ok": True, "provider": "codex", "output": output, "latency_ms": latency_ms,
+                    "codex_binary": codex_binary}
         except subprocess.TimeoutExpired:
             return {"ok": False, "provider": "codex", "error": f"codex exec timed out after {timeout}s",
                     "latency_ms": int((time.monotonic() - started) * 1000)}
