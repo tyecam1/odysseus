@@ -145,23 +145,33 @@ hosts:
     tailscale_dns: glovebox.tail171792.ts.net
     inventoried_at: "2026-08-19"
     verified_live_at: null
+    last_reachability_check: "2026-08-23"  # P12.5: tailscale status + tailscale ping from lab, both re-run this pass — still offline/no reply
+    candidate_capability_tags: [ros2, realsense, experiment-capture, edge-perception, robotics-logs]  # NOT live/binding — vocabulary only, per P12.5.4; do not treat as eligible until live-verified
     notes: >-
       P12 (2026-08-23): operator states this Jetson Orin Nano is currently
       connected and used for research experiments; role corrected from
       `unassigned` to `experiment-edge` on that operator statement. Live
       re-check from lab this pass (`tailscale status`, `tailscale ping`)
-      still shows it OFFLINE, last seen 36d ago — a real discrepancy
-      between operator statement and this session's own tailnet evidence,
-      recorded truthfully rather than silently trusting either side. Prior
-      research records (docs/aoteru-lab-local-model-strategy-2026-08-20.md
-      and related) associate it with Jetson Linux/JetPack and S2-E1
-      experiment storage at `/data/s2-e1`; treat all such detail as
-      hypothesis, not confirmed, until it is next live-reachable and
-      re-inventoried (P12.5). Capability tags intentionally left unset
-      until live-verified — do not route `ros2`/`realsense`/
-      `experiment-capture` work here on inventoried-but-unreachable status.
-      Never eligible for generic `local-fast`/`code-fast`/background
-      indexing regardless of reachability (P12 boundary 4).
+      still shows it OFFLINE, last seen 36d ago, no ping reply — a real
+      discrepancy between operator statement and this session's own
+      tailnet evidence, recorded truthfully rather than silently trusting
+      either side. Prior research records
+      (docs/aoteru-lab-local-model-strategy-2026-08-20.md and related)
+      associate it with Jetson Linux/JetPack and S2-E1 experiment storage
+      at `/data/s2-e1`; treat all such detail as hypothesis, not
+      confirmed, until it is next live-reachable and re-inventoried.
+      `candidate_capability_tags` above names the tag vocabulary P12.5.4
+      calls for but assigns none of them live — do not route
+      `ros2`/`realsense`/`experiment-capture` work here on
+      inventoried-but-unreachable status. The P12.5.6 safe read-only
+      experiment-adjacent proof is truthfully deferred for the same
+      reason: no route can be proven against a host this session cannot
+      reach, not a safety concession on a live host. Never eligible for
+      generic `local-fast`/`code-fast`/background indexing regardless of
+      reachability (P12 boundary 4) — enforced structurally by
+      `src.estate_router.eligible_hosts()` already excluding any role
+      other than `lab`/`home`, so `experiment-edge` never becomes a
+      generic execution candidate even once reachable.
 
 services:
   - id: svc:aoteru
