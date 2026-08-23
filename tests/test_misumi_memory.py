@@ -274,6 +274,59 @@ def test_recall_limit_is_capped_at_one_hundred(tmp_path):
     assert len(results) == 3  # capped internally, never crashes or over-returns what exists
 
 
+def test_history_returns_every_revision_oldest_first(tmp_path):
+    """The revision trail plan §6.2 asks for, read directly off the JSONL
+    log — no separate memory_revision table (P4). Previously untested at
+    either the MisumiMemory or HTTP layer despite the route already
+    existing (GET /memory/{capsule_id}/history)."""
+    memory = MisumiMemory(tmp_path / "memory")
+    cap = memory.capture("needs confirmation", persona="kurisu")
+    memory.confirm(cap["id"])
+    memory.close(cap["id"], resolution="done")
+
+    versions = memory.history("capsules", cap["id"])
+    assert len(versions) == 3
+    assert versions[0]["status"] == "open"
+    assert versions[1]["status"] == "confirmed"
+    assert versions[2]["status"] == "closed"
+
+
+def test_history_excludes_other_records(tmp_path):
+    memory = MisumiMemory(tmp_path / "memory")
+    cap_a = memory.capture("record A", persona="kurisu")
+    memory.capture("record B", persona="kurisu")
+
+    versions = memory.history("capsules", cap_a["id"])
+    assert len(versions) == 1
+    assert versions[0]["id"] == cap_a["id"]
+
+
+def test_history_unknown_id_returns_empty_list(tmp_path):
+    memory = MisumiMemory(tmp_path / "memory")
+    assert memory.history("capsules", "cap-does-not-exist") == []
+
+
+def test_memory_history_http_route_returns_versions(tmp_path, monkeypatch):
+    client, _ = _client(tmp_path, monkeypatch)
+    captured = client.post("/misumi/memory/capture", json={"text": "still need to fix the wiring"}).json()
+    client.post(f"/misumi/memory/{captured['id']}/confirm")
+
+    response = client.get(f"/misumi/memory/{captured['id']}/history")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["capsule_id"] == captured["id"]
+    assert len(body["versions"]) == 2
+    assert body["versions"][0]["status"] == "open"
+    assert body["versions"][1]["status"] == "confirmed"
+
+
+def test_memory_history_http_route_404_for_unknown_capsule(tmp_path, monkeypatch):
+    client, _ = _client(tmp_path, monkeypatch)
+    response = client.get("/misumi/memory/cap-does-not-exist/history")
+    assert response.status_code == 404
+
+
 def test_memory_recall_http_route_returns_bounded_shape(tmp_path, monkeypatch):
     client, _ = _client(tmp_path, monkeypatch)
     client.post("/misumi/memory/capture", json={"text": "still need to fix the wiring", "persona": "kurisu"})
