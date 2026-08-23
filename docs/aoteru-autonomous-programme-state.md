@@ -256,9 +256,34 @@ see `[[project-aoteru-p12-estate-convergence]]`.
   priority: medium
   depends_on: []
   blocker: "glovebox offline 36d+ on tailnet (re-checked this session, unchanged from P12) — host-availability gate, not code-controlled"
-  next_action: "operator: power/reconnect glovebox; then re-run live inventory + read-only qualification. Deployable-package prep (non-live parts) remains open independent work."
-  evidence: ["tailscale status 2026-08-23: glovebox offline, last seen 36d ago"]
-  last_verified_commit: null
+  next_action: >-
+    operator: `ssh glovebox 'python3 glovebox_qualification.py'` (or copy
+    the one file over) once reconnected — that is now the exact one
+    command, not prose. Remaining non-live work: safe busy/experiment-
+    active state + data-locality policy (item 4); integrating the
+    reservation signal with lab routing so an active glovebox experiment
+    can also reserve lab GPU (item 5 — today experiment_priority_active()
+    only checks lab-local signals); compact artefact/log/metric transfer
+    to lab (item 6); idempotent deploy/update/rollback (item 7's other
+    half, qualification-only was done this session).
+  evidence:
+    - "tailscale status 2026-08-23 (re-checked again this session):
+      glovebox still offline, last seen 36d ago — unchanged, expected,
+      not a new problem."
+    - "Added scripts/glovebox_qualification.py: read-only qualification
+      reusing scripts/home_reentry_inventory.py's generic host facts
+      ([[I-home-reentry]]) plus glovebox-specific checks (JetPack/L4T
+      version, ROS 2 presence, RealSense/pyrealsense2, Jetson thermals via
+      tegrastats). Makes zero model calls (G's own 'never run generic
+      background LLMs on Jetson' invariant). Cannot be verified against
+      real Jetson hardware this session — explicitly flagged in the
+      module docstring as written from documented JetPack/ROS2/RealSense
+      conventions, not live-proven, so a future session correcting a
+      wrong assumption here is expected, not a regression. 7 unit tests
+      (mocked subprocess/shutil.which), including one confirming it never
+      mutates config/estate.yaml — matches candidate_capability_tags
+      exactly but never makes them live/binding itself."
+  last_verified_commit: <pending this checkpoint's commit>
 
 - id: H-interface-mobile-frontdoor
   outcome: deployable svc:aoteru front-door + PWA, activation-ready for interface PC
