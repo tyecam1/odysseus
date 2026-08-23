@@ -14,6 +14,7 @@ from src.routing_evaluator import (
     EVIDENCE_THRESHOLD,
     RECENCY_HALF_LIFE_DAYS,
     aggregate_routing_decisions,
+    canonical_task_class,
 )
 
 
@@ -41,6 +42,51 @@ def test_groups_by_task_class_alias_model_and_executor():
                      ("code", "local-fast", "codex")}
     code_local = next(a for a in aggs if a.task_class == "code" and a.executor == "local")
     assert code_local.n == 2
+
+
+class TestCanonicalTaskClass:
+    """docs/aoteru-final-convergence-activation.agent-task.md item 7:
+    routing-evidence hygiene. Only unambiguous synonym pairs are mapped
+    (never the one-off smoke/proof-of-concept labels — merging those
+    would be exactly the arbitrary grouping the task explicitly
+    forbids)."""
+
+    def test_known_synonyms_map_to_canonical_name(self):
+        assert canonical_task_class("strict_json_schema_output") == "strict_schema_output"
+        assert canonical_task_class("ros_log_test_interpretation") == "log_interpretation"
+
+    def test_unknown_task_class_passes_through_unchanged(self):
+        assert canonical_task_class("code") == "code"
+        assert canonical_task_class("lm1-a1-live-smoke") == "lm1-a1-live-smoke"
+        assert canonical_task_class("p12_controller_proof") == "p12_controller_proof"
+
+
+def test_aggregate_merges_known_synonym_task_classes():
+    """The evaluator-side normalization item 7 asks for: two raw labels
+    that are the same benchmark concept must fold into one aggregate
+    (growing toward EVIDENCE_THRESHOLD together), while the exact raw
+    labels that contributed stay visible via raw_task_classes — never
+    hidden, never rewriting the underlying RoutingDecision rows."""
+    decisions = [
+        _decision(task_class="strict_json_schema_output", model_alias="code-strong", executor="codex"),
+        _decision(task_class="strict_schema_output", model_alias="code-strong", executor="codex"),
+    ]
+    aggs = aggregate_routing_decisions(decisions)
+    assert len(aggs) == 1
+    agg = aggs[0]
+    assert agg.task_class == "strict_schema_output"
+    assert agg.n == 2
+    assert agg.raw_task_classes == {"strict_json_schema_output", "strict_schema_output"}
+
+
+def test_aggregate_does_not_merge_unrelated_one_off_labels():
+    decisions = [
+        _decision(task_class="lm1-a1-live-smoke", model_alias="local-fast"),
+        _decision(task_class="systemd-cutover-smoke", model_alias="local-fast"),
+    ]
+    aggs = aggregate_routing_decisions(decisions)
+    assert len(aggs) == 2
+    assert {a.task_class for a in aggs} == {"lm1-a1-live-smoke", "systemd-cutover-smoke"}
 
 
 def test_success_rate_counts_only_deterministic_gate_pass():

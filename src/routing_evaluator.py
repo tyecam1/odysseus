@@ -52,6 +52,40 @@ EVIDENCE_THRESHOLD = 20
 RECENCY_HALF_LIFE_DAYS = 30
 
 
+# Routing-evidence hygiene (docs/aoteru-final-convergence-activation.
+# agent-task.md item 7): the raw `RoutingDecision.task_class` taxonomy is
+# fragmented — 38 distinct labels across 63 rows at the time this was
+# written, many of them one-off smoke/proof-of-concept labels
+# (lm1-*-smoke, systemd-cutover-*-smoke, p12_*_proof, verify-test-*)
+# that are genuinely one-time verification events, not a repeatable
+# benchmark class, and correctly should NOT be merged into anything —
+# doing so would be exactly the arbitrary grouping this task explicitly
+# forbids. This map only covers pairs that are unambiguously the same
+# concept under a different spelling (confirmed by reading what each
+# task actually was, not guessed from the label alone) — deliberately
+# small and hand-curated rather than a fuzzy/automatic normalization
+# that could quietly conflate unrelated work. Evaluator-side only: the
+# raw RoutingDecision.task_class column is never rewritten (no
+# destructive migration of historical rows, no schema change at all).
+_TASK_CLASS_CANONICAL_MAP: dict[str, str] = {
+    # Same benchmark concept (LM4 canary evidence used the JSON-flavoured
+    # spelling; this session's own convergence qualification task used
+    # the shorter one for the identical "parse-strict JSON object" check).
+    "strict_json_schema_output": "strict_schema_output",
+    # Same benchmark concept — ROS-specific log/test interpretation is
+    # the general log_interpretation class applied to a ROS 2 repo, not
+    # a distinct class of its own.
+    "ros_log_test_interpretation": "log_interpretation",
+}
+
+
+def canonical_task_class(raw_task_class: str) -> str:
+    """The stable benchmark-taxonomy name for a raw `task_class`, or the
+    raw value unchanged if it isn't a known synonym. Aggregation-only —
+    never used to mutate a stored RoutingDecision row."""
+    return _TASK_CLASS_CANONICAL_MAP.get(raw_task_class, raw_task_class)
+
+
 @dataclass
 class RouteAggregate:
     task_class: str
@@ -70,6 +104,10 @@ class RouteAggregate:
     paid_tokens_total: int = 0
     first_seen: Optional[datetime] = None
     last_seen: Optional[datetime] = None
+    # The distinct raw RoutingDecision.task_class values folded into this
+    # aggregate's canonical task_class (item 7: transparency for the
+    # canonical-class mapping — never hides that a merge happened).
+    raw_task_classes: set = field(default_factory=set)
 
     @property
     def evidence_sufficient(self) -> bool:
@@ -106,6 +144,7 @@ class RouteAggregate:
     def to_dict(self) -> dict:
         return {
             "task_class": self.task_class,
+            "raw_task_classes": sorted(self.raw_task_classes),
             "model_alias": self.model_alias,
             "concrete_model": self.concrete_model,
             "executor": self.executor,
@@ -158,14 +197,16 @@ def aggregate_routing_decisions(decisions: list, *, now: Optional[datetime] = No
     groups: dict[tuple, RouteAggregate] = {}
 
     for d in decisions:
-        key = (d.task_class, d.model_alias, d.concrete_model, d.executor)
+        canonical = canonical_task_class(d.task_class)
+        key = (canonical, d.model_alias, d.concrete_model, d.executor)
         agg = groups.get(key)
         if agg is None:
             agg = RouteAggregate(
-                task_class=d.task_class, model_alias=d.model_alias,
+                task_class=canonical, model_alias=d.model_alias,
                 concrete_model=d.concrete_model, executor=d.executor,
             )
             groups[key] = agg
+        agg.raw_task_classes.add(d.task_class)
 
         weight = _recency_weight(getattr(d, "created_at", None), now=now)
         agg.n += 1
