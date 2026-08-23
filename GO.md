@@ -6,7 +6,7 @@ This file overrides any wording elsewhere that suggests a planned multi-session 
 
 ## Execution rule
 
-Do **not** voluntarily stop at a clean checkpoint, green test suite, completed workstream, pushed commit, substantial progress report, or because the programme is large enough to span multiple sessions.
+Do **not** voluntarily stop at a clean checkpoint, green test suite, completed workstream, pushed commit, substantial progress report, human-action batch, or because the programme is large enough to span multiple sessions.
 
 A checkpoint is only a durability boundary. Immediately continue into the next highest-value eligible workstream.
 
@@ -30,7 +30,7 @@ Repeat continuously:
 
 Do not ration the invocation to one or two workstreams. Complete as much of the unblocked programme as the environment can actually execute.
 
-If one stream blocks on laptop, glovebox, home, interface PC, sudo, credentials, hardware, or another genuine external dependency, record that blocker once and immediately continue independent work.
+If one stream blocks on laptop, glovebox, home, interface PC, sudo, credentials, hardware, or another genuine external dependency, record that blocker once and immediately continue independent work. A human-action batch is not a stopping condition unless **every** remaining workstream is blocked by it.
 
 ## Context and delegation
 
@@ -44,11 +44,26 @@ Preserve Sonnet as programme foreman/integrator rather than spending its context
 
 If context pressure rises, first checkpoint/update programme state, then compact/summarise context using the available Claude mechanism and **continue the same programme**. Context pressure is not itself a planned stop condition.
 
+## Mandatory stop-gate audit
+
+Immediately before any final response, re-read `docs/aoteru-autonomous-programme-state.md` and perform this explicit gate:
+
+```text
+active_count = number of workstreams with status: active
+eligible_count = number of workstreams with status: eligible
+```
+
+If `active_count > 0` OR `eligible_count > 0`, a voluntary final response is **forbidden**. Select the highest-value such workstream and continue execution.
+
+Do not reinterpret `eligible` as "next session" or "large enough to defer". If it can be advanced with current repo/lab/network/model/tool access, advance it now.
+
+A workstream may be changed from `eligible`/`active` to `blocked` only when a concrete external dependency is identified and recorded. Size, elapsed effort, a clean checkpoint, or desire for a fresh context are not blockers.
+
 ## Allowed stop conditions
 
 Stop voluntarily only when ALL of the following are true:
 
-1. no `active` or `eligible` programme work remains that can be completed with currently available repo, lab, network, model/provider and tool access;
+1. `active_count == 0` and `eligible_count == 0` after the mandatory stop-gate audit;
 2. every remaining item is blocked by an irreducible human/physical/external gate, not merely large or inconvenient work;
 3. all non-live deliverables for blocked hosts have already been completed;
 4. each remaining gate has one exact minimal continuation action recorded;
