@@ -680,3 +680,31 @@ def test_run_task_end_to_end_uses_bounded_context(fixture_config, monkeypatch):
     assert result["executed"] is True
     assert result["execution"]["output"] == "pong"
     assert captured["num_ctx"] < 262144
+
+
+def test_model_config_change_and_rollback_both_take_effect_live(fixture_config):
+    """Workstream J audit item: 'rollback of model/config/executor
+    changes'. config/models.yaml is read fresh on every _load_yaml() call
+    (no lru_cache/module-level caching anywhere in this file) — a
+    binding edit takes effect on the very next resolve_alias() call, and
+    critically, so does reverting it back. This is what actually makes a
+    rollback safe: there is no cached/stale state anywhere in this
+    process that a config revert could fail to reach."""
+    models_path = fixture_config / "models.yaml"
+    original = yaml.safe_load(models_path.read_text())
+
+    assert estate_router.resolve_alias("local-fast")["concrete_model"] == "test-model-fast"
+
+    # Simulate a model/config change (e.g. a binding swap during an
+    # incident) landing live.
+    changed = yaml.safe_load(models_path.read_text())
+    for cap in changed["capabilities"]:
+        if cap["alias"] == "local-fast":
+            cap["binding"] = "test-model-changed"
+    models_path.write_text(yaml.safe_dump(changed))
+    assert estate_router.resolve_alias("local-fast")["concrete_model"] == "test-model-changed"
+
+    # Roll it back — must take effect immediately too, not just the
+    # forward change.
+    models_path.write_text(yaml.safe_dump(original))
+    assert estate_router.resolve_alias("local-fast")["concrete_model"] == "test-model-fast"
