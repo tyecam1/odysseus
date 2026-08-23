@@ -36,18 +36,38 @@ repos:
   - id: misumi
     description: Aoteru persona and household policy
     authority: misumi
-    remote: null  # not yet known to this registry — no clone found on any registered host
+    remote: https://github.com/tyecam1/misumi.git
+    default_branch: main
     root_var: HOUSEHOLD_ROOT
     path: "${HOUSEHOLD_ROOT}/misumi"
     canonical: false
+    notes: >-
+      Remote confirmed 2026-08-23 (final convergence pass) via
+      authenticated `gh repo view tyecam1/misumi` (private, default
+      branch main) — no longer `remote: null`. Live-cloned read-only on
+      this host under HOUSEHOLD_ROOT=/home/agent/projects/household (a
+      controlled lab-side location for governance/validation, per
+      docs/aoteru-final-convergence-activation.agent-task.md item B) —
+      this does NOT redefine misumi's canonical location, which stays a
+      home-host decision.
 
   - id: obsidian-phd
     description: PhD knowledge, research workflow, evidence/trust/write gates
     authority: obsidian-phd
-    remote: null  # not yet known to this registry — no clone found on any registered host
+    remote: https://github.com/tyecam1/obsidian-PhD.git
+    default_branch: main
     root_var: PHD_ROOT
     path: "${PHD_ROOT}/obsidian-PhD"
     canonical: false
+    notes: >-
+      Remote confirmed 2026-08-23 (final convergence pass) via
+      authenticated `gh repo view tyecam1/obsidian-PhD` (private, default
+      branch main) — no longer `remote: null`. Live-cloned read-only on
+      this host under PHD_ROOT=/home/agent/projects/phd (a controlled
+      lab-side location for governance/validation, per docs/aoteru-
+      final-convergence-activation.agent-task.md item B) — this does NOT
+      redefine obsidian-PhD's canonical location, which stays a
+      home-host decision.
 
   - id: s2-e1-ros2-measurement-spine
     description: >-
@@ -55,11 +75,16 @@ repos:
       inventory (docs/aoteru-long-horizon-autonomous-convergence.agent-
       task.md) — the glovebox Jetson's likely experiment-edge software,
       per config/estate.yaml's glovebox capability tags (ros2, realsense,
-      experiment-capture). Was entirely unregistered in this file before
-      this entry (a genuine gap, not a deferred/unavailable-host item —
-      the other repos here at least had a prior `remote: null` placeholder).
+      experiment-capture).
     authority: s2-e1-ros2-measurement-spine
-    remote: https://github.com/tyecam1/s2-e1-ros2-measurement-spine.git  # named explicitly by the operator/task doc — treated as confirmed, unlike the guessed fields below
-    root_var: PHD_ROOT  # ASSUMED (same root as obsidian-phd, since this is PhD robotics work) — not live-confirmed; correct if wrong
-    path: "${PHD_ROOT}/s2-e1-ros2-measurement-spine"  # ASSUMED directory name — not live-confirmed
+    remote: https://github.com/tyecam1/s2-e1-ros2-measurement-spine.git
+    default_branch: main
+    root_var: PHD_ROOT  # confirmed correct 2026-08-23 — real clone landed at PHD_ROOT/s2-e1-ros2-measurement-spine with no path mismatch
+    path: "${PHD_ROOT}/s2-e1-ros2-measurement-spine"  # confirmed 2026-08-23 — matches the real repo name exactly (gh repo view), no longer an assumption
     canonical: false
+    notes: >-
+      Remote/path ASSUMED fields from an earlier pass now confirmed
+      2026-08-23 (final convergence pass) via authenticated `gh repo
+      view tyecam1/s2-e1-ros2-measurement-spine` (private, default
+      branch main) and a real clone at PHD_ROOT/s2-e1-ros2-measurement-
+      spine on this host — path/root_var needed no correction.
