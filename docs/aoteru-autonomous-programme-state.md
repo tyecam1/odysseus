@@ -168,13 +168,50 @@ see `[[project-aoteru-p12-estate-convergence]]`.
 
 - id: F-cross-repo-governance
   outcome: proven read/park/execute across tyecam1/obsidian-PhD, s2-e1-ros2-measurement-spine, misumi
-  status: eligible
+  status: blocked
   priority: medium
   depends_on: []
-  blocker: null
-  next_action: inventory config/repositories.yaml registrations and reachability before any cross-repo action.
-  evidence: []
-  last_verified_commit: null
+  blocker: >-
+    misumi and obsidian-phd have no known git remote (`remote: null` — not
+    a lab-host-only gap, this registry has never had one for either) and
+    no clone exists on any host this session can reach; s2-e1-ros2-
+    measurement-spine was entirely unregistered until this session (now
+    added, with an ASSUMED not confirmed root_var/path — see evidence).
+    None of items 2-6 (source-pointer handoff, repo-specific instruction
+    loading, parking a real repo, one representative real task) can be
+    honestly exercised without operator-confirmed remotes/paths or an
+    actual clone reachable from a session. Never fabricated by mutating
+    or inventing access to PhD/robotics work to manufacture a demo.
+  next_action: >-
+    operator: confirm the real git remote for misumi and obsidian-phd (this
+    registry has genuinely never known them), and confirm/correct the
+    ASSUMED root_var=PHD_ROOT + path for s2-e1-ros2-measurement-spine.
+    Once any one of the three is clone-reachable from a session (lab or
+    laptop, once PHD_ROOT/HOUSEHOLD_ROOT are set in that host's
+    ~/.aoteru/config.local.json), re-run this workstream's items 1-6
+    against it for real.
+  evidence:
+    - "Live-confirmed via `agent status` on lab (2026-08-23): only
+      `odysseus` and `odysseus-upstream-lab` resolve on this host; `misumi`
+      and `obsidian-phd` correctly report 'unresolved: HOUSEHOLD_ROOT/
+      PHD_ROOT not set' — truthful failure, not a guess, matching the
+      registry's own stated contract. This IS the correct proof of item 1's
+      'read-only resolution... fails truthfully' half, just not the
+      'succeeds and returns real content' half, since no clone exists."
+    - "Added config/repositories.yaml's missing s2-e1-ros2-measurement-spine
+      entry (previously absent entirely, unlike misumi/obsidian-phd which
+      at least had a `remote: null` placeholder) — remote taken from the
+      task doc's explicit naming (tyecam1/s2-e1-ros2-measurement-spine,
+      treated as confirmed); root_var/path are marked ASSUMED (inferred
+      from obsidian-phd's PHD_ROOT convention, not live-verified) so a
+      human correction is unambiguous rather than silently trusted."
+    - "Item 4 (parking/lease/heartbeat/reclaim on a safe fixture) is
+      already covered independent of any real cross-repo clone —
+      tests/test_agent_cli_parking_lease.py exercises the full
+      stale-reclaim/live-conflict lifecycle against a disposable fixture,
+      confirmed still passing (5/5) this session. Not re-done here; this
+      is a note that it was already satisfied, not a new gap."
+  last_verified_commit: <pending this checkpoint's commit>
 
 - id: G-glovebox-jetson
   outcome: deployable experiment-edge bootstrap; live qualification when reachable

@@ -48,3 +48,18 @@ repos:
     root_var: PHD_ROOT
     path: "${PHD_ROOT}/obsidian-PhD"
     canonical: false
+
+  - id: s2-e1-ros2-measurement-spine
+    description: >-
+      ROS 2 measurement/experiment codebase named in the Workstream F
+      inventory (docs/aoteru-long-horizon-autonomous-convergence.agent-
+      task.md) — the glovebox Jetson's likely experiment-edge software,
+      per config/estate.yaml's glovebox capability tags (ros2, realsense,
+      experiment-capture). Was entirely unregistered in this file before
+      this entry (a genuine gap, not a deferred/unavailable-host item —
+      the other repos here at least had a prior `remote: null` placeholder).
+    authority: s2-e1-ros2-measurement-spine
+    remote: https://github.com/tyecam1/s2-e1-ros2-measurement-spine.git  # named explicitly by the operator/task doc — treated as confirmed, unlike the guessed fields below
+    root_var: PHD_ROOT  # ASSUMED (same root as obsidian-phd, since this is PhD robotics work) — not live-confirmed; correct if wrong
+    path: "${PHD_ROOT}/s2-e1-ros2-measurement-spine"  # ASSUMED directory name — not live-confirmed
+    canonical: false
