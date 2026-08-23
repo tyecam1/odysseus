@@ -58,6 +58,9 @@ docs/aoteru-cold-reboot-checklist.md if it's the lab host.
 python aoteru.py route --capability local-fast              # dry-run: what would this route to?
 python aoteru.py ask "summarise the last 3 commits" --capability local-fast
 python aoteru.py ask "refactor X" --capability code-strong --allow-paid   # opt in to paid escalation
+python aoteru.py park-status                                 # estate-wide active park-lease view
+python aoteru.py heartbeat <repo-id>                          # renew the backend host's lease for a repo
+python aoteru.py release <repo-id>                            # release the backend host's lease for a repo
 ```
 
 `--allow-paid` only takes effect if the token has `estate:execute` scope
@@ -65,6 +68,13 @@ and the resolved local capability is unbound/unavailable — it never
 forces paid execution when a qualified local route exists (same
 economic-ladder rule as every other caller of
 `src.estate_router.run_task`).
+
+`heartbeat`/`release` act on whichever host is actually running the
+backend process this client is pointed at (resolved server-side via
+`src.estate_router.current_host_id()`) — a laptop cannot renew or
+release a lease held on a *different* host through this surface; that
+still requires that other host's own session/operator, same restriction
+`scripts/agent`'s CLI already enforces.
 
 ## Windows
 
@@ -89,7 +99,13 @@ B).
   that blocks until `/api/estate/run` returns, matching the backend's own
   current synchronous execution model (src/estate_router.py's
   `run_task()`).
-- No `park`/`release`/`heartbeat`/`where` subcommands yet — those need an
-  HTTP-facing parking API; today `scripts/agent`'s park/release/heartbeat
-  commands talk to the database directly and have no REST equivalent for
-  a checkout-less caller to hit. Real follow-up work, not done here.
+- `park-status`/`heartbeat`/`release` are now here (backed by
+  `GET /api/estate/park/status` and `POST /api/estate/park/{repo_id}/
+  heartbeat|release`). No `park`/`where` subcommand yet — acquiring a
+  lease needs repo-path resolution and a git-clean check that only exist
+  in `scripts/agent` today; exposing `park` at the HTTP layer without
+  that check would let a remote caller park a dirty/nonexistent
+  worktree, so it deliberately stays CLI-only for now. `where` (listing
+  the *current* repo's own lease from a checkout) has no laptop-side
+  analogue since a checkout-less client has no "current repo" — use
+  `park-status` for the estate-wide view instead.

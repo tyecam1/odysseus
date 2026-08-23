@@ -130,3 +130,79 @@ def test_ask_reports_scope_denial_clearly(client, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert rc == 1
     assert "estate:execute" in out
+
+
+class FakeResponse:
+    def __init__(self, payload):
+        self.status = 200
+        self._payload = payload
+    def read(self):
+        return json.dumps(self._payload).encode()
+    def __enter__(self):
+        return self
+    def __exit__(self, *a):
+        return False
+
+
+def test_heartbeat_hits_the_correct_endpoint(client, monkeypatch):
+    client.main(["config", "set", "--url", "http://lab:7001", "--token", "ody_x"])
+    captured = {}
+
+    def fake_urlopen(req, timeout=None):
+        captured["url"] = req.full_url
+        captured["method"] = req.get_method()
+        return FakeResponse({"ok": True, "lease_id": "abc", "repo_id": "odysseus"})
+    monkeypatch.setattr(client.urllib.request, "urlopen", fake_urlopen)
+
+    rc = client.main(["heartbeat", "odysseus"])
+    assert rc == 0
+    assert captured["url"].endswith("/api/estate/park/odysseus/heartbeat")
+    assert captured["method"] == "POST"
+
+
+def test_release_hits_the_correct_endpoint(client, monkeypatch):
+    client.main(["config", "set", "--url", "http://lab:7001", "--token", "ody_x"])
+    captured = {}
+
+    def fake_urlopen(req, timeout=None):
+        captured["url"] = req.full_url
+        return FakeResponse({"ok": True, "lease_id": "abc", "repo_id": "odysseus"})
+    monkeypatch.setattr(client.urllib.request, "urlopen", fake_urlopen)
+
+    rc = client.main(["release", "odysseus"])
+    assert rc == 0
+    assert captured["url"].endswith("/api/estate/park/odysseus/release")
+
+
+def test_heartbeat_reports_no_active_lease_clearly(client, monkeypatch, capsys):
+    client.main(["config", "set", "--url", "http://lab:7001", "--token", "ody_x"])
+
+    def fake_urlopen(req, timeout=None):
+        import io
+        import urllib.error
+        raise urllib.error.HTTPError(
+            req.full_url, 409, "Conflict", {},
+            io.BytesIO(json.dumps({"detail": "no active lease for 'odysseus'"}).encode()),
+        )
+    monkeypatch.setattr(client.urllib.request, "urlopen", fake_urlopen)
+
+    rc = client.main(["heartbeat", "odysseus"])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "no active lease" in out
+
+
+def test_park_status_lists_active_leases(client, monkeypatch, capsys):
+    client.main(["config", "set", "--url", "http://lab:7001", "--token", "ody_x"])
+    captured = {}
+
+    def fake_urlopen(req, timeout=None):
+        captured["url"] = req.full_url
+        return FakeResponse({"active_park_leases": [{"repo_id": "odysseus", "stale": False}]})
+    monkeypatch.setattr(client.urllib.request, "urlopen", fake_urlopen)
+
+    rc = client.main(["park-status"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert captured["url"].endswith("/api/estate/park/status")
+    assert "odysseus" in out

@@ -15,6 +15,9 @@ runs and used immediately.
     aoteru route --capability code-fast
     aoteru ask "summarise the last 3 commits" --capability local-fast
     aoteru ask "refactor X" --capability code-strong --allow-paid
+    aoteru park-status
+    aoteru heartbeat <repo-id>
+    aoteru release <repo-id>
 
 Config lives at ~/.aoteru/client.json (Windows: %USERPROFILE%\\.aoteru\\
 client.json), created 0600 where the OS supports it. The token is never
@@ -146,6 +149,53 @@ def cmd_route(args: argparse.Namespace) -> int:
     return 0 if result["status"] == 200 else 1
 
 
+def cmd_park_status(args: argparse.Namespace) -> int:
+    """Estate-wide active-lease view over HTTP
+    (GET /api/estate/park/status) — the laptop-side equivalent of an
+    operator's `agent status`, without needing a repo checkout."""
+    cfg = _load_config()
+    result = _request(cfg, "GET", "/api/estate/park/status")
+    if result["status"] in (401, 403):
+        print(f"denied: {result['body']} — token needs estate:read or estate:execute scope")
+        return 1
+    print(json.dumps(result["body"], indent=2))
+    return 0 if result["status"] == 200 else 1
+
+
+def cmd_heartbeat(args: argparse.Namespace) -> int:
+    """Renew the caller's active ParkLease over HTTP
+    (POST /api/estate/park/{repo_id}/heartbeat) — the laptop-side
+    equivalent of `agent heartbeat`. Only renews the lease the backend
+    host itself already holds; it cannot renew a lease on a host it
+    isn't (see routes/estate_routing_routes.py's park_heartbeat)."""
+    cfg = _load_config()
+    result = _request(cfg, "POST", f"/api/estate/park/{args.repo_id}/heartbeat")
+    if result["status"] in (401, 403):
+        print(f"denied: {result['body']} — token needs the estate:execute scope for `heartbeat`")
+        return 1
+    if result["status"] == 409:
+        print(f"no active lease to renew: {result['body']}")
+        return 1
+    print(json.dumps(result["body"], indent=2))
+    return 0 if result["status"] == 200 else 1
+
+
+def cmd_release(args: argparse.Namespace) -> int:
+    """Release the caller's active ParkLease over HTTP
+    (POST /api/estate/park/{repo_id}/release) — the laptop-side
+    equivalent of `agent release`."""
+    cfg = _load_config()
+    result = _request(cfg, "POST", f"/api/estate/park/{args.repo_id}/release")
+    if result["status"] in (401, 403):
+        print(f"denied: {result['body']} — token needs the estate:execute scope for `release`")
+        return 1
+    if result["status"] == 409:
+        print(f"no active lease to release: {result['body']}")
+        return 1
+    print(json.dumps(result["body"], indent=2))
+    return 0 if result["status"] == 200 else 1
+
+
 def cmd_ask(args: argparse.Namespace) -> int:
     cfg = _load_config()
     envelope = {
@@ -181,6 +231,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_route.add_argument("--repo", default=None)
     p_route.add_argument("--capability", default=None, help="capability alias, e.g. local-fast, code-strong")
 
+    sub.add_parser("park-status", help="estate-wide active park-lease view")
+
+    p_heartbeat = sub.add_parser("heartbeat", help="renew the backend host's active lease for a repo")
+    p_heartbeat.add_argument("repo_id")
+
+    p_release = sub.add_parser("release", help="release the backend host's active lease for a repo")
+    p_release.add_argument("repo_id")
+
     p_ask = sub.add_parser("ask", help="route and execute an objective")
     p_ask.add_argument("objective")
     p_ask.add_argument("--task-class", default="unclassified")
@@ -201,6 +259,9 @@ def main(argv: list[str] | None = None) -> int:
         "status": cmd_status,
         "route": cmd_route,
         "ask": cmd_ask,
+        "park-status": cmd_park_status,
+        "heartbeat": cmd_heartbeat,
+        "release": cmd_release,
     }
     return handlers[args.command](args)
 
