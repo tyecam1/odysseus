@@ -67,13 +67,21 @@ def main() -> int:
 
     print(f"replay: {source_root} -> {args.target}")
     total_applied = 0
+    total_conflicting = 0
     for store, stats in result.items():
         print(f"  {store:<12} source={stats['source_count']:>4}  applied={stats['applied']:>4}  "
-              f"already_present={stats['already_present']:>4}  "
+              f"already_present={stats['already_present']:>4}  conflicting={stats['conflicting']:>4}  "
               f"corrupt(source/target)={stats['source_corrupt_lines']}/{stats['target_corrupt_lines']}")
         total_applied += stats["applied"]
+        total_conflicting += stats["conflicting"]
     print()
     print(f"{total_applied} record(s) newly applied. Re-run any time — already-applied records are skipped.")
+    if total_conflicting:
+        print(
+            f"WARNING: {total_conflicting} record(s) exist on both sides under the same id but with "
+            "different content — NOT overwritten either way. Resolve manually; see conflicting_ids "
+            "in --json output for the exact ids."
+        )
     return 0
 
 

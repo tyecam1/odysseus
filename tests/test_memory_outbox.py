@@ -127,3 +127,65 @@ def test_raw_records_rejects_unknown_store(tmp_path):
         assert False, "expected ValueError"
     except ValueError:
         pass
+
+
+def test_replay_detects_diverging_content_for_same_id_as_conflict(tmp_path):
+    """Workstream I: 'backup/restore and conflict checks'. If both sides
+    independently hold a record under the same id but with different
+    content (e.g. each store's own copy was separately confirmed/edited
+    after a prior partial sync), a naive id-only skip would silently
+    hide the divergence forever. Must be reported, not folded into
+    already_present, and never auto-overwritten."""
+    source = _memory(tmp_path / "lab")
+    target = _memory(tmp_path / "home")
+
+    cap = source.capture("needs confirmation", persona="kurisu")
+    # Seed target with the SAME id but genuinely different content —
+    # simulates the two sides diverging independently rather than one
+    # being a strict subset of the other.
+    diverged = dict(cap)
+    diverged["summary"] = "a different summary than the source has"
+    target.append_record("capsules", diverged)
+
+    result = replay(source, target)
+
+    assert result["capsules"]["conflicting"] == 1
+    assert result["capsules"]["conflicting_ids"] == [cap["id"]]
+    assert result["capsules"]["applied"] == 0
+    assert result["capsules"]["already_present"] == 0
+
+    # Target's own version must not have been overwritten by replay.
+    target_record = target.get_capsule(cap["id"])
+    assert target_record["summary"] == "a different summary than the source has"
+
+
+def test_replay_identical_content_for_same_id_is_not_a_conflict(tmp_path):
+    """The common, benign case — both sides genuinely have the exact same
+    record (e.g. from a prior full sync) — must still count as
+    already_present, not a false-positive conflict."""
+    source = _memory(tmp_path / "lab")
+    target = _memory(tmp_path / "home")
+    source.capture("a stable fact", persona="kurisu")
+
+    replay(source, target)
+    second = replay(source, target)
+
+    assert second["capsules"]["conflicting"] == 0
+    assert second["capsules"]["already_present"] == 1
+
+
+def test_replay_conflict_in_one_store_does_not_block_others(tmp_path):
+    source = _memory(tmp_path / "lab")
+    target = _memory(tmp_path / "home")
+
+    cap = source.capture("needs confirmation", persona="kurisu")
+    diverged = dict(cap)
+    diverged["summary"] = "diverged"
+    target.append_record("capsules", diverged)
+
+    source.create_handoff("kurisu", "aoteru", "please review")
+    result = replay(source, target)
+
+    assert result["capsules"]["conflicting"] == 1
+    assert result["handoffs"]["applied"] == 1
+    assert result["handoffs"]["conflicting"] == 0
