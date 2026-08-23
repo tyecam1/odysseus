@@ -383,13 +383,36 @@ see `[[project-aoteru-p12-estate-convergence]]`.
 
 - id: L-real-work-validation
   outcome: representative end-to-end tasks across local/paid/multimodal/experiment-priority/blocked-host
-  status: eligible
+  status: active
   priority: high
   depends_on: [B, C, D, E, F]
-  blocker: null
-  next_action: run only once the underlying workstreams have real surfaces to validate; premature now.
-  evidence: []
-  last_verified_commit: null
+  blocker: >-
+    PhD evidence/retrieval and S2-E1 ROS/log tasks specifically (as
+    opposed to the generic unavailable-host case, which WAS run) still
+    need a reachable clone — same F blocker, not re-litigated here.
+  next_action: >-
+    remaining: re-run the two blocked task classes for real once F's
+    clone/remote gap is resolved by the operator; a repo-reconnaissance
+    task against tyecam1/s2-e1-ros2-measurement-spine specifically (ROS/
+    log interpretation) once reachable.
+  evidence:
+    - "Full run recorded in docs/aoteru-l-real-work-validation-evidence.md
+      with real decision_ids, not a second offline harness: (1) local
+      task via run_task (qwen3:8b, retries:0, real RoutingDecision row);
+      (2) live multimodal task (gemma4:12b, a real base64 image round-
+      tripped end-to-end, not just regression-tested); (3) experiment-
+      priority reservation correctly withholding local-strong while
+      leaving local-fast untouched, live-toggled and cleaned up; (4) one
+      real paid Codex escalation reviewing this session's own security-
+      relevant scope-gate change — found a genuine environment defect
+      (bwrap 0.6.1 rejects a codex-cli 0.116.0 sandbox flag, so codex
+      could not actually read repo files despite -C/--sandbox read-only)
+      rather than fabricating a clean success, and was deliberately not
+      retried; (5) `agent park obsidian-phd` — a real registered F-gap
+      repo — produced a clean truthful block (exit 1, no traceback, no
+      guessed path), satisfying L's own 'one intentionally unavailable-
+      host task that produces a durable truthful block' item."
+  last_verified_commit: <pending this checkpoint's commit>
 ```
 
 ## Notes for the next session/turn
