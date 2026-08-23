@@ -44,13 +44,46 @@ capabilities:
       matches plan §9's own "GPT-OSS 20B" candidate. Same single-prompt
       caveat as local-fast.
   - alias: code-fast
-    binding: null
+    binding: ornith:9b
+    evidence: docs/aoteru-lm2-model-discovery-evidence.md
+    note: >-
+      LM3 (2026-08-23): production Ollama upgraded 0.19.0 -> 0.32.15
+      (requires >= 0.30.11 per `ollama show ornith:9b`); pulled cleanly
+      onto production. Bound after a production-path smoke
+      (code_repair-01, real `src.estate_router.execute_local` against
+      127.0.0.1:11434) passed 3/3 pytest, matching LM2's 39/39-trial
+      evidence. See docs/aoteru-lm3-production-runtime-promotion-evidence.md.
   - alias: code-strong
     binding: null
   - alias: reasoning-strong
-    binding: null
+    binding: nemotron-3.5-lightning:30b-a3b
+    evidence: docs/aoteru-lm2-model-discovery-evidence.md
+    note: >-
+      LM3 (2026-08-23): production Ollama upgraded 0.19.0 -> 0.32.15
+      (requires >= 0.32.9 per `ollama show`); pulled cleanly onto
+      production (25GB). Bound after a production-path smoke
+      (scientific_reasoning-01, real `src.estate_router.execute_local`
+      against 127.0.0.1:11434) passed keyword gate at 34.9s, consistent
+      with LM2's 36/39-trial evidence and ~29s avg latency. No incumbent
+      to regress — this alias was previously unbound. See
+      docs/aoteru-lm3-production-runtime-promotion-evidence.md.
   - alias: vision
-    binding: null
+    binding: gemma4:12b
+    evidence: docs/aoteru-lm2-model-discovery-evidence.md
+    note: >-
+      LM3 (2026-08-23): production Ollama upgraded 0.19.0 -> 0.32.15
+      (requires >= 0.30.5 per `ollama show`); `gemma4:12b` pulled cleanly
+      from the Ollama library onto production. Artifact mismatch vs LM2's
+      promotable evidence disclosed: LM2's 37/42 (vision 3/3) result ran
+      the official QAT Q4_0 GGUF directly via llama.cpp, not this
+      Ollama-library Q4_K_M build — not assumed equivalent. Instead ran
+      the tiny equivalence check the task allows: doc_image-01 through the
+      real production path (`src.estate_router.execute_local` against
+      127.0.0.1:11434) — model correctly read "7421" MiB from the image
+      (11.9B dense, same architecture/param count as LM2's tested
+      artifact). Bound on that production-path parity result, not on
+      LM2's llama.cpp evidence directly. See
+      docs/aoteru-lm3-production-runtime-promotion-evidence.md.
   - alias: embedding
     binding: qwen3-embedding:8b
     note: structural binding only (it is literally an embedding model) — no retrieval-quality benchmark run yet.
@@ -107,12 +140,17 @@ installed_candidates:
       Ollama (0.19.0 has no gemma4 architecture support) and cannot be
       routed to yet — see evidence doc blocker/operator action.
   - model: gemma4:12b
-    state: benchmark-only
+    state: production-installed
     note: >-
-      LM1: screened (3 trials) via a temporary, non-production second
-      Ollama instance, since torn down. NOT installed on production
-      Ollama (0.19.0 has no gemma4 architecture support) and cannot be
-      routed to yet — see evidence doc blocker/operator action.
+      LM1: screened (3 trials, 11/13) via a temporary, non-production
+      second Ollama instance. LM3 (2026-08-23): after the Ollama 0.19.0
+      -> 0.32.15 upgrade, this Ollama-library artifact (Q4_K_M, requires
+      >= 0.30.5) pulled cleanly onto production. This is NOT the exact
+      artifact LM2's promotable vision evidence used (see
+      gemma4:12b-qat-gguf-direct below) — bound to capabilities.vision on
+      its own production-path equivalence check (doc_image-01 passed
+      through real execute_local), not on LM2's llama.cpp numbers
+      directly. See docs/aoteru-lm3-production-runtime-promotion-evidence.md.
   - model: qwen3.6:35b
     state: production-installed
     note: >-
@@ -141,15 +179,13 @@ installed_candidates:
       bound. Cannot bind to production execute_local until the operator
       upgrades production Ollama regardless — see LM2 evidence doc.
   - model: ornith:9b
-    state: benchmark-only
+    state: production-installed
     note: >-
       LM2: screened + 3-trial finalist sweep via the temporary second
-      Ollama instance (production 0.19.0 412s on this manifest, same
-      blocker class as Gemma 4/lfm2.5:8b above). Perfect 39/39 across 3
-      trials, avg 3.6-6.1s/call — the strongest evidence any LM2
-      candidate produced. capabilities.code-fast intentionally stays null
-      because production execute_local cannot reach this model yet; see
-      "Exact safe action" in the LM2 evidence doc for the unblock.
+      Ollama instance. Perfect 39/39 across 3 trials, avg 3.6-6.1s/call —
+      the strongest evidence any LM2 candidate produced. LM3 (2026-08-23):
+      pulled cleanly onto production after the Ollama 0.19.0 -> 0.32.15
+      upgrade; production-path smoke passed; bound to capabilities.code-fast.
   - model: gemma4:12b-qat-gguf-direct
     state: benchmark-only
     note: >-
@@ -158,21 +194,23 @@ installed_candidates:
       production Ollama involved at all) -- the specific "QAT vs
       Ollama-library" comparison LM1 flagged as unresolved. 3 trials =
       37/42 (88.1%), vision (doc_image-01) passed all 3 -- beats LM1's
-      gemma4:12b Ollama-library result (11/13). capabilities.vision stays
-      null: this evidence used neither production Ollama nor the second
-      scratch Ollama instance, so it cannot bind either; see LM2 evidence
-      doc for the unblock (same production Ollama upgrade action as the
-      other benchmark-only rows above, followed by pulling gemma4:12b
-      directly onto production once unblocked).
+      gemma4:12b Ollama-library result (11/13). Stays benchmark-only: this
+      exact artifact (llama.cpp, official QAT Q4_0 GGUF) was never
+      installed on production and LM3 (2026-08-23) did not assume it
+      equivalent to the Ollama-library gemma4:12b bound to
+      capabilities.vision -- that binding rests on its own production-path
+      equivalence check (doc_image-01 via real execute_local), not on this
+      row's numbers. This row remains a distinct, not reproduced-in-
+      production artifact for the record.
   - model: nemotron-3.5-lightning:30b-a3b
-    state: benchmark-only
+    state: production-installed
     note: >-
       LM2: screened + 3-trial finalist sweep via the temporary second
-      Ollama instance (production 0.19.0 412s on this manifest). 36/39
-      pass across 3 trials (92.3%), no errors/timeouts; reasoning-strong
-      has zero incumbent so this clears the bar on evidence alone, but
-      capabilities.reasoning-strong stays null for the same production
-      Ollama version reason as ornith:9b/lfm2.5:8b — see LM2 evidence doc.
+      Ollama instance. 36/39 pass across 3 trials (92.3%), no
+      errors/timeouts; reasoning-strong had zero incumbent so this cleared
+      the bar on evidence alone. LM3 (2026-08-23): pulled cleanly onto
+      production after the Ollama 0.19.0 -> 0.32.15 upgrade; production-path
+      smoke passed; bound to capabilities.reasoning-strong.
 
 # Economic ladder — seed policy only; P7/live benchmark evidence overrides
 # it (docs/aoteru-model-host-routing-contract.md "Default economic ladder").
