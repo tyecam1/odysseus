@@ -11,10 +11,14 @@
 # file does not re-derive host state, it reads it. Kept here only as the
 # routing-specific interpretation of that state.
 host_eligibility:
+  laptop:
+    execution_worker: false  # human control surface, never a routing target (P12: renamed from `interface`, which now names the separate deferred interface PC)
   interface:
-    execution_worker: false  # human control surface, never a routing target
+    execution_worker: false  # deferred/unreachable interface PC (config/estate.yaml `interface-pc`) — human-facing front door, never a routing target either way
   lab:
     execution_worker: true
+  experiment-edge:
+    execution_worker: false  # glovebox Jetson (P12): experiment-edge capability tags only, never generic execution_worker eligibility
   home:
     execution_worker: true
     # Never hardcode this true from prose. Real eligibility is computed at

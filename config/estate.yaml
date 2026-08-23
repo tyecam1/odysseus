@@ -5,8 +5,19 @@
 # false` / `os: unknown` mean exactly that: named, not yet confirmed. This
 # execution session's own filesystem/shell access reaches only
 # `hz2-workstation` (lab) — that is a session limitation, not a statement
-# about the estate's real topology, which the operator has now specified as
-# laptop (`desktop-7dj1hma`) / home (`desktop-in7o23d`) / lab (this host).
+# about the estate's real topology.
+#
+# P12 (2026-08-23, docs/aoteru-p12-active-estate-convergence.md) topology
+# correction: this file previously conflated "laptop" and "interface" as
+# one entity (`desktop-7dj1hma`, role: interface). Operator now states
+# these are two distinct machines: `desktop-7dj1hma` is the laptop
+# controller (currently reachable, live on tailnet), and the interface PC
+# is a *separate*, currently-unreachable box (older Misumi deployment
+# material references `192.168.4.37:8770` for it, but that identity is
+# unverified — do not assume it still applies). The currently-reachable
+# active estate is laptop + lab (this host) + glovebox Jetson; home and
+# the separate interface PC are registered-but-ineligible, deferred per
+# P12.7, not failed.
 #
 # Services are logical names (plan section 5.6). None are provisioned yet —
 # that's P2 (private connectivity). `endpoint: null` means "not live";
@@ -62,18 +73,47 @@ hosts:
 
   - id: desktop-7dj1hma
     hostname: DESKTOP-7DJ1HMA
-    role: interface  # operator's controller/laptop machine (plan §3.1) — NOT a parking worker
+    role: laptop  # operator's human controller/conversational surface (P12) — NOT a parking worker, NOT the interface PC
     os: windows
     tailscale: true
     tailscale_dns: desktop-7dj1hma.tail171792.ts.net
     inventoried_at: "2026-08-19"
+    verified_live_at: "2026-08-23"  # `tailscale status` from lab: 100.75.44.26, active direct connection
     notes: >-
-      Corrected 2026-08-19 (operator, twice): this is the laptop/interface
-      controller, not a worker. Whether *lab* can reach *this* machine is
-      not a plan requirement and is not tracked as a blocker — the required
-      direction is this machine reaching lab/home, which needs a session
-      running on the laptop itself to test. Do not assume Tailscale SSH
-      works here regardless: it does not terminate SSH on Windows.
+      Corrected 2026-08-19 (operator, twice): this is the laptop
+      controller, not a worker. Corrected again 2026-08-23 (P12, operator
+      truth): this is NOT the separate interface PC — those were
+      previously conflated under `role: interface`. See the standalone
+      `interface-pc` entry below for the deferred, distinct machine.
+      Whether *lab* can reach *this* machine is not a plan requirement and
+      is not tracked as a blocker — the required direction is this machine
+      reaching lab/home, which needs a session running on the laptop
+      itself to test. Do not assume Tailscale SSH works here regardless:
+      it does not terminate SSH on Windows. Live at 2026-08-23 per
+      `tailscale status` run from lab (100.75.44.26, active direct
+      185.17.164.207:56189) — reachability from lab's *view* only; the
+      required laptop→lab direction is still untested end-to-end (no
+      session has run on the laptop itself).
+
+  - id: interface-pc
+    hostname: unknown  # do not guess — operator states it is a separate machine from desktop-7dj1hma; identity not yet live-confirmed
+    role: interface
+    os: unknown
+    tailscale: false
+    verified: false
+    inventoried_at: "2026-08-23"
+    notes: >-
+      P12 topology repair: split out of the former conflated
+      `desktop-7dj1hma` (role: interface) entity. Operator states the
+      interface PC is a genuinely separate machine, currently unreachable
+      via tailnet. Older Misumi deployment material references
+      `192.168.4.37:8770` for an interface-role service, but that
+      identity/hardware is unverified and MUST NOT be trusted without live
+      confirmation. Registered-but-ineligible/deferred, not failed — see
+      P12.7 re-entry checklist in
+      docs/aoteru-p12-active-estate-convergence-evidence.md. Intended
+      future purpose: persistent Aoteru/Misumi human-facing front door
+      (svc:aoteru), phone/mobile bridge.
 
   - id: desktop-in7o23d
     hostname: DESKTOP-IN7O23D  # per docs/operations/odysseus-host-deployment.md
@@ -91,20 +131,37 @@ hosts:
       confirmed live through the existing laptop→home LAN SSH path — that
       requires a session running on the laptop, which this session is not.
       Not present in `tailscale status` from the lab host under either
-      spelling as of this check.
+      spelling as of this check. P12 (2026-08-23): explicitly
+      registered-but-ineligible/deferred, not a P12 failure — see the
+      home-PC re-entry checklist in
+      docs/aoteru-p12-active-estate-convergence-evidence.md. Its absence
+      does not block laptop/lab/glovebox convergence.
 
   - id: glovebox
     hostname: glovebox
-    role: unassigned
+    role: experiment-edge  # P12: Jetson Orin Nano, ROS2/RealSense research-experiment host — never a general LLM/background worker
     os: linux
     tailscale: true
     tailscale_dns: glovebox.tail171792.ts.net
     inventoried_at: "2026-08-19"
+    verified_live_at: null
     notes: >-
-      Offline at inventory time (last seen 32d ago). Not mentioned in the
-      operator's laptop/home/lab topology — role relative to that topology
-      is genuinely unknown, not assumed. Out of scope until clarified and
-      online.
+      P12 (2026-08-23): operator states this Jetson Orin Nano is currently
+      connected and used for research experiments; role corrected from
+      `unassigned` to `experiment-edge` on that operator statement. Live
+      re-check from lab this pass (`tailscale status`, `tailscale ping`)
+      still shows it OFFLINE, last seen 36d ago — a real discrepancy
+      between operator statement and this session's own tailnet evidence,
+      recorded truthfully rather than silently trusting either side. Prior
+      research records (docs/aoteru-lab-local-model-strategy-2026-08-20.md
+      and related) associate it with Jetson Linux/JetPack and S2-E1
+      experiment storage at `/data/s2-e1`; treat all such detail as
+      hypothesis, not confirmed, until it is next live-reachable and
+      re-inventoried (P12.5). Capability tags intentionally left unset
+      until live-verified — do not route `ros2`/`realsense`/
+      `experiment-capture` work here on inventoried-but-unreachable status.
+      Never eligible for generic `local-fast`/`code-fast`/background
+      indexing regardless of reachability (P12 boundary 4).
 
 services:
   - id: svc:aoteru
