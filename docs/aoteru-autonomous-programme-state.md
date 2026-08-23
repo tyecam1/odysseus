@@ -349,13 +349,37 @@ see `[[project-aoteru-p12-estate-convergence]]`.
 
 - id: K-operator-experience
   outcome: converged agent status / diagnostics / handbook
-  status: eligible
+  status: active
   priority: medium
   depends_on: []
   blocker: null
-  next_action: not yet started this session; likely sequenced after B/C/E produce real surfaces to expose.
-  evidence: []
-  last_verified_commit: null
+  next_action: >-
+    remaining: fold active-ParkLease and recent-RoutingDecision summaries
+    directly into `agent status`'s own output (today `explain` covers
+    per-alias diagnostics and `where` covers the current repo's lease, but
+    status itself doesn't list all active leases estate-wide); logs/result
+    pointers surface (deferred — no job-result store to point at yet
+    beyond RoutingDecision ids).
+  evidence:
+    - "Added `agent explain <alias>` (scripts/agent): the 'why this
+      route?' diagnostic — resolve_alias()'s resolution,
+      eligible_hosts()'s own per-host eligible/reason (reused directly,
+      not re-derived — a second copy would be exactly the duplicate
+      routing authority docs/aoteru-model-host-routing-contract.md
+      forbids), and src.routing_evaluator's real production evidence for
+      that alias, all in one command. Live-run against local-fast (13
+      task_classes of real evidence, correctly all evidence_sufficient:
+      false) and code-strong (unbound, shows the 3 real codex-escalation
+      decisions from P12). Degrades to 'no recorded routing decisions'
+      rather than crashing when the evaluator DB is unavailable. 3 new
+      tests (tests/test_agent_cli_explain.py)."
+    - "Added docs/aoteru-operating-handbook.md — normal use, experiment
+      reservation, recovery (cold-reboot + stale-lease + retry/paid-
+      escalation behaviour), memory promotion, host re-entry, and routing
+      evidence, each section pointing at the actual authority file/script
+      rather than re-explaining it (so it can't silently drift out of
+      sync with the code)."
+  last_verified_commit: <pending this checkpoint's commit>
 
 - id: L-real-work-validation
   outcome: representative end-to-end tasks across local/paid/multimodal/experiment-priority/blocked-host

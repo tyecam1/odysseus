@@ -509,6 +509,53 @@ def cmd_status(args):
     }, args)
 
 
+def cmd_explain(args):
+    """'Why this route?' diagnostic (Workstream K,
+    docs/aoteru-long-horizon-autonomous-convergence.agent-task.md):
+    resolve one capability alias the same way `src.estate_router.
+    resolve_route` would, and show, in one compact answer, what it
+    resolved to, why (or why not) each eligible host qualifies, and what
+    real production evidence (if any — src.routing_evaluator, Workstream
+    D) exists for that alias so far. Delegates entirely to
+    src.estate_router / src.routing_evaluator rather than re-deriving
+    eligibility logic here — a second copy would drift, exactly what
+    docs/aoteru-model-host-routing-contract.md's single-routing-authority
+    rule forbids."""
+    from src.estate_router import eligible_hosts, resolve_alias, RoutingConfigError
+    from src.routing_evaluator import load_and_aggregate
+
+    try:
+        resolution = resolve_alias(args.alias)
+    except RoutingConfigError as e:
+        fail(str(e))  # exits; nothing below runs
+
+    try:
+        # eligible_hosts() already carries a per-host `reason` string
+        # (host_reachable()'s own explanation, or the repo-conflict
+        # message) — reusing it directly instead of re-deriving
+        # eligibility/reason from config/estate.yaml here, which would be
+        # exactly the second routing-authority copy the contract forbids.
+        host_notes = eligible_hosts(args.repo)
+    except RoutingConfigError as e:
+        host_notes = [{"error": str(e)}]
+
+    evidence = None
+    try:
+        aggregates = load_and_aggregate()
+        matches = [a for a in aggregates if a.model_alias == args.alias]
+        if matches:
+            evidence = [a.to_dict() for a in matches]
+    except Exception:
+        evidence = None  # evaluator needs a live DB; degrade to "no evidence" rather than failing the explain
+
+    emit({
+        "alias": args.alias,
+        "resolution": resolution,
+        "host_eligibility": host_notes,
+        "production_evidence": evidence or "no recorded routing decisions for this alias yet",
+    }, args)
+
+
 def cmd_where(args):
     host_local = _load_host_local()
     repos = _resolve_repos(host_local)
@@ -682,6 +729,11 @@ def _build_parser():
     pc.add_argument("task", nargs="?", default=None)
     pc.add_argument("--repo", default=None)
     pc.set_defaults(func=cmd_claude)
+
+    pe = sub.add_parser("explain", parents=[parent], help="'why this route?' diagnostic for one capability alias")
+    pe.add_argument("alias")
+    pe.add_argument("--repo", default=None)
+    pe.set_defaults(func=cmd_explain)
 
     return p
 
