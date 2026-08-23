@@ -116,3 +116,5 @@ operator-confirmed remotes — see
 docs/aoteru-autonomous-programme-state.md workstream F. Glovebox Jetson
 and interface-PC/mobile front-door work are prepared as deployable
 artefacts but not live — see workstreams G and H in the same file.
+Interface-PC install/update/rollback procedure (once it's reachable):
+docs/aoteru-interface-pc-deployment.md.
