@@ -31,6 +31,23 @@ whatever channel you already trust (scp, a shared drive, pasting it) —
 this repo does not publish a hosted download URL for it. Anywhere on
 `PATH` or a fixed folder works; it needs only a Python 3.8+ interpreter.
 
+**Or, with `pipx` installed** (puts an `aoteru` command on `PATH`, no
+manual folder/PATH management):
+
+```
+pipx install /path/to/this/checkout/companion/laptop_client
+# then every command below is `aoteru ...` instead of `python aoteru.py ...`
+```
+
+`companion/laptop_client/pyproject.toml` wraps the same single file — it
+adds zero third-party dependencies (`aoteru.py` itself stays stdlib-only,
+verified by `tests/test_laptop_client.py`'s AST import audit); this only
+gives `pipx`/`pip` an installable entry point. No `.msix` (Windows Store)
+package exists yet — building one needs Windows-native packaging tooling
+(`MakeAppx.exe`) this session's Linux shell cannot run or verify; a
+future session on an actual Windows host is the right place to add it,
+not a build produced blind.
+
 ### 3. Configure it
 
 ```

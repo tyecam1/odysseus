@@ -18,6 +18,20 @@ import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 CLIENT_PATH = PROJECT_ROOT / "companion" / "laptop_client" / "aoteru.py"
+PYPROJECT_PATH = PROJECT_ROOT / "companion" / "laptop_client" / "pyproject.toml"
+
+
+def test_pyproject_declares_stdlib_only_console_script():
+    """Workstream B next_action: pipx packaging. pyproject.toml must add
+    an installable `aoteru` console-script entry point without adding any
+    third-party dependency — the whole point of the stdlib-only client is
+    that it stays that way even when pipx-installed, not just when run as
+    a bare copied file."""
+    import tomllib
+    data = tomllib.loads(PYPROJECT_PATH.read_text(encoding="utf-8"))
+    assert data["project"]["scripts"]["aoteru"] == "aoteru:main"
+    assert data["project"].get("dependencies") == []
+    assert data["tool"]["setuptools"]["py-modules"] == ["aoteru"]
 
 
 def test_client_is_stdlib_only():

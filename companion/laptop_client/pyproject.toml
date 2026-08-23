@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aoteru-client"
+version = "0.1.0"
+description = "Laptop thin-client controller for an Odysseus/Aoteru estate"
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = []
+
+# Deliberately zero third-party dependencies — aoteru.py itself stays
+# stdlib-only (verified by tests/test_laptop_client.py's AST import
+# audit); this file only turns that one existing script into something
+# `pipx install` can put on PATH as an `aoteru` command, it does not
+# change what the script is allowed to import.
+[project.scripts]
+aoteru = "aoteru:main"
+
+[tool.setuptools]
+py-modules = ["aoteru"]
