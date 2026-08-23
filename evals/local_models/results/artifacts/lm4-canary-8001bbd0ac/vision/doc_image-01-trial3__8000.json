@@ -1,0 +1,21 @@
+{
+  "run_id": "lm4-canary-8001bbd0ac",
+  "task_id": "doc_image-01-trial3",
+  "task_class": "document_image_understanding",
+  "corpus_id": "lm1-2026-08-21",
+  "source_pointer": "evals/local_models/fixtures/doc_image_01.png (synthetic, generated this pass)",
+  "model_key": "vision",
+  "concrete_model": "gemma4:12b",
+  "upstream_repo": null,
+  "upstream_revision": null,
+  "artifact": null,
+  "quantization": null,
+  "runtime": "ollama",
+  "runtime_version": "0.32.15 (production)",
+  "runtime_base_url": "http://127.0.0.1:11434",
+  "context_point": 8000,
+  "status": "pass",
+  "score": "pass",
+  "output_sha256": "edc3a0c5ca2f10d682530acd90d7bb0250d237b70aa6402c1a6e3975d8998a6e",
+  "raw_output": "The 'Peak VRAM this run' value shown is 7421 MiB."
+}

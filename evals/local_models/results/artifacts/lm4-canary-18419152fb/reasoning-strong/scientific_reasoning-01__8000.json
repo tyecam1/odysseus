@@ -1,0 +1,21 @@
+{
+  "run_id": "lm4-canary-18419152fb",
+  "task_id": "scientific_reasoning-01",
+  "task_class": "phd_scientific_reasoning",
+  "corpus_id": "lm1-2026-08-21",
+  "source_pointer": "tyecam1/obsidian-PhD@731fcd8:01-research-plan/00-RC/evidence requirements.md#L2-L7,L56-L62",
+  "model_key": "reasoning-strong",
+  "concrete_model": "nemotron-3.5-lightning:30b-a3b",
+  "upstream_repo": null,
+  "upstream_revision": null,
+  "artifact": null,
+  "quantization": null,
+  "runtime": "ollama",
+  "runtime_version": "0.32.15 (production)",
+  "runtime_base_url": "http://127.0.0.1:11434",
+  "context_point": 8000,
+  "status": "pass",
+  "score": "pass",
+  "output_sha256": "b2fe42a137121813ed5b3cc246cb843015879d91b09c5fae634f29f3fa220555",
+  "raw_output": "The three source tiers required by the rubric are:\n\n1. **Authoritative source**  \n2. **Peer-reviewed synthesis (Survey/Review)**  \n3. **Implementation/ reality check** (industry implementation, case study, or systematic review)\n\nFor Claim C3, a paper describing **\"a real industrial conformity-assessment case where a certifier forced a manufacturer to reduce a cobot's autonomy before sign-off\"** would satisfy the **Implementation/ reality check** tier. The rubric explicitly defines this tier as including *\"industrial conformity assessment narratives, certification case studies, or papers reporting how safety process constrained design\"* \u2013 which is a direct match for the described paper's content."
+}

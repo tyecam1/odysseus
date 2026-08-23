@@ -1,0 +1,21 @@
+{
+  "run_id": "lm4-canary-18419152fb",
+  "task_id": "ros_log_test-01",
+  "task_class": "ros_log_test_interpretation",
+  "corpus_id": "lm1-2026-08-21",
+  "source_pointer": "tyecam1/s2-e1-ros2-measurement-spine@6c4efdf:docs/ros2_measurement_graph.md#L9-L13;tests/test_manifest_validation.py#L59-L69",
+  "model_key": "reasoning-strong",
+  "concrete_model": "nemotron-3.5-lightning:30b-a3b",
+  "upstream_repo": null,
+  "upstream_revision": null,
+  "artifact": null,
+  "quantization": null,
+  "runtime": "ollama",
+  "runtime_version": "0.32.15 (production)",
+  "runtime_base_url": "http://127.0.0.1:11434",
+  "context_point": 8000,
+  "status": "pass",
+  "score": "pass",
+  "output_sha256": "d393fad51d0d64ecc17a98f1f4e86c2ce3a5bd274241dc121adf36bbf1be0b79",
+  "raw_output": "(1) The E1a synthetic publisher uses the ROS 2 topic name `/s2_e1/e1a/static_token_observation` with message type `std_msgs/String`.\n\n(2) The `self.assertIn(...)` checks for the exact substring `does not match expected` in the raised `ManifestValidationError`'s message string."
+}

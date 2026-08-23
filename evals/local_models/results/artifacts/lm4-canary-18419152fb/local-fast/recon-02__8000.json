@@ -1,0 +1,21 @@
+{
+  "run_id": "lm4-canary-18419152fb",
+  "task_id": "recon-02",
+  "task_class": "repo_reconnaissance",
+  "corpus_id": "lm1-2026-08-21",
+  "source_pointer": "tyecam1/odysseus@ac295b7:core/database.py#L788-L793",
+  "model_key": "local-fast",
+  "concrete_model": "qwen3:8b",
+  "upstream_repo": null,
+  "upstream_revision": null,
+  "artifact": null,
+  "quantization": null,
+  "runtime": "ollama",
+  "runtime_version": "0.32.15 (production)",
+  "runtime_base_url": "http://127.0.0.1:11434",
+  "context_point": 8000,
+  "status": "pass",
+  "score": "pass",
+  "output_sha256": "94e557622ce0dbd1e5157e04fce4e6e176c6df3424f5c689ef4e452660fefc6b",
+  "raw_output": "The module-level constant's name is `PARK_LEASE_STALE_SECONDS`, and its integer value in seconds is **1800**."
+}

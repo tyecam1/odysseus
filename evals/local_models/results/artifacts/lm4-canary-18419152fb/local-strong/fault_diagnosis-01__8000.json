@@ -1,0 +1,21 @@
+{
+  "run_id": "lm4-canary-18419152fb",
+  "task_id": "fault_diagnosis-01",
+  "task_class": "fault_diagnosis",
+  "corpus_id": "lm1-2026-08-21",
+  "source_pointer": "tyecam1/odysseus@ac295b7:docs/aoteru-lab-execution-convergence-evidence.md#L201-L217",
+  "model_key": "local-strong",
+  "concrete_model": "gpt-oss:20b",
+  "upstream_repo": null,
+  "upstream_revision": null,
+  "artifact": null,
+  "quantization": null,
+  "runtime": "ollama",
+  "runtime_version": "0.32.15 (production)",
+  "runtime_base_url": "http://127.0.0.1:11434",
+  "context_point": 8000,
+  "status": "pass",
+  "score": "pass",
+  "output_sha256": "4ceddfaa9a706ef044baaeac6922c2faedf9155be577443272d30fe3316f022b",
+  "raw_output": "The failure is caused by a version mismatch in the MCP SDK (the server API has changed so `list_tools` no longer exists), and it was not triggered by any routing or execution changes in this repository."
+}

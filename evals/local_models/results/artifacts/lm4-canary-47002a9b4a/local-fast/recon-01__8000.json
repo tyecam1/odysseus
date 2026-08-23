@@ -1,0 +1,21 @@
+{
+  "run_id": "lm4-canary-47002a9b4a",
+  "task_id": "recon-01",
+  "task_class": "repo_reconnaissance",
+  "corpus_id": "lm1-2026-08-21",
+  "source_pointer": "tyecam1/odysseus@ac295b7:src/estate_router.py#L424-L464",
+  "model_key": "local-fast",
+  "concrete_model": "qwen3:8b",
+  "upstream_repo": null,
+  "upstream_revision": null,
+  "artifact": null,
+  "quantization": null,
+  "runtime": "ollama",
+  "runtime_version": "0.32.15 (production)",
+  "runtime_base_url": "http://127.0.0.1:11434",
+  "context_point": 8000,
+  "status": "pass",
+  "score": "pass",
+  "output_sha256": "2ebbb7848e99a6128468a3eadb755163321a1eca81a51fb4c07c759dbada04c7",
+  "raw_output": "execute_local\n_update_decision_outcome"
+}

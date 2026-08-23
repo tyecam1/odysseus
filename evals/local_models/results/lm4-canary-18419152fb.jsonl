@@ -1,0 +1,14 @@
+{"run_id": "lm4-canary-18419152fb", "alias": "local-fast", "task_id": "recon-01", "status": "pass", "reason": "pass", "score": "pass", "wall_time_ms": 2436, "context_point": 8000}
+{"run_id": "lm4-canary-18419152fb", "alias": "local-fast", "task_id": "recon-02", "status": "pass", "reason": "pass", "score": "pass", "wall_time_ms": 2000, "context_point": 8000}
+{"run_id": "lm4-canary-18419152fb", "alias": "local-fast", "task_id": "summarisation-01", "status": "pass", "reason": "pass", "score": "pass", "wall_time_ms": 2704, "context_point": 8000}
+{"run_id": "lm4-canary-18419152fb", "alias": "local-strong", "task_id": "fault_diagnosis-01", "status": "pass", "reason": "pass", "score": "pass", "wall_time_ms": 14592, "context_point": 8000}
+{"run_id": "lm4-canary-18419152fb", "alias": "local-strong", "task_id": "independent_review-01", "status": "pass", "reason": "pass", "score": "pass", "wall_time_ms": 5616, "context_point": 8000}
+{"run_id": "lm4-canary-18419152fb", "alias": "local-strong", "task_id": "long_context-01", "status": "pass", "reason": "pass", "score": "pass", "wall_time_ms": 45570, "context_point": 32000}
+{"run_id": "lm4-canary-18419152fb", "alias": "code-fast", "task_id": "code_repair-01", "status": "pass", "reason": "pass", "score": "pass", "wall_time_ms": 5375, "context_point": 8000}
+{"run_id": "lm4-canary-18419152fb", "alias": "code-fast", "task_id": "tool_call-01", "status": "pass", "reason": "pass", "score": "pass", "wall_time_ms": 673, "context_point": 8000}
+{"run_id": "lm4-canary-18419152fb", "alias": "code-fast", "task_id": "json_schema-01", "status": "pass", "reason": "pass", "score": "pass", "wall_time_ms": 690, "context_point": 8000}
+{"run_id": "lm4-canary-18419152fb", "alias": "reasoning-strong", "task_id": "scientific_reasoning-01", "status": "pass", "reason": "pass", "score": "pass", "wall_time_ms": 30734, "context_point": 8000}
+{"run_id": "lm4-canary-18419152fb", "alias": "reasoning-strong", "task_id": "ros_log_test-01", "status": "pass", "reason": "pass", "score": "pass", "wall_time_ms": 17009, "context_point": 8000}
+{"run_id": "lm4-canary-18419152fb", "alias": "vision", "task_id": "doc_image-01", "status": "pass", "reason": "pass", "score": "pass", "wall_time_ms": 7993, "context_point": 8000}
+{"run_id": "lm4-canary-18419152fb", "alias": "vision", "task_id": "doc_image-01-trial2", "status": "pass", "reason": "pass", "score": "pass", "wall_time_ms": 2118, "context_point": 8000}
+{"run_id": "lm4-canary-18419152fb", "alias": "vision", "task_id": "doc_image-01-trial3", "status": "pass", "reason": "pass", "score": "pass", "wall_time_ms": 3670, "context_point": 8000}

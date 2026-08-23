@@ -1,0 +1,21 @@
+{
+  "run_id": "lm4-canary-18419152fb",
+  "task_id": "independent_review-01",
+  "task_class": "independent_review",
+  "corpus_id": "lm1-2026-08-21",
+  "source_pointer": "synthetic worker-result (derived from src/estate_router.py execute_local contract)",
+  "model_key": "local-strong",
+  "concrete_model": "gpt-oss:20b",
+  "upstream_repo": null,
+  "upstream_revision": null,
+  "artifact": null,
+  "quantization": null,
+  "runtime": "ollama",
+  "runtime_version": "0.32.15 (production)",
+  "runtime_base_url": "http://127.0.0.1:11434",
+  "context_point": 8000,
+  "status": "pass",
+  "score": "pass",
+  "output_sha256": "eca81427fdab7fb1a9279ec01ac758a0049715c86e3924a5271f7b22b49613e2",
+  "raw_output": "NO \u2013 the **output** field contradicts the rule.  \nThe rule requires a non\u2011empty, non\u2011whitespace string for a \u201cpass\u201d, but the worker\u2019s output is an empty string."
+}

@@ -1,0 +1,21 @@
+{
+  "run_id": "lm4-canary-18419152fb",
+  "task_id": "long_context-01",
+  "task_class": "long_context_retrieval",
+  "corpus_id": "lm1-2026-08-21",
+  "source_pointer": "tyecam1/odysseus@ac295b7:docs/aoteru-model-host-routing-contract.md + docs/aoteru-lab-local-model-strategy-2026-08-20.md (concatenated, needle inserted)",
+  "model_key": "local-strong",
+  "concrete_model": "gpt-oss:20b",
+  "upstream_repo": null,
+  "upstream_revision": null,
+  "artifact": null,
+  "quantization": null,
+  "runtime": "ollama",
+  "runtime_version": "0.32.15 (production)",
+  "runtime_base_url": "http://127.0.0.1:11434",
+  "context_point": 32000,
+  "status": "pass",
+  "score": "pass",
+  "output_sha256": "d0c48576abbd583599f4e496a3b986dfc65ac0f5e8e0d5c37aa903ddd84e4727",
+  "raw_output": "The unique canary value noted in the documents is:\n\n**ODYSSEUS-NEEDLE-47281**"
+}

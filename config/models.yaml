@@ -36,6 +36,10 @@ capabilities:
       106.1 decode tok/s, fits fully in 10GB VRAM (`ollama ps` confirmed
       100% GPU). Measured on one representative coding prompt at 8K
       context — a single data point, not a full quality-floor benchmark.
+      LM4 (2026-08-23): production canary disposition RETAIN — 3/3 pass
+      (repo_reconnaissance x2, compact_summarisation x1) through the real
+      production route (`src.estate_router.run_task`). See
+      docs/aoteru-lm4-production-canary-evidence.md.
   - alias: local-strong
     binding: gpt-oss:20b
     evidence: docs/aoteru-estate-p7-evidence.md
@@ -43,6 +47,9 @@ capabilities:
       23.6 decode tok/s despite exceeding VRAM (partial CPU offload) —
       matches plan §9's own "GPT-OSS 20B" candidate. Same single-prompt
       caveat as local-fast.
+      LM4 (2026-08-23): production canary disposition RETAIN — 3/3 pass
+      (fault_diagnosis, independent_review, long_context@32K) through the
+      real production route. See docs/aoteru-lm4-production-canary-evidence.md.
   - alias: code-fast
     binding: ornith:9b
     evidence: docs/aoteru-lm2-model-discovery-evidence.md
@@ -53,6 +60,10 @@ capabilities:
       (code_repair-01, real `src.estate_router.execute_local` against
       127.0.0.1:11434) passed 3/3 pytest, matching LM2's 39/39-trial
       evidence. See docs/aoteru-lm3-production-runtime-promotion-evidence.md.
+      LM4 (2026-08-23): production canary disposition RETAIN — 3/3 pass
+      (bounded_code_repair, tool_function_call_correctness,
+      strict_json_schema_output) through the real production route. See
+      docs/aoteru-lm4-production-canary-evidence.md.
   - alias: code-strong
     binding: null
   - alias: reasoning-strong
@@ -67,6 +78,9 @@ capabilities:
       with LM2's 36/39-trial evidence and ~29s avg latency. No incumbent
       to regress — this alias was previously unbound. See
       docs/aoteru-lm3-production-runtime-promotion-evidence.md.
+      LM4 (2026-08-23): production canary disposition RETAIN — 2/2 pass
+      (phd_scientific_reasoning, ros_log_test_interpretation) through the
+      real production route. See docs/aoteru-lm4-production-canary-evidence.md.
   - alias: vision
     binding: gemma4:12b
     evidence: docs/aoteru-lm2-model-discovery-evidence.md
@@ -84,6 +98,16 @@ capabilities:
       artifact). Bound on that production-path parity result, not on
       LM2's llama.cpp evidence directly. See
       docs/aoteru-lm3-production-runtime-promotion-evidence.md.
+      LM4 (2026-08-23): production canary disposition RETAIN, vision
+      caution closed. Ran doc_image-01 three independent times through
+      the real production route (`src.estate_router.resolve_route` +
+      `src.llm_core.llm_call` against 127.0.0.1:11434, the same
+      Ollama-library `gemma4:12b` artifact bound above) — 3/3 pass,
+      correctly reading "7421" MiB each time. Combined with LM3's own
+      equivalence check this is now 4/4 independent production-path
+      passes on the bound artifact itself, closing the "modestly broader
+      coverage" gap the LM3 note left open — no longer resting on a
+      single trial. See docs/aoteru-lm4-production-canary-evidence.md.
   - alias: embedding
     binding: qwen3-embedding:8b
     note: structural binding only (it is literally an embedding model) — no retrieval-quality benchmark run yet.

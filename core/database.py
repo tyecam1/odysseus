@@ -959,6 +959,20 @@ class BenchmarkResult(TimestampMixin, Base):
     raw_output_sha256  = Column(String, nullable=True)  # SHA-256 of the exact artefact contents, for integrity
                                                           # verification without duplicating the transcript here
 
+    # LM4 (docs/aoteru-lm4-production-canary-adaptive-routing.agent-task.md):
+    # minimal additive fields distinguishing a production canary pass (real
+    # config/models.yaml alias, executed through the real production route)
+    # from an LM1/LM2 offline benchmark sweep (candidate models compared
+    # directly, no alias/routing involved). NULL on every pre-LM4 row —
+    # NULL `run_kind` reads as "benchmark" by convention rather than
+    # backfilling history that was never actually alias-routed.
+    model_alias              = Column(String, nullable=True, index=True)  # capability alias exercised, e.g. "code-fast"
+    run_kind                 = Column(String, nullable=True)  # "benchmark" | "canary"; NULL == benchmark (pre-LM4)
+    routing_decision_id      = Column(String, nullable=True, index=True)  # links to routing_decisions.id for canary rows
+    escalated                = Column(Boolean, nullable=True)
+    escalation_reason        = Column(String, nullable=True)
+    human_correction_observed = Column(Boolean, nullable=True)  # NULL = not yet checked, not "no correction"
+
     __table_args__ = (
         Index('ix_benchmark_results_run_model_task', 'run_id', 'concrete_model', 'task_id'),
     )
@@ -1266,6 +1280,46 @@ def _migrate_add_benchmark_raw_output_sha256_column():
             logging.getLogger(__name__).info("Migrated: added 'raw_output_sha256' column to benchmark_results")
     except Exception as e:
         logging.getLogger(__name__).warning(f"benchmark_results raw_output_sha256 migration failed: {e}")
+    finally:
+        if conn:
+            conn.close()
+
+
+def _migrate_add_benchmark_canary_columns():
+    """Add LM4's minimal canary-evidence columns to benchmark_results if
+    they don't exist (docs/aoteru-lm4-production-canary-adaptive-routing.agent-task.md):
+    model_alias, run_kind, routing_decision_id, escalated, escalation_reason,
+    human_correction_observed. Same additive, non-destructive pattern as
+    `_migrate_add_benchmark_raw_output_sha256_column`."""
+    import sqlite3
+    db_path = DATABASE_URL.replace("sqlite:///", "")
+    if not os.path.exists(db_path):
+        return
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.execute("PRAGMA table_info(benchmark_results)")
+        columns = [row[1] for row in cursor.fetchall()]
+        if not columns:
+            return
+        additions = [
+            ("model_alias", "TEXT"),
+            ("run_kind", "TEXT"),
+            ("routing_decision_id", "TEXT"),
+            ("escalated", "BOOLEAN"),
+            ("escalation_reason", "TEXT"),
+            ("human_correction_observed", "BOOLEAN"),
+        ]
+        added = []
+        for col, coltype in additions:
+            if col not in columns:
+                conn.execute(f"ALTER TABLE benchmark_results ADD COLUMN {col} {coltype}")
+                added.append(col)
+        if added:
+            conn.commit()
+            logging.getLogger(__name__).info(f"Migrated: added {added} columns to benchmark_results")
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"benchmark_results canary-columns migration failed: {e}")
     finally:
         if conn:
             conn.close()
@@ -2183,6 +2237,7 @@ def init_db():
     _migrate_add_supports_tools_column()
     _migrate_add_task_run_model_column()
     _migrate_add_benchmark_raw_output_sha256_column()
+    _migrate_add_benchmark_canary_columns()
     _migrate_add_owner_column()
     _migrate_add_document_archived_column()
     _migrate_add_last_message_at_column()
