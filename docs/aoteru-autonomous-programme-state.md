@@ -223,12 +223,24 @@ being withheld pending these; see each workstream's `next_action` for what
   next_action: >-
     remaining: candidate-config-change proposal generator with before/after
     evidence (item 6, needs evidence_sufficient routes to exist first —
-    none do yet, live-confirmed); a real shadow-execution replay harness
-    that re-runs historical prompts against a candidate config, not just
-    aggregation of what already happened; re-evaluate code-strong only if
-    future evidence shows code-fast+paid insufficient (still null, still
-    correctly not filled cosmetically).
+    none do yet, re-confirmed this checkpoint, see evidence); a real
+    shadow-execution replay harness that re-runs historical prompts
+    against a candidate config, not just aggregation of what already
+    happened; re-evaluate code-strong only if future evidence shows
+    code-fast+paid insufficient (still null, still correctly not filled
+    cosmetically).
   evidence:
+    - "Re-checked this checkpoint whether item 6 (candidate-config-change
+      proposals) could now be built: routing_evaluator.py's own docstring
+      already states the reason it's deferred — with the current
+      production row count, no (task_class, model_alias) pair reaches
+      EVIDENCE_THRESHOLD=20, so any proposal generator built now would be
+      speculative divergence-guessing, not evidence-driven, directly
+      contradicting config/routing.yaml's 'no cosmetic exploration'
+      invariant this same workstream's item 5 already enforces. Left
+      unbuilt deliberately (again) rather than building something
+      hollow to show programme progress; genuinely still gated on
+      accumulating more real RoutingDecision volume, not on effort."
     - "core.database.RoutingDecision's own docstring already said 'not yet
       the full replay/shadow evaluator' — confirmed true by reading, not
       assumed. Built src/routing_evaluator.py: aggregates real
@@ -467,13 +479,30 @@ being withheld pending these; see each workstream's `next_action` for what
     session's inventory script covers generic host/model/service facts,
     not Misumi-domain service checks — needs a live Misumi deployment to
     design against, deferred with the host itself); worker eligibility/
-    shadow/canary gate wiring once a real target exists; backup/restore
-    conflict checks; operator: run
+    shadow/canary gate wiring once a real target exists; operator: run
     `venv/bin/python scripts/home_reentry_inventory.py` on the actual
     home host once reachable, then
     `venv/bin/python scripts/memory_promote_replay.py --target <home
-    misumi memory root>` to promote lab's accumulated memory.
+    misumi memory root>` to promote lab's accumulated memory (now warns
+    on any conflicting id instead of silently applying).
   evidence:
+    - "Backup/restore conflict checks (checked, not assumed missing):
+      src/memory_outbox.replay() treated any id already present in the
+      target as clean 'already_present' with no content comparison — a
+      real divergence (both sides independently confirmed/edited the
+      same id after a prior partial sync) would be silently and
+      permanently hidden. Added a content comparison for any id present
+      on both sides: a mismatch is now counted as `conflicting` (ids
+      returned), still never auto-overwritten either way (resolving a
+      real conflict stays a human decision — this only makes the
+      divergence visible). scripts/memory_promote_replay.py's plain-text
+      output prints a WARNING with the count so an operator sees it
+      without --json. 5 new tests (diverging content flagged, identical
+      content still 'already_present' — no false positives, one store's
+      conflict doesn't block the others, CLI warning text). Live-
+      verified replaying the real accumulated Misumi memory into a
+      scratch target (0 conflicts, as expected for a fresh target). Full
+      suite green (5059 passed, 4 skipped)."
     - "Added scripts/home_reentry_inventory.py: generic, read-only host
       inventory (identity, hardware via /proc/meminfo — matching
       scripts/agent's own existing approach rather than adding a psutil
@@ -498,7 +527,7 @@ being withheld pending these; see each workstream's `next_action` for what
       accumulated Misumi memory (4 capsules, 1 open loop) into a scratch
       target: first run applied all 5, second run applied 0 (idempotent,
       confirmed live not just in unit tests). 3 new unit tests."
-  last_verified_commit: <pending this checkpoint's commit>
+  last_verified_commit: e2e5ce1
 
 - id: J-security-resilience
   outcome: recovery paths verified beyond happy-path smokes; cold-reboot checklist
