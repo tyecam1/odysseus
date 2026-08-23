@@ -588,18 +588,34 @@ being withheld pending these; see each workstream's `next_action` for what
   depends_on: []
   blocker: null
   next_action: >-
-    remaining: Chroma rebuild/stale-session items above are now closed;
-    the only J audit items left without at least one live-verified test
-    are timeout/cancel/retry state transitions specifically for a
-    long-running task (retry logic itself is tested — see C's evidence —
-    but not a mid-flight cancel/timeout signal) and controller
-    disconnect/reconnect. operator: `sudo systemctl
+    remaining: the only J audit item left without at least one
+    live-verified test is timeout/cancel/retry state transitions
+    specifically for a *long-running* task's mid-flight cancel signal
+    (retry-on-transient-failure is already tested — see C's evidence —
+    but run_task()/execute_local() are synchronous with no cancel
+    endpoint at all today; testing 'cancel' honestly requires either
+    building one or explicitly recording that none exists yet, not
+    fabricating a test against a mechanism that isn't there). operator:
+    `sudo systemctl
     restart odysseus-aoteru-lab.service` to deploy this session's
     RunTaskEnvelope.objective fix and its oversized-objective guard to the
     live port-7001 instance — this session could not restart it (no
     non-interactive sudo), correctly treated as a stop-gate per GO.md
     rather than worked around.
   evidence:
+    - "Controller disconnect/reconnect (checked, not assumed missing):
+      the laptop thin client already reported an unreachable backend
+      cleanly (pre-existing test), but nothing proved the other half —
+      a subsequent call against the same on-disk config succeeding
+      normally once the backend is back, with no explicit reconnect/
+      reset step and no state left corrupted by the failed attempt.
+      True by construction (the client is stateless per-invocation —
+      fresh HTTP request each time, no persistent socket) but now
+      proven, not assumed: added
+      test_controller_reconnects_cleanly_after_a_disconnect. Also
+      live-verified the disconnect half with a real subprocess against
+      a genuinely unreachable port (127.0.0.1:1), not mocked. Full suite
+      green (5075 passed, 4 skipped)."
     - "Worker/model/provider disappearance mid-task (checked, not
       assumed missing): live-verified execute_local() against the real
       Ollama instance with a model name that doesn't exist — the real
@@ -705,7 +721,7 @@ being withheld pending these; see each workstream's `next_action` for what
       the exact post-boot command. 8 new unit tests
       (tests/test_cold_reboot_verify.py) cover the PASS/FAIL/SKIP
       classification logic with mocked subprocess/HTTP calls."
-  last_verified_commit: 46dcd93
+  last_verified_commit: 01de50b
 
 - id: K-operator-experience
   outcome: converged agent status / diagnostics / handbook
