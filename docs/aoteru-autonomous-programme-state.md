@@ -435,15 +435,33 @@ being withheld pending these; see each workstream's `next_action` for what
   depends_on: []
   blocker: null
   next_action: >-
-    remaining: Chroma rebuild-from-authoritative-state test, worker/model/
-    provider disappearance mid-task, stale LogicalSession/job
-    reconciliation. operator: `sudo systemctl restart
-    odysseus-aoteru-lab.service` to deploy this session's
+    remaining: worker/model/provider disappearance mid-task (stale
+    LogicalSession/job reconciliation is already covered — see
+    _reconcile_stale_sessions + tests/test_agent_cli_session_lifecycle.py,
+    confirmed live not new this checkpoint). operator: `sudo systemctl
+    restart odysseus-aoteru-lab.service` to deploy this session's
     RunTaskEnvelope.objective fix and its oversized-objective guard to the
     live port-7001 instance — this session could not restart it (no
     non-interactive sudo), correctly treated as a stop-gate per GO.md
     rather than worked around.
   evidence:
+    - "Chroma rebuild from authoritative state (checked, not assumed
+      done): grep confirmed src/personal_docs.py's index_all_directories()
+      — which repopulates Chroma from indexed_directories.json, the real
+      authoritative source of what belongs in the index — had zero
+      callers and zero tests anywhere in the repo. rag_manager.
+      rebuild_index() only ever wiped the collection; nothing composed
+      the two, exactly the kind of unwired-wipe gap remove_directory()'s
+      own #1660 comment already warned about. Added
+      PersonalDocsManager.rebuild_index_from_authoritative_state():
+      wipe-then-repopulate as one auditable action, truthfully reporting
+      wipe failure/exception without silently repopulating into nothing.
+      8 new tests (tests/test_personal_docs_chroma_rebuild.py) cover
+      index_all_directories() itself (previously untested: base+tracked
+      dirs, missing-directory skip, reported per-directory failure,
+      no-rag-manager noop) and the new orchestration (happy path,
+      wipe-failure, wipe-exception, no-rag-manager). Full suite green
+      (5031 passed, 4 skipped)."
     - "Malformed/oversized envelope handling (checked, not assumed): a
       malformed objective (wrong type, e.g. an int) was already correctly
       rejected 422 by Pydantic's own type validation — no gap there. But
@@ -516,7 +534,7 @@ being withheld pending these; see each workstream's `next_action` for what
       the exact post-boot command. 8 new unit tests
       (tests/test_cold_reboot_verify.py) cover the PASS/FAIL/SKIP
       classification logic with mocked subprocess/HTTP calls."
-  last_verified_commit: <pending this checkpoint's commit>
+  last_verified_commit: 26c6466
 
 - id: K-operator-experience
   outcome: converged agent status / diagnostics / handbook
