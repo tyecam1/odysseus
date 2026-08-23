@@ -377,11 +377,23 @@ see `[[project-aoteru-p12-estate-convergence]]`.
   depends_on: []
   blocker: null
   next_action: >-
-    remaining: DB backup/restore drill, Chroma rebuild-from-authoritative-state
-    test, worker/model/provider disappearance mid-task, stale LogicalSession/
-    job reconciliation, auth/token scope audit, malformed/oversized
-    multimodal envelope handling.
+    remaining: Chroma rebuild-from-authoritative-state test, worker/model/
+    provider disappearance mid-task, stale LogicalSession/job
+    reconciliation, malformed/oversized multimodal envelope handling.
   evidence:
+    - "DB backup/restore drill (live, non-destructive): audited rather
+      than built from scratch — scripts/odysseus-backup already exists
+      with a real security-hardened restore path (symlink/hardlink-escape
+      rejection, tested in tests/test_backup_cli_security.py) but no
+      round-trip data-integrity drill had actually been run. Ran
+      `odysseus-backup snapshot` (83MB, 60 files, sqlite3 .backup so the
+      live app kept running) against the real production data dir, then
+      `verify` (tarball integrity, no extract), then extracted into an
+      isolated scratch directory (never touching live data/) and queried
+      the restored SQLite DB directly: 54 routing_decisions (including
+      today's own [[L-real-work-validation]] decision_ids), 4
+      park_leases, 384 benchmark_results — all recovered intact. Real
+      evidence, not a synthetic fixture."
     - "Live-verified 2026-08-23: `tailscale serve status` on lab shows both
       routes '(tailnet only)' — no Funnel/public exposure. Confirms
       config/estate.yaml's private-only-listener invariant is actually true
