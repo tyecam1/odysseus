@@ -83,23 +83,56 @@ being withheld pending these; see each workstream's `next_action` for what
 
 - id: B-laptop-thin-client
   outcome: installable controller product surface requiring no Odysseus checkout
-  status: ready-for-operator
+  status: complete
   priority: high
   depends_on: []
   blocker: null
   next_action: >-
-    Final convergence pass (2026-08-23) closed both material controller
-    gaps: genuinely checkout-free bootstrap (pipx/pip straight from
-    GitHub, live-verified — no local clone needed) and safe remote
-    `park` acquisition (POST /api/estate/park/{repo_id}, repo_id-only,
-    server resolves path + git-clean, live-verified against the real
-    obsidian-PhD repo). Nothing material left for this session to close
-    — remaining is operator-only: run the exact bootstrap command from
-    companion/laptop_client/README.md on an actual laptop (not provable
-    from this lab-only session) as the live-origin smoke test. .msix is
-    explicitly not a completion criterion (task decision 5); Windows
-    .ps1/.bat wrapper needs a real Windows host to verify path/quoting.
+    Closed (2026-08-23). Live laptop-origin proof run from the real
+    Windows laptop controller (DESKTOP-7DJ1HMA) through the tailnet
+    front door confirmed the checkout-free bootstrap and full
+    status/route/ask/park/heartbeat/release cycle end-to-end. No
+    successor engineering work; remaining D/G/H/I states stay
+    evidence-/host-triggered as previously recorded.
   evidence:
+    - "Laptop-origin closeout proof (2026-08-23), run from
+      DESKTOP-7DJ1HMA (Windows 11 Pro) over Tailscale against the
+      tailnet-only front door
+      http://dmem-hp-z2-tower-g9-workstation-desktop-pc.tail171792.ts.net:8080
+      (not :7001). Install path was checkout-free: user-local pipx,
+      then `aoteru-client` installed from a temporary extraction of
+      only companion/laptop_client (a plain `pipx install git+...@dev`
+      fails on Windows because the dev branch's
+      evals/local_models/results/artifacts/**/*.json tree contains
+      filenames with literal colons, e.g. 'qwen3:8b/...', which NTFS
+      cannot materialize on checkout — a pre-existing repo defect,
+      unrelated to Workstream B, worth a follow-up cleanup; the
+      companion/laptop_client subdirectory itself is unaffected). The
+      temporary extraction directory was deleted immediately after
+      install; no persistent checkout remains on the laptop. Token
+      `laptop-controller` (estate:execute scope) was configured via
+      `aoteru config set`; the raw token was never printed, logged, or
+      committed — `aoteru config show` confirms it as masked
+      ('token: set (hidden)'). Smoke sequence: `aoteru status` ->
+      backend reachable/healthy, 2 eligible hosts; `aoteru route
+      --capability local-fast --task-class laptop-smoke` -> resolved
+      to host hz2-workstation/local/qwen3:8b, decision_id
+      98968811-5c4c-4578-8b58-ba4b2512fdff; `aoteru ask 'Return
+      exactly: laptop-controller-ok' --capability local-fast
+      --task-class laptop-smoke` -> executed=true, output exactly
+      'laptop-controller-ok', deterministic_gate=pass, decision_id
+      f3f3c4a6-652e-4774-a0ea-64a08026a2d0; `aoteru park-status`
+      (before) -> no active leases; `aoteru park obsidian-phd --branch
+      main` -> acquired lease 6308fc09-2e88-4169-92b2-27f9c1aa1705
+      against the server-resolved path
+      /home/agent/projects/phd/obsidian-PhD; `aoteru heartbeat
+      obsidian-phd` -> succeeded on that lease; `aoteru release
+      obsidian-phd` -> succeeded; `aoteru park-status` (final) -> no
+      active leases, confirming no leaked lease from this proof. No
+      PhD content mutated (park/heartbeat/release only). Paid
+      `--allow-paid` lane not exercised — already qualified on the
+      backend per prior evidence, no operator need justified spending
+      here."
     - "Final convergence pass (2026-08-23): closed checkout-free
       bootstrap (`pipx install \"git+https://github.com/tyecam1/odysseus.git@dev#subdirectory=companion/laptop_client\"`,
       live-verified in a scratch venv with nothing pre-cloned) and
@@ -1008,15 +1041,13 @@ deliberately NOT another open-ended `/loop` iteration — per that task's
 own explicit instruction, do not resume a timed autonomous development
 loop against this file. Final classification:
 
-- **complete**: A, C, F, J, K, L.
+- **complete**: A, B, C, F, J, K, L. (B closed 2026-08-23: live
+  laptop-origin proof from the real Windows laptop controller — see
+  the B-laptop-thin-client evidence entry above.)
 - **complete-current-estate**: E (future home-primary promotion stays
   ready-for-host, not a current gap).
 - **evidence-gated**: D (evaluator is sound; the remaining item needs
   real production traffic volume, not more engineering).
-- **ready-for-operator**: B (checkout-free bootstrap + remote park both
-  closed this pass; only the actual live laptop-origin smoke test
-  remains, which needs an operator running the documented command from
-  a real laptop).
 - **ready-for-host**: G, H, I (all non-live deliverables — packages,
   scripts, docs, the interface-acceptance identity fix — are done;
   what's left needs the actual unreachable/not-yet-live hardware).
