@@ -162,6 +162,34 @@ def cmd_park_status(args: argparse.Namespace) -> int:
     return 0 if result["status"] == 200 else 1
 
 
+def cmd_park(args: argparse.Namespace) -> int:
+    """Acquire a ParkLease on the backend host over HTTP
+    (POST /api/estate/park/{repo_id}) — the laptop-side equivalent of
+    `agent park`. Only a repo_id is ever sent; the backend resolves the
+    real registered path and checks it's git-clean server-side (no path
+    this client supplies is ever trusted)."""
+    cfg = _load_config()
+    path = f"/api/estate/park/{args.repo_id}"
+    if args.branch:
+        import urllib.parse
+        path += "?" + urllib.parse.urlencode({"branch": args.branch})
+    result = _request(cfg, "POST", path)
+    if result["status"] in (401, 403):
+        print(f"denied: {result['body']} — token needs the estate:execute scope for `park`")
+        return 1
+    if result["status"] == 404:
+        print(f"not registered: {result['body']}")
+        return 1
+    if result["status"] == 409:
+        print(f"cannot park: {result['body']}")
+        return 1
+    if result["status"] == 503:
+        print(f"backend host not registered: {result['body']}")
+        return 1
+    print(json.dumps(result["body"], indent=2))
+    return 0 if result["status"] == 200 else 1
+
+
 def cmd_heartbeat(args: argparse.Namespace) -> int:
     """Renew the caller's active ParkLease over HTTP
     (POST /api/estate/park/{repo_id}/heartbeat) — the laptop-side
@@ -233,6 +261,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("park-status", help="estate-wide active park-lease view")
 
+    p_park = sub.add_parser("park", help="acquire a lease on the backend host for a registered repo")
+    p_park.add_argument("repo_id")
+    p_park.add_argument("--branch", default=None)
+
     p_heartbeat = sub.add_parser("heartbeat", help="renew the backend host's active lease for a repo")
     p_heartbeat.add_argument("repo_id")
 
@@ -260,6 +292,7 @@ def main(argv: list[str] | None = None) -> int:
         "route": cmd_route,
         "ask": cmd_ask,
         "park-status": cmd_park_status,
+        "park": cmd_park,
         "heartbeat": cmd_heartbeat,
         "release": cmd_release,
     }

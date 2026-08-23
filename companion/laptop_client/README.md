@@ -99,6 +99,7 @@ aoteru route --capability local-fast              # dry-run: what would this rou
 aoteru ask "summarise the last 3 commits" --capability local-fast
 aoteru ask "refactor X" --capability code-strong --allow-paid   # opt in to paid escalation
 aoteru park-status                                 # estate-wide active park-lease view
+aoteru park <repo-id> --branch main                # acquire a lease on the backend host for a registered repo
 aoteru heartbeat <repo-id>                          # renew the backend host's lease for a repo
 aoteru release <repo-id>                            # release the backend host's lease for a repo
 ```
@@ -143,13 +144,13 @@ B).
   that blocks until `/api/estate/run` returns, matching the backend's own
   current synchronous execution model (src/estate_router.py's
   `run_task()`).
-- `park-status`/`heartbeat`/`release` are now here (backed by
-  `GET /api/estate/park/status` and `POST /api/estate/park/{repo_id}/
-  heartbeat|release`). No `park`/`where` subcommand yet — acquiring a
-  lease needs repo-path resolution and a git-clean check that only exist
-  in `scripts/agent` today; exposing `park` at the HTTP layer without
-  that check would let a remote caller park a dirty/nonexistent
-  worktree, so it deliberately stays CLI-only for now. `where` (listing
-  the *current* repo's own lease from a checkout) has no laptop-side
-  analogue since a checkout-less client has no "current repo" — use
-  `park-status` for the estate-wide view instead.
+- `park`/`park-status`/`heartbeat`/`release` are all here (backed by
+  `POST /api/estate/park/{repo_id}`, `GET /api/estate/park/status`, and
+  `POST /api/estate/park/{repo_id}/heartbeat|release`). `park` only
+  takes a `repo_id` (+ optional `--branch`) — the backend resolves the
+  real registered path via `src.estate_router.resolve_repo_path` and
+  fails closed (409) on a dirty/unresolved worktree before ever
+  acquiring a lease; no path is ever supplied by this client. `where`
+  (listing the *current* repo's own lease from a checkout) still has no
+  laptop-side analogue since a checkout-less client has no "current
+  repo" — use `park-status` for the estate-wide view instead.

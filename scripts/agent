@@ -160,21 +160,11 @@ def _repo_by_id(repos: list[dict], repo_id: str) -> dict | None:
 
 
 def _git_is_clean(path: str) -> tuple[bool, str]:
-    """Fail closed: anything but a clean `git status --porcelain` (including
-    the command itself failing) is treated as dirty."""
-    import subprocess
-    try:
-        out = subprocess.run(
-            ["git", "-C", path, "status", "--porcelain"],
-            capture_output=True, text=True, timeout=15,
-        )
-    except (OSError, subprocess.TimeoutExpired) as e:
-        return False, f"git status failed: {e}"
-    if out.returncode != 0:
-        return False, out.stderr.strip() or "git status failed"
-    if out.stdout.strip():
-        return False, "working tree has uncommitted changes"
-    return True, ""
+    """Delegates to src.park_lease_ops.git_is_clean (the single authority,
+    also used by park_repo_by_id's HTTP-safe remote park path) — not
+    re-derived here."""
+    from src.park_lease_ops import git_is_clean
+    return git_is_clean(path)
 
 
 def _park_lease_ops():

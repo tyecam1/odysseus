@@ -23,7 +23,16 @@ from src.estate_router import (
     resolve_route,
     run_task,
 )
-from src.park_lease_ops import NoActiveLease, active_leases_summary, heartbeat_repo, release_repo
+from src.park_lease_ops import (
+    NoActiveLease,
+    ParkConflict,
+    RepoNotClean,
+    RepoNotResolvable,
+    active_leases_summary,
+    heartbeat_repo,
+    park_repo_by_id,
+    release_repo,
+)
 
 # Bounds the serialized size of `objective` (text or a multimodal content
 # list — a few embedded base64 images can legitimately be several MB).
@@ -185,6 +194,30 @@ def setup_estate_routing_routes() -> APIRouter:
         _scope_owner(request, {"estate:read", "estate:execute"})
         return {"active_park_leases": active_leases_summary()}
 
+    @router.post("/park/{repo_id}")
+    async def park_acquire(request: Request, repo_id: str, branch: Optional[str] = None):
+        """Safe remote lease acquisition (docs/aoteru-final-convergence-
+        activation.agent-task.md item D: "remote park is still a real
+        controller gap"). The caller supplies only a repo_id — never a
+        path — src.park_lease_ops.park_repo_by_id resolves the real
+        worktree via src.estate_router.resolve_repo_path (registered
+        repos only) and fails closed (409) on an unresolved/dirty
+        worktree before ever acquiring a lease. Reuses the exact same
+        stale-reclaim/live-conflict semantics as `agent park` and the
+        heartbeat/release routes below — no second lease authority."""
+        _scope_owner(request, {"estate:execute"})
+        host_id = current_host_id()
+        if host_id is None:
+            raise HTTPException(503, "this host is not registered in config/estate.yaml — cannot acquire a lease as an unknown host")
+        try:
+            return {"ok": True, **park_repo_by_id(repo_id, host_id, branch=branch)}
+        except RepoNotResolvable as e:
+            raise HTTPException(404, str(e)) from e
+        except RepoNotClean as e:
+            raise HTTPException(409, str(e)) from e
+        except ParkConflict as e:
+            raise HTTPException(409, str(e)) from e
+
     @router.post("/park/{repo_id}/heartbeat")
     async def park_heartbeat(request: Request, repo_id: str):
         """HTTP surface for `agent heartbeat` (Workstream B next_action:
@@ -192,11 +225,7 @@ def setup_estate_routing_routes() -> APIRouter:
         those scripts/agent subcommands too"). Scoped to the host this
         server process is actually running on — a remote caller (e.g. the
         laptop thin client) renews the lease this host holds, it cannot
-        renew a lease on a host it isn't. `park` itself is deliberately not
-        exposed here yet: acquiring a lease also needs repo-path resolution
-        and a git-clean check, both currently CLI-only
-        (scripts/agent's _resolve_repos/_git_is_clean) — heartbeat/release
-        only need the lease row, already reused via src.park_lease_ops."""
+        renew a lease on a host it isn't."""
         _scope_owner(request, {"estate:execute"})
         host_id = current_host_id()
         try:

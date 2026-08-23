@@ -17,9 +17,13 @@ from core.database import ParkLease, get_db_session, PARK_LEASE_STALE_SECONDS, u
 from src.park_lease_ops import (
     NoActiveLease,
     ParkConflict,
+    RepoNotClean,
+    RepoNotResolvable,
     active_leases_summary,
+    git_is_clean,
     heartbeat_repo,
     park_repo,
+    park_repo_by_id,
     release_repo,
 )
 
@@ -123,3 +127,76 @@ def test_active_leases_summary_degrades_to_empty_on_db_error(monkeypatch):
     monkeypatch.setattr(database, "get_db_session", boom)
 
     assert active_leases_summary() == []
+
+
+class TestGitIsClean:
+    def test_clean_worktree_reports_clean(self, tmp_path):
+        import subprocess
+        subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+        (tmp_path / "f.txt").write_text("x")
+        subprocess.run(["git", "-C", str(tmp_path), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(tmp_path), "commit", "-q", "-m", "init"], check=True)
+
+        clean, reason = git_is_clean(str(tmp_path))
+        assert clean is True
+
+    def test_dirty_worktree_reports_dirty(self, tmp_path):
+        import subprocess
+        subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+        (tmp_path / "f.txt").write_text("uncommitted")
+
+        clean, reason = git_is_clean(str(tmp_path))
+        assert clean is False
+
+    def test_non_git_directory_fails_closed(self, tmp_path):
+        clean, reason = git_is_clean(str(tmp_path))
+        assert clean is False
+
+
+class TestParkRepoById:
+    """docs/aoteru-final-convergence-activation.agent-task.md item D:
+    the safe remote-callable entrypoint — repo_id in, no path ever
+    supplied by the caller."""
+
+    def _clean_git_repo(self, tmp_path):
+        import subprocess
+        subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+        (tmp_path / "f.txt").write_text("x")
+        subprocess.run(["git", "-C", str(tmp_path), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(tmp_path), "commit", "-q", "-m", "init"], check=True)
+        return tmp_path
+
+    def test_unresolvable_repo_id_fails_closed(self, monkeypatch):
+        import src.estate_router as estate_router
+        monkeypatch.setattr(estate_router, "resolve_repo_path", lambda repo_id: None)
+
+        with pytest.raises(RepoNotResolvable):
+            park_repo_by_id("unknown-repo", "test-lab")
+
+    def test_dirty_worktree_fails_closed_without_acquiring_lease(self, monkeypatch, tmp_path):
+        import subprocess
+        import src.estate_router as estate_router
+        subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+        (tmp_path / "dirty.txt").write_text("uncommitted")
+        monkeypatch.setattr(estate_router, "resolve_repo_path", lambda repo_id: str(tmp_path))
+
+        with pytest.raises(RepoNotClean):
+            park_repo_by_id("ops-repo", "test-lab")
+
+        with get_db_session() as db:
+            assert db.query(ParkLease).filter(ParkLease.repo_id == "ops-repo", ParkLease.status == "active").first() is None
+
+    def test_clean_resolved_repo_acquires_a_real_lease(self, monkeypatch, tmp_path):
+        import src.estate_router as estate_router
+        clean_repo = self._clean_git_repo(tmp_path)
+        monkeypatch.setattr(estate_router, "resolve_repo_path", lambda repo_id: str(clean_repo))
+
+        result = park_repo_by_id("ops-repo", "test-lab", branch="main")
+        assert result["repo_id"] == "ops-repo"
+        assert result["worktree_path"] == str(clean_repo)
+        assert result["branch"] == "main"
+
+        with get_db_session() as db:
+            row = db.query(ParkLease).filter(ParkLease.repo_id == "ops-repo", ParkLease.status == "active").first()
+            assert row is not None
+            assert row.worktree_path == str(clean_repo)

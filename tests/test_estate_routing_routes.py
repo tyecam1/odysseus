@@ -204,6 +204,105 @@ class TestRunRouteEndToEnd:
         assert response.status_code == 422
 
 
+class TestParkAcquireRoute:
+    """POST /api/estate/park/{repo_id} — docs/aoteru-final-convergence-
+    activation.agent-task.md item D: safe remote lease acquisition. The
+    caller supplies only a repo_id; path resolution and the git-clean
+    check happen server-side via src.park_lease_ops.park_repo_by_id."""
+
+    def _client(self, monkeypatch):
+        monkeypatch.setenv("AUTH_ENABLED", "false")
+        app = FastAPI()
+        app.include_router(setup_estate_routing_routes())
+        return TestClient(app)
+
+    def test_park_acquires_a_lease(self, monkeypatch):
+        client = self._client(monkeypatch)
+        import routes.estate_routing_routes as mod
+
+        monkeypatch.setattr(mod, "current_host_id", lambda: "test-lab")
+        captured = {}
+
+        def fake_park_repo_by_id(repo_id, host_id, *, branch=None, session_id=None):
+            captured.update(repo_id=repo_id, host_id=host_id, branch=branch)
+            return {"lease_id": "abc", "repo_id": repo_id, "host_id": host_id,
+                    "worktree_path": "/real/path", "branch": branch, "session_id": None,
+                    "reclaimed_stale_lease": None}
+        monkeypatch.setattr(mod, "park_repo_by_id", fake_park_repo_by_id)
+
+        response = client.post("/api/estate/park/my-repo", params={"branch": "main"})
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["ok"] is True
+        assert body["worktree_path"] == "/real/path"
+        assert captured == {"repo_id": "my-repo", "host_id": "test-lab", "branch": "main"}
+
+    def test_park_unresolvable_repo_returns_404(self, monkeypatch):
+        client = self._client(monkeypatch)
+        import routes.estate_routing_routes as mod
+
+        monkeypatch.setattr(mod, "current_host_id", lambda: "test-lab")
+
+        def boom(repo_id, host_id, *, branch=None, session_id=None):
+            raise mod.RepoNotResolvable(f"{repo_id!r} is not registered")
+        monkeypatch.setattr(mod, "park_repo_by_id", boom)
+
+        response = client.post("/api/estate/park/unknown-repo")
+        assert response.status_code == 404
+
+    def test_park_dirty_worktree_returns_409(self, monkeypatch):
+        client = self._client(monkeypatch)
+        import routes.estate_routing_routes as mod
+
+        monkeypatch.setattr(mod, "current_host_id", lambda: "test-lab")
+
+        def boom(repo_id, host_id, *, branch=None, session_id=None):
+            raise mod.RepoNotClean(f"refusing to park {repo_id!r}: dirty")
+        monkeypatch.setattr(mod, "park_repo_by_id", boom)
+
+        response = client.post("/api/estate/park/my-repo")
+        assert response.status_code == 409
+
+    def test_park_conflict_returns_409(self, monkeypatch):
+        client = self._client(monkeypatch)
+        import routes.estate_routing_routes as mod
+
+        monkeypatch.setattr(mod, "current_host_id", lambda: "test-lab")
+
+        def boom(repo_id, host_id, *, branch=None, session_id=None):
+            raise mod.ParkConflict(f"{repo_id!r} already parked")
+        monkeypatch.setattr(mod, "park_repo_by_id", boom)
+
+        response = client.post("/api/estate/park/my-repo")
+        assert response.status_code == 409
+
+    def test_park_unregistered_host_returns_503(self, monkeypatch):
+        client = self._client(monkeypatch)
+        import routes.estate_routing_routes as mod
+
+        monkeypatch.setattr(mod, "current_host_id", lambda: None)
+
+        response = client.post("/api/estate/park/my-repo")
+        assert response.status_code == 503
+
+    def test_park_requires_estate_execute_scope(self, monkeypatch):
+        monkeypatch.setenv("AUTH_ENABLED", "true")
+        app = FastAPI()
+        app.include_router(setup_estate_routing_routes())
+        client = TestClient(app, raise_server_exceptions=False)
+
+        @app.middleware("http")
+        async def _inject_token(request, call_next):
+            request.state.api_token = True
+            request.state.api_token_scopes = ["estate:read"]
+            request.state.api_token_owner = "laptop"
+            return await call_next(request)
+
+        response = client.post("/api/estate/park/my-repo")
+        assert response.status_code == 403
+
+
 class TestParkHeartbeatReleaseRoutes:
     """HTTP surface for `agent heartbeat`/`agent release` (Workstream B
     next_action: "a park/release/heartbeat HTTP surface so the client can

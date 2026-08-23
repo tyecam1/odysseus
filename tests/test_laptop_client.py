@@ -200,6 +200,58 @@ class FakeResponse:
         return False
 
 
+def test_park_hits_the_correct_endpoint_with_branch(client, monkeypatch):
+    client.main(["config", "set", "--url", "http://lab:7001", "--token", "ody_x"])
+    captured = {}
+
+    def fake_urlopen(req, timeout=None):
+        captured["url"] = req.full_url
+        captured["method"] = req.get_method()
+        return FakeResponse({"ok": True, "lease_id": "abc", "repo_id": "odysseus", "worktree_path": "/real/path"})
+    monkeypatch.setattr(client.urllib.request, "urlopen", fake_urlopen)
+
+    rc = client.main(["park", "odysseus", "--branch", "dev"])
+    assert rc == 0
+    assert captured["url"] == "http://lab:7001/api/estate/park/odysseus?branch=dev"
+    assert captured["method"] == "POST"
+
+
+def test_park_unresolvable_repo_reports_clearly(client, monkeypatch, capsys):
+    client.main(["config", "set", "--url", "http://lab:7001", "--token", "ody_x"])
+
+    def fake_urlopen(req, timeout=None):
+        import io
+        import urllib.error
+        raise urllib.error.HTTPError(
+            req.full_url, 404, "Not Found", {},
+            io.BytesIO(json.dumps({"detail": "'unknown-repo' is not registered"}).encode()),
+        )
+    monkeypatch.setattr(client.urllib.request, "urlopen", fake_urlopen)
+
+    rc = client.main(["park", "unknown-repo"])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "not registered" in out
+
+
+def test_park_dirty_worktree_reports_clearly(client, monkeypatch, capsys):
+    client.main(["config", "set", "--url", "http://lab:7001", "--token", "ody_x"])
+
+    def fake_urlopen(req, timeout=None):
+        import io
+        import urllib.error
+        raise urllib.error.HTTPError(
+            req.full_url, 409, "Conflict", {},
+            io.BytesIO(json.dumps({"detail": "refusing to park 'odysseus': dirty"}).encode()),
+        )
+    monkeypatch.setattr(client.urllib.request, "urlopen", fake_urlopen)
+
+    rc = client.main(["park", "odysseus"])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "cannot park" in out
+
+
 def test_heartbeat_hits_the_correct_endpoint(client, monkeypatch):
     client.main(["config", "set", "--url", "http://lab:7001", "--token", "ody_x"])
     captured = {}

@@ -9,13 +9,20 @@ of duplicate authority docs/aoteru-model-host-routing-contract.md already
 forbids for routing decisions, and lease mutation deserves the same
 discipline.
 
-Deliberately does not resolve repo paths, check git cleanliness, or infer
-the caller's host — those are call-site concerns (the CLI reads the local
-filesystem/config; the HTTP route runs inside the server process on
-whichever host it's deployed to) and stay in each caller, not here.
+`park_repo`/`heartbeat_repo`/`release_repo` still take an already-resolved
+worktree path and don't infer the caller's host — those stay call-site
+concerns. `park_repo_by_id` (added for docs/aoteru-final-convergence-
+activation.agent-task.md item D: "remote park is still a real controller
+gap") is the one exception: it resolves repo_id -> real path via
+`src.estate_router.resolve_repo_path` (registered repos only, no
+arbitrary path from a caller) and fails closed on a dirty/unresolved
+worktree via `git_is_clean` below, before ever calling `park_repo` — this
+is what makes it safe to expose over HTTP to a remote (e.g. laptop)
+caller who supplies only a repo_id, never a path.
 """
 from __future__ import annotations
 
+import subprocess
 import uuid
 from typing import Optional
 
@@ -26,6 +33,62 @@ class ParkConflict(Exception):
 
 class NoActiveLease(Exception):
     """heartbeat/release found no matching active lease to act on."""
+
+
+class RepoNotResolvable(Exception):
+    """repo_id is unregistered, or its root var/path doesn't resolve on
+    this host — fail closed rather than guessing a path."""
+
+
+class RepoNotClean(Exception):
+    """The resolved worktree has uncommitted changes (or git itself
+    failed) — fail closed rather than parking a dirty tree."""
+
+
+def git_is_clean(path: str) -> tuple[bool, str]:
+    """Fail closed: anything but a clean `git status --porcelain`
+    (including the command itself failing) is treated as dirty. Shared
+    by `scripts/agent`'s `park` CLI subcommand and `park_repo_by_id`
+    below — not re-derived per caller."""
+    try:
+        out = subprocess.run(
+            ["git", "-C", path, "status", "--porcelain"],
+            capture_output=True, text=True, timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return False, f"git status failed: {e}"
+    if out.returncode != 0:
+        return False, out.stderr.strip() or "git status failed"
+    if out.stdout.strip():
+        return False, "working tree has uncommitted changes"
+    return True, ""
+
+
+def park_repo_by_id(
+    repo_id: str,
+    host_id: str,
+    *,
+    branch: Optional[str] = None,
+    session_id: Optional[str] = None,
+) -> dict:
+    """Safe remote-callable park acquisition: repo_id in, no path ever
+    supplied by the caller. Resolves the real worktree path via
+    `src.estate_router.resolve_repo_path` (registered repos only) and
+    fails closed (`RepoNotResolvable`) if it doesn't resolve on this
+    host; fails closed (`RepoNotClean`) if the resolved worktree is
+    dirty or git itself fails. Only then delegates to `park_repo` — same
+    stale-reclaim/live-conflict semantics, not re-derived."""
+    from src.estate_router import resolve_repo_path
+
+    path = resolve_repo_path(repo_id)
+    if path is None:
+        raise RepoNotResolvable(
+            f"{repo_id!r} is not a registered repo, or its root var/path doesn't resolve on this host"
+        )
+    clean, reason = git_is_clean(path)
+    if not clean:
+        raise RepoNotClean(f"refusing to park {repo_id!r}: {reason} (fail-closed — commit/stash first)")
+    return park_repo(repo_id, host_id, path, branch=branch, session_id=session_id)
 
 
 def park_repo(
