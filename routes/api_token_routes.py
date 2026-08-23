@@ -32,6 +32,8 @@ ALLOWED_SCOPES = {
     "bbc:read",
     "bbc:invoke",
     "bbc:write",
+    "estate:read",
+    "estate:execute",
 }
 TOKEN_PROFILES = {
     "chat": ["chat"],

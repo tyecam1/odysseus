@@ -48,17 +48,47 @@ see `[[project-aoteru-p12-estate-convergence]]`.
 
 - id: B-laptop-thin-client
   outcome: installable controller product surface requiring no Odysseus checkout
-  status: eligible
+  status: active
   priority: high
   depends_on: []
   blocker: null
   next_action: >-
-    audit scripts/agent + companion/ for what already exists as a thin
-    client vs what still runs from a full checkout; design the smallest
-    packaged surface (pipx/uv script or single-file bootstrap); this
-    session has not yet started implementation.
-  evidence: []
-  last_verified_commit: null
+    remaining: operator-run live smoke test from an actual laptop (not
+    proven from this lab-only session — see companion/laptop_client/README.md
+    "what's deliberately not here yet"); pipx/msix packaging; a
+    park/release/heartbeat HTTP surface so the client can cover those
+    scripts/agent subcommands too; Windows-specific .ps1/.bat wrapper.
+  evidence:
+    - "scripts/agent (the existing operator-bay CLI) requires a full
+      checkout (imports core.database, reads config/*.yaml from the repo
+      root) — confirmed by reading it, not assumed; this is exactly the
+      gap Workstream B describes."
+    - "Found routes/estate_routing_routes.py already exposes
+      POST /api/estate/route and POST /api/estate/run (a synchronous
+      job-submission API) — reused rather than duplicated. It had zero
+      scope gating (any authenticated caller, including a companion
+      chat-scoped pairing token, could drive estate execution) and
+      RunTaskEnvelope had no field for run_task()'s existing
+      allow_paid_escalation opt-in, so no HTTP caller could ever reach
+      the paid lane. Fixed both: added estate:read/estate:execute to
+      ALLOWED_SCOPES (routes/api_token_routes.py), scope-gated all four
+      /api/estate/* routes (session-cookie callers unrestricted, same
+      pattern as routes/codex_routes.py's _scope_owner), and added
+      RunTaskEnvelope.allow_paid_escalation threading into
+      task['routing']. 9 new tests (tests/test_estate_routing_routes.py)
+      — this route file had ZERO test coverage before."
+    - "Built companion/laptop_client/aoteru.py: single stdlib-only file
+      (verified by AST-walking its imports in
+      tests/test_laptop_client.py — no repo/third-party dependency can
+      sneak in unnoticed), subcommands config/status/route/ask, config at
+      ~/.aoteru/client.json (chmod 600), token never printed. Live-tested
+      standalone (copied outside the repo, HOME redirected) against the
+      real running dev instance on 127.0.0.1:7000: /api/health round-trip
+      succeeded, and an invalid token was correctly rejected 401 by the
+      live auth middleware (confirmed independently via curl). 7 new
+      unit tests. companion/laptop_client/README.md is the exact operator
+      bootstrap (mint token -> copy file -> configure -> smoke test)."
+  last_verified_commit: <pending this checkpoint's commit>
 
 - id: C-execution-plane
   outcome: deterministic/local/Codex/Claude execution as one mature governed lane

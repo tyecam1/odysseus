@@ -1,0 +1,132 @@
+"""Tests for companion/laptop_client/aoteru.py — the standalone, stdlib-only
+laptop thin client (Workstream B).
+
+Imports the script by file path (not as a package) since it is deliberately
+NOT part of the odysseus-aoteru Python package — a laptop with no checkout
+only ever has this one file. Verifies: it stays stdlib-only (no accidental
+dependency on this repo or third-party packages sneaking in), config
+read/write round-trips without ever writing the token in plaintext logs,
+and request-building/response-handling logic for each subcommand.
+"""
+import ast
+import importlib.util
+import json
+import sys
+from pathlib import Path
+
+import pytest
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+CLIENT_PATH = PROJECT_ROOT / "companion" / "laptop_client" / "aoteru.py"
+
+
+def test_client_is_stdlib_only():
+    """The whole point of Workstream B: this file must run on a bare laptop
+    Python with no pip install and no Odysseus checkout on sys.path."""
+    STDLIB = {"__future__", "argparse", "json", "os", "pathlib", "stat", "sys", "urllib"}
+    tree = ast.parse(CLIENT_PATH.read_text(encoding="utf-8"))
+    found = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            found.update(n.name.split(".")[0] for n in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            found.add(node.module.split(".")[0])
+    assert found <= STDLIB, f"non-stdlib import(s) found: {found - STDLIB}"
+
+
+@pytest.fixture
+def client(monkeypatch, tmp_path):
+    spec = importlib.util.spec_from_file_location("aoteru_client", CLIENT_PATH)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    monkeypatch.setattr(mod, "CONFIG_DIR", tmp_path / ".aoteru")
+    monkeypatch.setattr(mod, "CONFIG_PATH", tmp_path / ".aoteru" / "client.json")
+    return mod
+
+
+def test_config_set_and_show_round_trips(client, capsys):
+    client.main(["config", "set", "--url", "http://lab:7001", "--token", "ody_secret_value"])
+    capsys.readouterr()
+
+    saved = json.loads(client.CONFIG_PATH.read_text())
+    assert saved == {"url": "http://lab:7001", "token": "ody_secret_value"}
+
+    client.main(["config", "show"])
+    out = capsys.readouterr().out
+    assert "ody_secret_value" not in out, "the raw token must never be printed"
+    assert "set (hidden)" in out
+    assert "http://lab:7001" in out
+
+
+def test_config_partial_update_preserves_existing_field(client):
+    client.main(["config", "set", "--url", "http://lab:7001", "--token", "ody_a"])
+    client.main(["config", "set", "--token", "ody_b"])
+    saved = json.loads(client.CONFIG_PATH.read_text())
+    assert saved == {"url": "http://lab:7001", "token": "ody_b"}
+
+
+def test_status_reports_clear_error_when_no_backend_configured(client):
+    with pytest.raises(SystemExit) as exc:
+        client.main(["status"])
+    assert "no backend configured" in str(exc.value)
+
+
+def test_status_reports_unreachable_backend_clearly(client, monkeypatch, capsys):
+    client.main(["config", "set", "--url", "http://127.0.0.1:1", "--token", "ody_x"])
+
+    import urllib.error
+
+    def fake_urlopen(req, timeout=None):
+        raise urllib.error.URLError("connection refused")
+    monkeypatch.setattr(client.urllib.request, "urlopen", fake_urlopen)
+
+    with pytest.raises(SystemExit) as exc:
+        client.main(["status"])
+    assert "cannot reach" in str(exc.value)
+
+
+def test_ask_sends_allow_paid_escalation_flag(client, monkeypatch):
+    client.main(["config", "set", "--url", "http://lab:7001", "--token", "ody_x"])
+
+    captured = {}
+
+    class FakeResponse:
+        status = 200
+        def read(self):
+            return json.dumps({"ok": True, "executed": True}).encode()
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+
+    def fake_urlopen(req, timeout=None):
+        captured["url"] = req.full_url
+        captured["body"] = json.loads(req.data.decode())
+        captured["headers"] = dict(req.header_items())
+        return FakeResponse()
+    monkeypatch.setattr(client.urllib.request, "urlopen", fake_urlopen)
+
+    rc = client.main(["ask", "do the thing", "--capability", "code-strong", "--allow-paid"])
+    assert rc == 0
+    assert captured["url"].endswith("/api/estate/run")
+    assert captured["body"]["allow_paid_escalation"] is True
+    assert captured["body"]["requirements"]["capabilities"] == ["code-strong"]
+    assert captured["headers"]["Authorization"] == "Bearer ody_x"
+
+
+def test_ask_reports_scope_denial_clearly(client, monkeypatch, capsys):
+    client.main(["config", "set", "--url", "http://lab:7001", "--token", "ody_readonly"])
+
+    def fake_urlopen(req, timeout=None):
+        import urllib.error
+        raise urllib.error.HTTPError(
+            req.full_url, 403, "Forbidden", {}, __import__("io").BytesIO(
+                json.dumps({"detail": "API token missing required scope: estate:execute"}).encode()
+            ),
+        )
+    monkeypatch.setattr(client.urllib.request, "urlopen", fake_urlopen)
+
+    rc = client.main(["ask", "do the thing"])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "estate:execute" in out
