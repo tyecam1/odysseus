@@ -85,6 +85,48 @@ def test_status_reports_unreachable_backend_clearly(client, monkeypatch, capsys)
     assert "cannot reach" in str(exc.value)
 
 
+def test_controller_reconnects_cleanly_after_a_disconnect(client, monkeypatch, capsys):
+    """Workstream J: 'controller disconnect/reconnect'. The client keeps
+    no persistent connection or in-process session state across
+    subcommands — each invocation is one fresh HTTP request against the
+    on-disk config — so a backend that comes back after being briefly
+    unreachable must work on the very next call with no special recovery
+    step, reset, or stale config left over from the failed attempt."""
+    client.main(["config", "set", "--url", "http://lab:7001", "--token", "ody_x"])
+    import urllib.error
+
+    call_count = {"n": 0}
+
+    def flaky_then_healthy(req, timeout=None):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise urllib.error.URLError("connection refused")
+
+        class FakeResponse:
+            status = 200
+            def read(self):
+                return json.dumps({"active_park_leases": []}).encode()
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                return False
+        return FakeResponse()
+    monkeypatch.setattr(client.urllib.request, "urlopen", flaky_then_healthy)
+
+    with pytest.raises(SystemExit):
+        client.main(["park-status"])
+
+    # Second attempt against the same, untouched config must succeed —
+    # no reconnect/reset command needed, and config wasn't mutated by
+    # the failed first attempt. park-status is a single request, so the
+    # call count directly proves no retry-loop/leftover state either.
+    rc = client.main(["park-status"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "active_park_leases" in out
+    assert call_count["n"] == 2
+
+
 def test_ask_sends_allow_paid_escalation_flag(client, monkeypatch):
     client.main(["config", "set", "--url", "http://lab:7001", "--token", "ody_x"])
 
