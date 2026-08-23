@@ -303,10 +303,28 @@ being withheld pending these; see each workstream's `next_action` for what
   next_action: >-
     remaining: incremental ingest adapters (claude-code-sessions,
     chatgpt-export, codex-artifacts, repo-pointers — all still `planned`
-    per `agent status`'s memory_sources, correctly not filled cosmetically);
-    wiring `memory_outbox.replay()` into an actual scheduled/CLI entry
-    point once a real home target exists to replay into.
+    per `agent status`'s memory_sources, correctly not filled cosmetically
+    — codex-artifacts specifically now has a recorded scoping blocker, see
+    evidence); wiring `memory_outbox.replay()` into an actual scheduled/CLI
+    entry point once a real home target exists to replay into.
   evidence:
+    - "Investigated building the codex-artifacts ingest adapter this
+      checkpoint (a genuinely real local source — ~/.codex/sessions/ has
+      real rollout JSONL files with a workable session_meta/cwd shape).
+      Did NOT build it: ~/.codex is this whole host's shared codex
+      history across every project the operator uses it for, not scoped
+      to this repo (confirmed live — the first session file inspected
+      was from an unrelated /home/agent/projects/vault checkout, not
+      odysseus-aoteru). An adapter built without an explicit
+      cwd-prefix filter and explicit operator opt-in would risk pulling
+      unrelated-project content into this repo's Misumi memory store —
+      a real cross-project data-leak risk, not a hypothetical one, and
+      exactly the kind of consequential decision GO.md's own discipline
+      says needs recording and deferring, not an autonomous unilateral
+      call. Recording as a scoping blocker: needs (a) an explicit
+      cwd-prefix allowlist (this repo's path only) and (b) operator
+      confirmation that reading ~/.codex/sessions/ at all is wanted,
+      before this adapter gets built."
     - "The history()-backed revision endpoint this next_action previously
       listed as missing was a stale claim (checked this checkpoint):
       GET /misumi/memory/{capsule_id}/history already existed
