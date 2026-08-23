@@ -287,13 +287,41 @@ see `[[project-aoteru-p12-estate-convergence]]`.
 
 - id: H-interface-mobile-frontdoor
   outcome: deployable svc:aoteru front-door + PWA, activation-ready for interface PC
-  status: eligible
+  status: active
   priority: medium
   depends_on: []
   blocker: null
-  next_action: build/test as deployable artefacts against a lab test instance only; never relabel as canonical svc:aoteru.
-  evidence: []
-  last_verified_commit: null
+  next_action: >-
+    remaining: dedicated install/update/rollback doc specifically for the
+    interface PC (launch-windows.ps1/update_windows.bat/odysseus-
+    ui.service already provide the generic mechanism, just not written up
+    as an interface-PC-specific procedure); an HTTP-facing park/status
+    surface for the mobile UI (same underlying gap [[B-laptop-thin-
+    client]] already recorded); operator: run
+    `scripts/interface_frontdoor_acceptance.py --url <interface PC URL>`
+    once it's live — same command, no rewrite needed.
+  evidence:
+    - "Audited rather than assumed missing: app.py already IS a
+      persistent authenticated front-door (item 1), static/manifest.json
+      + sw.js already form an installable, standalone-display PWA
+      (item 2), companion/ already provides LAN-discovery pairing (item
+      3's memory-recall/chat half), and config/estate.yaml already
+      enforces 'do not stand up a lab-hosted stand-in and call it
+      svc:aoteru' (item 6) — svc:aoteru stays endpoint:null by design,
+      confirmed still true. Job submission/escalation (item 3's other
+      half) is [[B-laptop-thin-client]]'s new scope-gated /api/estate/*
+      work, reused not duplicated."
+    - "Added scripts/interface_frontdoor_acceptance.py — item 7's
+      'acceptance tests that can be rerun verbatim when the interface PC
+      returns'. Points at any URL (lab test instance today, the real
+      interface PC later, same command); checks PWA manifest served,
+      liveness, protected routes correctly reject unauthenticated callers
+      (the private-network assumption checked at the HTTP layer, not only
+      via tailscale serve), and the login page is reachable. Live-run
+      against the real dev instance: 4/4 PASS. Complements rather than
+      duplicates scripts/cold_reboot_verify.py, which checks systemd/DB/
+      Ollama/Chroma/leases, not the mobile-facing surface. 5 unit tests."
+  last_verified_commit: <pending this checkpoint's commit>
 
 - id: I-home-reentry
   outcome: bounded home-PC re-entry/migration procedure, not a redesign
