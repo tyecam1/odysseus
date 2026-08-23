@@ -8,7 +8,7 @@ resolves to at the HTTP layer.
 """
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -74,7 +74,22 @@ class RunTaskEnvelope(TaskEnvelope):
     (Codex) lane. Still requires the `estate:execute` scope this whole
     endpoint already requires; this field does not grant any new
     authority, it only unlocks routing behaviour that authority already
-    permits."""
+    permits.
+
+    BUG FIX (found live this session, Workstream J validation): this
+    field was accidentally dropped entirely by the same commit that added
+    `allow_paid_escalation` — pydantic v2 silently ignores an unknown
+    kwarg by default (no error), so every `objective` an HTTP caller sent
+    (including companion/laptop_client/aoteru.py's `ask` command) was
+    dropped before it ever reached `run_task()`, which then correctly
+    reported 'no objective provided to execute' for every single HTTP
+    `/api/estate/run` call since that commit. Restored, and widened to
+    also accept the OpenAI-style multimodal content list `run_task()`/
+    `execute_local()` already support (P12.2) — the original field was
+    `Optional[str]` only, which never covered multimodal even before this
+    regression, a separate pre-existing gap fixed here at the same time
+    rather than left half-fixed."""
+    objective: Optional[Union[str, List[Dict[str, object]]]] = None
     allow_paid_escalation: bool = False
 
     def to_task(self) -> dict:

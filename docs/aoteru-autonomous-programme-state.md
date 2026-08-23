@@ -81,13 +81,26 @@ see `[[project-aoteru-p12-estate-convergence]]`.
       (verified by AST-walking its imports in
       tests/test_laptop_client.py — no repo/third-party dependency can
       sneak in unnoticed), subcommands config/status/route/ask, config at
-      ~/.aoteru/client.json (chmod 600), token never printed. Live-tested
-      standalone (copied outside the repo, HOME redirected) against the
-      real running dev instance on 127.0.0.1:7000: /api/health round-trip
-      succeeded, and an invalid token was correctly rejected 401 by the
-      live auth middleware (confirmed independently via curl). 7 new
-      unit tests. companion/laptop_client/README.md is the exact operator
-      bootstrap (mint token -> copy file -> configure -> smoke test)."
+      ~/.aoteru/client.json (chmod 600), token never printed. 'Live'-tested
+      standalone against 127.0.0.1:7000 at the time — **correction, found
+      2026-08-23 during [[J-security-resilience]] validation: port 7000
+      is `/home/agent/projects/odysseus` (the registered
+      `odysseus-upstream-lab` capability-source repo, a DIFFERENT
+      codebase, version 0.9.1, zero estate_routing_routes references),
+      not this repo. The real deployed instance of this repo is
+      `odysseus-aoteru-lab.service` on port 7001. The /api/health and
+      401-on-bad-token results were still real HTTP behaviour, just
+      against the wrong app, and coincidentally plausible because that
+      app has its own similar-shaped auth-gated routes — not a
+      fabrication, but not proof of this repo's behaviour either. See the
+      real HTTP-layer proof added afterward (TestClient-based, in-process
+      against the actual route handler) in this same workstream's later
+      test additions.** Re-run for real against port 7001: `status`
+      correctly reported 'backend: reachable, status=healthy', and an
+      invalid token was correctly rejected 401 (confirmed independently
+      via curl against the same port). 7 unit tests.
+      companion/laptop_client/README.md is the exact operator bootstrap
+      (mint token -> copy file -> configure -> smoke test)."
   last_verified_commit: <pending this checkpoint's commit>
 
 - id: C-execution-plane
@@ -317,10 +330,20 @@ see `[[project-aoteru-p12-estate-convergence]]`.
       interface PC later, same command); checks PWA manifest served,
       liveness, protected routes correctly reject unauthenticated callers
       (the private-network assumption checked at the HTTP layer, not only
-      via tailscale serve), and the login page is reachable. Live-run
-      against the real dev instance: 4/4 PASS. Complements rather than
-      duplicates scripts/cold_reboot_verify.py, which checks systemd/DB/
-      Ollama/Chroma/leases, not the mobile-facing surface. 5 unit tests."
+      via tailscale serve), and the login page is reachable. **Correction
+      (found 2026-08-23, see [[B-laptop-thin-client]]): the original 4/4
+      PASS run targeted port 7000, which is a different repo/app
+      (`odysseus-upstream-lab`), not this one — the script's own logic
+      is still correct (proven separately by unit tests with mocked
+      HTTP), but that specific run was not proof of this repo's live
+      behaviour.** Re-run for real against port 7001
+      (`odysseus-aoteru-lab.service`, this repo's actual deployed
+      instance, confirmed via `/api/version` == this repo's APP_VERSION):
+      4/4 PASS, genuinely this time. Complements rather than duplicates
+      scripts/cold_reboot_verify.py
+      (systemd/DB/Ollama/Chroma/leases, not the mobile-facing surface;
+      cold_reboot_verify.py's own APP_URL already correctly defaults to
+      port 7001, unaffected by this mistake). 5 unit tests."
   last_verified_commit: <pending this checkpoint's commit>
 
 - id: I-home-reentry
@@ -379,8 +402,38 @@ see `[[project-aoteru-p12-estate-convergence]]`.
   next_action: >-
     remaining: Chroma rebuild-from-authoritative-state test, worker/model/
     provider disappearance mid-task, stale LogicalSession/job
-    reconciliation, malformed/oversized multimodal envelope handling.
+    reconciliation. operator: `sudo systemctl restart
+    odysseus-aoteru-lab.service` to deploy the RunTaskEnvelope.objective
+    fix below to the live port-7001 instance — this session could not
+    restart it (no non-interactive sudo), correctly treated as a stop-gate
+    per GO.md rather than worked around.
   evidence:
+    - "CRITICAL SELF-FOUND REGRESSION, fixed same session: the
+      [[B-laptop-thin-client]] commit that added
+      RunTaskEnvelope.allow_paid_escalation accidentally dropped the
+      `objective` field entirely from the class body. Pydantic v2 default
+      config silently ignores an unknown constructor kwarg (no error), so
+      every test that constructed RunTaskEnvelope(objective=...) still
+      'passed' without ever exercising the missing field, and
+      to_task()'s model_dump() simply omitted 'objective' from the task
+      dict — meaning every HTTP POST /api/estate/run caller (including
+      the laptop client's `ask` command) had its objective silently
+      dropped, and run_task() correctly reported 'no objective provided
+      to execute' for every single call since that commit. Found while
+      validating malformed/oversized-envelope handling for this
+      workstream (checked what the route actually does with a real
+      request body, not just the Pydantic model in isolation). Fixed:
+      restored `objective: Optional[Union[str, List[Dict[str, object]]]]`
+      (also widened past the original Optional[str]-only to cover the
+      multimodal content lists run_task()/execute_local() already
+      support, a separate pre-existing gap fixed at the same time). Added
+      2 new TestClient-based end-to-end tests
+      (TestRunRouteEndToEnd, tests/test_estate_routing_routes.py) that
+      POST a real HTTP JSON body through the actual route handler and
+      assert the objective survives into the dict run_task() receives —
+      the exact thing the earlier model-only tests didn't check, which is
+      why they didn't catch this. Full suite re-verified green (5015
+      passed) after the fix."
     - "DB backup/restore drill (live, non-destructive): audited rather
       than built from scratch — scripts/odysseus-backup already exists
       with a real security-hardened restore path (symlink/hardlink-escape
