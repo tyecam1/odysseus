@@ -160,7 +160,7 @@ being withheld pending these; see each workstream's `next_action` for what
       via curl against the same port). 7 unit tests.
       companion/laptop_client/README.md is the exact operator bootstrap
       (mint token -> copy file -> configure -> smoke test)."
-  last_verified_commit: 8cab723
+  last_verified_commit: 049eccc
 
 - id: C-execution-plane
   outcome: deterministic/local/Codex/Claude execution as one mature governed lane
@@ -367,12 +367,24 @@ being withheld pending these; see each workstream's `next_action` for what
     remaining: dedicated install/update/rollback doc specifically for the
     interface PC (launch-windows.ps1/update_windows.bat/odysseus-
     ui.service already provide the generic mechanism, just not written up
-    as an interface-PC-specific procedure); an HTTP-facing park/status
-    surface for the mobile UI (same underlying gap [[B-laptop-thin-
-    client]] already recorded); operator: run
+    as an interface-PC-specific procedure); wiring the mobile/companion
+    frontend to actually call the new GET /api/estate/park/status route
+    (the route exists, is tested and live-verified server-side; no
+    frontend caller uses it yet); operator: run
     `scripts/interface_frontdoor_acceptance.py --url <interface PC URL>`
     once it's live — same command, no rewrite needed.
   evidence:
+    - "HTTP-facing park/status surface (checked, not assumed missing):
+      agent status already showed an estate-wide active-lease view for an
+      operator with a checkout, but nothing exposed it over HTTP for a
+      companion/mobile caller. Extracted the read into
+      src.park_lease_ops.active_leases_summary() (same empty-on-DB-error
+      degrade as before) and added GET /api/estate/park/status, scope-
+      gated under estate:read|estate:execute. scripts/agent's
+      _active_park_leases_summary() now delegates to the same function
+      rather than re-querying — one authority, not two. 6 new tests
+      (summary function, HTTP round-trip, scope gate). Live-verified
+      against the real DB. Full suite green (5050 passed, 4 skipped)."
     - "Audited rather than assumed missing: app.py already IS a
       persistent authenticated front-door (item 1), static/manifest.json
       + sw.js already form an installable, standalone-display PWA
@@ -403,7 +415,7 @@ being withheld pending these; see each workstream's `next_action` for what
       (systemd/DB/Ollama/Chroma/leases, not the mobile-facing surface;
       cold_reboot_verify.py's own APP_URL already correctly defaults to
       port 7001, unaffected by this mistake). 5 unit tests."
-  last_verified_commit: <pending this checkpoint's commit>
+  last_verified_commit: 049eccc
 
 - id: I-home-reentry
   outcome: bounded home-PC re-entry/migration procedure, not a redesign
