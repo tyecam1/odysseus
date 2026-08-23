@@ -149,13 +149,33 @@ see `[[project-aoteru-p12-estate-convergence]]`.
 
 - id: J-security-resilience
   outcome: recovery paths verified beyond happy-path smokes; cold-reboot checklist
-  status: eligible
+  status: active
   priority: high
   depends_on: []
   blocker: null
-  next_action: not yet started this session.
-  evidence: []
-  last_verified_commit: null
+  next_action: >-
+    remaining: DB backup/restore drill, Chroma rebuild-from-authoritative-state
+    test, worker/model/provider disappearance mid-task, stale LogicalSession/
+    job reconciliation, auth/token scope audit, malformed/oversized
+    multimodal envelope handling.
+  evidence:
+    - "Live-verified 2026-08-23: `tailscale serve status` on lab shows both
+      routes '(tailnet only)' — no Funnel/public exposure. Confirms
+      config/estate.yaml's private-only-listener invariant is actually true
+      in production right now, not just documented."
+    - "Added scripts/cold_reboot_verify.py (Workstream J's required
+      cold-reboot verification script): checks systemd unit active,
+      app liveness/`/api/ready` (falls back to liveness-only without a
+      COLD_REBOOT_AUTH_TOKEN, since /api/ready is deliberately not
+      auth-exempt), Ollama reachable, ChromaDB reachable (best-effort),
+      Tailscale serve stays tailnet-only (hard-fails on any non-private
+      route), and no stale active ParkLease rows. Ran live against the
+      real lab deployment: 6/6 PASS. Never reboots anything itself — see
+      docs/aoteru-cold-reboot-checklist.md for the one human action plus
+      the exact post-boot command. 8 new unit tests
+      (tests/test_cold_reboot_verify.py) cover the PASS/FAIL/SKIP
+      classification logic with mocked subprocess/HTTP calls."
+  last_verified_commit: <pending this checkpoint's commit>
 
 - id: K-operator-experience
   outcome: converged agent status / diagnostics / handbook
