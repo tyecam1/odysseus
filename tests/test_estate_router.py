@@ -371,6 +371,33 @@ def test_run_task_marks_empty_output_as_failed_gate(fixture_config, monkeypatch)
     assert recorded["escalation_reason"] == "worker_failed"
 
 
+def test_run_task_records_worker_disappearance_as_failed_not_a_crash(fixture_config, monkeypatch):
+    """Workstream J: 'worker/model/provider disappearance mid-task' — a
+    model that resolved as live at routing time but errors out entirely
+    by execution time (e.g. unloaded, host restarted, Ollama itself
+    down) must be recorded as a truthful failed RoutingDecision, not
+    raise or silently report success. Distinct from the existing
+    empty-output test above: here execute_local itself reports ok=False,
+    the actual disappearance shape, not a hollow success."""
+    monkeypatch.setattr(estate_router, "_record_decision", lambda *a, **k: "fake-decision-id")
+    monkeypatch.setattr(estate_router, "_ollama_model_live", lambda model, timeout=3.0: (True, "live"))
+    monkeypatch.setattr(estate_router, "execute_local", lambda model, objective, **k: {
+        "ok": False, "error": "502: Upstream ... 404: model not found", "retries": 0, "latency_ms": 42,
+    })
+    recorded = {}
+    monkeypatch.setattr(estate_router, "_update_decision_outcome", lambda decision_id, **k: recorded.update(k))
+
+    result = estate_router.run_task({
+        "task_class": "coding", "objective": "say pong",
+        "requirements": {"capabilities": ["local-fast"]},
+    })
+    assert result["executed"] is True
+    assert result["deterministic_gate"] == "fail"
+    assert result["execution"]["ok"] is False
+    assert recorded["status"] == "failed"
+    assert recorded["escalation_reason"] == "worker_failed"
+
+
 def test_run_task_does_not_execute_deterministic_route(fixture_config, monkeypatch):
     monkeypatch.setattr(estate_router, "_record_decision", lambda *a, **k: "fake-decision-id")
     called = []
