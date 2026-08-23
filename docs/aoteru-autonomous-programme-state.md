@@ -757,14 +757,27 @@ being withheld pending these; see each workstream's `next_action` for what
 
 - id: K-operator-experience
   outcome: converged agent status / diagnostics / handbook
-  status: active
+  status: complete
   priority: medium
   depends_on: []
   blocker: null
   next_action: >-
-    remaining: logs/result pointers surface (deferred — no job-result
-    store to point at yet beyond RoutingDecision ids).
+    remaining: none identified — all of K's originally-scoped items
+    (converged agent status/diagnostics/handbook, recent-decisions
+    summary, logs/result pointers) are now closed. Any further K work
+    would be a new scope addition, not a gap in what was asked for.
   evidence:
+    - "Logs/result pointers surface (checked, not assumed permanently
+      deferred): re-examined the 'no job-result store to point at yet'
+      reasoning — RoutingDecision itself already IS an addressable
+      result store, it just had no lookup-by-id anywhere. Added
+      src.routing_evaluator.get_decision_by_id(decision_id) (single
+      telemetry authority, not a second data source), wired into
+      `agent decision <decision_id>` and
+      GET /api/estate/decision/{decision_id} (scope-gated like other
+      read endpoints). 7 new tests; live-verified against the real
+      production DB and CLI end-to-end with a real decision_id. Full
+      suite green (5083 passed, 4 skipped)."
     - "Added recent_routing_decisions to `agent status`'s own output
       (_recent_routing_decisions_summary(), scripts/agent): last 10
       RoutingDecision rows newest-first (id/task_class/host_id/executor/
@@ -802,7 +815,7 @@ being withheld pending these; see each workstream's `next_action` for what
       evidence, each section pointing at the actual authority file/script
       rather than re-explaining it (so it can't silently drift out of
       sync with the code)."
-  last_verified_commit: a967110
+  last_verified_commit: 631cb12
 
 - id: L-real-work-validation
   outcome: representative end-to-end tasks across local/paid/multimodal/experiment-priority/blocked-host
@@ -843,9 +856,22 @@ being withheld pending these; see each workstream's `next_action` for what
 - This programme is intentionally multi-session in scope (11 workstreams,
   several requiring unavailable hardware). Do not treat one session's
   checkpoint as programme completion; keep working down eligible
-  workstreams in priority order (A done; B/C/J next as highest-value
-  currently-unblocked work) rather than re-deriving this file from
-  scratch.
+  workstreams rather than re-deriving this file from scratch.
+- As of 2026-08-23 (this checkpoint): A and K complete. B, D, E, H, I are
+  active but every remaining item is either genuinely host/tool-blocked
+  (live laptop, interface PC, home, glovebox, Windows packaging), an
+  explicit operator decision (C's bwrap/codex sandbox-bypass tradeoff,
+  E's codex-artifacts cross-project-data-leak scoping), or a deliberate
+  design deferral with recorded reasoning (B's park HTTP route, D's
+  evidence-volume gate). J is active with only one item left
+  (timeout/cancel for a *long-running* task — no cancel mechanism exists
+  at all yet; building one is a real feature addition, not an audit gap,
+  and hasn't been attempted without discussing scope first). F/G/L(partial)
+  remain externally host/operator-blocked, unchanged.
 - G and I are genuinely host-blocked per live 2026-08-23 evidence, not
   under-worked; their non-live deliverables (packages, scripts, docs) are
   still open independent work and should not wait for the host.
+- Before starting a new slice: re-check `tailscale status` and this
+  file's per-workstream blockers first — most of what's left now
+  genuinely needs either operator input (see the two decisions above) or
+  a host that isn't reachable yet, not more autonomous code changes.
