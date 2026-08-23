@@ -490,13 +490,21 @@ see `[[project-aoteru-p12-estate-convergence]]`.
   depends_on: []
   blocker: null
   next_action: >-
-    remaining: fold active-ParkLease and recent-RoutingDecision summaries
-    directly into `agent status`'s own output (today `explain` covers
-    per-alias diagnostics and `where` covers the current repo's lease, but
-    status itself doesn't list all active leases estate-wide); logs/result
-    pointers surface (deferred — no job-result store to point at yet
-    beyond RoutingDecision ids).
+    remaining: recent-RoutingDecision summary directly in `agent status`
+    (explain already covers this per-alias; status now covers leases but
+    not decisions); logs/result pointers surface (deferred — no job-result
+    store to point at yet beyond RoutingDecision ids).
   evidence:
+    - "Added active_park_leases to `agent status`'s own output — it
+      previously had no estate-wide lease view at all (only `agent where`
+      showed the current repo's own lease). Lists every active ParkLease
+      across all repos/hosts with a `stale` flag
+      (park_lease_is_stale, reused not re-derived), and degrades to an
+      empty list rather than crashing if the DB is unreachable — lease
+      visibility is one field among many in this command, not its reason
+      to exist. Live-verified against the real DB (currently 0 active
+      leases). 2 new tests covering both a live and a stale lease in the
+      same summary, and the DB-unavailable degrade path."
     - "Added `agent explain <alias>` (scripts/agent): the 'why this
       route?' diagnostic — resolve_alias()'s resolution,
       eligible_hosts()'s own per-host eligible/reason (reused directly,

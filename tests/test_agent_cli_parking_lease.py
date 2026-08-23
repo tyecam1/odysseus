@@ -160,3 +160,41 @@ def test_eligible_hosts_ignores_stale_conflicting_lease(monkeypatch, tmp_path):
 
     hosts = {h["host_id"]: h for h in estate_router.eligible_hosts(repo_id="conflict-repo")}
     assert hosts["test-lab"]["eligible"] is True
+
+
+def test_status_active_park_leases_summary_lists_and_flags_stale(agent_cli):
+    """Workstream K: `agent status` previously had no estate-wide lease
+    view at all (only `agent where` showed the current repo's own lease).
+    Covers both a live lease (not stale) and a crashed-holder lease
+    (stale) in the same summary."""
+    from core.database import get_db_session, ParkLease, PARK_LEASE_STALE_SECONDS, utcnow_naive
+
+    live_heartbeat = utcnow_naive()
+    stale_heartbeat = utcnow_naive() - timedelta(seconds=PARK_LEASE_STALE_SECONDS + 60)
+    with get_db_session() as db:
+        db.add(ParkLease(
+            id=str(uuid.uuid4()), repo_id="test-repo", host_id="test-lab",
+            worktree_path="/tmp/test-repo", status="active", heartbeat_at=live_heartbeat,
+        ))
+        db.add(ParkLease(
+            id=str(uuid.uuid4()), repo_id="conflict-repo", host_id="some-other-host",
+            worktree_path="/tmp/x", status="active", heartbeat_at=stale_heartbeat,
+        ))
+
+    summary = agent_cli._active_park_leases_summary()
+    by_repo = {row["repo_id"]: row for row in summary}
+    assert by_repo["test-repo"]["stale"] is False
+    assert by_repo["conflict-repo"]["stale"] is True
+
+
+def test_status_active_park_leases_summary_degrades_to_empty_on_db_error(agent_cli, monkeypatch):
+    """A missing/unreachable DB must not crash `agent status` — lease
+    visibility is one field among many, not the command's reason to
+    exist."""
+    import core.database as database
+
+    def boom():
+        raise RuntimeError("db unavailable")
+    monkeypatch.setattr(database, "get_db_session", boom)
+
+    assert agent_cli._active_park_leases_summary() == []

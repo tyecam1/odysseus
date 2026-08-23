@@ -476,6 +476,30 @@ def cmd_claude(args):
     sys.exit(1)
 
 
+def _active_park_leases_summary() -> list:
+    """Estate-wide active-lease view for `agent status` (Workstream K:
+    'clear host/service/model/repo/lease/job/memory status') — `agent
+    where` already shows the current repo's own lease, but status had no
+    view of leases held on OTHER repos/hosts. Best-effort: a missing/
+    unreachable DB degrades to an empty list rather than failing the
+    whole status command, since lease visibility is one field among many
+    here, not the command's reason to exist."""
+    try:
+        from core.database import ParkLease, get_db_session, park_lease_is_stale
+        with get_db_session() as db:
+            active = db.query(ParkLease).filter(ParkLease.status == "active").all()
+            return [
+                {
+                    "repo_id": row.repo_id, "host_id": row.host_id,
+                    "heartbeat_at": row.heartbeat_at.isoformat() if row.heartbeat_at else None,
+                    "stale": park_lease_is_stale(row),
+                }
+                for row in active
+            ]
+    except Exception:
+        return []
+
+
 def cmd_status(args):
     host_local = _load_host_local()
     live = _live_host_inventory()
@@ -505,6 +529,7 @@ def cmd_status(args):
         "memory_sources": [
             {"id": s["id"], "status": s.get("status")} for s in memory_sources.get("sources", [])
         ],
+        "active_park_leases": _active_park_leases_summary(),
         "host_local_config": str(_HOST_LOCAL_PATH),
     }, args)
 
