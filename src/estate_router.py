@@ -459,7 +459,23 @@ def _update_decision_outcome(decision_id: str, *, status: str, deterministic_gat
         logging.getLogger(__name__).exception("routing_decisions outcome update failed; execution result is unaffected")
 
 
-def execute_local(concrete_model: str, objective: "str | list[dict]", *, timeout: float = 60.0) -> dict:
+def _retryable_local_error(exc: Exception) -> bool:
+    """Classify a local-execution failure as retryable. Only transient
+    transport failures (connection refused/reset, DNS hiccup, upstream
+    timeout) qualify — a bad request, an auth failure, or any other
+    deterministic upstream rejection would fail identically on a second
+    attempt and just doubles latency for no benefit."""
+    if isinstance(exc, (ConnectionError, TimeoutError)):
+        return True
+    text = str(exc).lower()
+    return any(marker in text for marker in (
+        "connection refused", "connection reset", "connection aborted",
+        "timed out", "timeout", "temporarily unavailable",
+    ))
+
+
+def execute_local(concrete_model: str, objective: "str | list[dict]", *, timeout: float = 60.0,
+                   max_retries: int = 1) -> dict:
     """WHAT actually happens once WHERE+WHAT have been resolved: the one
     provider-neutral bounded execution/result path this lab-first slice
     can run for real right now (no claude/codex binary or paid
@@ -485,7 +501,15 @@ def execute_local(concrete_model: str, objective: "str | list[dict]", *, timeout
     contribution is verifying and documenting that fact so callers stop
     bypassing this function for vision (see
     scripts/run_lm4_production_canary.py's `run_vision_task`, written
-    before this was confirmed). Plain-string callers are unaffected."""
+    before this was confirmed). Plain-string callers are unaffected.
+
+    `max_retries` (default 1) bounds retry of transient transport
+    failures only (`_retryable_local_error`: connection refused/reset,
+    timeout) — free local calls, so retrying costs latency, not money.
+    A deterministic upstream rejection (`HTTPException`, e.g. bad
+    request/model-not-found) never retries. The paid path
+    (`execute_codex`) intentionally has no retry logic at all — never
+    blindly repeat a paid prompt (Workstream C invariant)."""
     from fastapi import HTTPException
 
     from src.llm_core import llm_call
@@ -499,14 +523,26 @@ def execute_local(concrete_model: str, objective: "str | list[dict]", *, timeout
     # requesting the full window regardless of prompt size is real, measured
     # LM1 evidence of production overhead/timeouts, not a hypothetical.
     num_ctx = select_bounded_context(_OLLAMA_BASE, concrete_model, messages)
-    try:
-        output = llm_call(_OLLAMA_BASE, concrete_model, messages, timeout=int(timeout), num_ctx=num_ctx)
-    except HTTPException as e:
-        return {"ok": False, "error": f"{e.status_code}: {e.detail}",
+    attempts = 0
+    last_error: Optional[dict] = None
+    while attempts <= max_retries:
+        attempts += 1
+        try:
+            output = llm_call(_OLLAMA_BASE, concrete_model, messages, timeout=int(timeout), num_ctx=num_ctx)
+        except HTTPException as e:
+            # A deterministic upstream rejection (bad request, model not
+            # found, etc.) — retrying would not change it.
+            return {"ok": False, "error": f"{e.status_code}: {e.detail}", "retries": attempts - 1,
+                    "latency_ms": int((time.monotonic() - started) * 1000)}
+        except Exception as e:
+            last_error = {"ok": False, "error": str(e), "retries": attempts - 1,
+                           "latency_ms": int((time.monotonic() - started) * 1000)}
+            if attempts <= max_retries and _retryable_local_error(e):
+                continue
+            return last_error
+        return {"ok": True, "output": output, "retries": attempts - 1,
                 "latency_ms": int((time.monotonic() - started) * 1000)}
-    except Exception as e:
-        return {"ok": False, "error": str(e), "latency_ms": int((time.monotonic() - started) * 1000)}
-    return {"ok": True, "output": output, "latency_ms": int((time.monotonic() - started) * 1000)}
+    return last_error  # pragma: no cover — loop always returns above
 
 
 def _codex_available() -> tuple[bool, str]:

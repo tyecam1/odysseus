@@ -453,6 +453,71 @@ def test_execute_local_bounds_and_reports_upstream_failure(fixture_config, monke
     assert "connection refused" in result["error"]
 
 
+def test_execute_local_retries_transient_transport_failure(fixture_config, monkeypatch):
+    """A retryable failure (connection refused) gets one bounded retry and
+    succeeds if the second attempt works — must not require the caller to
+    retry manually for a transient blip."""
+    import src.model_context as model_context
+    monkeypatch.setattr(model_context, "_query_context_length", lambda url, model: (131072, True))
+
+    calls = {"n": 0}
+
+    def flaky(url, model, messages, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise ConnectionError("connection refused")
+        return "recovered"
+    import src.llm_core as llm_core
+    monkeypatch.setattr(llm_core, "llm_call", flaky)
+
+    result = estate_router.execute_local("qwen3:8b", "hello", timeout=1.0)
+    assert result["ok"] is True
+    assert result["output"] == "recovered"
+    assert result["retries"] == 1
+    assert calls["n"] == 2
+
+
+def test_execute_local_does_not_retry_deterministic_rejection(fixture_config, monkeypatch):
+    """An HTTPException (e.g. bad request/model-not-found) is a deterministic
+    upstream rejection — retrying it would just double latency for the same
+    answer, so it must fail on the first attempt."""
+    from fastapi import HTTPException
+    import src.model_context as model_context
+    monkeypatch.setattr(model_context, "_query_context_length", lambda url, model: (131072, True))
+
+    calls = {"n": 0}
+
+    def always_bad_request(url, model, messages, **kwargs):
+        calls["n"] += 1
+        raise HTTPException(status_code=400, detail="bad request")
+    import src.llm_core as llm_core
+    monkeypatch.setattr(llm_core, "llm_call", always_bad_request)
+
+    result = estate_router.execute_local("qwen3:8b", "hello", timeout=1.0)
+    assert result["ok"] is False
+    assert calls["n"] == 1, "deterministic upstream rejections must not be retried"
+
+
+def test_execute_local_gives_up_after_max_retries_on_persistent_transport_failure(fixture_config, monkeypatch):
+    """A connection failure that never recovers must still terminate (bounded
+    retry, not infinite) and report the retry count actually spent."""
+    import src.model_context as model_context
+    monkeypatch.setattr(model_context, "_query_context_length", lambda url, model: (131072, True))
+
+    calls = {"n": 0}
+
+    def always_refused(url, model, messages, **kwargs):
+        calls["n"] += 1
+        raise ConnectionError("connection refused")
+    import src.llm_core as llm_core
+    monkeypatch.setattr(llm_core, "llm_call", always_refused)
+
+    result = estate_router.execute_local("qwen3:8b", "hello", timeout=1.0, max_retries=2)
+    assert result["ok"] is False
+    assert result["retries"] == 2
+    assert calls["n"] == 3
+
+
 def test_execute_local_uses_bounded_context_not_full_window(fixture_config, monkeypatch):
     """A1 repair: production execute_local must not blindly request a
     model's full advertised window regardless of prompt size — this is the

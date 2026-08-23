@@ -62,16 +62,30 @@ see `[[project-aoteru-p12-estate-convergence]]`.
 
 - id: C-execution-plane
   outcome: deterministic/local/Codex/Claude execution as one mature governed lane
-  status: eligible
+  status: active
   priority: high
   depends_on: []
   blocker: null
   next_action: >-
-    audit run_task()/execute_codex() retry+error-classification+telemetry
-    depth beyond P12's single smoke escalation; this session has not yet
-    started implementation.
-  evidence: []
-  last_verified_commit: null
+    remaining: exercise execute_codex on representative nontrivial bounded
+    tasks (repo reconnaissance, schema output, one deterministic-repair
+    loop) with recorded provider/latency/retry/cost-proxy telemetry; a
+    provider-neutral Claude executor adapter (dormant, no `claude` binary
+    on this host); cheap/strong paid capability aliases via config, not
+    hardcoded names.
+  evidence:
+    - "execute_local() had zero retry logic — any transient connection
+      blip failed the whole task immediately. Added bounded retry
+      (default max_retries=1) gated by _retryable_local_error(): only
+      transport-class failures (connection refused/reset, timeout)
+      retry; a deterministic upstream rejection (HTTPException, e.g. bad
+      request/model-not-found) never retries, since retrying it would
+      just double latency for the same answer. execute_codex()
+      deliberately still has no retry — paid prompts are never blindly
+      repeated. 3 new regression tests (retry-and-recover,
+      no-retry-on-deterministic-rejection, bounded-give-up), 37/37
+      passing in tests/test_estate_router.py."
+  last_verified_commit: <pending this checkpoint's commit>
 
 - id: D-routing-replay-evaluator
   outcome: replay/shadow routing evaluator reusing RoutingDecision/BenchmarkResult
