@@ -38,7 +38,17 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-DEFAULT_URL = os.getenv("INTERFACE_ACCEPTANCE_URL", "http://127.0.0.1:7000")
+# Corrected 2026-08-23 (final convergence pass): this defaulted to port
+# 7000 for the same reason cold_reboot_verify.py's own history warns
+# about — port 7000 is `odysseus-upstream-lab` (a DIFFERENT app, no
+# estate_routing_routes references), not this repo. A run against the
+# wrong default previously produced a coincidentally-plausible 4/4 PASS
+# (see docs/aoteru-autonomous-programme-state.md workstream B/H) because
+# that app happens to expose similarly-shaped auth-gated routes. Default
+# now matches cold_reboot_verify.py's own APP_URL (this repo's actual
+# lab-deployed port) — still overridable via --url/env for testing a
+# real future interface PC.
+DEFAULT_URL = os.getenv("INTERFACE_ACCEPTANCE_URL", "http://127.0.0.1:7001")
 
 
 class Result:
@@ -54,6 +64,43 @@ def _get(base_url: str, path: str, timeout: float = 4.0) -> int:
             return resp.status
     except urllib.error.HTTPError as e:
         return e.code
+
+
+def _get_json(base_url: str, path: str, timeout: float = 4.0) -> tuple[int, dict | None]:
+    req = urllib.request.Request(base_url + path, headers={"User-Agent": "interface-acceptance/1"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
+            try:
+                return resp.status, json.loads(resp.read().decode("utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                return resp.status, None
+    except urllib.error.HTTPError as e:
+        return e.code, None
+    except urllib.error.URLError:
+        return 0, None
+
+
+def check_app_identity(base_url: str) -> Result:
+    """The exact regression this script previously had no defence
+    against: a same-shaped wrong app (port 7000, `odysseus-upstream-lab`
+    — a different codebase entirely) can answer `/api/health` and even
+    401/403 on estate/companion-shaped paths, and previously produced a
+    coincidentally-plausible PASS. This check requires the target to
+    report the exact APP_VERSION of THIS checkout before any PASS is
+    possible — a version mismatch (or no /api/version at all) fails
+    identity outright, regardless of what the other checks report."""
+    from src.constants import APP_VERSION
+    status, body = _get_json(base_url, "/api/version")
+    if status != 200 or not isinstance(body, dict):
+        return Result("app identity (/api/version)", "FAIL", f"status={status}, body={body}")
+    remote_version = body.get("version")
+    if remote_version != APP_VERSION:
+        return Result(
+            "app identity (/api/version)", "FAIL",
+            f"remote reports version {remote_version!r}, this checkout is {APP_VERSION!r} — "
+            "likely a different application, not this repo's deployment",
+        )
+    return Result("app identity (/api/version)", "PASS", f"version={remote_version}")
 
 
 def check_health(base_url: str) -> Result:
@@ -95,6 +142,7 @@ def check_login_page_reachable(base_url: str) -> Result:
 
 def build_report(base_url: str) -> list[Result]:
     return [
+        check_app_identity(base_url),
         check_health(base_url),
         check_pwa_manifest(base_url),
         check_protected_routes_reject_unauthenticated(base_url),
