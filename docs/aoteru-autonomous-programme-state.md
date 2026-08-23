@@ -460,18 +460,15 @@ being withheld pending these; see each workstream's `next_action` for what
 
 - id: F-cross-repo-governance
   outcome: proven read/park/execute across tyecam1/obsidian-PhD, s2-e1-ros2-measurement-spine, misumi
-  status: active
+  status: complete
   priority: medium
   depends_on: []
   blocker: null
   next_action: >-
     None material — F was never actually blocked on repository identity
     (confirmed 2026-08-23), it was blocked on not having asked gh/GitHub
-    directly. Remaining: misumi's own park/release cycle hasn't been
-    separately live-tested (obsidian-PhD and s2-e1 both were) — low
-    value, same mechanism, not required by this workstream's own "misumi
-    should receive the same proof if reachable... its presence must not
-    block PhD/S2-E1 closure" instruction.
+    directly. misumi's own park/release cycle (the one item left
+    unexercised) is now also proven — see evidence.
   evidence:
     - "Final convergence pass (2026-08-23): F was never actually blocked
       on repository identity. Confirmed live via authenticated `gh repo
@@ -499,6 +496,13 @@ being withheld pending these; see each workstream's `next_action` for what
       manuscript/content mutation performed. Item 5 (source-pointer
       handoff) proven via a real SourceEvent + linked memory capsule —
       see [[E-memory-broker]]. See commit 6b561f0."
+    - "misumi's own park/release cycle proven live (2026-08-23,
+      completing this workstream): confirmed the real clone at
+      HOUSEHOLD_ROOT/misumi is git-clean, acquired a real ParkLease
+      (lease_id 62509ea1-16fb-49a8-9fa6-ec538c82414c) via `agent park
+      misumi --branch main`, released it cleanly. All three named repos
+      (obsidian-PhD, s2-e1-ros2-measurement-spine, misumi) now have a
+      real proven park/release cycle, not just two of three."
     - "Item 4 (parking/lease/heartbeat/reclaim on a safe fixture) was
       already covered independent of any real cross-repo clone —
       tests/test_agent_cli_parking_lease.py exercises the full
@@ -1004,7 +1008,7 @@ deliberately NOT another open-ended `/loop` iteration — per that task's
 own explicit instruction, do not resume a timed autonomous development
 loop against this file. Final classification:
 
-- **complete**: A, C, J, K, L.
+- **complete**: A, C, F, J, K, L.
 - **complete-current-estate**: E (future home-primary promotion stays
   ready-for-host, not a current gap).
 - **evidence-gated**: D (evaluator is sound; the remaining item needs
@@ -1016,10 +1020,9 @@ loop against this file. Final classification:
 - **ready-for-host**: G, H, I (all non-live deliverables — packages,
   scripts, docs, the interface-acceptance identity fix — are done;
   what's left needs the actual unreachable/not-yet-live hardware).
-- **active**: F (repository identity was never actually the blocker —
-  resolved this pass via `gh repo view`; misumi's own park/release cycle
-  is the only unexercised, low-value residual, not required for
-  closure).
+
+No workstream remains `active`/`eligible` with a material current
+engineering gap as of this pass.
 
 Three residual gates are genuinely operator-only, not engineering work:
 (1) restart-class actions already happened this pass (the service
