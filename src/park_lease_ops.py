@@ -97,6 +97,29 @@ def heartbeat_repo(repo_id: str, host_id: Optional[str] = None) -> dict:
         }
 
 
+def active_leases_summary() -> list:
+    """Estate-wide active-lease view (Workstream K's `agent status` field,
+    Workstream H/B's "HTTP-facing park/status surface for the mobile UI" —
+    same read shared rather than re-queried per caller). Best-effort: a
+    missing/unreachable DB degrades to an empty list rather than raising,
+    since lease visibility is one field among many for any caller of this,
+    not the caller's reason to exist."""
+    try:
+        from core.database import ParkLease, get_db_session, park_lease_is_stale
+        with get_db_session() as db:
+            active = db.query(ParkLease).filter(ParkLease.status == "active").all()
+            return [
+                {
+                    "repo_id": row.repo_id, "host_id": row.host_id,
+                    "heartbeat_at": row.heartbeat_at.isoformat() if row.heartbeat_at else None,
+                    "stale": park_lease_is_stale(row),
+                }
+                for row in active
+            ]
+    except Exception:
+        return []
+
+
 def release_repo(repo_id: str, host_id: Optional[str] = None) -> dict:
     """Release the caller's active lease. Raises NoActiveLease if none matches."""
     from core.database import ParkLease, get_db_session, utcnow_naive

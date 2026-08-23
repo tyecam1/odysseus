@@ -23,7 +23,7 @@ from src.estate_router import (
     resolve_route,
     run_task,
 )
-from src.park_lease_ops import NoActiveLease, heartbeat_repo, release_repo
+from src.park_lease_ops import NoActiveLease, active_leases_summary, heartbeat_repo, release_repo
 
 # Bounds the serialized size of `objective` (text or a multimodal content
 # list — a few embedded base64 images can legitimately be several MB).
@@ -160,6 +160,17 @@ def setup_estate_routing_routes() -> APIRouter:
     async def route_alias(request: Request, alias: str):
         _scope_owner(request, {"estate:read", "estate:execute"})
         return _route_call(resolve_alias, alias)
+
+    @router.get("/park/status")
+    async def park_status(request: Request):
+        """HTTP-facing park/status surface for the mobile UI (Workstream H
+        next_action, same underlying gap Workstream B recorded) — the
+        estate-wide active-lease view `agent status` already shows an
+        operator, now reachable from a scoped API token too (e.g. the
+        companion mobile frontend, once it wires this in) without needing
+        a full repo checkout/CLI on the caller's device."""
+        _scope_owner(request, {"estate:read", "estate:execute"})
+        return {"active_park_leases": active_leases_summary()}
 
     @router.post("/park/{repo_id}/heartbeat")
     async def park_heartbeat(request: Request, repo_id: str):

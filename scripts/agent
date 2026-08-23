@@ -436,24 +436,12 @@ def _active_park_leases_summary() -> list:
     """Estate-wide active-lease view for `agent status` (Workstream K:
     'clear host/service/model/repo/lease/job/memory status') — `agent
     where` already shows the current repo's own lease, but status had no
-    view of leases held on OTHER repos/hosts. Best-effort: a missing/
-    unreachable DB degrades to an empty list rather than failing the
-    whole status command, since lease visibility is one field among many
-    here, not the command's reason to exist."""
-    try:
-        from core.database import ParkLease, get_db_session, park_lease_is_stale
-        with get_db_session() as db:
-            active = db.query(ParkLease).filter(ParkLease.status == "active").all()
-            return [
-                {
-                    "repo_id": row.repo_id, "host_id": row.host_id,
-                    "heartbeat_at": row.heartbeat_at.isoformat() if row.heartbeat_at else None,
-                    "stale": park_lease_is_stale(row),
-                }
-                for row in active
-            ]
-    except Exception:
-        return []
+    view of leases held on OTHER repos/hosts. Delegates to
+    src.park_lease_ops.active_leases_summary(), the same shared read the
+    new HTTP status surface (Workstream H/B) also uses — not re-derived
+    here."""
+    from src.park_lease_ops import active_leases_summary
+    return active_leases_summary()
 
 
 def _recent_routing_decisions_summary(limit: int = 10) -> list:

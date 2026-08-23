@@ -14,7 +14,14 @@ from datetime import timedelta
 import pytest
 
 from core.database import ParkLease, get_db_session, PARK_LEASE_STALE_SECONDS, utcnow_naive
-from src.park_lease_ops import NoActiveLease, ParkConflict, heartbeat_repo, park_repo, release_repo
+from src.park_lease_ops import (
+    NoActiveLease,
+    ParkConflict,
+    active_leases_summary,
+    heartbeat_repo,
+    park_repo,
+    release_repo,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -92,3 +99,27 @@ def test_release_repo_releases_active_lease():
 def test_release_repo_raises_when_no_active_lease():
     with pytest.raises(NoActiveLease):
         release_repo("ops-repo")
+
+
+def test_active_leases_summary_lists_and_flags_stale():
+    park_repo("ops-repo", "test-lab", "/tmp/ops-repo")
+    stale_heartbeat = utcnow_naive() - timedelta(seconds=PARK_LEASE_STALE_SECONDS + 60)
+    with get_db_session() as db:
+        db.add(ParkLease(
+            id="stale-lease-2", repo_id="ops-conflict-repo", host_id="crashed-host",
+            worktree_path="/tmp/x", status="active", heartbeat_at=stale_heartbeat,
+        ))
+
+    summary = {row["repo_id"]: row for row in active_leases_summary()}
+    assert summary["ops-repo"]["stale"] is False
+    assert summary["ops-conflict-repo"]["stale"] is True
+
+
+def test_active_leases_summary_degrades_to_empty_on_db_error(monkeypatch):
+    import core.database as database
+
+    def boom():
+        raise RuntimeError("db unavailable")
+    monkeypatch.setattr(database, "get_db_session", boom)
+
+    assert active_leases_summary() == []

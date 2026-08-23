@@ -301,3 +301,33 @@ class TestParkHeartbeatReleaseRoutes:
 
         response = client.post("/api/estate/park/my-repo/heartbeat")
         assert response.status_code == 403
+
+    def test_park_status_returns_active_leases_summary(self, monkeypatch):
+        client = self._client(monkeypatch)
+        import routes.estate_routing_routes as mod
+
+        monkeypatch.setattr(mod, "active_leases_summary", lambda: [
+            {"repo_id": "odysseus", "host_id": "hz2-workstation", "heartbeat_at": "2026-01-01T00:00:00", "stale": False},
+        ])
+
+        response = client.get("/api/estate/park/status")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["active_park_leases"][0]["repo_id"] == "odysseus"
+
+    def test_park_status_requires_scope(self, monkeypatch):
+        monkeypatch.setenv("AUTH_ENABLED", "true")
+        app = FastAPI()
+        app.include_router(setup_estate_routing_routes())
+        client = TestClient(app, raise_server_exceptions=False)
+
+        @app.middleware("http")
+        async def _inject_token(request, call_next):
+            request.state.api_token = True
+            request.state.api_token_scopes = ["chat"]
+            request.state.api_token_owner = "companion"
+            return await call_next(request)
+
+        response = client.get("/api/estate/park/status")
+        assert response.status_code == 403
