@@ -90,10 +90,34 @@ being withheld pending these; see each workstream's `next_action` for what
   next_action: >-
     remaining: operator-run live smoke test from an actual laptop (not
     proven from this lab-only session — see companion/laptop_client/README.md
-    "what's deliberately not here yet"); pipx/msix packaging; a
-    park/release/heartbeat HTTP surface so the client can cover those
-    scripts/agent subcommands too; Windows-specific .ps1/.bat wrapper.
+    "what's deliberately not here yet"); pipx/msix packaging; wiring
+    companion/laptop_client/aoteru.py's own subcommands to the new
+    heartbeat/release HTTP routes (the routes exist and are tested/live-
+    verified server-side; the client CLI doesn't call them yet); a
+    park HTTP route specifically (needs repo-path resolution + git-clean
+    check ported off scripts/agent, deliberately deferred — see evidence);
+    Windows-specific .ps1/.bat wrapper.
   evidence:
+    - "Park/release/heartbeat HTTP surface (checked, not assumed missing):
+      scripts/agent's park/heartbeat/release CLI subcommands each had
+      their own inline ParkLease mutation logic with no HTTP equivalent.
+      Extracted the shared stale-reclaim/fail-closed/renewal semantics
+      into src/park_lease_ops.py (new single authority, same discipline
+      already applied to routing decisions) and refactored the CLI to
+      call it — 7 existing CLI lease tests still pass unchanged against
+      the refactor. Added src.estate_router.current_host_id() (shared
+      'which host is this process on' lookup) and exposed
+      POST /api/estate/park/{repo_id}/heartbeat + .../release, scope-
+      gated under estate:execute like /api/estate/run. `park` itself
+      stays CLI-only for now — acquiring a lease also needs repo-path
+      resolution and a git-clean check that only exist in scripts/agent
+      today; exposing those at the HTTP layer without that check would
+      let a remote caller park a dirty/nonexistent worktree, a real gap
+      not papered over here. 18 new tests (ops functions direct,
+      current_host_id, HTTP round-trip including 409/403 paths).
+      Live-verified against the real DB and config/estate.yaml (park ->
+      heartbeat -> release round trip, real host_id 'hz2-workstation').
+      Full suite green (5046 passed, 4 skipped)."
     - "scripts/agent (the existing operator-bay CLI) requires a full
       checkout (imports core.database, reads config/*.yaml from the repo
       root) — confirmed by reading it, not assumed; this is exactly the
@@ -136,7 +160,7 @@ being withheld pending these; see each workstream's `next_action` for what
       via curl against the same port). 7 unit tests.
       companion/laptop_client/README.md is the exact operator bootstrap
       (mint token -> copy file -> configure -> smoke test)."
-  last_verified_commit: <pending this checkpoint's commit>
+  last_verified_commit: 8cab723
 
 - id: C-execution-plane
   outcome: deterministic/local/Codex/Claude execution as one mature governed lane
