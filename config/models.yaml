@@ -42,6 +42,7 @@ capabilities:
       docs/aoteru-lm4-production-canary-evidence.md.
   - alias: local-strong
     binding: gpt-oss:20b
+    gpu_priority: yield_to_experiment  # P12.4: heaviest/longest-running local route on the shared RTX 3080 — yields first when an experiment reservation is active
     evidence: docs/aoteru-estate-p7-evidence.md
     note: >-
       23.6 decode tok/s despite exceeding VRAM (partial CPU offload) —
@@ -68,6 +69,7 @@ capabilities:
     binding: null
   - alias: reasoning-strong
     binding: nemotron-3.5-lightning:30b-a3b
+    gpu_priority: yield_to_experiment  # P12.4: 25GB model on a 10GB card — heaviest GPU/CPU-offload contention of any bound alias
     evidence: docs/aoteru-lm2-model-discovery-evidence.md
     note: >-
       LM3 (2026-08-23): production Ollama upgraded 0.19.0 -> 0.32.15
@@ -83,6 +85,7 @@ capabilities:
       real production route. See docs/aoteru-lm4-production-canary-evidence.md.
   - alias: vision
     binding: gemma4:12b
+    gpu_priority: yield_to_experiment  # P12.4: vision inference competes directly with camera/perception GPU work the Jetson can't do locally
     evidence: docs/aoteru-lm2-model-discovery-evidence.md
     note: >-
       LM3 (2026-08-23): production Ollama upgraded 0.19.0 -> 0.32.15

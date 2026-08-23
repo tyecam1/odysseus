@@ -110,6 +110,41 @@ def test_resolve_alias_unbound_fails_truthfully_not_silently(fixture_config):
     assert "no evidence-backed binding" in result["reason"]
 
 
+def test_resolve_alias_gpu_heavy_eligible_when_idle(fixture_config, monkeypatch):
+    """P12.4 idle state: a gpu_priority: yield_to_experiment alias resolves
+    normally when no experiment is reserved/active."""
+    models_path = fixture_config / "models.yaml"
+    data = yaml.safe_load(models_path.read_text())
+    data["capabilities"][1] = {"alias": "reasoning-strong", "binding": "test-heavy-model", "gpu_priority": "yield_to_experiment"}
+    models_path.write_text(yaml.safe_dump(data))
+    monkeypatch.setattr(estate_router, "_ollama_model_live", lambda model, timeout=3.0: (True, "live"))
+    monkeypatch.setattr(estate_router, "experiment_priority_active", lambda: (False, "idle"))
+
+    result = estate_router.resolve_alias("reasoning-strong")
+    assert result["resolved"] is True
+    assert result["concrete_model"] == "test-heavy-model"
+
+
+def test_resolve_alias_gpu_heavy_withheld_when_experiment_active(fixture_config, monkeypatch):
+    """P12.4 reserved state: robotics experiments outrank background
+    Aoteru model use (boundary 5) — a heavy alias must fail truthfully,
+    not silently degrade or contend for the GPU, while a reservation is
+    active. A non-heavy alias (local-fast) is unaffected."""
+    models_path = fixture_config / "models.yaml"
+    data = yaml.safe_load(models_path.read_text())
+    data["capabilities"][1] = {"alias": "reasoning-strong", "binding": "test-heavy-model", "gpu_priority": "yield_to_experiment"}
+    models_path.write_text(yaml.safe_dump(data))
+    monkeypatch.setattr(estate_router, "_ollama_model_live", lambda model, timeout=3.0: (True, "live"))
+    monkeypatch.setattr(estate_router, "experiment_priority_active", lambda: (True, "robotics run reserved"))
+
+    heavy = estate_router.resolve_alias("reasoning-strong")
+    assert heavy["resolved"] is False
+    assert "experiment priority active" in heavy["reason"]
+
+    light = estate_router.resolve_alias("local-fast")
+    assert light["resolved"] is True
+
+
 def test_resolve_alias_unknown(fixture_config):
     result = estate_router.resolve_alias("does-not-exist")
     assert result["resolved"] is False

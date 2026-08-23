@@ -153,13 +153,70 @@ def _ollama_model_live(model: str, timeout: float = 3.0) -> tuple[bool, str]:
     return False, f"configured as {model!r} in config/models.yaml but not currently listed by Ollama"
 
 
+_EXPERIMENT_RESERVATION_PATH = Path.home() / ".aoteru" / "experiment_reservation.json"
+
+
+def experiment_priority_active() -> tuple[bool, str]:
+    """P12.4: robotics experiments outrank background Aoteru model use
+    (boundary 5). Two independent signals, either is sufficient — an
+    explicit host-local reservation file the operator/experiment tooling
+    sets (`~/.aoteru/experiment_reservation.json`, never committed, same
+    host-local convention as `~/.aoteru/config.local.json`), or live
+    measured evidence: a non-Ollama process already holding significant
+    GPU memory on this shared RTX 3080. Prefers this simple signal pair
+    over a scheduler redesign — no existing host-load/reservation
+    mechanism was found in a targeted search of src/ and core/ before
+    this was added."""
+    if _EXPERIMENT_RESERVATION_PATH.exists():
+        try:
+            import json
+            data = json.loads(_EXPERIMENT_RESERVATION_PATH.read_text())
+        except Exception:
+            data = {}
+        if data.get("active"):
+            return True, data.get("reason") or "experiment_reservation.json: active"
+
+    import subprocess
+    try:
+        proc = subprocess.run(
+            ["nvidia-smi", "--query-compute-apps=pid,process_name,used_memory",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except Exception:
+        return False, "no reservation; nvidia-smi unavailable for live GPU load check"
+    if proc.returncode == 0:
+        for line in proc.stdout.strip().splitlines():
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) < 3:
+                continue
+            pid, name, mem = parts[0], parts[1], parts[2]
+            if "ollama" in name.lower():
+                continue
+            try:
+                mem_mib = float(mem)
+            except ValueError:
+                continue
+            if mem_mib >= 500:
+                return True, f"live GPU load: non-ollama process {name!r} (pid {pid}) using {mem_mib:.0f}MiB"
+    return False, "no reservation; no significant non-ollama GPU load"
+
+
 def resolve_alias(alias: str) -> dict:
     """WHAT half: resolve a capability alias to a concrete model from
     config/models.yaml's evidence-backed bindings. Never a hardcoded brand
     in this function — an unbound alias fails truthfully rather than
     guessing a model. A bound alias is additionally checked live before
     being reported resolved — a config binding alone is not proof the
-    model is actually available right now (see `_ollama_model_live`)."""
+    model is actually available right now (see `_ollama_model_live`).
+
+    P12.4: an alias tagged `gpu_priority: yield_to_experiment` in
+    config/models.yaml fails truthfully (not silently) while
+    `experiment_priority_active()` says an experiment is reserved/active
+    — heavy background inference must not contend with a live robotics
+    experiment for the one shared RTX 3080. Aliases without that tag
+    (`local-fast`, `code-fast`) are unaffected; idle-state routing is
+    unaffected either way."""
     models = _load_yaml("models")
     entry = next((c for c in models.get("capabilities", []) if c["alias"] == alias), None)
     if entry is None:
@@ -170,6 +227,13 @@ def resolve_alias(alias: str) -> dict:
             "alias": alias, "resolved": False,
             "reason": "no evidence-backed binding yet — see config/models.yaml",
         }
+    if entry.get("gpu_priority") == "yield_to_experiment":
+        active, reason = experiment_priority_active()
+        if active:
+            return {
+                "alias": alias, "resolved": False, "concrete_model": binding,
+                "reason": f"withheld — experiment priority active ({reason})",
+            }
     live, live_reason = _ollama_model_live(binding)
     if not live:
         return {
