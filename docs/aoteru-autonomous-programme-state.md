@@ -588,16 +588,34 @@ being withheld pending these; see each workstream's `next_action` for what
   depends_on: []
   blocker: null
   next_action: >-
-    remaining: worker/model/provider disappearance mid-task (stale
-    LogicalSession/job reconciliation is already covered — see
-    _reconcile_stale_sessions + tests/test_agent_cli_session_lifecycle.py,
-    confirmed live not new this checkpoint). operator: `sudo systemctl
+    remaining: Chroma rebuild/stale-session items above are now closed;
+    the only J audit items left without at least one live-verified test
+    are timeout/cancel/retry state transitions specifically for a
+    long-running task (retry logic itself is tested — see C's evidence —
+    but not a mid-flight cancel/timeout signal) and controller
+    disconnect/reconnect. operator: `sudo systemctl
     restart odysseus-aoteru-lab.service` to deploy this session's
     RunTaskEnvelope.objective fix and its oversized-objective guard to the
     live port-7001 instance — this session could not restart it (no
     non-interactive sudo), correctly treated as a stop-gate per GO.md
     rather than worked around.
   evidence:
+    - "Worker/model/provider disappearance mid-task (checked, not
+      assumed missing): live-verified execute_local() against the real
+      Ollama instance with a model name that doesn't exist — the real
+      disappearance shape (unloaded, host restarted, model removed),
+      not just a mocked HTTPException. Result: ok=false, no retry
+      (correct — model-not-found is a deterministic upstream rejection,
+      not the transient-transport case _retryable_local_error is meant
+      for), clean error message, latency recorded. The one real gap
+      found: run_task()'s own outcome-recording path for execute_local
+      returning ok=False entirely (as opposed to the already-tested
+      'hollow success' case of ok=True with empty output) had no
+      dedicated test. Added
+      test_run_task_records_worker_disappearance_as_failed_not_a_crash —
+      confirms RoutingDecision records status=failed/
+      escalation_reason=worker_failed and run_task() returns cleanly.
+      Full suite green (5074 passed, 4 skipped)."
     - "Chroma rebuild from authoritative state (checked, not assumed
       done): grep confirmed src/personal_docs.py's index_all_directories()
       — which repopulates Chroma from indexed_directories.json, the real
@@ -687,7 +705,7 @@ being withheld pending these; see each workstream's `next_action` for what
       the exact post-boot command. 8 new unit tests
       (tests/test_cold_reboot_verify.py) cover the PASS/FAIL/SKIP
       classification logic with mocked subprocess/HTTP calls."
-  last_verified_commit: 26c6466
+  last_verified_commit: 46dcd93
 
 - id: K-operator-experience
   outcome: converged agent status / diagnostics / handbook
