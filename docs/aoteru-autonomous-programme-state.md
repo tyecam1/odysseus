@@ -525,11 +525,18 @@ being withheld pending these; see each workstream's `next_action` for what
   depends_on: []
   blocker: null
   next_action: >-
-    remaining: recent-RoutingDecision summary directly in `agent status`
-    (explain already covers this per-alias; status now covers leases but
-    not decisions); logs/result pointers surface (deferred — no job-result
+    remaining: logs/result pointers surface (deferred — no job-result
     store to point at yet beyond RoutingDecision ids).
   evidence:
+    - "Added recent_routing_decisions to `agent status`'s own output
+      (_recent_routing_decisions_summary(), scripts/agent): last 10
+      RoutingDecision rows newest-first (id/task_class/host_id/executor/
+      model_alias/status/escalated/retries/created_at), same best-effort
+      empty-list-on-DB-error degrade as active_park_leases. Live-verified
+      against the real DB via `agent status --pretty`. 3 new tests
+      (tests/test_agent_cli_recent_routing_decisions.py): ordering+limit,
+      field shape, DB-error degrade. Full suite green (5023 passed, 4
+      skipped) after this change."
     - "Added active_park_leases to `agent status`'s own output — it
       previously had no estate-wide lease view at all (only `agent where`
       showed the current repo's own lease). Lists every active ParkLease
@@ -558,7 +565,7 @@ being withheld pending these; see each workstream's `next_action` for what
       evidence, each section pointing at the actual authority file/script
       rather than re-explaining it (so it can't silently drift out of
       sync with the code)."
-  last_verified_commit: <pending this checkpoint's commit>
+  last_verified_commit: a967110
 
 - id: L-real-work-validation
   outcome: representative end-to-end tasks across local/paid/multimodal/experiment-priority/blocked-host
