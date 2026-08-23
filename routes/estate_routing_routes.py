@@ -15,7 +15,15 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field, field_validator
 
 from src.auth_helpers import require_user
-from src.estate_router import RoutingConfigError, eligible_hosts, resolve_alias, resolve_route, run_task
+from src.estate_router import (
+    RoutingConfigError,
+    current_host_id,
+    eligible_hosts,
+    resolve_alias,
+    resolve_route,
+    run_task,
+)
+from src.park_lease_ops import NoActiveLease, heartbeat_repo, release_repo
 
 # Bounds the serialized size of `objective` (text or a multimodal content
 # list — a few embedded base64 images can legitimately be several MB).
@@ -152,5 +160,35 @@ def setup_estate_routing_routes() -> APIRouter:
     async def route_alias(request: Request, alias: str):
         _scope_owner(request, {"estate:read", "estate:execute"})
         return _route_call(resolve_alias, alias)
+
+    @router.post("/park/{repo_id}/heartbeat")
+    async def park_heartbeat(request: Request, repo_id: str):
+        """HTTP surface for `agent heartbeat` (Workstream B next_action:
+        "a park/release/heartbeat HTTP surface so the client can cover
+        those scripts/agent subcommands too"). Scoped to the host this
+        server process is actually running on — a remote caller (e.g. the
+        laptop thin client) renews the lease this host holds, it cannot
+        renew a lease on a host it isn't. `park` itself is deliberately not
+        exposed here yet: acquiring a lease also needs repo-path resolution
+        and a git-clean check, both currently CLI-only
+        (scripts/agent's _resolve_repos/_git_is_clean) — heartbeat/release
+        only need the lease row, already reused via src.park_lease_ops."""
+        _scope_owner(request, {"estate:execute"})
+        host_id = current_host_id()
+        try:
+            return {"ok": True, **heartbeat_repo(repo_id, host_id=host_id)}
+        except NoActiveLease as e:
+            raise HTTPException(409, str(e)) from e
+
+    @router.post("/park/{repo_id}/release")
+    async def park_release(request: Request, repo_id: str):
+        """HTTP surface for `agent release` — see park_heartbeat above for
+        why `park` itself isn't exposed yet."""
+        _scope_owner(request, {"estate:execute"})
+        host_id = current_host_id()
+        try:
+            return {"ok": True, **release_repo(repo_id, host_id=host_id)}
+        except NoActiveLease as e:
+            raise HTTPException(409, str(e)) from e
 
     return router

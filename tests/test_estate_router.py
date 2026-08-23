@@ -50,6 +50,15 @@ def test_eligible_hosts_this_host_is_reachable_by_construction(fixture_config):
     assert hosts["test-lab"]["reason"] == "this host"
 
 
+def test_current_host_id_matches_registered_hostname(fixture_config):
+    assert estate_router.current_host_id() == "test-lab"
+
+
+def test_current_host_id_none_when_hostname_not_registered(fixture_config, monkeypatch):
+    monkeypatch.setattr(socket, "gethostname", lambda: "UNREGISTERED-HOST")
+    assert estate_router.current_host_id() is None
+
+
 def test_eligible_hosts_home_fails_truthfully_not_a_tailnet_member(fixture_config):
     hosts = {h["host_id"]: h for h in estate_router.eligible_hosts()}
     assert hosts["test-home"]["eligible"] is False

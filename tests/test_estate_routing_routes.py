@@ -202,3 +202,102 @@ class TestRunRouteEndToEnd:
         client = self._client(monkeypatch)
         response = client.post("/api/estate/run", json={"task_class": "code", "objective": 12345})
         assert response.status_code == 422
+
+
+class TestParkHeartbeatReleaseRoutes:
+    """HTTP surface for `agent heartbeat`/`agent release` (Workstream B
+    next_action: "a park/release/heartbeat HTTP surface so the client can
+    cover those scripts/agent subcommands too"). Both routes delegate to
+    src.park_lease_ops (the same authority scripts/agent's CLI now also
+    uses) and resolve the acting host_id via src.estate_router.
+    current_host_id() rather than trusting a caller-supplied host."""
+
+    def _client(self, monkeypatch):
+        monkeypatch.setenv("AUTH_ENABLED", "false")
+        app = FastAPI()
+        app.include_router(setup_estate_routing_routes())
+        return TestClient(app)
+
+    def test_heartbeat_renews_lease_on_this_host(self, monkeypatch):
+        client = self._client(monkeypatch)
+        import routes.estate_routing_routes as mod
+
+        monkeypatch.setattr(mod, "current_host_id", lambda: "test-lab")
+        captured = {}
+
+        def fake_heartbeat_repo(repo_id, host_id=None):
+            captured["repo_id"] = repo_id
+            captured["host_id"] = host_id
+            return {"lease_id": "abc", "repo_id": repo_id, "host_id": host_id, "heartbeat_at": "2026-01-01T00:00:00"}
+        monkeypatch.setattr(mod, "heartbeat_repo", fake_heartbeat_repo)
+
+        response = client.post("/api/estate/park/my-repo/heartbeat")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["ok"] is True
+        assert body["lease_id"] == "abc"
+        assert captured == {"repo_id": "my-repo", "host_id": "test-lab"}
+
+    def test_heartbeat_no_active_lease_returns_409(self, monkeypatch):
+        client = self._client(monkeypatch)
+        import routes.estate_routing_routes as mod
+
+        monkeypatch.setattr(mod, "current_host_id", lambda: "test-lab")
+
+        def boom(repo_id, host_id=None):
+            raise mod.NoActiveLease(f"no active lease for {repo_id!r}")
+        monkeypatch.setattr(mod, "heartbeat_repo", boom)
+
+        response = client.post("/api/estate/park/my-repo/heartbeat")
+        assert response.status_code == 409
+
+    def test_release_releases_lease_on_this_host(self, monkeypatch):
+        client = self._client(monkeypatch)
+        import routes.estate_routing_routes as mod
+
+        monkeypatch.setattr(mod, "current_host_id", lambda: "test-lab")
+        captured = {}
+
+        def fake_release_repo(repo_id, host_id=None):
+            captured["repo_id"] = repo_id
+            captured["host_id"] = host_id
+            return {"lease_id": "abc", "repo_id": repo_id, "host_id": host_id}
+        monkeypatch.setattr(mod, "release_repo", fake_release_repo)
+
+        response = client.post("/api/estate/park/my-repo/release")
+
+        assert response.status_code == 200
+        assert response.json()["ok"] is True
+        assert captured == {"repo_id": "my-repo", "host_id": "test-lab"}
+
+    def test_release_no_active_lease_returns_409(self, monkeypatch):
+        client = self._client(monkeypatch)
+        import routes.estate_routing_routes as mod
+
+        monkeypatch.setattr(mod, "current_host_id", lambda: "test-lab")
+
+        def boom(repo_id, host_id=None):
+            raise mod.NoActiveLease(f"no active lease for {repo_id!r}")
+        monkeypatch.setattr(mod, "release_repo", boom)
+
+        response = client.post("/api/estate/park/my-repo/release")
+        assert response.status_code == 409
+
+    def test_heartbeat_requires_estate_execute_scope(self, monkeypatch):
+        """A read-only estate:read token must not be able to mutate a
+        lease — same scope discipline as /api/estate/run."""
+        monkeypatch.setenv("AUTH_ENABLED", "true")
+        app = FastAPI()
+        app.include_router(setup_estate_routing_routes())
+        client = TestClient(app, raise_server_exceptions=False)
+
+        @app.middleware("http")
+        async def _inject_token(request, call_next):
+            request.state.api_token = True
+            request.state.api_token_scopes = ["estate:read"]
+            request.state.api_token_owner = "laptop"
+            return await call_next(request)
+
+        response = client.post("/api/estate/park/my-repo/heartbeat")
+        assert response.status_code == 403

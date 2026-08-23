@@ -177,15 +177,19 @@ def _git_is_clean(path: str) -> tuple[bool, str]:
     return True, ""
 
 
-def _lease_db():
+def _park_lease_ops():
     """Import lazily — the CLI must still work (status/where/sync) even if
     the app's dependencies aren't installed in whatever environment invokes
-    it; only park/release/heartbeat need the ORM."""
+    it; only park/release/heartbeat need the ORM (via src.park_lease_ops,
+    the single authority for lease-mutation semantics — also used by
+    routes/estate_routing_routes.py's HTTP surface, so this logic isn't
+    duplicated between the CLI and the API)."""
     try:
-        from core.database import get_db_session, ParkLease, utcnow_naive
+        import src.park_lease_ops as ops
     except ModuleNotFoundError as e:
         fail(f"{e}\nhint: run from a venv with the app's requirements installed (park/release need core.database).")
-    return get_db_session, ParkLease, utcnow_naive
+        return None
+    return ops
 
 
 def cmd_park(args):
@@ -214,54 +218,17 @@ def cmd_park(args):
     if not clean:
         fail(f"refusing to park {args.repo_id!r}: {reason} (fail-closed — commit/stash first)")
 
-    get_db_session, ParkLease, utcnow_naive = _lease_db()
-    from core.database import park_lease_is_stale
-    import uuid
-    from sqlalchemy.exc import IntegrityError
-
-    reclaimed_stale = None
-    with get_db_session() as db:
-        existing = db.query(ParkLease).filter(
-            ParkLease.repo_id == args.repo_id, ParkLease.status == "active",
-        ).first()
-        # A holder that crashed/was killed without releasing must not
-        # block this repo forever — the finding this fixes ("heartbeat
-        # renewal/stale lease handling... incomplete"). Only a *stale*
-        # active lease is auto-reclaimed here; a live one still fails
-        # closed exactly as before (same IntegrityError-backed guarantee).
-        if existing is not None and park_lease_is_stale(existing):
-            reclaimed_stale = {"lease_id": existing.id, "host_id": existing.host_id,
-                                "heartbeat_at": existing.heartbeat_at.isoformat()}
-            existing.status = "released"
-            existing.released_at = utcnow_naive()
-
-    lease_id = str(uuid.uuid4())
+    ops = _park_lease_ops()
     try:
-        with get_db_session() as db:
-            lease = ParkLease(
-                id=lease_id,
-                repo_id=args.repo_id,
-                host_id=host_id,
-                worktree_path=repo["path"],
-                branch=args.branch,
-                session_id=args.session,
-                allowed_write_scope="repo",
-                status="active",
-            )
-            db.add(lease)
-    except IntegrityError:
-        fail(f"{args.repo_id!r} is already parked (active lease exists) — release it first")
+        result = ops.park_repo(
+            args.repo_id, host_id, repo["path"],
+            branch=args.branch, session_id=args.session,
+        )
+    except ops.ParkConflict as e:
+        fail(str(e))
+        return
 
-    emit({
-        "ok": True,
-        "lease_id": lease_id,
-        "repo_id": args.repo_id,
-        "host_id": host_id,
-        "worktree_path": repo["path"],
-        "branch": args.branch,
-        "session_id": args.session,
-        "reclaimed_stale_lease": reclaimed_stale,
-    }, args)
+    emit({"ok": True, **result}, args)
 
 
 def cmd_heartbeat(args):
@@ -269,48 +236,37 @@ def cmd_heartbeat(args):
     'Renew heartbeat during work') — the missing half of parking that made
     every lease look permanently fresh regardless of whether the holder
     was still actually working."""
-    get_db_session, ParkLease, utcnow_naive = _lease_db()
     host_local = _load_host_local()
     estate = _load_yaml("estate")
     live_hostname = socket.gethostname()
     this_host = _resolve_current_host(estate, live_hostname)
     host_id = args.host or (this_host["id"] if this_host else None)
 
-    with get_db_session() as db:
-        q = db.query(ParkLease).filter(ParkLease.repo_id == args.repo_id, ParkLease.status == "active")
-        if host_id:
-            q = q.filter(ParkLease.host_id == host_id)
-        lease = q.first()
-        if lease is None:
-            fail(f"no active lease for {args.repo_id!r}" + (f" on {host_id!r}" if host_id else "") +
-                 " — heartbeat only renews an existing lease, it does not acquire one")
-        lease.heartbeat_at = utcnow_naive()
-        renewed = {"lease_id": lease.id, "repo_id": lease.repo_id, "host_id": lease.host_id,
-                   "heartbeat_at": lease.heartbeat_at.isoformat()}
+    ops = _park_lease_ops()
+    try:
+        result = ops.heartbeat_repo(args.repo_id, host_id=host_id)
+    except ops.NoActiveLease as e:
+        fail(str(e))
+        return
 
-    emit({"ok": True, **renewed}, args)
+    emit({"ok": True, **result}, args)
 
 
 def cmd_release(args):
-    get_db_session, ParkLease, utcnow_naive = _lease_db()
     host_local = _load_host_local()
     estate = _load_yaml("estate")
     live_hostname = socket.gethostname()
     this_host = _resolve_current_host(estate, live_hostname)
     host_id = args.host or (this_host["id"] if this_host else None)
 
-    with get_db_session() as db:
-        q = db.query(ParkLease).filter(ParkLease.repo_id == args.repo_id, ParkLease.status == "active")
-        if host_id:
-            q = q.filter(ParkLease.host_id == host_id)
-        lease = q.first()
-        if lease is None:
-            fail(f"no active lease for {args.repo_id!r}" + (f" on {host_id!r}" if host_id else ""))
-        lease.status = "released"
-        lease.released_at = utcnow_naive()
-        released = {"lease_id": lease.id, "repo_id": lease.repo_id, "host_id": lease.host_id}
+    ops = _park_lease_ops()
+    try:
+        result = ops.release_repo(args.repo_id, host_id=host_id)
+    except ops.NoActiveLease as e:
+        fail(str(e))
+        return
 
-    emit({"ok": True, **released}, args)
+    emit({"ok": True, **result}, args)
 
 
 def _session_db():

@@ -91,6 +91,23 @@ def host_reachable(host: dict, live_hostname: str) -> tuple[bool, str]:
         s.close()
 
 
+def current_host_id() -> Optional[str]:
+    """The `config/estate.yaml` host id matching the hostname this process
+    is actually running on, or None if this host isn't registered at all.
+    Shared identity lookup (Workstream B: the HTTP park/heartbeat/release
+    surface needs the same "which host is this" resolution `scripts/agent`
+    already does for its CLI subcommands, via a different code path since
+    that script isn't an importable module) — kept here rather than
+    duplicated at the route, for the same reason `host_reachable` already
+    is."""
+    estate = _load_yaml("estate")
+    live_hostname = socket.gethostname()
+    for host in estate.get("hosts", []):
+        if host.get("hostname") == live_hostname:
+            return host["id"]
+    return None
+
+
 def eligible_hosts(repo_id: Optional[str] = None) -> list[dict]:
     """Hard host-eligibility filter (contract's "Eligibility and scoring").
     The interface role is never a candidate (invariant 9: "The
