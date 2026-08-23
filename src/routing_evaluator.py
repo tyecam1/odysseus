@@ -229,6 +229,45 @@ def load_and_aggregate(*, since: Optional[datetime] = None) -> list[RouteAggrega
     return aggregate_routing_decisions([_AttrDict(d) for d in decisions])
 
 
+def get_decision_by_id(decision_id: str) -> Optional[dict]:
+    """The 'logs/result pointers surface' Workstream K's next_action asks
+    for: every route/run response and RoutingDecision-referencing log
+    line already hands back a `decision_id` (src.estate_router's
+    `_record_decision`), but nothing let a caller look that id back up
+    afterward — the only way to see a specific decision's actual recorded
+    outcome was a raw DB query. Returns the full row as a plain dict (all
+    columns, not the aggregated/weighted view `aggregate_routing_decisions`
+    produces), or None if the id doesn't exist. Read-only — this is a
+    lookup, not a second telemetry authority."""
+    from core.database import RoutingDecision, get_db_session
+
+    with get_db_session() as db:
+        row = db.query(RoutingDecision).filter(RoutingDecision.id == decision_id).first()
+        if row is None:
+            return None
+        return {
+            "id": row.id,
+            "task_class": row.task_class,
+            "complexity": row.complexity,
+            "consequence": row.consequence,
+            "host_id": row.host_id,
+            "executor": row.executor,
+            "model_alias": row.model_alias,
+            "concrete_model": row.concrete_model,
+            "context_tokens": row.context_tokens,
+            "paid_tokens": row.paid_tokens,
+            "latency_ms": row.latency_ms,
+            "deterministic_gate": row.deterministic_gate,
+            "retries": row.retries,
+            "escalated": row.escalated,
+            "escalation_reason": row.escalation_reason,
+            "verification_outcome": row.verification_outcome,
+            "status": row.status,
+            "created_at": row.created_at.isoformat() if row.created_at else None,
+            "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+        }
+
+
 class _AttrDict:
     def __init__(self, data: dict):
         self._data = data

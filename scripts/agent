@@ -561,6 +561,23 @@ def cmd_explain(args):
     }, args)
 
 
+def cmd_decision(args):
+    """'What actually happened for this decision_id' lookup (Workstream
+    K next_action: 'logs/result pointers surface') — every /api/estate/
+    run response and `agent explain` evidence entry already hands back a
+    `decision_id`, but there was previously no way to look that specific
+    id back up afterward short of a raw DB query. Delegates entirely to
+    src.routing_evaluator.get_decision_by_id (the single telemetry
+    authority) rather than re-querying RoutingDecision here."""
+    from src.routing_evaluator import get_decision_by_id
+
+    row = get_decision_by_id(args.decision_id)
+    if row is None:
+        fail(f"no routing decision found with id {args.decision_id!r}")
+        return
+    emit(row, args)
+
+
 def cmd_where(args):
     host_local = _load_host_local()
     repos = _resolve_repos(host_local)
@@ -739,6 +756,10 @@ def _build_parser():
     pe.add_argument("alias")
     pe.add_argument("--repo", default=None)
     pe.set_defaults(func=cmd_explain)
+
+    pd = sub.add_parser("decision", parents=[parent], help="look up one routing decision's full recorded outcome by id")
+    pd.add_argument("decision_id")
+    pd.set_defaults(func=cmd_decision)
 
     return p
 

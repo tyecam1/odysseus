@@ -161,6 +161,19 @@ def setup_estate_routing_routes() -> APIRouter:
         _scope_owner(request, {"estate:read", "estate:execute"})
         return _route_call(resolve_alias, alias)
 
+    @router.get("/decision/{decision_id}")
+    async def get_decision(request: Request, decision_id: str):
+        """HTTP surface for 'what actually happened for this decision_id'
+        (Workstream K: 'logs/result pointers surface') — every
+        POST /api/estate/run response already returns a decision_id;
+        this is the other half, looking it back up afterward."""
+        _scope_owner(request, {"estate:read", "estate:execute"})
+        from src.routing_evaluator import get_decision_by_id
+        row = get_decision_by_id(decision_id)
+        if row is None:
+            raise HTTPException(404, f"no routing decision found with id {decision_id!r}")
+        return row
+
     @router.get("/park/status")
     async def park_status(request: Request):
         """HTTP-facing park/status surface for the mobile UI (Workstream H

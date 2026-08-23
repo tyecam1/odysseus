@@ -331,3 +331,53 @@ class TestParkHeartbeatReleaseRoutes:
 
         response = client.get("/api/estate/park/status")
         assert response.status_code == 403
+
+
+class TestDecisionLookupRoute:
+    """GET /api/estate/decision/{decision_id} — Workstream K's 'logs/
+    result pointers surface': every POST /api/estate/run response already
+    returns a decision_id, this looks it back up afterward."""
+
+    def _client(self, monkeypatch):
+        monkeypatch.setenv("AUTH_ENABLED", "false")
+        app = FastAPI()
+        app.include_router(setup_estate_routing_routes())
+        return TestClient(app)
+
+    def test_get_decision_returns_the_row(self, monkeypatch):
+        client = self._client(monkeypatch)
+        import src.routing_evaluator as routing_evaluator
+
+        monkeypatch.setattr(routing_evaluator, "get_decision_by_id", lambda decision_id: {
+            "id": decision_id, "task_class": "coding", "executor": "local", "status": "complete",
+        })
+
+        response = client.get("/api/estate/decision/some-id")
+
+        assert response.status_code == 200
+        assert response.json()["id"] == "some-id"
+
+    def test_get_decision_unknown_id_returns_404(self, monkeypatch):
+        client = self._client(monkeypatch)
+        import src.routing_evaluator as routing_evaluator
+
+        monkeypatch.setattr(routing_evaluator, "get_decision_by_id", lambda decision_id: None)
+
+        response = client.get("/api/estate/decision/does-not-exist")
+        assert response.status_code == 404
+
+    def test_get_decision_requires_scope(self, monkeypatch):
+        monkeypatch.setenv("AUTH_ENABLED", "true")
+        app = FastAPI()
+        app.include_router(setup_estate_routing_routes())
+        client = TestClient(app, raise_server_exceptions=False)
+
+        @app.middleware("http")
+        async def _inject_token(request, call_next):
+            request.state.api_token = True
+            request.state.api_token_scopes = ["chat"]
+            request.state.api_token_owner = "companion"
+            return await call_next(request)
+
+        response = client.get("/api/estate/decision/some-id")
+        assert response.status_code == 403
