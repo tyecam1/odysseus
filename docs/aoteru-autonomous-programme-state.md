@@ -185,9 +185,28 @@ being withheld pending these; see each workstream's `next_action` for what
     re-attempt once the bwrap/codex sandbox defect below is resolved
     (operator decision, see evidence) or on a host where it doesn't
     reproduce; a provider-neutral Claude executor adapter (dormant, no
-    `claude` binary on this host); cheap/strong paid capability aliases
-    via config, not hardcoded names.
+    `claude` binary on this host).
   evidence:
+    - "Cheap/strong paid capability aliases via config (checked, not
+      assumed missing): run_task() hardcoded the literal strings
+      'codex'/'codex-cli' for every needs_escalation route. Added
+      config/models.yaml's paid_providers/default_paid_provider registry
+      (code-strong now explicitly sets paid_provider: codex) and
+      src.estate_router._resolve_paid_provider(alias) — alias-specific
+      override -> default -> truthful failure if neither configured,
+      never a silent guess. run_task() dispatches through this instead
+      of the hardcoded literals; the actual callable table
+      (_PAID_PROVIDER_FUNCTION_NAMES) stays in code by necessity (a
+      provider implementation can't live in YAML) and resolves by name
+      via globals() at call time so existing
+      monkeypatch('execute_codex', ...) test patterns still work. Only
+      codex has a real implementation — this makes selection/labeling
+      configurable, it does not invent a second provider. 6 new tests;
+      all 39 pre-existing estate_router tests pass unchanged. Live-
+      verified against the real config/models.yaml (resolved behavior
+      unchanged: code-strong/reasoning-strong both -> codex/codex-cli,
+      same as before this change, now sourced from config). Full suite
+      green (5073 passed, 4 skipped)."
     - "Re-confirmed this checkpoint (not a new finding, re-verified live):
       execute_codex('list top-level directories...', cwd='.') against
       the real repo — codex-cli 0.116.0 + bubblewrap 0.6.1, same versions
@@ -222,7 +241,7 @@ being withheld pending these; see each workstream's `next_action` for what
       repeated. 3 new regression tests (retry-and-recover,
       no-retry-on-deterministic-rejection, bounded-give-up), 37/37
       passing in tests/test_estate_router.py."
-  last_verified_commit: <pending this checkpoint's commit>
+  last_verified_commit: c8f5a5a
 
 - id: D-routing-replay-evaluator
   outcome: replay/shadow routing evaluator reusing RoutingDecision/BenchmarkResult
