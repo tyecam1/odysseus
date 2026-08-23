@@ -171,3 +171,34 @@ class TestRunRouteEndToEnd:
 
         assert response.status_code == 200
         assert captured.get("objective") == content
+
+    def test_oversized_objective_rejected_before_reaching_run_task(self, monkeypatch):
+        """This endpoint executes against a shared lab GPU — nothing
+        downstream (select_bounded_context only bounds the requested
+        context window, not the payload actually sent) previously capped
+        objective size, so a 20MB+ objective would be fully constructed
+        and shipped to Ollama before any model-side limit kicked in."""
+        client = self._client(monkeypatch)
+        called = {"n": 0}
+
+        import routes.estate_routing_routes as mod
+        monkeypatch.setattr(mod, "run_task", lambda task: called.__setitem__("n", called["n"] + 1) or {"ok": True})
+
+        huge = "x" * 20_000_000
+        response = client.post("/api/estate/run", json={"task_class": "code", "objective": huge})
+
+        assert response.status_code == 422
+        assert called["n"] == 0, "run_task must never be reached for an oversized objective"
+
+    def test_reasonably_sized_objective_still_accepted(self, monkeypatch):
+        client = self._client(monkeypatch)
+        import routes.estate_routing_routes as mod
+        monkeypatch.setattr(mod, "run_task", lambda task: {"ok": True})
+
+        response = client.post("/api/estate/run", json={"task_class": "code", "objective": "a" * 10_000})
+        assert response.status_code == 200
+
+    def test_malformed_objective_type_rejected_cleanly(self, monkeypatch):
+        client = self._client(monkeypatch)
+        response = client.post("/api/estate/run", json={"task_class": "code", "objective": 12345})
+        assert response.status_code == 422

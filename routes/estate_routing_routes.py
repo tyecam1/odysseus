@@ -8,13 +8,25 @@ resolves to at the HTTP layer.
 """
 from __future__ import annotations
 
+import json
 from typing import Dict, List, Optional, Union
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from src.auth_helpers import require_user
 from src.estate_router import RoutingConfigError, eligible_hosts, resolve_alias, resolve_route, run_task
+
+# Bounds the serialized size of `objective` (text or a multimodal content
+# list — a few embedded base64 images can legitimately be several MB).
+# Nothing downstream currently caps this: select_bounded_context()
+# (src/model_context.py) only bounds the *requested context window*, not
+# the size of the HTTP payload/prompt actually sent — an oversized
+# objective would still be fully constructed and shipped to a shared,
+# expensive resource (Ollama on the lab GPU) before any model-side limit
+# kicks in. 8 MB comfortably covers a handful of realistic photos plus a
+# long text prompt while still rejecting a clearly abusive payload.
+_MAX_OBJECTIVE_BYTES = 8 * 1024 * 1024
 
 
 def _scope_owner(request: Request, allowed: set[str]) -> str:
@@ -91,6 +103,19 @@ class RunTaskEnvelope(TaskEnvelope):
     rather than left half-fixed."""
     objective: Optional[Union[str, List[Dict[str, object]]]] = None
     allow_paid_escalation: bool = False
+
+    @field_validator("objective")
+    @classmethod
+    def _bounded_objective_size(cls, value):
+        if value is None:
+            return value
+        size = len(value.encode("utf-8")) if isinstance(value, str) else len(json.dumps(value).encode("utf-8"))
+        if size > _MAX_OBJECTIVE_BYTES:
+            raise ValueError(
+                f"objective is {size} bytes, exceeding the {_MAX_OBJECTIVE_BYTES}-byte limit "
+                "— this endpoint executes against a shared lab resource, not a bulk-upload surface"
+            )
+        return value
 
     def to_task(self) -> dict:
         task = self.model_dump(exclude={"allow_paid_escalation"})

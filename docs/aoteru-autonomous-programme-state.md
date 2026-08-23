@@ -403,11 +403,29 @@ see `[[project-aoteru-p12-estate-convergence]]`.
     remaining: Chroma rebuild-from-authoritative-state test, worker/model/
     provider disappearance mid-task, stale LogicalSession/job
     reconciliation. operator: `sudo systemctl restart
-    odysseus-aoteru-lab.service` to deploy the RunTaskEnvelope.objective
-    fix below to the live port-7001 instance — this session could not
-    restart it (no non-interactive sudo), correctly treated as a stop-gate
-    per GO.md rather than worked around.
+    odysseus-aoteru-lab.service` to deploy this session's
+    RunTaskEnvelope.objective fix and its oversized-objective guard to the
+    live port-7001 instance — this session could not restart it (no
+    non-interactive sudo), correctly treated as a stop-gate per GO.md
+    rather than worked around.
   evidence:
+    - "Malformed/oversized envelope handling (checked, not assumed): a
+      malformed objective (wrong type, e.g. an int) was already correctly
+      rejected 422 by Pydantic's own type validation — no gap there. But
+      an oversized objective (tested with a real 20MB string through a
+      TestClient) was accepted with 200 and would have been fully
+      constructed and shipped toward Ollama on the shared lab GPU had a
+      capability been requested (this particular test case resolved to
+      `deterministic` — no capability requested — so no actual model call
+      happened, but a capability-bearing request would not have been so
+      lucky). Nothing downstream capped this: select_bounded_context only
+      bounds the *requested context window*, not the payload size
+      actually sent. Added an 8MB field_validator cap on
+      RunTaskEnvelope.objective (covers both plain-text and multimodal
+      content-list shapes) — a 20MB payload now cleanly rejects 422
+      before run_task() is ever called (confirmed via a test asserting
+      run_task is never invoked), while a normal-sized objective is
+      unaffected. 3 new tests."
     - "CRITICAL SELF-FOUND REGRESSION, fixed same session: the
       [[B-laptop-thin-client]] commit that added
       RunTaskEnvelope.allow_paid_escalation accidentally dropped the
