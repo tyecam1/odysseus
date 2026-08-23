@@ -243,6 +243,7 @@ class UploadHandler:
         # In-memory index cache to avoid O(N) disk I/O on every request
         self._index_cache: Optional[Dict[str, Any]] = None
         self._index_mtime: float = 0.0
+        self._index_size: int = -1
     
     def inside_base_dir(self, path: str) -> bool:
         """Check if path is inside base directory"""
@@ -729,8 +730,10 @@ class UploadHandler:
             self._index_cache = data
             try:
                 self._index_mtime = os.path.getmtime(path)
+                self._index_size = os.path.getsize(path)
             except OSError:
                 self._index_mtime = time.time()
+                self._index_size = -1
 
     def _load_upload_index(self, *, fail_on_error: bool = False) -> Dict[str, Any]:
         """Load the upload index from disk/cache. Uses mtime-based validation
@@ -752,19 +755,28 @@ class UploadHandler:
         if not existing_candidates:
             self._index_cache = {}
             self._index_mtime = 0.0
+            self._index_size = -1
             return {}
 
-        # Check cache validity
+        # Check cache validity. mtime alone is not enough: two writes to the
+        # same path in quick succession (e.g. a write immediately followed by
+        # an external truncation/corruption) can land within the filesystem's
+        # mtime tick and appear unchanged, which would silently serve stale
+        # cached content instead of noticing the file changed. Pairing mtime
+        # with size closes that window without adding an extra read.
         try:
             mtime = max(os.path.getmtime(path) for path in existing_candidates)
+            size = os.path.getsize(uploads_db_path) if os.path.exists(uploads_db_path) else -1
             if (
                 not fail_on_error
                 and self._index_cache is not None
                 and mtime <= self._index_mtime
+                and size == self._index_size
             ):
                 return self._index_cache
         except OSError:
             mtime = 0.0
+            size = -1
 
         # Try the live file first, fall back to the .bak sibling if the
         # live file is truncated/corrupted.
@@ -773,8 +785,14 @@ class UploadHandler:
                 with open(candidate, "r", encoding="utf-8") as f:
                     data = json.load(f)
                 if isinstance(data, dict):
-                    self._index_cache = data
-                    self._index_mtime = mtime
+                    if candidate == uploads_db_path:
+                        # Only cache reads of the live file: caching a .bak
+                        # fallback against the live file's (corrupt) size
+                        # would wrongly validate future reads until the live
+                        # file's size happens to change again.
+                        self._index_cache = data
+                        self._index_mtime = mtime
+                        self._index_size = size
                     return data
             except Exception as e:
                 logger.warning(f"Failed to read uploads database ({candidate}): {e}")

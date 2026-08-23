@@ -39,7 +39,7 @@ python-dateutil
 caldav
 cryptography
 bcrypt
-mcp
+mcp>=1.29.0,<2.0.0  # mcp 2.0.0 removed the low-level Server.list_tools() decorator API used by mcp_servers/*_server.py; pin until those are migrated
 pyotp
 qrcode[pil]
 croniter
