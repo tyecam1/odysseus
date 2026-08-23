@@ -171,11 +171,36 @@ being withheld pending these; see each workstream's `next_action` for what
   next_action: >-
     remaining: exercise execute_codex on representative nontrivial bounded
     tasks (repo reconnaissance, schema output, one deterministic-repair
-    loop) with recorded provider/latency/retry/cost-proxy telemetry; a
-    provider-neutral Claude executor adapter (dormant, no `claude` binary
-    on this host); cheap/strong paid capability aliases via config, not
-    hardcoded names.
+    loop) with recorded provider/latency/retry/cost-proxy telemetry —
+    re-attempt once the bwrap/codex sandbox defect below is resolved
+    (operator decision, see evidence) or on a host where it doesn't
+    reproduce; a provider-neutral Claude executor adapter (dormant, no
+    `claude` binary on this host); cheap/strong paid capability aliases
+    via config, not hardcoded names.
   evidence:
+    - "Re-confirmed this checkpoint (not a new finding, re-verified live):
+      execute_codex('list top-level directories...', cwd='.') against
+      the real repo — codex-cli 0.116.0 + bubblewrap 0.6.1, same versions
+      as L's original finding. Result: ok=true (the CLI itself ran and
+      returned cleanly, latency_ms=21423) but codex's own output honestly
+      reported it could not inspect the repo ('bwrap: Unknown option
+      --argv0') and asked for a manual `find` paste instead of guessing —
+      truthful degraded behaviour, not a crash or a fabricated answer.
+      `codex exec --help` on this host confirms
+      `--dangerously-bypass-approvals-and-sandbox` exists specifically
+      for 'environments that are externally sandboxed' (which this one
+      already is), but switching execute_codex's default to it would
+      remove codex's own command-execution sandboxing for every future
+      call, not just this diagnostic one — a security-posture change
+      docs/aoteru-long-horizon-autonomous-convergence.agent-task.md's own
+      Workstream J discipline says needs an explicit operator decision,
+      not a silent autonomous change. Left execute_codex() unmodified;
+      recording this as the exact, unchanged-since-L blocker rather than
+      re-discovering it fresh next session. operator: either accept the
+      bypass-sandbox tradeoff explicitly (then this workstream's item can
+      be re-attempted), or upgrade bubblewrap on this host, or accept
+      execute_codex staying diagnostic-only (truthful ok=true +
+      self-reported inability) on hosts with this bwrap version."
     - "execute_local() had zero retry logic — any transient connection
       blip failed the whole task immediately. Added bounded retry
       (default max_retries=1) gated by _retryable_local_error(): only
@@ -238,12 +263,23 @@ being withheld pending these; see each workstream's `next_action` for what
     remaining: incremental ingest adapters (claude-code-sessions,
     chatgpt-export, codex-artifacts, repo-pointers — all still `planned`
     per `agent status`'s memory_sources, correctly not filled cosmetically);
-    bounded-recall API shape explicitly tuned for laptop/mobile payload
-    size (Workstream K/H will need this); a queryable `history()`-backed
-    revision endpoint (the data already supports it, no route exposes it
-    yet); wiring `memory_outbox.replay()` into an actual scheduled/CLI
-    entry point once a real home target exists to replay into.
+    a queryable `history()`-backed revision endpoint (the data already
+    supports it, no route exposes it yet); wiring `memory_outbox.replay()`
+    into an actual scheduled/CLI entry point once a real home target
+    exists to replay into.
   evidence:
+    - "Bounded-recall API shape (checked, not assumed missing):
+      MisumiMemory.capsules() and the existing GET /misumi/memory/recent
+      route both return every field — full untruncated raw_text included
+      — for every matching record, with no filters; fine for the operator
+      web UI, not tuned for a small-payload caller. Added
+      MisumiMemory.recall(query, persona, capsule_type, status, limit,
+      max_summary_chars): newest-first, count-capped (<=100), summary-
+      truncated, never returns raw_text. Exposed GET
+      /misumi/memory/recall alongside (not replacing) /memory/recent. 8
+      new tests (filters, truncation, ordering, limit cap, HTTP round
+      trip). Live-verified against the real accumulated Misumi memory
+      data. Full suite green (5055 passed, 4 skipped)."
     - "Audited against the canonical plan (docs/aoteru-estate-
       implementation-plan.md section 6) rather than assuming P4 closed it:
       the plan's source/relation/open_loop/outbox model is substantially
@@ -273,7 +309,7 @@ being withheld pending these; see each workstream's `next_action` for what
       (not just the record's first version), and source corruption is
       reported, not silently swallowed or fatal — directly exercises
       item 3's 'test corruption/rebuild/idempotent replay'."
-  last_verified_commit: <pending this checkpoint's commit>
+  last_verified_commit: dfc8d79
 
 - id: F-cross-repo-governance
   outcome: proven read/park/execute across tyecam1/obsidian-PhD, s2-e1-ros2-measurement-spine, misumi
