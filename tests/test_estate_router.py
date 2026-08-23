@@ -26,6 +26,8 @@ def fixture_config(tmp_path, monkeypatch):
         ],
     }))
     (config_dir / "models.yaml").write_text(yaml.safe_dump({
+        "paid_providers": [{"name": "codex", "concrete_model_label": "codex-cli"}],
+        "default_paid_provider": "codex",
         "capabilities": [
             {"alias": "local-fast", "binding": "test-model-fast"},
             {"alias": "reasoning-strong", "binding": None},
@@ -431,6 +433,83 @@ def test_run_task_escalates_to_codex_when_opted_in(fixture_config, monkeypatch):
     assert result["execution"]["output"] == "done"
     assert recorded["executor"] == "codex"
     assert recorded["escalated"] is True
+
+
+def test_resolve_paid_provider_uses_alias_specific_config(fixture_config, monkeypatch):
+    """Workstream C: "cheap/strong paid capability aliases via config,
+    not hardcoded names" — an alias with its own paid_provider entry
+    must use it, not silently fall back to the default."""
+    (fixture_config / "models.yaml").write_text(__import__("yaml").safe_dump({
+        "paid_providers": [
+            {"name": "codex", "concrete_model_label": "codex-cli"},
+            {"name": "other-provider", "concrete_model_label": "other-cli"},
+        ],
+        "default_paid_provider": "codex",
+        "capabilities": [
+            {"alias": "code-strong", "binding": None, "paid_provider": "other-provider"},
+        ],
+    }))
+
+    choice = estate_router._resolve_paid_provider("code-strong")
+    assert choice == {"provider": "other-provider", "concrete_model_label": "other-cli"}
+
+
+def test_resolve_paid_provider_falls_back_to_default(fixture_config):
+    """An alias with no paid_provider of its own (or not registered at
+    all) uses default_paid_provider — this is what makes an unbound alias
+    like reasoning-strong (no paid_provider entry in the fixture) still
+    escalate to codex today, from config rather than a hardcoded literal."""
+    choice = estate_router._resolve_paid_provider("reasoning-strong")
+    assert choice == {"provider": "codex", "concrete_model_label": "codex-cli"}
+
+
+def test_resolve_paid_provider_no_config_fails_truthfully(fixture_config):
+    (fixture_config / "models.yaml").write_text(__import__("yaml").safe_dump({
+        "capabilities": [{"alias": "code-strong", "binding": None}],
+    }))
+    choice = estate_router._resolve_paid_provider("code-strong")
+    assert choice["provider"] is None
+    assert "reason" in choice
+
+
+def test_run_task_uses_configured_provider_name_not_hardcoded_codex(fixture_config, monkeypatch):
+    """The exact regression this change fixes: executor/concrete_model
+    must come from config/models.yaml's paid_providers registry, not the
+    literal strings "codex"/"codex-cli" baked into run_task()."""
+    (fixture_config / "models.yaml").write_text(__import__("yaml").safe_dump({
+        "paid_providers": [{"name": "codex", "concrete_model_label": "codex-cli-renamed"}],
+        "default_paid_provider": "codex",
+        "capabilities": [{"alias": "code-strong", "binding": None, "paid_provider": "codex"}],
+    }))
+    monkeypatch.setattr(estate_router, "_record_decision", lambda *a, **k: "fake-decision-id")
+    monkeypatch.setattr(estate_router, "execute_codex",
+                         lambda objective, **k: {"ok": True, "provider": "codex", "output": "done", "latency_ms": 99})
+    monkeypatch.setattr(estate_router, "_update_decision_outcome", lambda decision_id, **k: None)
+
+    result = estate_router.run_task({
+        "task_class": "coding", "objective": "fix the bug",
+        "requirements": {"capabilities": ["code-strong"]},
+        "routing": {"allow_paid_escalation": True},
+    })
+    assert result["route"]["concrete_model"] == "codex-cli-renamed"
+
+
+def test_run_task_unresolvable_paid_provider_fails_truthfully_not_silently(fixture_config, monkeypatch):
+    (fixture_config / "models.yaml").write_text(__import__("yaml").safe_dump({
+        "capabilities": [{"alias": "code-strong", "binding": None}],
+    }))
+    monkeypatch.setattr(estate_router, "_record_decision", lambda *a, **k: "fake-decision-id")
+    called = []
+    monkeypatch.setattr(estate_router, "execute_codex", lambda *a, **k: called.append(1))
+
+    result = estate_router.run_task({
+        "task_class": "coding", "objective": "fix the bug",
+        "requirements": {"capabilities": ["code-strong"]},
+        "routing": {"allow_paid_escalation": True},
+    })
+    assert result["executed"] is False
+    assert "execution_error" in result
+    assert called == [], "must never fall back to codex when no provider is configured"
 
 
 def test_run_task_local_route_without_objective_does_not_execute(fixture_config, monkeypatch):

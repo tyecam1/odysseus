@@ -27,6 +27,21 @@
 # local-agent/local-code -> code-fast, local-multimodal -> vision,
 # local-strong/local-deep -> local-strong/reasoning-strong — recorded here
 # so a future pass doesn't invent a second alias vocabulary.
+#
+# Paid escalation providers (Workstream C: "cheap/strong paid capability
+# aliases via config, not hardcoded names"). `src.estate_router.run_task`
+# previously hardcoded the literal strings "codex"/"codex-cli" for every
+# needs_escalation route — this registry makes the provider *selection*
+# (which name gets recorded as executor/concrete_model, and which alias
+# maps to which provider) a config value instead. The actual dispatch
+# (the callable that talks to a given provider's CLI/API) necessarily
+# stays in code — a provider implementation can't itself live in YAML —
+# only one exists today (`execute_codex`), so this does not invent a
+# second paid provider that has no real implementation.
+paid_providers:
+  - name: codex
+    concrete_model_label: codex-cli
+default_paid_provider: codex
 
 capabilities:
   - alias: local-fast
@@ -67,6 +82,7 @@ capabilities:
       docs/aoteru-lm4-production-canary-evidence.md.
   - alias: code-strong
     binding: null
+    paid_provider: codex
   - alias: reasoning-strong
     binding: nemotron-3.5-lightning:30b-a3b
     gpu_priority: yield_to_experiment  # P12.4: 25GB model on a 10GB card — heaviest GPU/CPU-offload contention of any bound alias

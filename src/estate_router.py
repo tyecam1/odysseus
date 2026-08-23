@@ -631,6 +631,45 @@ def execute_codex(objective: str, *, timeout: float = 180.0, cwd: Optional[str] 
                     "latency_ms": int((time.monotonic() - started) * 1000)}
 
 
+# Provider dispatch table (Workstream C: "cheap/strong paid capability
+# aliases via config, not hardcoded names"). The *selection* of which
+# provider backs a given alias, and what name gets recorded as
+# executor/concrete_model, comes from config/models.yaml
+# (paid_providers/default_paid_provider/per-alias paid_provider) via
+# `_resolve_paid_provider` below — this dict is only the unavoidable code
+# side (an actual callable can't live in YAML). Only `codex` has a real
+# implementation today; adding a second provider means adding both a real
+# `execute_<provider>` function and an entry here, not just a config line.
+#
+# Maps provider name -> this module's own function *name* rather than the
+# function object directly, resolved via globals() at call time — tests
+# (and any future caller) monkeypatch `estate_router.execute_codex` the
+# same way they already monkeypatch `execute_local`; binding the object
+# here at import time would silently stop honouring that patch.
+_PAID_PROVIDER_FUNCTION_NAMES = {"codex": "execute_codex"}
+
+
+def _resolve_paid_provider(alias: Optional[str]) -> dict:
+    """Which paid provider backs `alias`'s escalation, read from
+    config/models.yaml rather than hardcoded. Resolution order: the
+    alias's own `paid_provider` (if the alias is registered and sets
+    one) -> `default_paid_provider` -> unresolved (a caller with no paid
+    provider configured at all gets a truthful failure, not a silent
+    guess). Returns `{"provider": name, "concrete_model_label": label}`
+    or `{"provider": None, "reason": ...}`."""
+    models = _load_yaml("models")
+    entry = next((c for c in models.get("capabilities", []) if c.get("alias") == alias), None) if alias else None
+    provider_name = (entry or {}).get("paid_provider") or models.get("default_paid_provider")
+    if not provider_name:
+        return {"provider": None, "reason": "no paid_provider configured for this alias and no default_paid_provider set"}
+    registry = {p["name"]: p for p in models.get("paid_providers", []) if p.get("name")}
+    provider_entry = registry.get(provider_name, {})
+    return {
+        "provider": provider_name,
+        "concrete_model_label": provider_entry.get("concrete_model_label", provider_name),
+    }
+
+
 def run_task(task: dict) -> dict:
     """Closes the execution gap: `resolve_route()` alone only answers
     WHERE+WHAT, it never calls a model. `run_task()` routes first (same
@@ -673,9 +712,17 @@ def run_task(task: dict) -> dict:
         allow_paid = (task.get("routing") or {}).get("allow_paid_escalation")
         if route.get("route", {}).get("executor") == "none" and route.get("decision_id") \
                 and allow_paid and (task.get("objective") is not None):
+            provider_choice = _resolve_paid_provider(route["route"].get("model_alias"))
+            provider_name = provider_choice.get("provider")
+            provider_fn_name = _PAID_PROVIDER_FUNCTION_NAMES.get(provider_name)
+            provider_fn = globals().get(provider_fn_name) if provider_fn_name else None
+            if provider_name is None or provider_fn is None:
+                return {**route, "executed": False, "execution_error": provider_choice.get(
+                    "reason", f"paid provider {provider_name!r} has no implementation",
+                )}
             objective = task.get("objective")
             paid_objective = objective if isinstance(objective, str) else str(objective)
-            result = execute_codex(paid_objective)
+            result = provider_fn(paid_objective)
             gate = "pass" if result.get("ok") and (result.get("output") or "").strip() else "fail"
             _update_decision_outcome(
                 route["decision_id"],
@@ -683,11 +730,12 @@ def run_task(task: dict) -> dict:
                 deterministic_gate=gate,
                 latency_ms=result.get("latency_ms"),
                 escalation_reason="insufficient_capability" if gate == "pass" else "worker_failed",
-                executor="codex",
+                executor=provider_name,
                 escalated=True,
             )
             route = {**route, "ok": gate == "pass",
-                     "route": {**route["route"], "executor": "codex", "concrete_model": "codex-cli"}}
+                     "route": {**route["route"], "executor": provider_name,
+                               "concrete_model": provider_choice["concrete_model_label"]}}
             return {**route, "executed": True, "execution": result, "deterministic_gate": gate}
         return {**route, "executed": False}
 
