@@ -620,21 +620,30 @@ being withheld pending these; see each workstream's `next_action` for what
   depends_on: []
   blocker: null
   next_action: >-
-    remaining: the only J audit item left without at least one
-    live-verified test is timeout/cancel/retry state transitions
-    specifically for a *long-running* task's mid-flight cancel signal
-    (retry-on-transient-failure is already tested — see C's evidence —
-    but run_task()/execute_local() are synchronous with no cancel
-    endpoint at all today; testing 'cancel' honestly requires either
-    building one or explicitly recording that none exists yet, not
-    fabricating a test against a mechanism that isn't there). operator:
-    `sudo systemctl
+    remaining: every J audit item now has at least one test except a
+    mid-flight cancel signal for a long-running task — run_task()/
+    execute_local() are synchronous with no cancel mechanism/endpoint at
+    all today, so testing "cancel" honestly requires either building one
+    (a real feature addition, not an audit gap — scope decision, not
+    attempted unilaterally) or explicitly recording that none exists,
+    which this note now does. operator: `sudo systemctl
     restart odysseus-aoteru-lab.service` to deploy this session's
     RunTaskEnvelope.objective fix and its oversized-objective guard to the
     live port-7001 instance — this session could not restart it (no
     non-interactive sudo), correctly treated as a stop-gate per GO.md
     rather than worked around.
   evidence:
+    - "Rollback of model/config/executor changes (checked, not assumed
+      missing): config/models.yaml is read fresh on every _load_yaml()
+      call (confirmed by reading the code — no lru_cache or
+      module-level caching in estate_router.py), which is what actually
+      makes a rollback safe: no cached/stale state a revert could fail
+      to reach. Added
+      test_model_config_change_and_rollback_both_take_effect_live —
+      binding change takes effect immediately, and critically so does
+      reverting it, using a fixture config dir rather than touching the
+      real live-served config. Full suite green (5084 passed, 4
+      skipped)."
     - "Controller disconnect/reconnect (checked, not assumed missing):
       the laptop thin client already reported an unreachable backend
       cleanly (pre-existing test), but nothing proved the other half —
@@ -753,7 +762,7 @@ being withheld pending these; see each workstream's `next_action` for what
       the exact post-boot command. 8 new unit tests
       (tests/test_cold_reboot_verify.py) cover the PASS/FAIL/SKIP
       classification logic with mocked subprocess/HTTP calls."
-  last_verified_commit: 01de50b
+  last_verified_commit: ebb6dd2
 
 - id: K-operator-experience
   outcome: converged agent status / diagnostics / handbook
