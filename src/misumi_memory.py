@@ -260,6 +260,29 @@ class MisumiMemory:
     def handoffs(self) -> Tuple[List[Dict[str, object]], int]:
         return self._fold("handoffs")
 
+    def raw_records(self, store: str) -> Tuple[List[Dict[str, object]], int]:
+        """Latest-by-id folded records for any of the three JSONL stores,
+        without loops()'s computed `stale` field — the exact shape
+        src/memory_outbox.py's replay needs to compare against a target
+        store's existing ids. Public so outbox replay doesn't need to
+        reach into `_fold` from outside the class."""
+        if store not in ("capsules", "open_loops", "handoffs"):
+            raise ValueError(f"unknown store: {store}")
+        return self._fold(store)
+
+    def append_record(self, store: str, record: Dict[str, object]) -> None:
+        """Append one already-shaped record line as-is, bypassing
+        capture()'s classification/routing/open-loop-detection. For
+        outbox replay only — re-appending a record another MisumiMemory
+        instance already produced (same id, same content) is not
+        authoring a new fact, and must not re-run capture()'s side
+        effects (e.g. spawning a second open_loop for the same capsule)."""
+        if store not in ("capsules", "open_loops", "handoffs"):
+            raise ValueError(f"unknown store: {store}")
+        if not isinstance(record.get("id"), str) or not record["id"]:
+            raise ValueError("record must carry a stable string id")
+        self._append(store, record)
+
     def _latest(self, store: str, record_id: str) -> Dict[str, object]:
         records, _ = self._fold(store)
         found = next((item for item in records if item.get("id") == record_id), None)

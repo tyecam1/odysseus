@@ -158,13 +158,50 @@ see `[[project-aoteru-p12-estate-convergence]]`.
 
 - id: E-memory-broker
   outcome: source-linked memory broker ready for future home-primary promotion
-  status: eligible
+  status: active
   priority: medium
   depends_on: []
   blocker: null
-  next_action: audit current memory service against the canonical plan's source-trace/outbox/idempotency requirements.
-  evidence: []
-  last_verified_commit: null
+  next_action: >-
+    remaining: incremental ingest adapters (claude-code-sessions,
+    chatgpt-export, codex-artifacts, repo-pointers — all still `planned`
+    per `agent status`'s memory_sources, correctly not filled cosmetically);
+    bounded-recall API shape explicitly tuned for laptop/mobile payload
+    size (Workstream K/H will need this); a queryable `history()`-backed
+    revision endpoint (the data already supports it, no route exposes it
+    yet); wiring `memory_outbox.replay()` into an actual scheduled/CLI
+    entry point once a real home target exists to replay into.
+  evidence:
+    - "Audited against the canonical plan (docs/aoteru-estate-
+      implementation-plan.md section 6) rather than assuming P4 closed it:
+      the plan's source/relation/open_loop/outbox model is substantially
+      already real, not prose — src/misumi_memory.py's append-only JSONL
+      capsule/open_loop/handoff stores with latest-by-id folding ARE the
+      revision trail (history() replays every raw version, no separate
+      revision table needed), source_event_id already links to
+      core.database.SourceEvent (content_hash for idempotent ingest,
+      already exists). `agent status`'s memory_sources confirms
+      misumi-capsules is the only 'active' source; the rest are honestly
+      'planned', matching item 4's 'only add adapters with a clear
+      supported path'."
+    - "The one concretely missing plan item, confirmed by grep (zero
+      matches for 'outbox'/'MemoryBroker' anywhere in the codebase before
+      this commit): idempotent outbox/replay semantics for moving
+      lab-accumulated memory into a future home-primary without
+      duplication. Added src/memory_outbox.py's replay(source, target) —
+      copies records missing from target by stable id (the uuid
+      capture() already stamps every record with), safe to call
+      repeatedly. Two small public MisumiMemory methods added
+      (raw_records, append_record) rather than reaching into the class's
+      private _fold/_append from outside."
+    - "8 new tests (tests/test_memory_outbox.py) cover: copy-into-empty-
+      target, idempotent double-replay (second run applies 0), partial-
+      prior-sync resume (only the delta applies), that a later correction
+      (confirm()) survives replay via the same latest-by-id folding
+      (not just the record's first version), and source corruption is
+      reported, not silently swallowed or fatal — directly exercises
+      item 3's 'test corruption/rebuild/idempotent replay'."
+  last_verified_commit: <pending this checkpoint's commit>
 
 - id: F-cross-repo-governance
   outcome: proven read/park/execute across tyecam1/obsidian-PhD, s2-e1-ros2-measurement-spine, misumi
