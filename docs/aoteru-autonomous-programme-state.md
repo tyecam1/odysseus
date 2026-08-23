@@ -11,6 +11,41 @@ glovebox offline 36d (unchanged from P12); home/interface-pc not present on
 tailnet at all (unchanged from P12). No new host-availability information —
 see `[[project-aoteru-p12-estate-convergence]]`.
 
+## Batched human actions (ordered by value)
+
+Everything below needs the operator specifically — no independent work is
+being withheld pending these; see each workstream's `next_action` for what
+*doesn't* need the operator and remains open.
+
+1. **`sudo systemctl restart odysseus-aoteru-lab.service`** — deploys this
+   session's two real fixes ([[J-security-resilience]]) to the live
+   port-7001 instance: (a) `RunTaskEnvelope.objective` was silently
+   dropped on every HTTP `/api/estate/run` call since commit `e0bbb9a`
+   (fixed in `e1be229`), and (b) an 8MB oversized-objective cap (fixed in
+   `03c4143`). Until restarted, the live service is still running the
+   broken code — the laptop client's `ask` command will not actually
+   execute anything against it. Expected output: no error; confirm with
+   `venv/bin/python scripts/cold_reboot_verify.py` afterward (should
+   still be 6/6 PASS) and a real `ask` round trip.
+2. Confirm the real git remote for `misumi` and `obsidian-phd`
+   (`config/repositories.yaml` has never known one for either — this is
+   not a lab-host-only gap) and correct/confirm
+   `s2-e1-ros2-measurement-spine`'s ASSUMED `root_var`/`path`
+   ([[F-cross-repo-governance]]). Unblocks re-running most of F and the
+   two still-blocked [[L-real-work-validation]] task classes.
+3. Power/reconnect the glovebox Jetson, then run
+   `ssh glovebox 'python3 glovebox_qualification.py'`
+   ([[G-glovebox-jetson]]) — offline 36d+, re-checked unchanged this
+   session.
+4. When the laptop is next used interactively: run
+   `companion/laptop_client/aoteru.py` from an actual laptop session (not
+   this lab session) for the one remaining un-proven leg —
+   [[B-laptop-thin-client]]'s server side is fully live-tested; only the
+   laptop-originated leg isn't.
+5. When home/interface PC next become reachable: see
+   [[I-home-reentry]] / [[H-interface-mobile-frontdoor]] for the exact
+   one-command qualification each.
+
 ```yaml
 - id: A-baseline-debt
   outcome: full pytest suite green, no repository-controlled failures carried as pre-existing
