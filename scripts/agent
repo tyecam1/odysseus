@@ -500,6 +500,41 @@ def _active_park_leases_summary() -> list:
         return []
 
 
+def _recent_routing_decisions_summary(limit: int = 10) -> list:
+    """Estate-wide recent-routing-decision view for `agent status`
+    (Workstream K next_action: "recent-RoutingDecision summary directly in
+    `agent status`" — `agent explain <alias>` already surfaces this
+    per-alias via src.routing_evaluator, but status had no at-a-glance
+    'what just ran' view). Best-effort: a missing/unreachable DB degrades
+    to an empty list rather than failing the whole status command, same
+    pattern as _active_park_leases_summary()."""
+    try:
+        from core.database import RoutingDecision, get_db_session
+        with get_db_session() as db:
+            rows = (
+                db.query(RoutingDecision)
+                .order_by(RoutingDecision.created_at.desc())
+                .limit(limit)
+                .all()
+            )
+            return [
+                {
+                    "id": row.id,
+                    "task_class": row.task_class,
+                    "host_id": row.host_id,
+                    "executor": row.executor,
+                    "model_alias": row.model_alias,
+                    "status": row.status,
+                    "escalated": row.escalated,
+                    "retries": row.retries,
+                    "created_at": row.created_at.isoformat() if row.created_at else None,
+                }
+                for row in rows
+            ]
+    except Exception:
+        return []
+
+
 def cmd_status(args):
     host_local = _load_host_local()
     live = _live_host_inventory()
@@ -530,6 +565,7 @@ def cmd_status(args):
             {"id": s["id"], "status": s.get("status")} for s in memory_sources.get("sources", [])
         ],
         "active_park_leases": _active_park_leases_summary(),
+        "recent_routing_decisions": _recent_routing_decisions_summary(),
         "host_local_config": str(_HOST_LOCAL_PATH),
     }, args)
 
