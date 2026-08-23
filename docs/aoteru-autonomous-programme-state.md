@@ -285,11 +285,19 @@ being withheld pending these; see each workstream's `next_action` for what
     remaining: incremental ingest adapters (claude-code-sessions,
     chatgpt-export, codex-artifacts, repo-pointers — all still `planned`
     per `agent status`'s memory_sources, correctly not filled cosmetically);
-    a queryable `history()`-backed revision endpoint (the data already
-    supports it, no route exposes it yet); wiring `memory_outbox.replay()`
-    into an actual scheduled/CLI entry point once a real home target
-    exists to replay into.
+    wiring `memory_outbox.replay()` into an actual scheduled/CLI entry
+    point once a real home target exists to replay into.
   evidence:
+    - "The history()-backed revision endpoint this next_action previously
+      listed as missing was a stale claim (checked this checkpoint):
+      GET /misumi/memory/{capsule_id}/history already existed
+      (routes/misumi_routes.py) and was already wired to
+      MisumiMemory.history() — the actual gap was zero test coverage for
+      either. Corrected the stale claim rather than re-implementing
+      what already existed; closed the real gap with 5 new tests
+      (revision ordering, cross-record isolation, unknown-id handling,
+      HTTP 200/404). Live-verified against the real accumulated Misumi
+      memory data. Full suite green (5068 passed, 4 skipped)."
     - "Bounded-recall API shape (checked, not assumed missing):
       MisumiMemory.capsules() and the existing GET /misumi/memory/recent
       route both return every field — full untruncated raw_text included
@@ -331,7 +339,7 @@ being withheld pending these; see each workstream's `next_action` for what
       (not just the record's first version), and source corruption is
       reported, not silently swallowed or fatal — directly exercises
       item 3's 'test corruption/rebuild/idempotent replay'."
-  last_verified_commit: dfc8d79
+  last_verified_commit: 2de475e
 
 - id: F-cross-repo-governance
   outcome: proven read/park/execute across tyecam1/obsidian-PhD, s2-e1-ros2-measurement-spine, misumi
