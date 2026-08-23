@@ -90,14 +90,24 @@ being withheld pending these; see each workstream's `next_action` for what
   next_action: >-
     remaining: operator-run live smoke test from an actual laptop (not
     proven from this lab-only session — see companion/laptop_client/README.md
-    "what's deliberately not here yet"); pipx/msix packaging; wiring
-    companion/laptop_client/aoteru.py's own subcommands to the new
-    heartbeat/release HTTP routes (the routes exist and are tested/live-
-    verified server-side; the client CLI doesn't call them yet); a
-    park HTTP route specifically (needs repo-path resolution + git-clean
-    check ported off scripts/agent, deliberately deferred — see evidence);
+    "what's deliberately not here yet"); pipx/msix packaging; a park HTTP
+    route specifically (needs repo-path resolution + git-clean check
+    ported off scripts/agent, deliberately deferred — see evidence);
     Windows-specific .ps1/.bat wrapper.
   evidence:
+    - "Wired the laptop client to the HTTP lease routes (checked, not
+      assumed done): companion/laptop_client/aoteru.py's own README
+      still said 'No park/release/heartbeat/where subcommands yet' even
+      after the HTTP routes were added and live-verified server-side
+      earlier this programme — a stale doc describing an already-closed
+      gap. Added `aoteru park-status`/`heartbeat <repo-id>`/`release
+      <repo-id>` subcommands calling the existing GET /api/estate/park/
+      status and POST /api/estate/park/{repo_id}/heartbeat|release
+      routes. Stayed stdlib-only (the existing AST import-audit test
+      still passes unchanged — no new imports needed). 6 new tests
+      (endpoint targeting, 409 no-active-lease handling, park-status
+      listing). README updated to match reality instead of left stale.
+      Full suite green (5063 passed, 4 skipped)."
     - "Park/release/heartbeat HTTP surface (checked, not assumed missing):
       scripts/agent's park/heartbeat/release CLI subcommands each had
       their own inline ParkLease mutation logic with no HTTP equivalent.
@@ -160,7 +170,7 @@ being withheld pending these; see each workstream's `next_action` for what
       via curl against the same port). 7 unit tests.
       companion/laptop_client/README.md is the exact operator bootstrap
       (mint token -> copy file -> configure -> smoke test)."
-  last_verified_commit: 049eccc
+  last_verified_commit: fcd511b
 
 - id: C-execution-plane
   outcome: deterministic/local/Codex/Claude execution as one mature governed lane
