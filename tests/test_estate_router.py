@@ -746,3 +746,114 @@ class TestResolveCodexBinary:
         binary, source = estate_router._resolve_codex_binary()
         assert binary is None
         assert "not found" in source
+
+
+class TestResolveRepoPath:
+    """docs/aoteru-final-convergence-activation.agent-task.md item 4:
+    grounding a paid-escalation task in its actual repo. Regression
+    coverage for the exact live-confirmed bug: run_task()'s codex
+    escalation previously never passed cwd, so a real repo_reconnaissance
+    task reported 'No src/ directory found' — it was pointed at an empty
+    scratch dir regardless of task['repo']."""
+
+    def _fixture_repos(self, config_dir, real_repo_path):
+        (config_dir / "repositories.yaml").write_text(yaml.safe_dump({
+            "repos": [
+                {"id": "test-repo", "path": "${TEST_ROOT}/test-repo"},
+                {"id": "literal-path-repo", "path": str(real_repo_path)},
+            ],
+        }))
+
+    def test_resolves_via_host_local_root_var(self, fixture_config, monkeypatch, tmp_path):
+        real_path = tmp_path / "resolved" / "test-repo"
+        real_path.mkdir(parents=True)
+        self._fixture_repos(fixture_config, real_path)
+
+        home = tmp_path / "fakehome"
+        (home / ".aoteru").mkdir(parents=True)
+        (home / ".aoteru" / "config.local.json").write_text(
+            __import__("json").dumps({"TEST_ROOT": str(tmp_path / "resolved")})
+        )
+        monkeypatch.setattr(estate_router.Path, "home", lambda: home)
+
+        assert estate_router.resolve_repo_path("test-repo") == str(real_path)
+
+    def test_unknown_repo_id_returns_none(self, fixture_config, monkeypatch, tmp_path):
+        self._fixture_repos(fixture_config, tmp_path)
+        monkeypatch.setattr(estate_router.Path, "home", lambda: tmp_path / "fakehome")
+        assert estate_router.resolve_repo_path("does-not-exist") is None
+
+    def test_unset_root_var_returns_none_not_a_guess(self, fixture_config, monkeypatch, tmp_path):
+        self._fixture_repos(fixture_config, tmp_path)
+        home = tmp_path / "fakehome-no-config"
+        monkeypatch.setattr(estate_router.Path, "home", lambda: home)  # no config.local.json at all
+        assert estate_router.resolve_repo_path("test-repo") is None
+
+    def test_root_set_but_path_missing_returns_none(self, fixture_config, monkeypatch, tmp_path):
+        self._fixture_repos(fixture_config, tmp_path)
+        home = tmp_path / "fakehome2"
+        (home / ".aoteru").mkdir(parents=True)
+        (home / ".aoteru" / "config.local.json").write_text(
+            __import__("json").dumps({"TEST_ROOT": str(tmp_path / "nonexistent-root")})
+        )
+        monkeypatch.setattr(estate_router.Path, "home", lambda: home)
+        assert estate_router.resolve_repo_path("test-repo") is None
+
+
+def test_run_task_paid_escalation_grounds_codex_in_the_named_repo(fixture_config, monkeypatch, tmp_path):
+    """The exact live-confirmed regression: without cwd grounding, codex
+    escalation always ran against an empty scratch dir regardless of
+    task['repo']."""
+    (fixture_config / "models.yaml").write_text(yaml.safe_dump({
+        "paid_providers": [{"name": "codex", "concrete_model_label": "codex-cli"}],
+        "default_paid_provider": "codex",
+        "capabilities": [{"alias": "code-strong", "binding": None, "paid_provider": "codex"}],
+    }))
+    (fixture_config / "repositories.yaml").write_text(yaml.safe_dump({
+        "repos": [{"id": "test-repo", "path": "${TEST_ROOT}/test-repo"}],
+    }))
+    real_path = tmp_path / "resolved" / "test-repo"
+    real_path.mkdir(parents=True)
+    home = tmp_path / "fakehome"
+    (home / ".aoteru").mkdir(parents=True)
+    (home / ".aoteru" / "config.local.json").write_text(
+        __import__("json").dumps({"TEST_ROOT": str(tmp_path / "resolved")})
+    )
+    monkeypatch.setattr(estate_router.Path, "home", lambda: home)
+
+    monkeypatch.setattr(estate_router, "_record_decision", lambda *a, **k: "fake-decision-id")
+    monkeypatch.setattr(estate_router, "_update_decision_outcome", lambda *a, **k: None)
+    captured = {}
+
+    def fake_execute_codex(objective, **kwargs):
+        captured.update(kwargs)
+        return {"ok": True, "provider": "codex", "output": "done", "latency_ms": 1}
+    monkeypatch.setattr(estate_router, "execute_codex", fake_execute_codex)
+
+    estate_router.run_task({
+        "task_class": "coding", "objective": "fix the bug", "repo": "test-repo",
+        "requirements": {"capabilities": ["code-strong"]},
+        "routing": {"allow_paid_escalation": True},
+    })
+    assert captured["cwd"] == str(real_path)
+
+
+def test_run_task_paid_escalation_without_repo_field_passes_no_cwd_override(fixture_config, monkeypatch):
+    """No task['repo'] named at all — must not guess a cwd; execute_codex
+    keeps its own default (empty scratch dir) rather than this function
+    inventing a path."""
+    monkeypatch.setattr(estate_router, "_record_decision", lambda *a, **k: "fake-decision-id")
+    monkeypatch.setattr(estate_router, "_update_decision_outcome", lambda *a, **k: None)
+    captured = {}
+
+    def fake_execute_codex(objective, **kwargs):
+        captured.update(kwargs)
+        return {"ok": True, "provider": "codex", "output": "done", "latency_ms": 1}
+    monkeypatch.setattr(estate_router, "execute_codex", fake_execute_codex)
+
+    estate_router.run_task({
+        "task_class": "coding", "objective": "fix the bug",
+        "requirements": {"capabilities": ["code-strong"]},
+        "routing": {"allow_paid_escalation": True},
+    })
+    assert captured["cwd"] is None

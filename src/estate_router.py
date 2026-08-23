@@ -27,6 +27,8 @@ rather than hardcoding "always lab".
 """
 from __future__ import annotations
 
+import json
+import re
 import socket
 import uuid
 from pathlib import Path
@@ -89,6 +91,44 @@ def host_reachable(host: dict, live_hostname: str) -> tuple[bool, str]:
         return False, f"unreachable: {e}"
     finally:
         s.close()
+
+
+_HOST_LOCAL_ROOT_VAR_RE = re.compile(r"\$\{(\w+)\}")
+
+
+def resolve_repo_path(repo_id: str) -> Optional[str]:
+    """Resolve a `config/repositories.yaml` repo id to a real, existing
+    filesystem path on THIS host, using the same `${ROOT_VAR}/...`
+    template + `~/.aoteru/config.local.json` root-var convention
+    `scripts/agent`'s `_resolve_repos`/`_resolve_path` already use —
+    reused here (not re-derived) so a paid-escalation task grounded in a
+    specific repo (docs/aoteru-final-convergence-activation.agent-
+    task.md item 4: 'a task that cannot read its repo is a failed
+    qualification') actually gets pointed at that repo's real directory
+    instead of an empty scratch dir. Returns None if the repo id is
+    unknown, its root var isn't set on this host, or the resolved path
+    doesn't exist — never guesses."""
+    registry = _load_yaml("repositories")
+    entry = next((r for r in registry.get("repos", []) if r.get("id") == repo_id), None)
+    if entry is None:
+        return None
+    template = entry.get("path")
+    if not template:
+        return None
+    match = _HOST_LOCAL_ROOT_VAR_RE.search(template)
+    if not match:
+        return template if Path(template).exists() else None
+    var = match.group(1)
+    host_local_path = Path.home() / ".aoteru" / "config.local.json"
+    try:
+        host_local = json.loads(host_local_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    root = host_local.get(var)
+    if not root:
+        return None
+    resolved = template.replace(f"${{{var}}}", root)
+    return resolved if Path(resolved).exists() else None
 
 
 def current_host_id() -> Optional[str]:
@@ -751,7 +791,19 @@ def run_task(task: dict) -> dict:
                 )}
             objective = task.get("objective")
             paid_objective = objective if isinstance(objective, str) else str(objective)
-            result = provider_fn(paid_objective)
+            # Ground the paid worker in the task's actual repo if one was
+            # named (docs/aoteru-final-convergence-activation.agent-
+            # task.md item 4: "a task that cannot read its repo is a
+            # failed qualification, even if the CLI process exits zero").
+            # Without this, execute_codex() defaults to an empty scratch
+            # dir regardless of what repo the task is about — confirmed
+            # live: a real repo_reconnaissance task previously reported
+            # 'No src/ directory found' because it was never pointed at
+            # the repo at all. resolve_repo_path() returns None (no cwd
+            # override) for an unknown/unresolved repo id rather than
+            # guessing a path.
+            repo_cwd = resolve_repo_path(task.get("repo")) if task.get("repo") else None
+            result = provider_fn(paid_objective, cwd=repo_cwd)
             gate = "pass" if result.get("ok") and (result.get("output") or "").strip() else "fail"
             _update_decision_outcome(
                 route["decision_id"],
