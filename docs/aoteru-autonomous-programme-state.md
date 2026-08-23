@@ -422,16 +422,31 @@ being withheld pending these; see each workstream's `next_action` for what
   depends_on: []
   blocker: null
   next_action: >-
-    remaining: dedicated install/update/rollback doc specifically for the
-    interface PC (launch-windows.ps1/update_windows.bat/odysseus-
-    ui.service already provide the generic mechanism, just not written up
-    as an interface-PC-specific procedure); wiring the mobile/companion
-    frontend to actually call the new GET /api/estate/park/status route
-    (the route exists, is tested and live-verified server-side; no
-    frontend caller uses it yet); operator: run
+    remaining: wiring the mobile/companion frontend to actually call the
+    new GET /api/estate/park/status route (the route exists, is tested
+    and live-verified server-side; no frontend caller uses it yet — the
+    laptop CLI now does, the mobile PWA doesn't); operator: run
     `scripts/interface_frontdoor_acceptance.py --url <interface PC URL>`
-    once it's live — same command, no rewrite needed.
+    once it's live — same command, no rewrite needed; then follow
+    docs/aoteru-interface-pc-deployment.md's registration steps.
   evidence:
+    - "Interface-PC install/update/rollback doc (checked, not assumed
+      missing): docs/setup.md already has correct generic Docker/native-
+      Windows/native-Linux install instructions, but nothing tied them to
+      this estate's interface-pc registration/acceptance/rollback
+      specifics, and no rollback procedure existed for any host. Added
+      docs/aoteru-interface-pc-deployment.md — deliberately does NOT
+      assume Windows or Linux (config/estate.yaml's interface-pc entry is
+      explicitly os: unknown after two previously-conflated machines were
+      split apart this programme; guessing would violate the same
+      'do not hard-code imagined home hardware' discipline
+      [[I-home-reentry]] already follows), instead: identify-OS-first via
+      the existing generic scripts/home_reentry_inventory.py, a table
+      mapping confirmed-OS to the correct existing install/update/
+      rollback commands, and a found-and-documented real inconsistency
+      (update_windows.bat assumes a Docker Compose deployment that
+      launch-windows.ps1's native path never creates — must not be mixed
+      on one host). Doc-only change, linked from the operating handbook."
     - "HTTP-facing park/status surface (checked, not assumed missing):
       agent status already showed an estate-wide active-lease view for an
       operator with a checkout, but nothing exposed it over HTTP for a
@@ -473,7 +488,7 @@ being withheld pending these; see each workstream's `next_action` for what
       (systemd/DB/Ollama/Chroma/leases, not the mobile-facing surface;
       cold_reboot_verify.py's own APP_URL already correctly defaults to
       port 7001, unaffected by this mistake). 5 unit tests."
-  last_verified_commit: 049eccc
+  last_verified_commit: ebcbfe6
 
 - id: I-home-reentry
   outcome: bounded home-PC re-entry/migration procedure, not a redesign
