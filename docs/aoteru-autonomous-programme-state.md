@@ -90,11 +90,25 @@ being withheld pending these; see each workstream's `next_action` for what
   next_action: >-
     remaining: operator-run live smoke test from an actual laptop (not
     proven from this lab-only session — see companion/laptop_client/README.md
-    "what's deliberately not here yet"); pipx/msix packaging; a park HTTP
-    route specifically (needs repo-path resolution + git-clean check
-    ported off scripts/agent, deliberately deferred — see evidence);
-    Windows-specific .ps1/.bat wrapper.
+    "what's deliberately not here yet"); .msix packaging (needs a real
+    Windows host with MakeAppx.exe — deliberately not attempted blind,
+    see evidence); a park HTTP route specifically (needs repo-path
+    resolution + git-clean check ported off scripts/agent, deliberately
+    deferred — see evidence); Windows-specific .ps1/.bat wrapper.
   evidence:
+    - "pipx packaging (checked, not assumed done): added
+      companion/laptop_client/pyproject.toml wrapping aoteru.py as an
+      installable console-script (`aoteru`), zero third-party
+      dependencies. Verified for real — pip-installed into a scratch
+      venv (functionally what `pipx install` does; pipx itself isn't on
+      this host to invoke literally) and confirmed the resulting
+      `aoteru` command runs and lists the full subcommand set. 1 new
+      test. .msix deliberately NOT attempted — needs Windows-native
+      packaging tooling (MakeAppx.exe) this Linux session cannot run or
+      verify; a manifest built blind would be exactly the kind of
+      unproven 'looks done' work this programme avoids, so it's
+      recorded as needing a real Windows host, not silently produced.
+      Full suite green (5076 passed, 4 skipped)."
     - "Wired the laptop client to the HTTP lease routes (checked, not
       assumed done): companion/laptop_client/aoteru.py's own README
       still said 'No park/release/heartbeat/where subcommands yet' even
@@ -170,7 +184,7 @@ being withheld pending these; see each workstream's `next_action` for what
       via curl against the same port). 7 unit tests.
       companion/laptop_client/README.md is the exact operator bootstrap
       (mint token -> copy file -> configure -> smoke test)."
-  last_verified_commit: fcd511b
+  last_verified_commit: e63b000
 
 - id: C-execution-plane
   outcome: deterministic/local/Codex/Claude execution as one mature governed lane
