@@ -119,13 +119,42 @@ see `[[project-aoteru-p12-estate-convergence]]`.
 
 - id: D-routing-replay-evaluator
   outcome: replay/shadow routing evaluator reusing RoutingDecision/BenchmarkResult
-  status: eligible
+  status: active
   priority: medium
   depends_on: []
   blocker: null
-  next_action: locate existing routing-contract/evaluator code and gap-check against LM1-LM4 corpus.
-  evidence: []
-  last_verified_commit: null
+  next_action: >-
+    remaining: candidate-config-change proposal generator with before/after
+    evidence (item 6, needs evidence_sufficient routes to exist first —
+    none do yet, live-confirmed); a real shadow-execution replay harness
+    that re-runs historical prompts against a candidate config, not just
+    aggregation of what already happened; re-evaluate code-strong only if
+    future evidence shows code-fast+paid insufficient (still null, still
+    correctly not filled cosmetically).
+  evidence:
+    - "core.database.RoutingDecision's own docstring already said 'not yet
+      the full replay/shadow evaluator' — confirmed true by reading, not
+      assumed. Built src/routing_evaluator.py: aggregates real
+      RoutingDecision rows (the only telemetry authority — no second data
+      source) by (task_class, model_alias, concrete_model, executor) into
+      success/verification/escalation/retry rates and latency p50/p95,
+      with exponential recency weighting (30-day half-life, missing
+      timestamps get full weight rather than being dropped) and an
+      explicit EVIDENCE_THRESHOLD=20 so a route with too few decisions is
+      reported honestly, not silently used to justify a config change."
+    - "scripts/routing_replay_evaluator.py CLI ran live against the real
+      database: 52 recorded RoutingDecision rows split across 37 distinct
+      (task_class, alias, executor) combinations — every one below
+      EVIDENCE_THRESHOLD. This is genuinely useful evidence in itself: the
+      task_class taxonomy is currently too fragmented (many one-off smoke
+      task_classes) for any route to accumulate enough volume to matter
+      yet, which is exactly why item 5's exploration gate and item 7's
+      code-strong null must both stay exactly as they are."
+    - "11 unit tests (tests/test_routing_evaluator.py) cover grouping,
+      each rate calculation, percentile math, the evidence threshold, and
+      recency weighting (a stale failure must count but be out-weighed by
+      a fresh pass, not be dropped or dominate)."
+  last_verified_commit: <pending this checkpoint's commit>
 
 - id: E-memory-broker
   outcome: source-linked memory broker ready for future home-primary promotion
