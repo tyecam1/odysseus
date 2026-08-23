@@ -390,7 +390,7 @@ def _update_decision_outcome(decision_id: str, *, status: str, deterministic_gat
         logging.getLogger(__name__).exception("routing_decisions outcome update failed; execution result is unaffected")
 
 
-def execute_local(concrete_model: str, objective: str, *, timeout: float = 60.0) -> dict:
+def execute_local(concrete_model: str, objective: "str | list[dict]", *, timeout: float = 60.0) -> dict:
     """WHAT actually happens once WHERE+WHAT have been resolved: the one
     provider-neutral bounded execution/result path this lab-first slice
     can run for real right now (no claude/codex binary or paid
@@ -403,7 +403,20 @@ def execute_local(concrete_model: str, objective: str, *, timeout: float = 60.0)
     indefinitely; every failure mode (timeout, connection refused,
     malformed upstream response) is caught and returned as a clean
     `{"ok": False, "error": ...}` rather than a raised exception, matching
-    every other truthful-failure surface in this module."""
+    every other truthful-failure surface in this module.
+
+    `objective` also accepts the OpenAI-style multimodal content list
+    `llm_call`/`estimate_tokens` already understand (P12.2, docs/aoteru-
+    p12-active-estate-convergence.md): `[{"type": "text", ...},
+    {"type": "image_url", "image_url": {"url": "data:..."}}, ...]`. This
+    was already structurally true before P12.2 — `objective` was always
+    passed straight into `messages[0]["content"]` unmodified, and both
+    `estimate_tokens` (src/model_context.py) and `llm_call`'s multimodal
+    conversion already branch on `isinstance(content, list)` — P12.2's
+    contribution is verifying and documenting that fact so callers stop
+    bypassing this function for vision (see
+    scripts/run_lm4_production_canary.py's `run_vision_task`, written
+    before this was confirmed). Plain-string callers are unaffected."""
     from fastapi import HTTPException
 
     from src.llm_core import llm_call
@@ -447,6 +460,12 @@ def run_task(task: dict) -> dict:
     convention) — it only checks the model actually returned a non-empty
     response, the cheapest real signal available before any task-specific
     verification exists.
+
+    `task["objective"]` accepts a plain string (unchanged) or an
+    OpenAI-style multimodal content list (P12.2) — see `execute_local`'s
+    docstring. All current capability aliases, including `vision`, now
+    traverse this one route/job/telemetry path; a caller no longer needs
+    to bypass to `resolve_route()` + `llm_call` directly for image input.
     """
     route = resolve_route(task)
     executor = (route.get("route") or {}).get("executor")

@@ -280,6 +280,35 @@ def test_run_task_executes_local_route_and_persists_outcome(fixture_config, monk
     assert recorded["deterministic_gate"] == "pass"
 
 
+def test_run_task_passes_multimodal_objective_through_unmodified(fixture_config, monkeypatch):
+    """P12.2: run_task() must carry OpenAI-style multimodal content
+    (text + image_url blocks) through to execute_local() unchanged, not
+    stringify or drop it — closing the gap LM4 found where vision tasks
+    had to bypass run_task() and call resolve_route()+llm_call directly."""
+    monkeypatch.setattr(estate_router, "_record_decision", lambda *a, **k: "fake-decision-id")
+    monkeypatch.setattr(estate_router, "_ollama_model_live", lambda model, timeout=3.0: (True, "live"))
+    received = {}
+
+    def fake_execute_local(model, objective, **k):
+        received["objective"] = objective
+        return {"ok": True, "output": "7421", "latency_ms": 10}
+
+    monkeypatch.setattr(estate_router, "execute_local", fake_execute_local)
+
+    multimodal_objective = [
+        {"type": "text", "text": "What number is shown?"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+    ]
+    result = estate_router.run_task({
+        "task_class": "document_image_understanding",
+        "objective": multimodal_objective,
+        "requirements": {"capabilities": ["local-fast"]},
+    })
+    assert result["executed"] is True
+    assert result["deterministic_gate"] == "pass"
+    assert received["objective"] == multimodal_objective
+
+
 def test_run_task_marks_empty_output_as_failed_gate(fixture_config, monkeypatch):
     monkeypatch.setattr(estate_router, "_record_decision", lambda *a, **k: "fake-decision-id")
     monkeypatch.setattr(estate_router, "_ollama_model_live", lambda model, timeout=3.0: (True, "live"))
