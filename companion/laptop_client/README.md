@@ -3,7 +3,8 @@
 A single stdlib-only Python file (`aoteru.py`) that lets a laptop with **no
 Odysseus checkout** talk to a running Odysseus backend (today: the lab
 host; later: any `svc:aoteru` front door, unchanged). No pip install, no
-model weights, no database, no ChromaDB — copy the one file and run it.
+model weights, no database, no ChromaDB — install (or just copy) the one
+file and run it. **No local clone of this repository is ever required.**
 
 ## Operator bootstrap (one time)
 
@@ -24,35 +25,57 @@ or via the web UI's token management page if one is wired to
 `routes/api_token_routes.py`. The raw token (`ody_...`) is shown **once**
 — copy it now.
 
-### 2. Get the client file onto the laptop
+### 2. Install the client on the laptop — genuinely checkout-free
 
-Copy `companion/laptop_client/aoteru.py` from this repo to the laptop by
-whatever channel you already trust (scp, a shared drive, pasting it) —
-this repo does not publish a hosted download URL for it. Anywhere on
-`PATH` or a fixed folder works; it needs only a Python 3.8+ interpreter.
-
-**Or, with `pipx` installed** (puts an `aoteru` command on `PATH`, no
-manual folder/PATH management):
+**Recommended: `pipx` install straight from GitHub** — no clone, no
+downloaded folder, nothing left on disk but the installed command
+(pip/pipx does the fetch into a throwaway temp dir internally):
 
 ```
-pipx install /path/to/this/checkout/companion/laptop_client
+pipx install "git+https://github.com/tyecam1/odysseus.git@dev#subdirectory=companion/laptop_client"
 # then every command below is `aoteru ...` instead of `python aoteru.py ...`
 ```
 
-`companion/laptop_client/pyproject.toml` wraps the same single file — it
-adds zero third-party dependencies (`aoteru.py` itself stays stdlib-only,
-verified by `tests/test_laptop_client.py`'s AST import audit); this only
-gives `pipx`/`pip` an installable entry point. No `.msix` (Windows Store)
-package exists yet — building one needs Windows-native packaging tooling
-(`MakeAppx.exe`) this session's Linux shell cannot run or verify; a
-future session on an actual Windows host is the right place to add it,
-not a build produced blind.
+No `pipx`? The same URL works with plain `pip` in a venv:
+
+```
+python3 -m venv ~/.aoteru-client-venv
+~/.aoteru-client-venv/bin/pip install "git+https://github.com/tyecam1/odysseus.git@dev#subdirectory=companion/laptop_client"
+~/.aoteru-client-venv/bin/aoteru --help
+```
+
+Live-verified (2026-08-23): both commands above install cleanly into a
+scratch venv with nothing pre-cloned, and only fetch
+`companion/laptop_client/` (the client component) — not the worker/
+runtime/database/model stack the rest of this repo needs.
+
+**Single-file fallback** (no `pip`/`pipx`, or an environment that only
+allows `curl`+`python3`):
+
+```
+curl -fsSL https://raw.githubusercontent.com/tyecam1/odysseus/dev/companion/laptop_client/aoteru.py -o aoteru.py
+python3 aoteru.py --help
+```
+
+Also live-verified. Either path needs only a Python 3.8+ interpreter —
+no separate download/copy step, no manual folder management.
+
+`companion/laptop_client/pyproject.toml` adds zero third-party
+dependencies either way (`aoteru.py` itself stays stdlib-only, verified
+by `tests/test_laptop_client.py`'s AST import audit) — it only gives
+`pip`/`pipx` an installable entry point for the two commands above. No
+`.msix` (Windows Store) package exists — not a completion criterion
+(docs/aoteru-final-convergence-activation.agent-task.md decision 5);
+building one needs Windows-native packaging tooling (`MakeAppx.exe`)
+this session's Linux shell cannot run or verify.
 
 ### 3. Configure it
 
 ```
-python aoteru.py config set --url http://<backend-tailnet-name>:<port> --token ody_...
+aoteru config set --url http://<backend-tailnet-name>:<port> --token ody_...
 ```
+
+(single-file fallback: `python aoteru.py config set ...`, same flags)
 
 This writes `~/.aoteru/client.json` (Windows: `%USERPROFILE%\.aoteru\client.json`),
 `chmod 600` where the OS supports it. The token is never printed by this
@@ -61,7 +84,7 @@ script again.
 ### 4. Smoke test
 
 ```
-python aoteru.py status
+aoteru status
 ```
 
 Expect `backend: reachable, status=healthy` and a list of eligible hosts.
@@ -72,13 +95,15 @@ docs/aoteru-cold-reboot-checklist.md if it's the lab host.
 ## Everyday use
 
 ```
-python aoteru.py route --capability local-fast              # dry-run: what would this route to?
-python aoteru.py ask "summarise the last 3 commits" --capability local-fast
-python aoteru.py ask "refactor X" --capability code-strong --allow-paid   # opt in to paid escalation
-python aoteru.py park-status                                 # estate-wide active park-lease view
-python aoteru.py heartbeat <repo-id>                          # renew the backend host's lease for a repo
-python aoteru.py release <repo-id>                            # release the backend host's lease for a repo
+aoteru route --capability local-fast              # dry-run: what would this route to?
+aoteru ask "summarise the last 3 commits" --capability local-fast
+aoteru ask "refactor X" --capability code-strong --allow-paid   # opt in to paid escalation
+aoteru park-status                                 # estate-wide active park-lease view
+aoteru heartbeat <repo-id>                          # renew the backend host's lease for a repo
+aoteru release <repo-id>                            # release the backend host's lease for a repo
 ```
+
+(single-file fallback: prefix each with `python `, e.g. `python aoteru.py route ...`)
 
 `--allow-paid` only takes effect if the token has `estate:execute` scope
 and the resolved local capability is unbound/unavailable — it never
@@ -107,11 +132,13 @@ B).
 
 ## What's deliberately NOT here yet
 
-- No installer/uninstaller package (pipx/msix) — the one-file-copy path
-  above is the minimum that satisfies "no checkout required" and is
-  fully testable from this session; packaging it further is real but
-  lower-value work once the laptop-side round trip has actually been run
-  once by the operator.
+- `pipx install "git+https://github.com/tyecam1/odysseus.git@dev#subdirectory=companion/laptop_client"`
+  is now the recommended, genuinely checkout-free install (live-verified
+  2026-08-23 — nothing pre-cloned, only the client component fetched).
+  No `.msix` — not a completion criterion for this programme (docs/aoteru-
+  final-convergence-activation.agent-task.md decision 5); building one
+  needs Windows-native packaging tooling this session's Linux shell
+  cannot run or verify.
 - No local job queue/async status polling — `ask` is a synchronous call
   that blocks until `/api/estate/run` returns, matching the backend's own
   current synchronous execution model (src/estate_router.py's
