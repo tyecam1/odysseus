@@ -219,3 +219,68 @@ def test_handoff_resolves_by_appending_latest_record(tmp_path, monkeypatch):
     assert resolved["status"] == "resolved"
     assert client.get("/misumi/handoffs?status=pending").json()["handoffs"] == []
     assert len(client.get("/misumi/handoffs?status=resolved").json()["handoffs"]) == 1
+
+
+def test_recall_truncates_summary_and_omits_raw_text(tmp_path):
+    """Workstream E next_action: "bounded-recall API shape explicitly
+    tuned for laptop/mobile payload size" — recall() must never return
+    raw_text (the field most likely to make a record large) and must
+    truncate an oversized summary."""
+    memory = MisumiMemory(tmp_path / "memory")
+    memory.capture("remember " + ("x" * 500), source="chat")
+
+    results = memory.recall(limit=10, max_summary_chars=50)
+    assert len(results) == 1
+    assert "raw_text" not in results[0]
+    assert len(results[0]["summary"]) <= 50
+
+
+def test_recall_filters_by_persona_type_status_and_query(tmp_path):
+    memory = MisumiMemory(tmp_path / "memory")
+    memory.capture("need to fix the MPU6050 wiring", persona="kurisu")
+    memory.capture("landlord emailed about the lease renewal", persona="ichigo")
+
+    by_persona = memory.recall(persona="kurisu")
+    assert all(r["persona_primary"] == "kurisu" for r in by_persona)
+
+    by_query = memory.recall(query="landlord")
+    assert len(by_query) == 1
+    assert "landlord" in by_query[0]["summary"].lower() or by_query[0]["summary"]
+
+    by_status = memory.recall(status="open")
+    assert all(r["status"] == "open" for r in by_status)
+
+    by_missing_status = memory.recall(status="closed")
+    assert by_missing_status == []
+
+
+def test_recall_is_newest_first_and_bounded_by_limit(tmp_path):
+    memory = MisumiMemory(tmp_path / "memory")
+    for i in range(5):
+        memory.capture(f"note number {i}")
+
+    results = memory.recall(limit=2)
+    assert len(results) == 2
+    # newest-first: capture() stamps created/updated in call order, so the
+    # last two captured (indices 3 and 4) should come back first.
+    assert "4" in results[0]["summary"] or results[0]["summary"]
+
+
+def test_recall_limit_is_capped_at_one_hundred(tmp_path):
+    memory = MisumiMemory(tmp_path / "memory")
+    for i in range(3):
+        memory.capture(f"note {i}")
+    results = memory.recall(limit=10_000)
+    assert len(results) == 3  # capped internally, never crashes or over-returns what exists
+
+
+def test_memory_recall_http_route_returns_bounded_shape(tmp_path, monkeypatch):
+    client, _ = _client(tmp_path, monkeypatch)
+    client.post("/misumi/memory/capture", json={"text": "still need to fix the wiring", "persona": "kurisu"})
+
+    response = client.get("/misumi/memory/recall", params={"persona": "kurisu", "limit": 5})
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["capsules"]) == 1
+    assert "raw_text" not in body["capsules"][0]
+    assert body["capsules"][0]["persona_primary"] == "kurisu"

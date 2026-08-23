@@ -1218,6 +1218,26 @@ def setup_misumi_routes(
         capsules.sort(key=lambda item: str(item.get("created", "")), reverse=True)
         return {"capsules": capsules[:max(1, min(limit, 100))], "corrupt_lines": corrupt}
 
+    @router.get("/memory/recall")
+    async def memory_recall(
+        request: Request,
+        query: Optional[str] = None,
+        persona: Optional[str] = None,
+        type: Optional[str] = None,
+        status: Optional[str] = None,
+        limit: int = 10,
+    ):
+        """Bounded-recall surface for small-payload callers (Workstream
+        E/K/H: laptop/mobile). Unlike /memory/recent (full untruncated
+        capsules, no filters — built for the operator web UI), this caps
+        both the record count and each summary's length, and never
+        includes raw_text, so a companion app can ask "what does misumi
+        remember about X" without downloading the whole store."""
+        _require_api_scope(request, "misumi:read")
+        return {"capsules": memory_call(
+            memory.recall, query=query, persona=persona, capsule_type=type, status=status, limit=limit,
+        )}
+
     @router.get("/memory/open-loops")
     async def memory_open_loops(request: Request):
         _require_api_scope(request, "misumi:read")

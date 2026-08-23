@@ -260,6 +260,64 @@ class MisumiMemory:
     def handoffs(self) -> Tuple[List[Dict[str, object]], int]:
         return self._fold("handoffs")
 
+    def recall(
+        self,
+        *,
+        query: Optional[str] = None,
+        persona: Optional[str] = None,
+        capsule_type: Optional[str] = None,
+        status: Optional[str] = None,
+        limit: int = 10,
+        max_summary_chars: int = 240,
+    ) -> List[Dict[str, object]]:
+        """Bounded-recall read (Workstream E next_action: "bounded-recall
+        API shape explicitly tuned for laptop/mobile payload size").
+
+        `capsules()`/`raw_records("capsules")` return every field
+        (including full `raw_text`, unbounded) for every matching record —
+        fine for the operator web UI, but a mobile/laptop caller asking
+        "what does misumi remember about X" should not have to download
+        the entire store to get a handful of recent, human-readable hits.
+        Returns newest-first (by `updated`, falling back to `created`),
+        capped at `limit` records, each with `summary` truncated to
+        `max_summary_chars` — and deliberately never includes `raw_text`,
+        which is the field most likely to make a single record large."""
+        records, _ = self._fold("capsules")
+        if persona:
+            records = [
+                r for r in records
+                if r.get("persona_primary") == persona or r.get("persona_secondary") == persona
+            ]
+        if capsule_type:
+            records = [r for r in records if r.get("type") == capsule_type]
+        if status:
+            records = [r for r in records if r.get("status") == status]
+        if query:
+            needle = query.lower()
+            records = [
+                r for r in records
+                if needle in str(r.get("summary", "")).lower() or needle in str(r.get("raw_text", "")).lower()
+            ]
+        records.sort(key=lambda r: str(r.get("updated") or r.get("created") or ""), reverse=True)
+
+        bounded_limit = max(0, min(limit, 100))
+        out = []
+        for r in records[:bounded_limit]:
+            summary = str(r.get("summary") or "")
+            if len(summary) > max_summary_chars:
+                summary = summary[: max(0, max_summary_chars - 1)].rstrip() + "…"
+            out.append({
+                "id": r.get("id"),
+                "summary": summary,
+                "type": r.get("type"),
+                "persona_primary": r.get("persona_primary"),
+                "persona_secondary": r.get("persona_secondary"),
+                "status": r.get("status"),
+                "updated": r.get("updated"),
+                "entities": r.get("entities"),
+            })
+        return out
+
     def raw_records(self, store: str) -> Tuple[List[Dict[str, object]], int]:
         """Latest-by-id folded records for any of the three JSONL stores,
         without loops()'s computed `stale` field — the exact shape
