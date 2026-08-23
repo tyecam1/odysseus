@@ -272,13 +272,50 @@ see `[[project-aoteru-p12-estate-convergence]]`.
 
 - id: I-home-reentry
   outcome: bounded home-PC re-entry/migration procedure, not a redesign
-  status: blocked
+  status: active
   priority: low
   depends_on: []
-  blocker: "home PC not present on tailnet — host-availability gate"
-  next_action: "prepare inventory/promotion/benchmark tooling now (does not require home to be live); operator action required only for the actual re-entry session."
-  evidence: []
-  last_verified_commit: null
+  blocker: >-
+    home PC still not present on tailnet (re-checked this session,
+    unchanged) — the LIVE qualification run against real home hardware
+    is genuinely host-blocked; the non-live tooling below is not.
+  next_action: >-
+    remaining: household/Misumi service inventory specifics (this
+    session's inventory script covers generic host/model/service facts,
+    not Misumi-domain service checks — needs a live Misumi deployment to
+    design against, deferred with the host itself); worker eligibility/
+    shadow/canary gate wiring once a real target exists; backup/restore
+    conflict checks; operator: run
+    `venv/bin/python scripts/home_reentry_inventory.py` on the actual
+    home host once reachable, then
+    `venv/bin/python scripts/memory_promote_replay.py --target <home
+    misumi memory root>` to promote lab's accumulated memory.
+  evidence:
+    - "Added scripts/home_reentry_inventory.py: generic, read-only host
+      inventory (identity, hardware via /proc/meminfo — matching
+      scripts/agent's own existing approach rather than adding a psutil
+      dependency, GPU via nvidia-smi, Tailscale self status, Ollama model
+      list, config.local.json root-var resolution, matching systemd
+      units) runnable on ANY host, not hardcoded to imagined home specs.
+      Live-run against the lab host itself as a stand-in (real hardware
+      never tested against actual home machine, since it's unreachable):
+      correctly reported PHD_ROOT/HOUSEHOLD_ROOT unresolved, listed both
+      real systemd units and 11 real Ollama models. Fixed two bugs found
+      by that live run before committing: /proc/meminfo wasn't wired up
+      (mem_total_gb was always None) and `systemctl list-units`'s bullet
+      marker on failed units was being reported as a fake matching unit
+      name. 6 unit tests, including one asserting the script never
+      mutates config/estate.yaml — inventory only, never
+      auto-registers/promotes (Workstream I's own 'reachability never
+      implies trust' invariant)."
+    - "Added scripts/memory_promote_replay.py: CLI over
+      src/memory_outbox.replay() ([[E-memory-broker]]) — the exact
+      'memory-primary promotion/checkpoint/replay procedure' this
+      workstream asks for. Live-run against this checkout's real
+      accumulated Misumi memory (4 capsules, 1 open loop) into a scratch
+      target: first run applied all 5, second run applied 0 (idempotent,
+      confirmed live not just in unit tests). 3 new unit tests."
+  last_verified_commit: <pending this checkpoint's commit>
 
 - id: J-security-resilience
   outcome: recovery paths verified beyond happy-path smokes; cold-reboot checklist
