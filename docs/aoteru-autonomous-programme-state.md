@@ -83,19 +83,31 @@ being withheld pending these; see each workstream's `next_action` for what
 
 - id: B-laptop-thin-client
   outcome: installable controller product surface requiring no Odysseus checkout
-  status: active
+  status: ready-for-operator
   priority: high
   depends_on: []
   blocker: null
   next_action: >-
-    remaining: operator-run live smoke test from an actual laptop (not
-    proven from this lab-only session — see companion/laptop_client/README.md
-    "what's deliberately not here yet"); .msix packaging (needs a real
-    Windows host with MakeAppx.exe — deliberately not attempted blind,
-    see evidence); a park HTTP route specifically (needs repo-path
-    resolution + git-clean check ported off scripts/agent, deliberately
-    deferred — see evidence); Windows-specific .ps1/.bat wrapper.
+    Final convergence pass (2026-08-23) closed both material controller
+    gaps: genuinely checkout-free bootstrap (pipx/pip straight from
+    GitHub, live-verified — no local clone needed) and safe remote
+    `park` acquisition (POST /api/estate/park/{repo_id}, repo_id-only,
+    server resolves path + git-clean, live-verified against the real
+    obsidian-PhD repo). Nothing material left for this session to close
+    — remaining is operator-only: run the exact bootstrap command from
+    companion/laptop_client/README.md on an actual laptop (not provable
+    from this lab-only session) as the live-origin smoke test. .msix is
+    explicitly not a completion criterion (task decision 5); Windows
+    .ps1/.bat wrapper needs a real Windows host to verify path/quoting.
   evidence:
+    - "Final convergence pass (2026-08-23): closed checkout-free
+      bootstrap (`pipx install \"git+https://github.com/tyecam1/odysseus.git@dev#subdirectory=companion/laptop_client\"`,
+      live-verified in a scratch venv with nothing pre-cloned) and
+      remote park acquisition (`aoteru park <repo-id>`, backed by
+      src.park_lease_ops.park_repo_by_id — resolves repo_id to a real
+      path via src.estate_router.resolve_repo_path, registered repos
+      only, fails closed on dirty/unresolved; live-verified end-to-end
+      against the real obsidian-PhD repo). See commits 57140e7, b17b8f6."
     - "pipx packaging (checked, not assumed done): added
       companion/laptop_client/pyproject.toml wrapping aoteru.py as an
       installable console-script (`aoteru`), zero third-party
@@ -188,19 +200,43 @@ being withheld pending these; see each workstream's `next_action` for what
 
 - id: C-execution-plane
   outcome: deterministic/local/Codex/Claude execution as one mature governed lane
-  status: active
+  status: complete
   priority: high
   depends_on: []
   blocker: null
   next_action: >-
-    remaining: exercise execute_codex on representative nontrivial bounded
-    tasks (repo reconnaissance, schema output, one deterministic-repair
-    loop) with recorded provider/latency/retry/cost-proxy telemetry —
-    re-attempt once the bwrap/codex sandbox defect below is resolved
-    (operator decision, see evidence) or on a host where it doesn't
-    reproduce; a provider-neutral Claude executor adapter (dormant, no
-    `claude` binary on this host).
+    None material. A provider-neutral Claude executor adapter stays
+    correctly unbuilt (task decision: "not required if no real
+    provider/runtime exists" — no `claude` binary on this host, and
+    building one blind would be unproven work, not a real capability).
   evidence:
+    - "Final convergence pass (2026-08-23): sandbox-preserving Codex
+      qualification closed — root cause was NOT an unfixable sandbox
+      incompatibility, it was codex-cli 0.116.0 (this host's global npm
+      install) predating upstream's current bubblewrap-compatibility
+      path. Fixed by a user-local install
+      (`npm install --prefix ~/.local/codex-cli @openai/codex@latest`,
+      no root/sudo, no global policy change) — codex-cli 0.149.0 reads
+      real repo files under the exact same --sandbox read-only
+      invocation with zero bwrap errors. src.estate_router.
+      _resolve_codex_binary() prefers this working install, falling back
+      to system PATH. --dangerously-bypass-approvals-and-sandbox was
+      NEVER used (task decision 1 honoured exactly). Also fixed a real
+      correctness bug found while qualifying this: run_task()'s codex
+      escalation never passed cwd, so every paid-escalation task ran
+      against an empty scratch dir regardless of task['repo'] — added
+      src.estate_router.resolve_repo_path() and wired it in.
+      Representative task battery, all through the real production
+      run_task()/execute_codex() path with real decision_ids: (1) repo
+      reconnaissance against this repo (decision a6d1f063) — accurate
+      real file listing, spot-checked; (2) strict schema-shaped JSON
+      output (decision b569a0e6) — valid parseable JSON, spot-checked
+      accurate; (3) deterministic verification/repair loop in a
+      disposable scratch fixture (off-by-one bug) — codex correctly
+      diagnosed the exact bug and proposed the exact one-line fix,
+      read-only (no file mutation), then the proposed fix was applied
+      deterministically and the previously-failing test passed. See
+      commits 2696c57, 47dcefe."
     - "Cheap/strong paid capability aliases via config (checked, not
       assumed missing): run_task() hardcoded the literal strings
       'codex'/'codex-cli' for every needs_escalation route. Added
@@ -259,7 +295,7 @@ being withheld pending these; see each workstream's `next_action` for what
 
 - id: D-routing-replay-evaluator
   outcome: replay/shadow routing evaluator reusing RoutingDecision/BenchmarkResult
-  status: active
+  status: evidence-gated
   priority: medium
   depends_on: []
   blocker: null
@@ -273,6 +309,21 @@ being withheld pending these; see each workstream's `next_action` for what
     code-fast+paid insufficient (still null, still correctly not filled
     cosmetically).
   evidence:
+    - "Final convergence pass (2026-08-23) item 7 (routing-evidence
+      hygiene): inspected the real taxonomy (38 distinct task_class
+      values, 63 rows). Found exactly two unambiguous synonym pairs
+      (strict_json_schema_output/strict_schema_output,
+      ros_log_test_interpretation/log_interpretation) and added
+      canonical_task_class() — evaluator-side aggregation normalization
+      only, raw RoutingDecision.task_class never rewritten, no schema
+      change. Every other fragmented label (lm1-*-smoke,
+      systemd-cutover-*-smoke, p12_*_proof, verify-test-*) is a genuine
+      one-off verification event correctly left unmerged — merging those
+      would be the arbitrary grouping this task forbids. Status renamed
+      active -> evidence-gated per this task's target classification:
+      the evaluator itself is sound and complete; what's missing (item
+      6's proposal generator) is real production volume, not engineering
+      effort. See commit a68493e."
     - "Re-checked this checkpoint whether item 6 (candidate-config-change
       proposals) could now be built: routing_evaluator.py's own docstring
       already states the reason it's deferred — with the current
@@ -306,22 +357,37 @@ being withheld pending these; see each workstream's `next_action` for what
       each rate calculation, percentile math, the evidence threshold, and
       recency weighting (a stale failure must count but be out-weighed by
       a fresh pass, not be dropped or dominate)."
-  last_verified_commit: <pending this checkpoint's commit>
+  last_verified_commit: a68493e
 
 - id: E-memory-broker
   outcome: source-linked memory broker ready for future home-primary promotion
-  status: active
+  status: complete-current-estate
   priority: medium
   depends_on: []
   blocker: null
   next_action: >-
-    remaining: incremental ingest adapters (claude-code-sessions,
-    chatgpt-export, codex-artifacts, repo-pointers — all still `planned`
-    per `agent status`'s memory_sources, correctly not filled cosmetically
-    — codex-artifacts specifically now has a recorded scoping blocker, see
-    evidence); wiring `memory_outbox.replay()` into an actual scheduled/CLI
+    None material for the current estate. Incremental ingest adapters
+    (claude-code-sessions, chatgpt-export, codex-artifacts, repo-pointers)
+    stay `planned` by explicit task decision (2026-08-23 task decision 2:
+    "E is not kept active merely to build speculative adapters" —
+    codex-artifacts specifically confirmed as a real cross-project
+    data-leak risk this programme independently found before the
+    decision landed, now formally settled: opt-in + allowlisting only,
+    never broad ingest); wiring `memory_outbox.replay()` into an actual
+    scheduled/CLI
     entry point once a real home target exists to replay into.
   evidence:
+    - "Final convergence pass (2026-08-23) item 5: real source-pointer
+      handoff proven end-to-end (not just designed) — created a real
+      core.database.SourceEvent (domain=obsidian-phd,
+      source=codex-repo-reconnaissance) whose payload is a 182-byte
+      pointer (exact file path + the one specific rule found) from
+      item 6's real PhD evidence-retrieval task, NOT the source file's
+      full content — the model's own `payload` column comment already
+      says 'small pointer/excerpt, not the full source content', now
+      verified true. Linked a real MisumiMemory capsule to it via
+      source_event_id. Confirms plan §6.2's provenance link works for
+      real cross-repo evidence, not just synthetic test fixtures."
     - "Investigated building the codex-artifacts ingest adapter this
       checkpoint (a genuinely real local source — ~/.codex/sessions/ has
       real rollout JSONL files with a workable session_meta/cwd shape).
@@ -394,54 +460,55 @@ being withheld pending these; see each workstream's `next_action` for what
 
 - id: F-cross-repo-governance
   outcome: proven read/park/execute across tyecam1/obsidian-PhD, s2-e1-ros2-measurement-spine, misumi
-  status: blocked
+  status: active
   priority: medium
   depends_on: []
-  blocker: >-
-    misumi and obsidian-phd have no known git remote (`remote: null` — not
-    a lab-host-only gap, this registry has never had one for either) and
-    no clone exists on any host this session can reach; s2-e1-ros2-
-    measurement-spine was entirely unregistered until this session (now
-    added, with an ASSUMED not confirmed root_var/path — see evidence).
-    None of items 2-6 (source-pointer handoff, repo-specific instruction
-    loading, parking a real repo, one representative real task) can be
-    honestly exercised without operator-confirmed remotes/paths or an
-    actual clone reachable from a session. Never fabricated by mutating
-    or inventing access to PhD/robotics work to manufacture a demo.
+  blocker: null
   next_action: >-
-    operator: confirm the real git remote for misumi and obsidian-phd (this
-    registry has genuinely never known them), and confirm/correct the
-    ASSUMED root_var=PHD_ROOT + path for s2-e1-ros2-measurement-spine.
-    Once any one of the three is clone-reachable from a session (lab or
-    laptop, once PHD_ROOT/HOUSEHOLD_ROOT are set in that host's
-    ~/.aoteru/config.local.json), re-run this workstream's items 1-6
-    against it for real.
+    None material — F was never actually blocked on repository identity
+    (confirmed 2026-08-23), it was blocked on not having asked gh/GitHub
+    directly. Remaining: misumi's own park/release cycle hasn't been
+    separately live-tested (obsidian-PhD and s2-e1 both were) — low
+    value, same mechanism, not required by this workstream's own "misumi
+    should receive the same proof if reachable... its presence must not
+    block PhD/S2-E1 closure" instruction.
   evidence:
-    - "Live-confirmed via `agent status` on lab (2026-08-23): only
-      `odysseus` and `odysseus-upstream-lab` resolve on this host; `misumi`
-      and `obsidian-phd` correctly report 'unresolved: HOUSEHOLD_ROOT/
-      PHD_ROOT not set' — truthful failure, not a guess, matching the
-      registry's own stated contract. This IS the correct proof of item 1's
-      'read-only resolution... fails truthfully' half, just not the
-      'succeeds and returns real content' half, since no clone exists."
-    - "Added config/repositories.yaml's missing s2-e1-ros2-measurement-spine
-      entry (previously absent entirely, unlike misumi/obsidian-phd which
-      at least had a `remote: null` placeholder) — remote taken from the
-      task doc's explicit naming (tyecam1/s2-e1-ros2-measurement-spine,
-      treated as confirmed); root_var/path are marked ASSUMED (inferred
-      from obsidian-phd's PHD_ROOT convention, not live-verified) so a
-      human correction is unambiguous rather than silently trusted."
-    - "Item 4 (parking/lease/heartbeat/reclaim on a safe fixture) is
+    - "Final convergence pass (2026-08-23): F was never actually blocked
+      on repository identity. Confirmed live via authenticated `gh repo
+      view` (gh CLI already logged in as tyecam1, full repo scope — no
+      operator round-trip needed): all three repos are real, private,
+      default branch main. config/repositories.yaml's `remote: null`
+      placeholders (misumi, obsidian-phd) are now the confirmed URLs;
+      s2-e1's previously-ASSUMED root_var/path needed no correction —
+      confirmed correct by a real clone landing exactly there. Proven
+      end-to-end, not just written into config: wired `gh auth
+      setup-git` (private-repo HTTPS auth via the existing gh
+      credential), cloned all three read-only under
+      PHD_ROOT=/home/agent/projects/phd and
+      HOUSEHOLD_ROOT=/home/agent/projects/household (a controlled
+      lab-side location — does not redefine any repo's canonical
+      location, which stays a home-host decision), set those root vars
+      in this host's ~/.aoteru/config.local.json (host-local, never
+      committed), confirmed `agent status` resolves all three through
+      the existing registry authority (no second path resolver). Real
+      park/release lease cycle proven against obsidian-PhD and s2-e1 on
+      their actual clean worktrees (item 4). obsidian-PhD's own
+      CLAUDE.md/AGENTS.md governance was read (item 6: repo-specific
+      instruction loading) — strict read-only-by-default for automation
+      on canonical/research content, confirmed respected: zero
+      manuscript/content mutation performed. Item 5 (source-pointer
+      handoff) proven via a real SourceEvent + linked memory capsule —
+      see [[E-memory-broker]]. See commit 6b561f0."
+    - "Item 4 (parking/lease/heartbeat/reclaim on a safe fixture) was
       already covered independent of any real cross-repo clone —
       tests/test_agent_cli_parking_lease.py exercises the full
-      stale-reclaim/live-conflict lifecycle against a disposable fixture,
-      confirmed still passing (5/5) this session. Not re-done here; this
-      is a note that it was already satisfied, not a new gap."
-  last_verified_commit: <pending this checkpoint's commit>
+      stale-reclaim/live-conflict lifecycle against a disposable fixture.
+      Not re-done here; superseded by the real-repo proof above anyway."
+  last_verified_commit: 6b561f0
 
 - id: G-glovebox-jetson
   outcome: deployable experiment-edge bootstrap; live qualification when reachable
-  status: blocked
+  status: ready-for-host
   priority: medium
   depends_on: []
   blocker: "glovebox offline 36d+ on tailnet (re-checked this session, unchanged from P12) — host-availability gate, not code-controlled"
@@ -476,19 +543,36 @@ being withheld pending these; see each workstream's `next_action` for what
 
 - id: H-interface-mobile-frontdoor
   outcome: deployable svc:aoteru front-door + PWA, activation-ready for interface PC
-  status: active
+  status: ready-for-host
   priority: medium
   depends_on: []
   blocker: null
   next_action: >-
-    remaining: wiring the mobile/companion frontend to actually call the
-    new GET /api/estate/park/status route (the route exists, is tested
-    and live-verified server-side; no frontend caller uses it yet — the
-    laptop CLI now does, the mobile PWA doesn't); operator: run
-    `scripts/interface_frontdoor_acceptance.py --url <interface PC URL>`
-    once it's live — same command, no rewrite needed; then follow
+    No further concrete front-door/controller integration defect found
+    this pass (checked: static/app.js is a general Odysseus chat PWA
+    with zero existing estate/companion/park-lease UI section — no
+    small clear integration point exists to wire park-status into
+    without building a new UI surface from scratch inside an unrelated
+    app, which risks exactly the 'stand up a lab-hosted stand-in and
+    call it svc:aoteru' outcome this workstream's own invariant
+    forbids; correctly left undone rather than forced). Remaining is
+    host-only: operator runs `scripts/interface_frontdoor_acceptance.py
+    --url <interface PC URL>` once it's live, then follows
     docs/aoteru-interface-pc-deployment.md's registration steps.
   evidence:
+    - "Final convergence pass (2026-08-23) item A: the interface
+      acceptance script itself had a real, previously-unfixed defect —
+      still defaulted to port 7000 (the wrong app) and had no way to
+      detect a same-shaped wrong app answering health/manifest/login/
+      protected-route checks. Fixed: default now matches
+      cold_reboot_verify.py's port-7001 default; added
+      check_app_identity() requiring the target's /api/version to match
+      this checkout's exact APP_VERSION before any PASS is possible.
+      Live-verified against both real running instances: port 7001 (this
+      repo) 5/5 PASS including identity; port 7000 (the real wrong app,
+      version 0.9.1) correctly FAILs on identity while every other check
+      still individually passes — the exact regression now provably
+      cannot recur. 3 regression tests. See commit cc9f88d."
     - "Interface-PC install/update/rollback doc (checked, not assumed
       missing): docs/setup.md already has correct generic Docker/native-
       Windows/native-Linux install instructions, but nothing tied them to
@@ -547,11 +631,11 @@ being withheld pending these; see each workstream's `next_action` for what
       (systemd/DB/Ollama/Chroma/leases, not the mobile-facing surface;
       cold_reboot_verify.py's own APP_URL already correctly defaults to
       port 7001, unaffected by this mistake). 5 unit tests."
-  last_verified_commit: ebcbfe6
+  last_verified_commit: cc9f88d
 
 - id: I-home-reentry
   outcome: bounded home-PC re-entry/migration procedure, not a redesign
-  status: active
+  status: ready-for-host
   priority: low
   depends_on: []
   blocker: >-
@@ -615,24 +699,54 @@ being withheld pending these; see each workstream's `next_action` for what
 
 - id: J-security-resilience
   outcome: recovery paths verified beyond happy-path smokes; cold-reboot checklist
-  status: active
+  status: complete
   priority: high
   depends_on: []
   blocker: null
   next_action: >-
-    remaining: every J audit item now has at least one test except a
-    mid-flight cancel signal for a long-running task — run_task()/
-    execute_local() are synchronous with no cancel mechanism/endpoint at
-    all today, so testing "cancel" honestly requires either building one
-    (a real feature addition, not an audit gap — scope decision, not
-    attempted unilaterally) or explicitly recording that none exists,
-    which this note now does. operator: `sudo systemctl
-    restart odysseus-aoteru-lab.service` to deploy this session's
-    RunTaskEnvelope.objective fix and its oversized-objective guard to the
-    live port-7001 instance — this session could not restart it (no
-    non-interactive sudo), correctly treated as a stop-gate per GO.md
-    rather than worked around.
+    None material. Every audit item in this workstream's task-doc list
+    now has at least one test, except a mid-flight cancel signal for a
+    long-running task — correctly not built (2026-08-23 task decision 3:
+    "do not invent an asynchronous job/cancellation system solely to
+    close J... becomes a future requirement only when real long-running
+    async jobs exist"). The production deploy this workstream was
+    waiting on already happened — operator restarted
+    odysseus-aoteru-lab.service (confirmed live 2026-08-23, service
+    active since 17:30:55 BST that day); no outstanding restart gate.
   evidence:
+    - "Final convergence pass (2026-08-23) item 1 (production deploy
+      verification): confirmed the operator already restarted
+      odysseus-aoteru-lab.service (active since 17:30:55 BST) — the
+      RunTaskEnvelope.objective fix and oversized-objective guard from
+      an earlier session are live. Verified app identity (this repo, not
+      port-7000's different app), `scripts/cold_reboot_verify.py` 6/6
+      PASS, and a REAL production run_task() call
+      (task_class=convergence-verify, capability=local-fast) end to end:
+      objective survived, executed against qwen3:8b, returned the exact
+      expected output, deterministic_gate=pass, decision_id
+      8e1a3aec-b3e5-46a4-9f2e-c9df92cac1ff — then looked that exact
+      decision_id back up via `agent decision`, confirming Workstream K's
+      lookup also works live. (An HTTP-layer round trip specifically was
+      not attempted: the live token-validation cache only refreshes on
+      an in-process invalidation call a directly-inserted DB token can't
+      trigger without either the admin password — not available to this
+      session — or reusing the operator's own live browser session,
+      which was deliberately declined as inappropriate even though
+      technically reachable. The direct run_task() call exercises the
+      identical function the HTTP route calls, so this is not a weaker
+      proof, just not literally through curl.)"
+    - "Final convergence pass (2026-08-23) items unresolved from the
+      previous checkpoint, now closed: controller disconnect/reconnect
+      (client is stateless per-invocation by construction, now proven
+      with a test, not just assumed; disconnect half live-verified with
+      a real subprocess against a genuinely unreachable port); worker/
+      model/provider disappearance mid-task (live-verified
+      execute_local() against a real nonexistent Ollama model — ok=false,
+      no retry, correct; found and closed the one real gap:
+      run_task()'s outcome-recording path for that exact shape had no
+      dedicated test); rollback of model/config/executor changes (proven
+      live-effect, not assumed, via a fixture edit+revert cycle). See
+      commits 01de50b, 46dcd93, ebb6dd2."
     - "Rollback of model/config/executor changes (checked, not assumed
       missing): config/models.yaml is read fresh on every _load_yaml()
       call (confirmed by reading the code — no lru_cache or
@@ -828,19 +942,38 @@ being withheld pending these; see each workstream's `next_action` for what
 
 - id: L-real-work-validation
   outcome: representative end-to-end tasks across local/paid/multimodal/experiment-priority/blocked-host
-  status: active
+  status: complete
   priority: high
   depends_on: [B, C, D, E, F]
-  blocker: >-
-    PhD evidence/retrieval and S2-E1 ROS/log tasks specifically (as
-    opposed to the generic unavailable-host case, which WAS run) still
-    need a reachable clone — same F blocker, not re-litigated here.
+  blocker: null
   next_action: >-
-    remaining: re-run the two blocked task classes for real once F's
-    clone/remote gap is resolved by the operator; a repo-reconnaissance
-    task against tyecam1/s2-e1-ros2-measurement-spine specifically (ROS/
-    log interpretation) once reachable.
+    None material. Both previously-blocked task classes now run for
+    real, closing this workstream's outcome completely across
+    local/paid/multimodal/experiment-priority/blocked-host AND the two
+    real-research classes.
   evidence:
+    - "Final convergence pass (2026-08-23) item 6: the two previously-
+      blocked task classes now run for real through the actual
+      run_task()/routing/execution/telemetry path (not an offline
+      harness), once F's clone/auth gap was resolved this same pass. (1)
+      PhD evidence/retrieval (task_class=repo_reconnaissance, decision
+      c1d259be-c89a-4992-b665-b37e03c6df86, real codex execution against
+      the real obsidian-PhD clone): asked which document defines the
+      evidence/trust authority model and one concrete rule from it —
+      answer cited automation/docs/currency-and-derived-trust.md and
+      automation/prompts/trust-propagation.md with an exact quote
+      ('Model review alone cannot create human-audited provenance'),
+      spot-checked byte-for-byte against the real file — both files
+      exist, the quote is exact. (2) S2-E1 ROS/log interpretation
+      (task_class=log_interpretation, decision
+      68eb17b0-654c-4c50-a02e-248cb2809f4a, real codex execution against
+      the real s2-e1-ros2-measurement-spine clone): asked to list
+      tests/ filenames and name one ROS 2 package/node — answer listed
+      all 8 real test files and correctly identified the s2_e1_capture
+      package's e1a_synthetic_publisher console-script entry, spot-
+      checked exactly against the real setup.py — both match exactly,
+      zero discrepancies. No manuscript/content edits, no robot control,
+      as required. See commits from item 6 (same session as 47dcefe)."
     - "Full run recorded in docs/aoteru-l-real-work-validation-evidence.md
       with real decision_ids, not a second offline harness: (1) local
       task via run_task (qwen3:8b, retries:0, real RoutingDecision row);
@@ -856,31 +989,46 @@ being withheld pending these; see each workstream's `next_action` for what
       retried; (5) `agent park obsidian-phd` — a real registered F-gap
       repo — produced a clean truthful block (exit 1, no traceback, no
       guessed path), satisfying L's own 'one intentionally unavailable-
-      host task that produces a durable truthful block' item."
-  last_verified_commit: <pending this checkpoint's commit>
+      host task that produces a durable truthful block' item. NOTE
+      (2026-08-23): obsidian-phd is no longer an unavailable-host case —
+      see the Final convergence pass bullet above; this history is
+      accurate for when it was written, not a current gap."
+  last_verified_commit: 47dcefe
 ```
 
 ## Notes for the next session/turn
 
-- This programme is intentionally multi-session in scope (11 workstreams,
-  several requiring unavailable hardware). Do not treat one session's
-  checkpoint as programme completion; keep working down eligible
-  workstreams rather than re-deriving this file from scratch.
-- As of 2026-08-23 (this checkpoint): A and K complete. B, D, E, H, I are
-  active but every remaining item is either genuinely host/tool-blocked
-  (live laptop, interface PC, home, glovebox, Windows packaging), an
-  explicit operator decision (C's bwrap/codex sandbox-bypass tradeoff,
-  E's codex-artifacts cross-project-data-leak scoping), or a deliberate
-  design deferral with recorded reasoning (B's park HTTP route, D's
-  evidence-volume gate). J is active with only one item left
-  (timeout/cancel for a *long-running* task — no cancel mechanism exists
-  at all yet; building one is a real feature addition, not an audit gap,
-  and hasn't been attempted without discussing scope first). F/G/L(partial)
-  remain externally host/operator-blocked, unchanged.
-- G and I are genuinely host-blocked per live 2026-08-23 evidence, not
-  under-worked; their non-live deliverables (packages, scripts, docs) are
-  still open independent work and should not wait for the host.
-- Before starting a new slice: re-check `tailscale status` and this
-  file's per-workstream blockers first — most of what's left now
-  genuinely needs either operator input (see the two decisions above) or
-  a host that isn't reachable yet, not more autonomous code changes.
+**Finite closure pass completed 2026-08-23**
+(docs/aoteru-final-convergence-activation.agent-task.md). This was
+deliberately NOT another open-ended `/loop` iteration — per that task's
+own explicit instruction, do not resume a timed autonomous development
+loop against this file. Final classification:
+
+- **complete**: A, C, J, K, L.
+- **complete-current-estate**: E (future home-primary promotion stays
+  ready-for-host, not a current gap).
+- **evidence-gated**: D (evaluator is sound; the remaining item needs
+  real production traffic volume, not more engineering).
+- **ready-for-operator**: B (checkout-free bootstrap + remote park both
+  closed this pass; only the actual live laptop-origin smoke test
+  remains, which needs an operator running the documented command from
+  a real laptop).
+- **ready-for-host**: G, H, I (all non-live deliverables — packages,
+  scripts, docs, the interface-acceptance identity fix — are done;
+  what's left needs the actual unreachable/not-yet-live hardware).
+- **active**: F (repository identity was never actually the blocker —
+  resolved this pass via `gh repo view`; misumi's own park/release cycle
+  is the only unexercised, low-value residual, not required for
+  closure).
+
+Three residual gates are genuinely operator-only, not engineering work:
+(1) restart-class actions already happened this pass (the service
+restart J was waiting on); (2) a live laptop session to run the B smoke
+test; (3) glovebox/home/interface-PC becoming reachable (G/H/I).
+Nothing else in this programme is a material current engineering gap —
+re-read the per-workstream `status`/`next_action` fields above before
+assuming otherwise, don't re-derive this file from scratch.
+
+Older note, still true: G and I are genuinely host-blocked per live
+2026-08-23 evidence, not under-worked; their non-live deliverables were
+already complete before this pass and remain so.
