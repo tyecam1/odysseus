@@ -240,3 +240,53 @@ success condition.
 
 No other residual-risk item above was touched this pass; items 3-6 remain
 exactly as this file already described them.
+
+## PhD routing gate — closed (quota-reset re-run, 2026-08-29, same day)
+
+Resumed exactly at this file's own "Resume exactly here" marker above,
+after the recorded Codex usage-limit reset (~17:45 BST). Re-run from the
+laptop (`desktop-7dj1hma`), identical command, no other change:
+
+```
+aoteru lab "Read only the file 10-inbox/backlog.md and the S2-E1 work item it points to in this repository. Report exactly three things and nothing else: (1) the work item's title, (2) its status field, (3) the immediate next unchecked physical gate item (the first unchecked checkbox) from its execution ladder. Do not modify any file." --repo obsidian-phd --capability code-strong --allow-paid --timeout 180
+```
+
+Result: `executed: true`, `executor: codex`, `deterministic_gate: pass`,
+`decision_id: 535cba23-0e59-409c-a701-a46cb3e14f1d`. Output:
+
+```
+1. S2-E1 physical acquisition and static metrology vertical slice
+2. paused
+3. Rebuild from the Git-provenance fix and retain replacement E1a/E1b reports with the exact commit and `git_dirty: false`.
+```
+
+Independently verified against the operator's own laptop checkout of
+`10-inbox/s2-e1-perception-experiment-hardware-and-measurement-setup.md`
+(clean tree, `c589b8f`, unchanged since this file's prior attempt) before
+reading the routed answer: title, `status: paused`, and the first
+unchecked (`- [ ]`) execution-ladder item all match exactly, word for
+word. This exact match is the gate's deterministic success condition, met.
+
+**No write / no lease leak:** `aoteru park-status` returned
+`active_park_leases: []` both immediately before and immediately after
+this run — this task never acquires a park lease (it is a paid-escalation
+read, not a park/heartbeat/release flow), so absence of any lease
+before/after is the correct and only expected state, not a partial check.
+File-level no-write evidence rests on the same structural guarantee as
+every prior `execute_codex()` proof in this programme (P12.3, and this
+file's own prior quota-blocked attempt above): the escalation runs under
+`--sandbox read-only`, and the returned content is a verbatim read of
+existing file content rather than any generated/mutated text. Direct
+lab-side `git status` on `${PHD_ROOT}/obsidian-PhD` was not independently
+re-run this pass — laptop→lab SSH as `tyeca` remains blocked by the same
+Tailscale ACL policy already recorded as this file's residual risk item 2
+(unchanged, out of scope for this gate).
+
+**PhD routing proof (section 7 of the operator's original task) — closed.**
+The one item this file's "not reached" note above left open is now met:
+a bounded PhD-repo read/analysis task, routed from the laptop through
+`aoteru lab`, executed for real against the live `obsidian-phd` checkout
+and returned a deterministically correct, repo-grounded answer.
+
+No other residual-risk item in this file was touched this pass; items
+1, 3, 4, 5, 6 remain exactly as already recorded above.
