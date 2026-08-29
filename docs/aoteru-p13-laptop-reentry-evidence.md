@@ -155,3 +155,88 @@ unblocks `where`/`lab`/`home` end-to-end and the PhD routing proof; (2)
 home benchmark evidence gathered (reusing the existing `evals/local_models/`
 LM1–LM4 harness pattern), which is the only thing standing between the
 current honest `verified: false` and real worker eligibility for home.
+
+## Addendum 2026-08-29 (same day, follow-on session): lab deploy + laptop routing closed, PhD gate blocked on external Codex quota
+
+Continuation of this file's own residual-risk items 1 and 2, and the
+"PhD routing proof — not reached" section above. Re-verified live, not
+assumed from this file's own prior claims.
+
+**Tailscale ACL**: operator updated tailnet policy. `ssh tyeca@...`
+still rejected (`tailnet policy does not permit you to SSH as user
+"tyeca"`) — the grant was for user `agent`, which is also the
+correct account: the systemd unit and lab checkout are `User=agent`
+already, per `docs/aoteru-lab-first-operator-guide.md`. `ssh
+agent@dmem-hp-z2-tower-g9-workstation-desktop-pc.tail171792.ts.net`
+succeeds.
+
+**Backend deploy**: lab checkout fast-forwarded `44dcdc7` -> `3228f35`
+(clean tree, `git merge-base --is-ancestor` confirmed before pulling).
+`tests/test_estate_router.py` + `tests/test_laptop_client.py`: 78/78
+passed (the pytest run residual-risk item 1 above asked for). Neighbouring
+regression sweep (`-k 'estate or routing or session or placement or park
+or lease'`): 368 passed, 1 failed
+(`test_session_list_owner_scope.py::test_list_sessions_excludes_other_users_sessions`);
+re-run alone: 2/2 passed — an order-dependent flake unrelated to this
+change, not a regression, not weakened or touched.
+
+`sudo systemctl restart` needed an interactive password unavailable to
+the automated session; the operator ran the restart directly. Verified
+after: `systemctl is-active`/`is-enabled` both healthy, `MainPID`
+changed (fresh process), `GET /api/health` -> 200, deployed
+`git log -1` -> `3228f35`.
+
+**Laptop routing re-proof against the deployed backend** (this file's
+"PhD routing proof — not reached" trigger #1): `aoteru where` now
+returns `{"active_sessions": []}` instead of 404 -
+`GET /api/estate/sessions` is live. `aoteru status`/`route` still
+show lab eligible, home correctly considered-but-ineligible. Forced-host
+placement is truthful both ways: `aoteru lab "..." --capability
+local-fast` executed for real on `hz2-workstation`/`qwen3:8b`
+(exact echoed output, `deterministic_gate: pass`); `aoteru home
+"..."` was correctly refused (`requested host 'home' is not
+eligible`) — home was not made eligible just to pass this check, matching
+this file's own residual-risk item 3 (still open, untouched this pass).
+
+**PhD end-to-end gate — genuine architecture finding, not a repo-access
+bug**: `execute_local`/the "local" executor path has no filesystem
+grounding at all — `task["repo"]` is used only for host eligibility
+(`eligible_hosts(repo_id)`) and, separately, only inside the paid-Codex
+escalation branch (`resolve_repo_path` -> `cwd`). A capability that
+resolves to a bound local model (`local-fast`/`local-strong`) can
+never read the routed repo, by current design — confirmed live: a bounded
+read-only backlog question sent via `--capability local-strong`
+executed (`executed: true`) but returned empty output with
+`deterministic_gate: fail`, because the model was never given any file
+content to work from. Real repo-grounded execution only exists on the
+evidence-triggered paid-escalation path, reached here via
+`--capability code-strong` (the one alias with `binding: null` in
+`config/models.yaml`) + `--allow-paid`. That correctly escalated to
+`executor: codex`, reached the lab's real
+`obsidian-phd` checkout (`${PHD_ROOT}/obsidian-PhD`, content spot-
+checked identical to the operator's own laptop checkout of
+`10-inbox/backlog.md`), and failed truthfully and specifically:
+`codex exec exited 1` with Codex's own usage-limit error, reset time
+"5:45 PM" (lab-local `Europe/London`, confirmed `date` ->
+`16:10:20 BST` at the time of the attempt, i.e. reset ~17:45 BST). Not a
+repo-access failure, not fabricated, no file touched, no lease taken.
+
+**Resume exactly here** (operator decision: stop and record rather than
+wait ~95 minutes) — after 17:45 BST, from the laptop, re-run the identical
+command that failed on quota, no other change:
+
+```
+aoteru lab "Read only the file 10-inbox/backlog.md and the S2-E1 work item it points to in this repository. Report exactly three things and nothing else: (1) the work item's title, (2) its status field, (3) the immediate next unchecked physical gate item (the first unchecked checkbox) from its execution ladder. Do not modify any file." --repo obsidian-phd --capability code-strong --allow-paid --timeout 180
+```
+
+Expected deterministic pass: output names title "S2-E1 physical
+acquisition and static metrology vertical slice", status `paused`, and
+next gate "Rebuild from the Git-provenance fix and retain replacement
+E1a/E1b reports with the exact commit and `git_dirty: false`" (verified
+directly against `10-inbox/s2-e1-perception-experiment-hardware-and-
+measurement-setup.md` on the laptop's own checkout this same session,
+independent of the routed answer). That match is this gate's deterministic
+success condition.
+
+No other residual-risk item above was touched this pass; items 3-6 remain
+exactly as this file already described them.
