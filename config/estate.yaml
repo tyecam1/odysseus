@@ -2,22 +2,21 @@
 #
 # Hosts are added here only once genuinely inventoried or explicitly named
 # by the operator — never speculatively. `verified: false` / `tailscale:
-# false` / `os: unknown` mean exactly that: named, not yet confirmed. This
-# execution session's own filesystem/shell access reaches only
-# `hz2-workstation` (lab) — that is a session limitation, not a statement
-# about the estate's real topology.
+# false` / `os: unknown` mean exactly that: named, not yet confirmed.
 #
-# P12 (2026-08-23, docs/aoteru-p12-active-estate-convergence.md) topology
-# correction: this file previously conflated "laptop" and "interface" as
-# one entity (`desktop-7dj1hma`, role: interface). Operator now states
-# these are two distinct machines: `desktop-7dj1hma` is the laptop
-# controller (currently reachable, live on tailnet), and the interface PC
-# is a *separate*, currently-unreachable box (older Misumi deployment
-# material references `192.168.4.37:8770` for it, but that identity is
-# unverified — do not assume it still applies). The currently-reachable
-# active estate is laptop + lab (this host) + glovebox Jetson; home and
-# the separate interface PC are registered-but-ineligible, deferred per
-# P12.7, not failed.
+# P12.7 re-entry (2026-08-29, first laptop-run session — see
+# docs/aoteru-p12-active-estate-convergence-evidence.md and its P13
+# addendum): home (`desktop-in7o23d`) and the interface PC
+# (`desktop-rifpr07`, formerly `interface-pc` with unknown identity) are
+# both now live-confirmed reachable over LAN SSH and Tailscale, with
+# pinned/matching SSH host-key fingerprints. `verified: true` on
+# `interface-pc` is safe (the `interface` role is never
+# execution_worker-eligible regardless, config/routing.yaml). `home`
+# deliberately stays `verified: false` — identity is confirmed but
+# execution-worker eligibility additionally needs P12.7's benchmark
+# evidence (item 4), which `eligible_hosts()` has no separate gate for
+# today; see that host's notes and the evidence doc's residual risks.
+# registered != reachable != verified != execution-worker-eligible.
 #
 # Services are logical names (plan section 5.6). None are provisioned yet —
 # that's P2 (private connectivity). `endpoint: null` means "not live";
@@ -34,20 +33,43 @@ required_connectivity:
   - edge: laptop-to-lab
     from: desktop-7dj1hma
     to: hz2-workstation
-    status: lab-side-ready-untested-end-to-end
+    status: http-proven-ssh-policy-blocked
     note: >-
-      Lab sshd is confirmed active/listening/reachable via its own tailscale
-      IP (self-check). The actual laptop→lab direction has not been tested
-      because no session has run on the laptop yet — this session runs on
-      the lab host, which is the wrong end to initiate this test from.
+      2026-08-29, first laptop-run session (closes the P12.1 continuation
+      gate): `aoteru status` from the laptop against
+      `svc:odysseus-lab`'s tailnet URL succeeds end-to-end (`backend:
+      reachable, status=healthy`) — this is the actual transport
+      `companion/laptop_client/aoteru.py` / the estate-routing skill use,
+      and it is proven both directions now. Separately tried plain `ssh
+      dmem-hp-z2-tower-g9-workstation-desktop-pc.tail171792.ts.net` (the
+      §10.2 "launcher SSHs to the parked worker" transport) — reached the
+      host but was rejected by Tailscale SSH's tailnet ACL policy
+      ("tailnet policy does not permit you to SSH as user \"tyeca\""), not
+      a network/reachability failure. Not fixed this pass — tailnet ACL
+      policy is an admin-console change, out of scope unless a task
+      actually needs laptop→lab SSH (park/parking already works over the
+      HTTP surface per P12.1's evidence).
   - edge: laptop-to-home
     from: desktop-7dj1hma
     to: desktop-in7o23d
-    status: untested
+    status: proven
     note: >-
-      Per the operator, interface and home are pre-configured for mutual
-      LAN SSH. Not yet verified from a session running on the laptop. Home
-      host identity itself is unverified — see that host's entry.
+      2026-08-29, first laptop-run session. Proven both ways: LAN SSH
+      (`192.168.4.102`, pre-existing `homebase-agent` key, host-key
+      fingerprint matched the operator-supplied pin exactly before
+      connecting) and, after Tailscale enrollment this pass, over the
+      tailnet (`100.105.34.37`, same fingerprint reconfirmed).
+  - edge: laptop-to-interface
+    from: desktop-7dj1hma
+    to: interface-pc
+    status: proven
+    note: >-
+      2026-08-29, first laptop-run session, first time this edge has ever
+      been tested (interface PC was previously unreachable). Proven both
+      ways: LAN SSH (`mutisy@192.168.4.37`, laptop's existing
+      `tyeca-laptop` key, per the operator's own pre-existing
+      `flat-knowledgebase` repo `docs/ssh-access.md`) and, after Tailscale
+      enrollment this pass, over the tailnet (`100.99.90.100`).
   - edge: phone-to-svc-aoteru
     from: phone
     to: "svc:aoteru"
@@ -96,46 +118,73 @@ hosts:
       session has run on the laptop itself).
 
   - id: interface-pc
-    hostname: unknown  # do not guess — operator states it is a separate machine from desktop-7dj1hma; identity not yet live-confirmed
+    hostname: DESKTOP-RIFPR07
     role: interface
-    os: unknown
-    tailscale: false
-    verified: false
-    inventoried_at: "2026-08-23"
+    os: windows  # Windows 10 Pro, build 19045
+    tailscale: true
+    tailscale_dns: desktop-rifpr07.tail171792.ts.net
+    verified: true  # identity live-confirmed 2026-08-29 (see notes) — safe to set: `interface` role is never execution_worker-eligible (config/routing.yaml) regardless of this flag, so this does not grant any routing eligibility.
+    inventoried_at: "2026-08-29"
     notes: >-
-      P12 topology repair: split out of the former conflated
-      `desktop-7dj1hma` (role: interface) entity. Operator states the
-      interface PC is a genuinely separate machine, currently unreachable
-      via tailnet. Older Misumi deployment material references
-      `192.168.4.37:8770` for an interface-role service, but that
-      identity/hardware is unverified and MUST NOT be trusted without live
-      confirmation. Registered-but-ineligible/deferred, not failed — see
-      P12.7 re-entry checklist in
-      docs/aoteru-p12-active-estate-convergence-evidence.md. Intended
-      future purpose: persistent Aoteru/Misumi human-facing front door
-      (svc:aoteru), phone/mobile bridge.
+      P12.7 interface re-entry executed 2026-08-29, first laptop-run
+      session. Live-confirmed via LAN SSH (`mutisy@192.168.4.37`, key-only,
+      per the operator's own pre-existing `flat-knowledgebase`/`homeBase`
+      repo's `docs/ssh-access.md`) then re-confirmed over Tailscale
+      (`100.99.90.100`, host key fingerprint identical on both paths:
+      `SHA256:...` matches — see evidence doc): hostname `DESKTOP-RIFPR07`,
+      Windows 10 Pro build 19045, matches the 2026-06-12 audit in the
+      operator's separate `flat-knowledgebase` repo
+      (`docs/two-pc-topology.md`: "Living-room TV PC", Radeon RX 580, 16GB
+      RAM). That repo is the actual pre-existing governance for this
+      machine: role is explicitly "downstream client only... No services,
+      no schedulers, no self-hosting" — confirmed live (only two small
+      `python.exe` processes running, `C:\Misumi\interface-box` present,
+      no odysseus/misumi backend). Historical `192.168.4.37:8770` reference
+      was accurate for the LAN IP; the deployment repo names the correct
+      hostname/user (`DESKTOP-RIFPR07`/`mutisy`) that earlier estate.yaml
+      revisions didn't have. `svc:aoteru`/phone-bridge future purpose
+      (P12.7) still applies once that service is actually built — nothing
+      currently runs here to wrap. Tailscale installed + authorized
+      2026-08-29 (silent MSI install over SSH, operator completed the
+      interactive login); no Funnel/serve config (tailnet-only).
 
   - id: desktop-in7o23d
-    hostname: DESKTOP-IN7O23D  # per docs/operations/odysseus-host-deployment.md
-    aliases: [DESKTOP-IN7023D]  # operator's own message used this spelling once — treat both as unverified
+    hostname: DESKTOP-IN7O23D  # confirmed live 2026-08-29 — the letter-O spelling; DESKTOP-IN7023D (digit zero) does not resolve at all (mDNS/DNS both fail)
     role: home
-    os: unknown  # not yet observed — see notes
-    tailscale: false
-    verified: false
-    inventoried_at: "2026-08-19"
+    os: windows  # Windows 11 Pro, build 26200
+    tailscale: true
+    tailscale_dns: desktop-in7o23d.tail171792.ts.net
+    verified: false  # identity IS now live-confirmed (see notes) — deliberately still false: this is the sole gate `eligible_hosts()`/`host_reachable()` has today, and flipping it grants execution_worker eligibility immediately with zero benchmark evidence. P12.7 item 4 (benchmark before promotion) is a documented process step, not yet a separate code gate — see residual risk in the evidence doc. Flip only once benchmark evidence justifies worker eligibility, not merely because identity is confirmed.
+    inventoried_at: "2026-08-29"
     notes: >-
-      NOT VERIFIED. Hostname/IP are sourced only from
-      docs/operations/odysseus-host-deployment.md and the operator's own
-      messages, which disagree on spelling (IN7O23D vs IN7023D). Per
-      explicit operator instruction, do not trust this identity until
-      confirmed live through the existing laptop→home LAN SSH path — that
-      requires a session running on the laptop, which this session is not.
-      Not present in `tailscale status` from the lab host under either
-      spelling as of this check. P12 (2026-08-23): explicitly
-      registered-but-ineligible/deferred, not a P12 failure — see the
-      home-PC re-entry checklist in
-      docs/aoteru-p12-active-estate-convergence-evidence.md. Its absence
-      does not block laptop/lab/glovebox convergence.
+      P12.7 home re-entry executed 2026-08-29, first laptop-run session.
+      Identity live-confirmed two independent ways: (1) LAN SSH
+      (`User@192.168.4.102`) using the operator's pre-existing, previously
+      host-authorized `homebase-agent` key from their separate `homeBase`
+      project (`.agent-ssh/homebase-agent`), pinned host-key fingerprint
+      `SHA256:rmuPA4DUnFnR8UPXBHrksljQbT86l2aZZAztNZ1TIeU` matched exactly
+      against the operator-supplied value before connecting; (2) same
+      fingerprint reconfirmed over Tailscale (`100.105.34.37`) after
+      enrollment. `whoami` → `desktop-in7o23d\user`, hostname →
+      `DESKTOP-IN7O23D`. Live hardware: Windows 11 Pro (build 26200),
+      Gigabyte B450 AORUS ELITE, AMD Ryzen 7 5800X (8-core), 32,691MB RAM,
+      NVIDIA GeForce RTX 3070, ~1TB C: (339GB free) + ~1TB E: (235GB free).
+      Already running (pre-existing, NOT installed this session): Ollama
+      (5 models: qwen3:8b, llama3.1:8b, qwen2.5-coder-cc, qwen2.5-coder:7b,
+      qwen2.5-math:7b), and a full Odysseus-harness deployment
+      (`odysseus-releases\e68288238b3c`, port 420) plus `misumi_agent.py`
+      (4500) and an STT server (4600) — governed by the operator's separate
+      `flat-knowledgebase`/`homeBase` repo, not this one. Reconciliation
+      (2026-08-29): live-audited that deployment has NO
+      `src/estate_router.py` and NO `config/estate.yaml` at all — it is
+      structurally a single-host household adapter (chat/calendar/
+      email/cookbook/assistant/document routes only, no "estate" string
+      anywhere in `app.py`), not a competing estate router/lease/queue
+      authority. KEEP as-is, untouched; no migration needed. Tailscale
+      installed + authorized 2026-08-29 (silent MSI install over SSH,
+      operator completed the interactive login); no Funnel/serve config.
+      P12.7 remaining: hardware/benchmark qualification (item 4) before any
+      worker route is added — not done this pass.
 
   - id: glovebox
     hostname: glovebox
@@ -180,9 +229,14 @@ services:
     role: interface
     notes: >-
       Corrected 2026-08-20 (operator): belongs on the interface PC
-      (desktop-7dj1hma), not lab. Lab hosts backend capability only. Stays
-      null/deferred until the interface PC is reachable — do not stand up a
-      lab-hosted stand-in and call it svc:aoteru.
+      (`interface-pc` / `desktop-rifpr07` — the id here was stale,
+      pre-P12 naming still pointed at `desktop-7dj1hma`, which is the
+      laptop, not the interface PC), not lab. Lab hosts backend capability
+      only. `interface-pc` is now reachable (2026-08-29) but nothing
+      resembling `svc:aoteru` runs there yet (live-confirmed: only two
+      small idle python.exe processes, no listening service found) — stays
+      null/deferred until actually built, not merely because the box was
+      unreachable.
   - id: svc:memory
     description: memory broker API (home primary, lab read-cache fallback)
     endpoint: null
@@ -222,6 +276,19 @@ services:
   - id: svc:odysseus-home
     description: Odysseus instance on the home host
     endpoint: null
+    notes: >-
+      2026-08-29 discovery: an Odysseus-harness instance IS already
+      running on home (`http://192.168.4.102:420`, live `/api/health` ->
+      200 healthy) — but it is the operator's household/Misumi deployment
+      (`odysseus-releases\e68288238b3c`, governed by a separate pre-existing
+      `flat-knowledgebase`/`homeBase` repo), not an estate-routing backend.
+      Live-audited: no `src/estate_router.py`, no `config/estate.yaml`, no
+      "estate" string anywhere in `app.py` — structurally incapable of
+      acting as a second discovery/routing/lease authority. `endpoint`
+      deliberately stays null here: this id names an *estate-callable*
+      Odysseus backend on home, which does not exist and is not planned —
+      conflating the two would misroute estate tasks into a household
+      deployment with no estate/park/lease surface at all.
 
 # Domain permissions: which authority may request mutation routes through
 # which host role. Populated once P3 parking exists; empty is correct for P1.
