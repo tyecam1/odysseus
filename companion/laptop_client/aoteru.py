@@ -125,10 +125,25 @@ def cmd_status(args: argparse.Namespace) -> int:
 
     hosts = _request(cfg, "GET", "/api/estate/route/hosts")
     if hosts["status"] == 200:
-        eligible = hosts["body"].get("hosts") or []
+        # `/api/estate/route/hosts` returns every host *considered*
+        # (role lab/home), each tagged `eligible: bool` + `reason` — not
+        # a pre-filtered eligible list. `id` was never a key in that
+        # payload (the field is `host_id`), so this used to print
+        # `None` for every row and, worse, printed considered-but-not-
+        # eligible hosts (e.g. an unverified home) under the same
+        # "eligible hosts" heading as truly eligible ones. Preserve
+        # registered != reachable != verified != eligible instead of
+        # promoting a host because it merely showed up here.
+        considered = hosts["body"].get("hosts") or []
+        eligible = [h for h in considered if h.get("eligible")]
+        ineligible = [h for h in considered if not h.get("eligible")]
         print(f"eligible hosts: {len(eligible)}")
         for h in eligible:
-            print(f"  - {h.get('id')} ({h.get('role')})")
+            print(f"  - {h.get('host_id')} ({h.get('role')})")
+        if ineligible:
+            print(f"considered but not eligible: {len(ineligible)}")
+            for h in ineligible:
+                print(f"  - {h.get('host_id')} ({h.get('role')}): {h.get('reason')}")
     elif hosts["status"] in (401, 403):
         print("eligible hosts: (no/insufficient token — set one with `aoteru config set --token ...` "
               "scoped estate:read or estate:execute for full status)")

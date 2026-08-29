@@ -200,6 +200,37 @@ class FakeResponse:
         return False
 
 
+def test_status_reports_host_id_and_separates_eligible_from_considered(client, monkeypatch, capsys):
+    """Regression: `/api/estate/route/hosts` returns every considered host
+    (role lab/home) tagged `eligible`/`reason`, keyed `host_id` — not a
+    pre-filtered list keyed `id`. The client used to read the wrong key
+    (printing `None` for every row) and printed ineligible hosts under the
+    same "eligible hosts" heading, which would have made an unverified
+    home host look promoted to eligible. Preserve registered != reachable
+    != verified != eligible in the laptop-facing output itself."""
+    client.main(["config", "set", "--url", "http://lab:7001", "--token", "ody_x"])
+
+    def fake_urlopen(req, timeout=None):
+        if req.full_url.endswith("/api/health"):
+            return FakeResponse({"status": "healthy"})
+        assert req.full_url.endswith("/api/estate/route/hosts")
+        return FakeResponse({"hosts": [
+            {"host_id": "hz2-workstation", "role": "lab", "eligible": True, "reason": "this host"},
+            {"host_id": "desktop-in7o23d", "role": "home", "eligible": False,
+             "reason": "'desktop-in7o23d' is not verified (config/estate.yaml verified: false) — reachability alone is not sufficient"},
+        ]})
+    monkeypatch.setattr(client.urllib.request, "urlopen", fake_urlopen)
+
+    rc = client.main(["status"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "eligible hosts: 1" in out
+    assert "- hz2-workstation (lab)" in out
+    assert "None" not in out
+    assert "considered but not eligible: 1" in out
+    assert "desktop-in7o23d (home): 'desktop-in7o23d' is not verified" in out
+
+
 def test_park_hits_the_correct_endpoint_with_branch(client, monkeypatch):
     client.main(["config", "set", "--url", "http://lab:7001", "--token", "ody_x"])
     captured = {}
