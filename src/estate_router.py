@@ -187,6 +187,52 @@ def eligible_hosts(repo_id: Optional[str] = None) -> list[dict]:
     return out
 
 
+_STALE_ACTIVE_SESSION_SECONDS = 300
+
+
+def reconcile_stale_sessions(db, LogicalSession) -> int:
+    """Sweep any `logical_sessions` row still `active` with no
+    `claude_session_id` recorded past a bounded staleness window to
+    `failed` (P5, Laptop Claude routing skill's session-mapping rule;
+    core.database.LogicalSession's docstring covers the write-time half
+    of this invariant). Centralized here — same reason `host_reachable`
+    lives in this module rather than in `scripts/agent` — so `agent claude
+    where` (local CLI) and `/api/estate/sessions` (HTTP, this module) read
+    one reconciliation rule, not two that could drift apart."""
+    from datetime import datetime, timedelta, timezone
+    cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=_STALE_ACTIVE_SESSION_SECONDS)
+    stale = db.query(LogicalSession).filter(
+        LogicalSession.status == "active",
+        LogicalSession.claude_session_id.is_(None),
+        LogicalSession.created_at < cutoff,
+    ).all()
+    for row in stale:
+        row.status = "failed"
+        row.last_result = json.dumps({
+            "reconciled": True,
+            "reason": "stale active session with no claude_session_id recorded within "
+                      f"{_STALE_ACTIVE_SESSION_SECONDS}s — launch never confirmed",
+        })
+    return len(stale)
+
+
+def active_logical_sessions() -> list[dict]:
+    """Estate-wide active `LogicalSession` view — the laptop `where` mode
+    (execution contract's "Laptop Claude routing skill — required UX").
+    The checkout-free laptop client (companion/laptop_client/aoteru.py)
+    has no local `core.database` to query directly, so this is also the
+    body of `GET /api/estate/sessions` (routes/estate_routing_routes.py);
+    `scripts/agent`'s `agent claude where` reads the same rows locally."""
+    from core.database import LogicalSession, get_db_session
+    with get_db_session() as db:
+        reconcile_stale_sessions(db, LogicalSession)
+        rows = db.query(LogicalSession).filter(LogicalSession.status == "active").all()
+        return [{
+            "id": r.id, "host_id": r.host_id, "repo_id": r.repo_id, "engine": r.engine,
+            "claude_session_id": r.claude_session_id, "last_result": r.last_result,
+        } for r in rows]
+
+
 _OLLAMA_BASE = "http://127.0.0.1:11434"
 
 

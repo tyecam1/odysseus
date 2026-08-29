@@ -331,6 +331,104 @@ def test_heartbeat_reports_no_active_lease_clearly(client, monkeypatch, capsys):
     assert "no active lease" in out
 
 
+def test_lab_mode_sends_requested_host_placement(client, monkeypatch):
+    """Regression: `resolve_route` has always read `placement.requested_host`,
+    but nothing sent it over HTTP until `lab`/`home`/`auto` existed."""
+    client.main(["config", "set", "--url", "http://lab:7001", "--token", "ody_x"])
+    captured = {}
+
+    def fake_urlopen(req, timeout=None):
+        captured["url"] = req.full_url
+        captured["body"] = json.loads(req.data.decode())
+        return FakeResponse({"ok": True, "route": {"host": "hz2-workstation"}})
+    monkeypatch.setattr(client.urllib.request, "urlopen", fake_urlopen)
+
+    rc = client.main(["lab", "do the thing", "--capability", "code-fast"])
+    assert rc == 0
+    assert captured["url"].endswith("/api/estate/run")
+    assert captured["body"]["placement"]["requested_host"] == "lab"
+    assert captured["body"]["objective"] == "do the thing"
+    assert captured["body"]["requirements"]["capabilities"] == ["code-fast"]
+
+
+def test_home_mode_reports_host_not_eligible_truthfully(client, monkeypatch, capsys):
+    client.main(["config", "set", "--url", "http://lab:7001", "--token", "ody_x"])
+
+    def fake_urlopen(req, timeout=None):
+        return FakeResponse({"ok": False, "error": "requested host 'home' is not eligible"})
+    monkeypatch.setattr(client.urllib.request, "urlopen", fake_urlopen)
+
+    rc = client.main(["home", "do the thing"])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "not eligible" in out
+
+
+def test_auto_mode_sends_auto_placement(client, monkeypatch):
+    client.main(["config", "set", "--url", "http://lab:7001", "--token", "ody_x"])
+    captured = {}
+
+    def fake_urlopen(req, timeout=None):
+        captured["body"] = json.loads(req.data.decode())
+        return FakeResponse({"ok": True})
+    monkeypatch.setattr(client.urllib.request, "urlopen", fake_urlopen)
+
+    rc = client.main(["auto", "do the thing"])
+    assert rc == 0
+    assert captured["body"]["placement"]["requested_host"] == "auto"
+
+
+def test_where_lists_active_sessions(client, monkeypatch, capsys):
+    client.main(["config", "set", "--url", "http://lab:7001", "--token", "ody_x"])
+    captured = {}
+
+    def fake_urlopen(req, timeout=None):
+        captured["url"] = req.full_url
+        return FakeResponse({"active_sessions": [{"id": "abc", "host_id": "hz2-workstation"}]})
+    monkeypatch.setattr(client.urllib.request, "urlopen", fake_urlopen)
+
+    rc = client.main(["where"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert captured["url"].endswith("/api/estate/sessions")
+    assert "hz2-workstation" in out
+
+
+def test_where_reports_scope_denial_clearly(client, monkeypatch, capsys):
+    client.main(["config", "set", "--url", "http://lab:7001", "--token", "ody_readonly"])
+
+    def fake_urlopen(req, timeout=None):
+        import urllib.error
+        raise urllib.error.HTTPError(
+            req.full_url, 403, "Forbidden", {}, __import__("io").BytesIO(
+                json.dumps({"detail": "API token missing required scope: estate:read"}).encode()
+            ),
+        )
+    monkeypatch.setattr(client.urllib.request, "urlopen", fake_urlopen)
+
+    rc = client.main(["where"])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "estate:read" in out
+
+
+def test_sync_writes_skill_md(client, monkeypatch, tmp_path):
+    fake_home = tmp_path / "fakehome"
+    fake_home.mkdir()
+    monkeypatch.setattr(client.Path, "home", staticmethod(lambda: fake_home))
+
+    rc = client.main(["sync"])
+    assert rc == 0
+
+    skill_path = fake_home / ".claude" / "skills" / "aoteru-estate-routing" / "SKILL.md"
+    assert skill_path.exists()
+    content = skill_path.read_text()
+    assert "aoteru auto" in content
+    assert "aoteru lab" in content
+    assert "aoteru home" in content
+    assert "aoteru where" in content
+
+
 def test_park_status_lists_active_leases(client, monkeypatch, capsys):
     client.main(["config", "set", "--url", "http://lab:7001", "--token", "ody_x"])
     captured = {}

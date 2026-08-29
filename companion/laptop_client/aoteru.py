@@ -256,6 +256,106 @@ def cmd_ask(args: argparse.Namespace) -> int:
     return 0 if result["status"] == 200 and result["body"].get("ok", True) else 1
 
 
+def cmd_dispatch(args: argparse.Namespace) -> int:
+    """Shared body of `auto`/`lab`/`home` (execution contract's "Laptop
+    Claude routing skill — required UX"). Sends the estate's real
+    canonical envelope shape, `placement.requested_host` included, so
+    `lab`/`home` genuinely narrow eligibility server-side (fails
+    truthfully via `resolve_route` if the requested host isn't eligible)
+    rather than this client silently re-implementing routing/eligibility
+    logic — that would be exactly the second routing authority the
+    contract forbids. Executes over `/api/estate/run`: an LLM-completion
+    route against a resolved local/paid model, NOT a native interactive
+    Claude Code session launched on that remote host — that separate
+    remote-dispatch feature doesn't exist on the backend yet (see
+    `scripts/agent`'s `agent claude`, which fails the same way truthfully
+    rather than pretending)."""
+    cfg = _load_config()
+    envelope = {
+        "task_class": args.task_class,
+        "repo": args.repo,
+        "requirements": {"capabilities": [args.capability] if args.capability else []},
+        "placement": {"requested_host": args.command},
+        "objective": args.task,
+        "allow_paid_escalation": bool(args.allow_paid),
+    }
+    result = _request(cfg, "POST", "/api/estate/run", envelope, timeout=args.timeout)
+    if result["status"] in (401, 403):
+        print(f"denied: {result['body']} — token needs the estate:execute scope for `{args.command}`")
+        return 1
+    print(json.dumps(result["body"], indent=2))
+    return 0 if result["status"] == 200 and result["body"].get("ok", True) else 1
+
+
+def cmd_where(args: argparse.Namespace) -> int:
+    """Estate-wide active `LogicalSession` view over HTTP
+    (GET /api/estate/sessions) — the laptop-side equivalent of
+    `agent claude where`, without needing a repo checkout."""
+    cfg = _load_config()
+    result = _request(cfg, "GET", "/api/estate/sessions")
+    if result["status"] in (401, 403):
+        print(f"denied: {result['body']} — token needs estate:read or estate:execute scope")
+        return 1
+    print(json.dumps(result["body"], indent=2))
+    return 0 if result["status"] == 200 else 1
+
+
+def _estate_routing_skill_md() -> str:
+    return (
+        "---\n"
+        "name: aoteru-estate-routing\n"
+        "description: Route a task to an Aoteru estate worker (lab/home) "
+        "via `aoteru auto|lab|home \"<task>\"`, or list active sessions "
+        "via `aoteru where`. Use when the user wants work executed on a "
+        "specific estate machine instead of locally — works from any "
+        "repo/session on this laptop, no local Odysseus checkout needed.\n"
+        "---\n\n"
+        "Checkout-free wrapper over the laptop's `aoteru` client "
+        "(companion/laptop_client/aoteru.py, pipx-installed as `aoteru`) "
+        "— never a second router or authority. It only talks to the "
+        "estate's Odysseus backend over HTTP; never hardcode a hostname, "
+        "path, repo map, model name, or credential here — always resolve "
+        "through the live `aoteru` command's own output.\n\n"
+        "- `aoteru auto \"<task>\" [--repo <id>] [--capability <alias>]` "
+        "— resolve the best available host from live estate state and "
+        "execute.\n"
+        "- `aoteru lab \"<task>\" [...]` — force routing to the lab "
+        "worker; fails truthfully (does not silently fall back elsewhere) "
+        "if lab isn't eligible.\n"
+        "- `aoteru home \"<task>\" [...]` — force routing to the home "
+        "worker; fails truthfully when home is unavailable or not yet "
+        "eligible (e.g. not benchmark-qualified) — report that plainly, "
+        "never invent a result.\n"
+        "- `aoteru where` — list active logical estate sessions.\n\n"
+        "This executes via the estate's model-routing backend "
+        "(LLM completion against a resolved local/paid model), not a "
+        "native interactive Claude Code session launched on that remote "
+        "host — that separate remote-dispatch feature does not exist on "
+        "the backend yet; say so plainly if a task genuinely needs it "
+        "rather than treating this as equivalent.\n\n"
+        "Read the JSON the command prints. On `\"ok\": false` or a "
+        "nonzero exit, report the exact error — do not retry silently and "
+        "do not fabricate a successful outcome.\n\n"
+        "Once inside a resolved repo/worktree, that repo's own "
+        "CLAUDE.md/AGENTS.md and rules take precedence over this skill's "
+        "own convenience.\n"
+    )
+
+
+def cmd_sync(args: argparse.Namespace) -> int:
+    """Installs/refreshes the checkout-free `aoteru-estate-routing` skill
+    (execution contract: "one user-scoped, Odysseus-owned Claude skill
+    ... installed by `agent sync`" — this is that installer's laptop-side,
+    checkout-free equivalent; `scripts/agent`'s `agent sync` remains the
+    lab-side installer for hosts that do have a checkout)."""
+    skill_dir = Path.home() / ".claude" / "skills" / "aoteru-estate-routing"
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    content = _estate_routing_skill_md()
+    (skill_dir / "SKILL.md").write_text(content)
+    print(json.dumps({"ok": True, "written": str(skill_dir / "SKILL.md")}, indent=2))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="aoteru", description=__doc__.split("\n\n")[0])
     sub = parser.add_subparsers(dest="command", required=True)
@@ -295,6 +395,24 @@ def build_parser() -> argparse.ArgumentParser:
                         help="opt in to paid (Codex) escalation if local capability is unbound/unavailable")
     p_ask.add_argument("--timeout", type=float, default=120.0)
 
+    for mode, mode_help in (
+        ("auto", "resolve + execute a task on the best available estate host"),
+        ("lab", "resolve + execute a task, forced to the lab worker"),
+        ("home", "resolve + execute a task, forced to the home worker"),
+    ):
+        p_mode = sub.add_parser(mode, help=mode_help)
+        p_mode.add_argument("task")
+        p_mode.add_argument("--task-class", default="unclassified")
+        p_mode.add_argument("--repo", default=None)
+        p_mode.add_argument("--capability", default=None)
+        p_mode.add_argument("--allow-paid", action="store_true",
+                             help="opt in to paid (Codex) escalation if local capability is unbound/unavailable")
+        p_mode.add_argument("--timeout", type=float, default=120.0)
+
+    sub.add_parser("where", help="list active logical estate sessions")
+
+    sub.add_parser("sync", help="install/refresh the aoteru-estate-routing Claude skill")
+
     return parser
 
 
@@ -310,6 +428,11 @@ def main(argv: list[str] | None = None) -> int:
         "park": cmd_park,
         "heartbeat": cmd_heartbeat,
         "release": cmd_release,
+        "auto": cmd_dispatch,
+        "lab": cmd_dispatch,
+        "home": cmd_dispatch,
+        "where": cmd_where,
+        "sync": cmd_sync,
     }
     return handlers[args.command](args)
 

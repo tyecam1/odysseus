@@ -77,17 +77,33 @@ class TaskEnvelopeRequirements(BaseModel):
     context_tokens: Optional[int] = None
 
 
+class TaskEnvelopePlacement(BaseModel):
+    """BUG FIX (found this session, laptop routing-skill UX gap):
+    `src.estate_router.resolve_route` has read `task["placement"]
+    ["requested_host"]` (the `auto`/`lab`/`home` forced-host mode) since
+    it was written, but this HTTP envelope never declared a `placement`
+    field — pydantic v2 silently drops unknown input keys by default, so
+    every HTTP caller's `placement.requested_host` was discarded before
+    `resolve_route` ever saw it, identical in shape to the `objective`-
+    field regression documented on `RunTaskEnvelope` below. Only reachable
+    directly (Python callers importing `resolve_route`/`run_task`), never
+    over HTTP, until this field existed."""
+    requested_host: Optional[str] = None
+
+
 class TaskEnvelope(BaseModel):
     """Accepts the full canonical envelope shape (docs/aoteru-model-host-
     routing-contract.md "Canonical task envelope") but only task_class,
-    repo, and requirements.capabilities are used by this lab-first
-    implementation — everything else is accepted and ignored rather than
-    rejected, so callers can send the real envelope now."""
+    repo, requirements.capabilities, and placement.requested_host are used
+    by this lab-first implementation — everything else is accepted and
+    ignored rather than rejected, so callers can send the real envelope
+    now."""
     task_class: str = "unclassified"
     repo: Optional[str] = None
     complexity: Optional[str] = None
     consequence: Optional[str] = None
     requirements: TaskEnvelopeRequirements = Field(default_factory=TaskEnvelopeRequirements)
+    placement: TaskEnvelopePlacement = Field(default_factory=TaskEnvelopePlacement)
 
 
 class RunTaskEnvelope(TaskEnvelope):
@@ -182,6 +198,17 @@ def setup_estate_routing_routes() -> APIRouter:
         if row is None:
             raise HTTPException(404, f"no routing decision found with id {decision_id!r}")
         return row
+
+    @router.get("/sessions")
+    async def list_sessions(request: Request):
+        """HTTP surface for `agent claude where` (P5, "Laptop Claude
+        routing skill — required UX": the laptop's `where` mode). The
+        checkout-free laptop client (companion/laptop_client/aoteru.py)
+        has no local `core.database` to query directly — same gap
+        `/api/estate/park/status` already closed for park leases."""
+        _scope_owner(request, {"estate:read", "estate:execute"})
+        from src.estate_router import active_logical_sessions
+        return {"active_sessions": _route_call(active_logical_sessions)}
 
     @router.get("/park/status")
     async def park_status(request: Request):
