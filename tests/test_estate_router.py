@@ -911,6 +911,36 @@ def test_scenario_a_implementation_mode_dispatches_codex_write_under_active_leas
     assert recorded_outcome["verification_outcome"] == "pass"
 
 
+def test_record_decision_rejects_invalid_nondelegation_reason_even_off_preflight_path(fixture_config):
+    """`/api/estate/route` and `/api/estate/run` accept `nondelegation_reason`
+    on the raw envelope (routes/estate_routing_routes.py) without routing
+    through `delegation_preflight`'s validation — `_record_decision` must
+    re-validate itself so a caller can't stamp an arbitrary/junk reason
+    onto telemetry by skipping `/api/estate/preflight`."""
+    from src.routing_evaluator import get_decision_by_id
+
+    junk_id = estate_router._record_decision(
+        {"task_class": "audit", "nondelegation_reason": "because I said so"},
+        host_id="test-lab", executor="deterministic", model_alias=None,
+        concrete_model=None, status="complete",
+    )
+    assert get_decision_by_id(junk_id)["nondelegation_reason"] is None
+
+    fixed_id = estate_router._record_decision(
+        {"task_class": "audit", "nondelegation_reason": "architecture_judgement"},
+        host_id="test-lab", executor="deterministic", model_alias=None,
+        concrete_model=None, status="complete",
+    )
+    assert get_decision_by_id(fixed_id)["nondelegation_reason"] == "architecture_judgement"
+
+    freeform_id = estate_router._record_decision(
+        {"task_class": "audit", "nondelegation_reason": "other: bespoke evidence-backed reason"},
+        host_id="test-lab", executor="deterministic", model_alias=None,
+        concrete_model=None, status="complete",
+    )
+    assert get_decision_by_id(freeform_id)["nondelegation_reason"] == "other: bespoke evidence-backed reason"
+
+
 def test_implementation_mode_without_active_lease_hard_fails(fixture_config, monkeypatch, tmp_path):
     repo_path = tmp_path / "test-repo"
     repo_path.mkdir()

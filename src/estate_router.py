@@ -355,8 +355,20 @@ def _record_decision(task: dict, *, host_id, executor, model_alias, concrete_mod
     the telemetry write failed (DB unavailable, disk full, a threading/
     pooling quirk under a test's in-memory SQLite). Logged, not silently
     swallowed: a caller that actually needs to know telemetry didn't
-    persist can check for the `decision-unrecorded-` id prefix."""
+    persist can check for the `decision-unrecorded-` id prefix.
+
+    `nondelegation_reason` is re-validated here, not trusted from the
+    caller — `delegation_preflight`'s own validation only guards its own
+    `/api/estate/preflight` entry point; a caller reaching this function
+    through `resolve_route`/`run_task` (`/api/estate/route`,
+    `/api/estate/run`) directly must not be able to stamp an unvalidated
+    or junk reason onto telemetry and have it read as a legitimate
+    controller retention (task's completion gate #5: the reason must be
+    genuine, not merely present)."""
     from core.database import RoutingDecision, get_db_session
+    from src.delegation_preflight import _valid_nondelegation_reason
+    raw_reason = task.get("nondelegation_reason")
+    nondelegation_reason = raw_reason.strip() if _valid_nondelegation_reason(raw_reason) else None
     decision_id = str(uuid.uuid4())
     try:
         with get_db_session() as db:
@@ -369,7 +381,7 @@ def _record_decision(task: dict, *, host_id, executor, model_alias, concrete_mod
                 executor=executor,
                 model_alias=model_alias,
                 concrete_model=concrete_model,
-                nondelegation_reason=task.get("nondelegation_reason"),
+                nondelegation_reason=nondelegation_reason,
                 recommended_route=task.get("recommended_route"),
                 actual_route=task.get("actual_route"),
                 status=status,
