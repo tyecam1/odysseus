@@ -40,9 +40,14 @@ not before.
       record, no drift."
     - "aoteru park-status at session start: active_park_leases: []."
     - "GitHub code search (default branch dev) for SourceEvent, instagram,
-      whatsapp, ingest across tyecam1/odysseus: 0 hits — P1-P6 are
-      genuinely greenfield, no duplicate/parallel implementation exists to
-      reconcile against."
+      whatsapp, ingest across tyecam1/odysseus: 0 hits at audit time.
+      CORRECTED after P1: a SourceEvent model already existed in
+      core/database.py from a prior P4 memory-provenance workstream —
+      GitHub's code-search index was stale/lagging, not the repo. Lesson
+      recorded here: GitHub code search is not reliable ground truth for
+      this audit; direct file reads are. instagram/whatsapp/ingest-parsing
+      code genuinely does not exist yet (confirmed by direct inspection of
+      the P1 diff and core/database.py, not by search)."
     - "config/repositories.yaml already registers odysseus (canonical),
       misumi (authority misumi, remote confirmed), obsidian-phd (authority
       obsidian-phd, remote confirmed) — no new repository-registry work
@@ -83,7 +88,7 @@ not before.
 - id: P1-source-event-adapter-contract
   outcome: one bounded adapter contract emits existing Odysseus SourceEvent
     idempotently
-  status: active
+  status: complete
   depends_on: [P0-live-reconciliation-bootstrap]
   acceptance_tests:
     - same logical import twice does not duplicate
@@ -100,25 +105,71 @@ not before.
     - "Repo lease acquired via aoteru park odysseus --branch
       feat/external-ingest-source-event-p1 -> lease_id
       20d4db50-d475-453b-b2b4-56f106dbbee8, host hz2-workstation, worktree
-      /home/agent/projects/odysseus-aoteru."
+      /home/agent/projects/odysseus-aoteru. Released after acceptance."
     - "Bounded worker packet dispatched (single mutable worker, no swarm)
-      to a Claude implementation lane (remote isolated environment) after
-      the local code-fast lane was confirmed non-agentic (see P0
-      evidence) — this is the recorded insufficient_capability escalation
+      to a Claude implementation lane after the local code-fast lane was
+      empirically confirmed non-agentic (single-shot text completion, no
+      file-write tool) — recorded insufficient_capability escalation
       trigger, not a default choice."
-  commits: []
+    - "DISCOVERED CONSTRAINT: requesting isolation:remote on the worker
+      did not actually run it in a remote cloud environment — it wrote to
+      C:\\Users\\tyeca\\odysseus-work on this laptop, violating the
+      operator's explicit no-local-checkout instruction. Detected this
+      checkpoint by independently checking the reported file paths (not
+      trusting the worker's self-report), the local checkout was removed
+      immediately (git status confirmed everything was already committed
+      and pushed to origin, nothing lost), and it is recorded here as a
+      real product-behaviour boundary for this environment, not an
+      assumption: isolation:remote cannot currently be trusted to avoid
+      touching this laptop's disk, so future implementation-lane
+      dispatches must verify/clean up the same way rather than assume
+      isolation held."
+    - "Independent foreman verification (not the worker's self-report):
+      gh api compare dev...feat/external-ingest-source-event-p1 confirmed
+      diff scope is exactly the 4 declared files (core/database.py +80-2,
+      scripts/update_database.py +73-2, src/source_events.py +172 new,
+      tests/test_source_events.py +148 new). Full patch read directly by
+      the foreman: SourceEvent model extended additively (payload_ref,
+      received_at, status, prior_content_hash, revision_count) rather
+      than creating a colliding duplicate table — a pre-existing
+      SourceEvent/source_events table from a prior P4 memory-provenance
+      workstream was reused, consistent with the programme's
+      no-duplicated-raw-source-authority invariant. Idempotency via a
+      partial unique index on (source, external_id) (sqlite_where
+      external_id IS NOT NULL, so legacy chat/import rows are
+      unaffected). record_source_event() normalizes+sha256-hashes
+      content, never persists raw content, raises
+      SourceEventValidationError (ValueError subclass) on missing
+      source/external_id/empty content. Tests read directly by the
+      foreman: parametrized malformed-input cases, duplicate-identical
+      no-op, multi-step revision trail (prior_content_hash/revision_count
+      incrementing across 3 revisions), round-trip field preservation,
+      and an explicit never-stores-raw-content assertion."
+    - "pytest tests/test_source_events.py tests/test_update_database_script.py
+      -q: 17 passed (worker-reported, cross-checked by the foreman reading
+      the actual test file content and finding the assertions genuine and
+      non-trivial, not placeholder tests)."
+    - "PR opened for human review/merge:
+      https://github.com/tyecam1/odysseus/pull/25 (base dev, head
+      feat/external-ingest-source-event-p1). Not merged autonomously —
+      merging to dev is left as an operator action."
+  commits:
+    - a7cf330561607693ab093545354af476e6214d2d
   remaining_risks:
-    - "Worker result not yet inspected this checkpoint; V0 deterministic
-      verification (pytest + ast parse + diff-scope check) still to be
-      run by the foreman against the actual returned diff before this
-      phase can move to complete."
-  human_action: none
-  next_action: >-
-    On worker completion: run V0 deterministic verification against the
-    real branch state (not the worker's self-report), then either accept
-    + release the park lease + update this record with commit SHA, or
-    revise/re-scope/escalate per the worker packet's forbidden_actions and
-    the programme contract's stop conditions.
+    - "PR #25 not yet merged — P2 should not assume the SourceEvent
+      contract is on dev until this merges. If P2 work needs
+      src/source_events.py, branch it from
+      feat/external-ingest-source-event-p1 or wait for merge, not from
+      dev directly."
+    - "isolation:remote reliability gap (see evidence above) applies to
+      every future implementation-lane dispatch in this programme until
+      the underlying Claude Code product behaviour is confirmed fixed;
+      logged as product feedback separately from this programme."
+  human_action: >-
+    Review and merge (or request changes on) PR #25 when convenient — not
+    blocking further programme work, since P2 can branch from
+    feat/external-ingest-source-event-p1 if needed.
+  next_action: P2 smallest slice materialised below.
   last_verified_commit: 3a87800
 
 - id: P2-instagram-export-importer
@@ -126,24 +177,42 @@ not before.
     a real/representative Meta Download Your Information export
     reconstructs Saved-item inventory sufficiently for selected collection
     routing
-  status: pending
+  status: active
   depends_on: [P1-source-event-adapter-contract]
   acceptance_tests:
     - schema-fixture tests only, no live scraping
     - collection membership, stable identifiers/pointers, timestamps,
       declarative domain mapping, idempotency, visible schema-drift
       failure
-  evidence: []
+  evidence:
+    - "P1 accepted this checkpoint (commit a7cf3305, PR #25) — P2 is now
+      the immediately-unblocked next task per the contract's
+      materialise-only-current-plus-unblocked-next rule."
+    - "Smallest safe P2 slice does not need a real Meta export or
+      operator credentials: a synthetic, schema-representative fixture
+      (built from Meta's publicly documented DYI JSON export shape, not
+      real personal data) is sufficient to prove the schema-fixture
+      acceptance tests. Real/actual personal export files remain a
+      separate future batched human action only if/when the synthetic
+      fixture proves insufficient."
+    - "Task packet dispatched this checkpoint to a Claude implementation
+      lane, branched from feat/external-ingest-source-event-p1 (not dev,
+      since PR #25 is unmerged — see P1 remaining_risks) as
+      feat/external-ingest-instagram-importer-p2, calling
+      src/source_events.py.record_source_event() per saved item, with a
+      synthetic tests/fixtures/instagram_saved_posts_sample.json and
+      schema-drift/idempotency/collection-mapping tests."
   commits: []
   remaining_risks:
-    - "Needs a representative Meta DYI export fixture — not yet a batched
-      human action since P1 is not complete and no fixture has been
-      requested yet; will be batched when P2 is materialised."
+    - "Synthetic fixture is representative-by-documentation, not a real
+      export — P7 (real-data calibration) is the phase that validates
+      against actual captured material; do not treat P2's synthetic-
+      fixture pass as proof the real Meta export format matches exactly."
   human_action: none yet
   next_action: >-
-    Do not materialise beyond this phase specification until P1 is
-    complete and verified — per contract, materialise only the current
-    task and immediately unblocked next tasks.
+    Verify worker result independently (diff scope + direct code/test
+    read, same method as P1) once it returns, then accept/PR/checkpoint
+    or revise per stop conditions.
   last_verified_commit: 3a87800
 
 - id: P3-P10
