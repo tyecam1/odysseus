@@ -37,6 +37,7 @@ from typing import Optional
 import yaml
 
 from src.runtime_paths import get_app_root
+from src.park_lease_ops import active_lease_for_repo
 
 _CONFIG_DIR = Path(get_app_root()) / "config"
 
@@ -127,7 +128,8 @@ def resolve_repo_path(repo_id: str) -> Optional[str]:
     root = host_local.get(var)
     if not root:
         return None
-    resolved = template.replace(f"${{{var}}}", root)
+    suffix = template[match.end():].lstrip("/\\")
+    resolved = str(Path(root) / Path(suffix))
     return resolved if Path(resolved).exists() else None
 
 
@@ -367,6 +369,9 @@ def _record_decision(task: dict, *, host_id, executor, model_alias, concrete_mod
                 executor=executor,
                 model_alias=model_alias,
                 concrete_model=concrete_model,
+                nondelegation_reason=task.get("nondelegation_reason"),
+                recommended_route=task.get("recommended_route"),
+                actual_route=task.get("actual_route"),
                 status=status,
             ))
     except Exception:
@@ -382,12 +387,18 @@ _UNVERIFIABLE_BUDGET_FIELDS = (
 )
 
 
-def resolve_route(task: dict) -> dict:
+def resolve_route(task: dict, *, record_decision: bool = True) -> dict:
     """The routing API: canonical task envelope in, route out (docs/
     aoteru-model-host-routing-contract.md's "Canonical task envelope" /
     acceptance criterion #1). Resolves host before model (invariant 2).
     Records the decision to `routing_decisions` regardless of outcome —
     even a failed/blocked resolution is telemetry.
+
+    `record_decision=False` is reserved for delegation preflight, which
+    inspects a prospective route without creating a duplicate unit row;
+    the later `run_task` dispatch records the actual recommendation and
+    outcome. Controller-retained preflight units are recorded directly by
+    the preflight module because no worker dispatch follows them.
 
     Recognizes, beyond `task_class`/`repo`/`requirements.capabilities`:
 
@@ -428,10 +439,13 @@ def resolve_route(task: dict) -> dict:
             decision_id = _record_decision(
                 task, host_id=None, executor="none", model_alias=None,
                 concrete_model=None, status="blocked",
-            )
+            ) if record_decision else None
             return {
                 "ok": False,
                 "error": f"requested host {requested_host!r} is not eligible",
+                "reason": f"requested host {requested_host!r} failed live eligibility checks",
+                "verification_outcome": None,
+                "escalation_reason": "worker_failed",
                 "hosts_checked": hosts,
                 "decision_id": decision_id,
             }
@@ -441,10 +455,13 @@ def resolve_route(task: dict) -> dict:
         decision_id = _record_decision(
             task, host_id=None, executor="none", model_alias=None,
             concrete_model=None, status="blocked",
-        )
+        ) if record_decision else None
         return {
             "ok": False,
             "error": "no eligible host",
+            "reason": "no lab/home worker passed the live host eligibility checks",
+            "verification_outcome": None,
+            "escalation_reason": "worker_failed",
             "hosts_checked": hosts,
             "decision_id": decision_id,
         }
@@ -504,7 +521,15 @@ def resolve_route(task: dict) -> dict:
     decision_id = _record_decision(
         task, host_id=host["host_id"], executor=executor, model_alias=alias,
         concrete_model=alias_result.get("concrete_model"), status=status,
-    )
+    ) if record_decision else None
+
+    if executor == "deterministic":
+        route_reason = f"{host['host_id']} is eligible; no model capability was requested"
+    elif executor == "local":
+        route_reason = f"{host['host_id']} is eligible; all requested aliases resolve to live local models"
+    else:
+        unresolved = next((r.get("reason") for r in capability_resolutions if not r.get("resolved")), None)
+        route_reason = f"{host['host_id']} is eligible; local capability needs escalation: {unresolved or 'constraint failed'}"
 
     result = {
         "ok": status != "needs_escalation",
@@ -513,7 +538,15 @@ def resolve_route(task: dict) -> dict:
             "executor": executor,
             "model_alias": alias,
             "concrete_model": alias_result.get("concrete_model"),
+            "reason": route_reason,
         },
+        "reason": route_reason,
+        "verification_outcome": None,
+        "escalation_reason": (
+            "quality_floor_not_met" if quality_floor_error else
+            "context_limit" if context_error else
+            "insufficient_capability" if status == "needs_escalation" else None
+        ),
         "hosts_checked": hosts,
         "alias_resolution": alias_result,
         "capability_resolutions": capability_resolutions,
@@ -532,7 +565,9 @@ def resolve_route(task: dict) -> dict:
 
 def _update_decision_outcome(decision_id: str, *, status: str, deterministic_gate: str,
                              latency_ms: Optional[int] = None, escalation_reason: Optional[str] = None,
-                             executor: Optional[str] = None, escalated: Optional[bool] = None) -> None:
+                             executor: Optional[str] = None, escalated: Optional[bool] = None,
+                             actual_route: Optional[str] = None,
+                             verification_outcome: Optional[str] = None) -> None:
     """Execution happens after `resolve_route()` already wrote its
     decision row — update that same row with the real outcome rather than
     writing a second telemetry row for one routed task (`RoutingDecision`
@@ -557,6 +592,10 @@ def _update_decision_outcome(decision_id: str, *, status: str, deterministic_gat
                     row.executor = executor
                 if escalated is not None:
                     row.escalated = escalated
+                if actual_route is not None:
+                    row.actual_route = actual_route
+                if verification_outcome is not None:
+                    row.verification_outcome = verification_outcome
     except Exception:
         import logging
         logging.getLogger(__name__).exception("routing_decisions outcome update failed; execution result is unaffected")
@@ -691,25 +730,22 @@ def _codex_available() -> tuple[bool, str]:
     return True, binary
 
 
-def execute_codex(objective: str, *, timeout: float = 180.0, cwd: Optional[str] = None) -> dict:
-    """The provider-neutral paid worker mechanism (P12.3): smallest
-    extension of the existing `codex` CLI already installed/authenticated
-    on this host, selected by this router the same way `execute_local`
-    is — not a second orchestrator. Runs bounded and read-only
-    (`--sandbox read-only`, `--ephemeral`, no persisted session state) so
-    a paid escalation can never itself become an unreviewed mutation;
-    P3's parking/lease authority still gates any real repo mutation a
-    human/task later decides to make from codex's answer. Every failure
-    mode (binary missing, not authenticated, timeout, non-zero exit) is
-    returned as a clean `{"ok": False, "error": ...}`, matching
-    `execute_local`'s truthful-failure convention rather than raising."""
+def _execute_codex_with_sandbox(objective: str, *, sandbox: str, provider: str,
+                                timeout: float = 180.0, cwd: Optional[str] = None) -> dict:
+    """Share bounded CLI mechanics without making sandbox choice policy.
+
+    Only the public advisory/write functions choose the sandbox. Keeping
+    credential checks, ephemeral execution, timeout, and error handling in
+    one place prevents the narrow write lane drifting from the established
+    paid-worker behavior.
+    """
     import subprocess
     import tempfile
     import time
 
     available, detail = _codex_available()
     if not available:
-        return {"ok": False, "error": f"codex unavailable: {detail}", "provider": "codex"}
+        return {"ok": False, "error": f"codex unavailable: {detail}", "provider": provider}
     codex_binary = detail  # _codex_available() returns the resolved binary path on success
 
     started = time.monotonic()
@@ -719,7 +755,7 @@ def execute_codex(objective: str, *, timeout: float = 180.0, cwd: Optional[str] 
             proc = subprocess.run(
                 [
                     codex_binary, "exec",
-                    "--sandbox", "read-only",
+                    "--sandbox", sandbox,
                     "--ephemeral",
                     "--skip-git-repo-check",
                     "-C", cwd or scratch,
@@ -731,19 +767,70 @@ def execute_codex(objective: str, *, timeout: float = 180.0, cwd: Optional[str] 
             latency_ms = int((time.monotonic() - started) * 1000)
             if proc.returncode != 0:
                 return {
-                    "ok": False, "provider": "codex", "latency_ms": latency_ms,
+                    "ok": False, "provider": provider, "latency_ms": latency_ms,
                     "error": f"codex exec exited {proc.returncode}: {(proc.stderr or '')[-500:]}",
                     "codex_binary": codex_binary,
                 }
             output = Path(out_path).read_text().strip() if Path(out_path).exists() else ""
-            return {"ok": True, "provider": "codex", "output": output, "latency_ms": latency_ms,
+            return {"ok": True, "provider": provider, "output": output, "latency_ms": latency_ms,
                     "codex_binary": codex_binary}
         except subprocess.TimeoutExpired:
-            return {"ok": False, "provider": "codex", "error": f"codex exec timed out after {timeout}s",
+            return {"ok": False, "provider": provider, "error": f"codex exec timed out after {timeout}s",
                     "latency_ms": int((time.monotonic() - started) * 1000)}
         except Exception as e:
-            return {"ok": False, "provider": "codex", "error": str(e),
+            return {"ok": False, "provider": provider, "error": str(e),
                     "latency_ms": int((time.monotonic() - started) * 1000)}
+
+
+def execute_codex(objective: str, *, timeout: float = 180.0, cwd: Optional[str] = None) -> dict:
+    """Run the existing paid Codex lane as bounded, read-only advice.
+
+    This remains the default escalation contract: bounded, ephemeral, and
+    `--sandbox read-only`, so existing callers receive advisory output and
+    cannot mutate a repo. It does not rely on a ParkLease; implementation
+    authority is isolated in `execute_codex_write`.
+    """
+    return _execute_codex_with_sandbox(
+        objective, sandbox="read-only", provider="codex", timeout=timeout, cwd=cwd,
+    )
+
+
+def _codex_write_authority(repo_id: str, host_id: str) -> dict:
+    """Resolve the repo and prove its existing lease without acquiring one."""
+    repo_cwd = resolve_repo_path(repo_id)
+    if repo_cwd is None:
+        return {"ok": False, "error": f"implementation mode cannot resolve registered repo {repo_id!r} on this host"}
+    lease = active_lease_for_repo(repo_id, host_id)
+    if lease is None:
+        return {
+            "ok": False,
+            "error": f"implementation mode requires an active non-stale lease for {repo_id!r} held by {host_id!r}",
+        }
+    if lease.get("allowed_write_scope") != "repo":
+        return {"ok": False, "error": f"active lease for {repo_id!r} does not grant repo write scope"}
+    if Path(lease["worktree_path"]).resolve() != Path(repo_cwd).resolve():
+        return {"ok": False, "error": f"active lease worktree for {repo_id!r} does not match its resolved repo path"}
+    return {"ok": True, "cwd": repo_cwd, "lease_id": lease["lease_id"]}
+
+
+def execute_codex_write(objective: str, *, repo_id: str, host_id: str,
+                        timeout: float = 180.0) -> dict:
+    """Run Codex workspace-write inside a previously validated lease.
+
+    This function independently proves the active lease and resolved
+    worktree so direct Python callers cannot bypass `run_task`'s gate. It
+    deliberately cannot acquire or broaden write authority.
+    """
+    authority = _codex_write_authority(repo_id, host_id)
+    if not authority["ok"]:
+        return {
+            "ok": False, "provider": "codex-write",
+            "authority_denied": True, "error": authority["error"],
+        }
+    return _execute_codex_with_sandbox(
+        objective, sandbox="workspace-write", provider="codex-write", timeout=timeout,
+        cwd=authority["cwd"],
+    )
 
 
 # Provider dispatch table (Workstream C: "cheap/strong paid capability
@@ -762,6 +849,7 @@ def execute_codex(objective: str, *, timeout: float = 180.0, cwd: Optional[str] 
 # same way they already monkeypatch `execute_local`; binding the object
 # here at import time would silently stop honouring that patch.
 _PAID_PROVIDER_FUNCTION_NAMES = {"codex": "execute_codex"}
+_PAID_PROVIDER_WRITE_FUNCTION_NAMES = {"codex": "execute_codex_write"}
 
 
 def _resolve_paid_provider(alias: Optional[str]) -> dict:
@@ -820,20 +908,36 @@ def run_task(task: dict) -> dict:
     docstring. All current capability aliases, including `vision`, now
     traverse this one route/job/telemetry path; a caller no longer needs
     to bypass to `resolve_route()` + `llm_call` directly for image input.
+
+    `routing.mode: implementation` selects the separate Codex workspace-
+    write lane only after this host proves it already holds a live repo
+    lease. Missing repo, path, host identity, or lease fails closed; the
+    advisory paid lane above remains unchanged when mode is absent.
     """
+    task = dict(task)
+    if not task.get("recommended_route"):
+        from src.delegation_preflight import recommended_lane_for_task
+        task["recommended_route"] = recommended_lane_for_task(task)
     route = resolve_route(task)
     executor = (route.get("route") or {}).get("executor")
     if executor != "local":
-        allow_paid = (task.get("routing") or {}).get("allow_paid_escalation")
+        routing = task.get("routing") or {}
+        allow_paid = routing.get("allow_paid_escalation")
+        implementation_mode = routing.get("mode") == "implementation"
         if route.get("route", {}).get("executor") == "none" and route.get("decision_id") \
                 and allow_paid and (task.get("objective") is not None):
             provider_choice = _resolve_paid_provider(route["route"].get("model_alias"))
             provider_name = provider_choice.get("provider")
-            provider_fn_name = _PAID_PROVIDER_FUNCTION_NAMES.get(provider_name)
+            provider_functions = (
+                _PAID_PROVIDER_WRITE_FUNCTION_NAMES if implementation_mode
+                else _PAID_PROVIDER_FUNCTION_NAMES
+            )
+            provider_fn_name = provider_functions.get(provider_name)
             provider_fn = globals().get(provider_fn_name) if provider_fn_name else None
             if provider_name is None or provider_fn is None:
                 return {**route, "executed": False, "execution_error": provider_choice.get(
-                    "reason", f"paid provider {provider_name!r} has no implementation",
+                    "reason", f"paid provider {provider_name!r} has no "
+                    f"{'write ' if implementation_mode else ''}implementation",
                 )}
             objective = task.get("objective")
             paid_objective = objective if isinstance(objective, str) else str(objective)
@@ -849,7 +953,48 @@ def run_task(task: dict) -> dict:
             # override) for an unknown/unresolved repo id rather than
             # guessing a path.
             repo_cwd = resolve_repo_path(task.get("repo")) if task.get("repo") else None
-            result = provider_fn(paid_objective, cwd=repo_cwd)
+            executor_name = provider_name
+            if implementation_mode:
+                executor_name = f"{provider_name}-write"
+                error = None
+                repo_id = task.get("repo")
+                host_id = current_host_id()
+                if not repo_id:
+                    error = "implementation mode requires task.repo and an existing active write lease"
+                elif host_id is None:
+                    error = "implementation mode requires this backend host to be registered in config/estate.yaml"
+                elif route["route"].get("host") != host_id:
+                    error = (
+                        f"implementation route selected {route['route'].get('host')!r}, but the "
+                        f"write executor runs on lease holder {host_id!r}"
+                    )
+                if error:
+                    _update_decision_outcome(
+                        route["decision_id"], status="blocked", deterministic_gate="fail",
+                        escalation_reason="write_lease_missing", escalated=True,
+                        verification_outcome="fail",
+                    )
+                    return {
+                        **route, "ok": False, "executed": False,
+                        "execution_error": error,
+                        "escalation_reason": "write_lease_missing",
+                        "verification_outcome": "fail",
+                    }
+                result = provider_fn(paid_objective, repo_id=repo_id, host_id=host_id)
+                if result.get("authority_denied"):
+                    _update_decision_outcome(
+                        route["decision_id"], status="blocked", deterministic_gate="fail",
+                        escalation_reason="write_lease_missing", escalated=True,
+                        verification_outcome="fail",
+                    )
+                    return {
+                        **route, "ok": False, "executed": False,
+                        "execution_error": result["error"],
+                        "escalation_reason": "write_lease_missing",
+                        "verification_outcome": "fail",
+                    }
+            else:
+                result = provider_fn(paid_objective, cwd=repo_cwd)
             gate = "pass" if result.get("ok") and (result.get("output") or "").strip() else "fail"
             _update_decision_outcome(
                 route["decision_id"],
@@ -857,13 +1002,28 @@ def run_task(task: dict) -> dict:
                 deterministic_gate=gate,
                 latency_ms=result.get("latency_ms"),
                 escalation_reason="insufficient_capability" if gate == "pass" else "worker_failed",
-                executor=provider_name,
+                executor=executor_name,
                 escalated=True,
+                actual_route=executor_name,
+                verification_outcome=gate,
             )
-            route = {**route, "ok": gate == "pass",
-                     "route": {**route["route"], "executor": provider_name,
-                               "concrete_model": provider_choice["concrete_model_label"]}}
-            return {**route, "executed": True, "execution": result, "deterministic_gate": gate}
+            reason = (
+                f"local capability was insufficient; {executor_name} executed on "
+                f"{route['route']['host']}" + (" under the active repo lease" if implementation_mode else " read-only")
+            )
+            route = {
+                **route, "ok": gate == "pass", "reason": reason,
+                "route": {
+                    **route["route"], "executor": executor_name,
+                    "concrete_model": provider_choice["concrete_model_label"],
+                    "reason": reason,
+                },
+            }
+            return {
+                **route, "executed": True, "execution": result,
+                "deterministic_gate": gate, "verification_outcome": gate,
+                "escalation_reason": "insufficient_capability" if gate == "pass" else "worker_failed",
+            }
         return {**route, "executed": False}
 
     concrete_model = route["route"]["concrete_model"]
@@ -879,5 +1039,11 @@ def run_task(task: dict) -> dict:
         deterministic_gate=gate,
         latency_ms=result.get("latency_ms"),
         escalation_reason=None if gate == "pass" else "worker_failed",
+        actual_route="local",
+        verification_outcome=gate,
     )
-    return {**route, "executed": True, "execution": result, "deterministic_gate": gate}
+    return {
+        **route, "executed": True, "execution": result,
+        "deterministic_gate": gate, "verification_outcome": gate,
+        "escalation_reason": None if gate == "pass" else "worker_failed",
+    }

@@ -9,12 +9,13 @@ resolves to at the HTTP layer.
 from __future__ import annotations
 
 import json
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Literal, Optional, Union
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field, field_validator
 
 from src.auth_helpers import require_user
+from src.delegation_preflight import delegation_preflight
 from src.estate_router import (
     RoutingConfigError,
     current_host_id,
@@ -104,6 +105,7 @@ class TaskEnvelope(BaseModel):
     consequence: Optional[str] = None
     requirements: TaskEnvelopeRequirements = Field(default_factory=TaskEnvelopeRequirements)
     placement: TaskEnvelopePlacement = Field(default_factory=TaskEnvelopePlacement)
+    nondelegation_reason: Optional[str] = None
 
 
 class RunTaskEnvelope(TaskEnvelope):
@@ -136,6 +138,7 @@ class RunTaskEnvelope(TaskEnvelope):
     rather than left half-fixed."""
     objective: Optional[Union[str, List[Dict[str, object]]]] = None
     allow_paid_escalation: bool = False
+    mode: Optional[Literal["implementation"]] = None
 
     @field_validator("objective")
     @classmethod
@@ -151,9 +154,25 @@ class RunTaskEnvelope(TaskEnvelope):
         return value
 
     def to_task(self) -> dict:
-        task = self.model_dump(exclude={"allow_paid_escalation"})
+        task = self.model_dump(exclude={"allow_paid_escalation", "mode"})
         task["routing"] = {"allow_paid_escalation": self.allow_paid_escalation}
+        if self.mode is not None:
+            task["routing"]["mode"] = self.mode
         return task
+
+
+class DelegationPreflightUnit(BaseModel):
+    task_class: str
+    repo: Optional[str] = None
+    capabilities: List[str] = Field(default_factory=list)
+    objective: Optional[str] = None
+    requested_route: Optional[Literal["controller_retained"]] = None
+    retain_by_controller: bool = False
+    nondelegation_reason: Optional[str] = None
+
+
+class DelegationPreflightEnvelope(BaseModel):
+    units: List[DelegationPreflightUnit] = Field(min_length=1)
 
 
 def setup_estate_routing_routes() -> APIRouter:
@@ -164,6 +183,11 @@ def setup_estate_routing_routes() -> APIRouter:
         _scope_owner(request, {"estate:read", "estate:execute"})
         task = envelope.model_dump()
         return _route_call(resolve_route, task)
+
+    @router.post("/preflight")
+    async def preflight_task(request: Request, envelope: DelegationPreflightEnvelope):
+        _scope_owner(request, {"estate:read", "estate:execute"})
+        return _route_call(delegation_preflight, [unit.model_dump() for unit in envelope.units])
 
     @router.post("/run")
     async def run_task_route(request: Request, envelope: RunTaskEnvelope):

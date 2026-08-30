@@ -906,6 +906,9 @@ class RoutingDecision(TimestampMixin, Base):
     escalated             = Column(Boolean, nullable=False, default=False)
     escalation_reason     = Column(String, nullable=True)
     verification_outcome  = Column(String, nullable=True)
+    nondelegation_reason  = Column(String, nullable=True)
+    recommended_route     = Column(String, nullable=True)
+    actual_route          = Column(String, nullable=True)
     status                = Column(String, nullable=False)  # complete | blocked | failed | needs_escalation
 
     __table_args__ = (
@@ -2184,6 +2187,28 @@ def _migrate_seed_email_account():
 # Any future migrations or schema changes that temporarily violate foreign-key
 # constraints will fail. To perform such operations, foreign_keys must be
 # temporarily disabled around the migration workflow.
+def _migrate_add_routing_delegation_columns():
+    """Add delegation telemetry without replacing historical decisions."""
+    db_path = _sqlite_db_path(engine.url)
+    if db_path is None or not os.path.exists(db_path):
+        return
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path)
+        columns = [row[1] for row in conn.execute("PRAGMA table_info(routing_decisions)").fetchall()]
+        if not columns:
+            return
+        for name in ("nondelegation_reason", "recommended_route", "actual_route"):
+            if name not in columns:
+                conn.execute(f"ALTER TABLE routing_decisions ADD COLUMN {name} TEXT")
+        conn.commit()
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"routing_decisions delegation migration failed: {e}")
+    finally:
+        if conn:
+            conn.close()
+
+
 def init_db():
     """
     Initialize the database by creating all tables.
@@ -2191,6 +2216,7 @@ def init_db():
     """
     _migrate_model_endpoints()
     Base.metadata.create_all(bind=engine)
+    _migrate_add_routing_delegation_columns()
     # Lock the DB file (and any SQLite sidecars) to 0o600 — it holds bearer-token
     # + bcrypt hashes and encrypted provider keys. POSIX only; safe_chmod no-ops
     # on Windows (ACL-restricted profile dir) and the path helper returns None for

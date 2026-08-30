@@ -162,12 +162,43 @@ def test_ask_sends_allow_paid_escalation_flag(client, monkeypatch):
         return FakeResponse()
     monkeypatch.setattr(client.urllib.request, "urlopen", fake_urlopen)
 
-    rc = client.main(["ask", "do the thing", "--capability", "code-strong", "--allow-paid"])
+    rc = client.main([
+        "ask", "do the thing", "--repo", "odysseus", "--capability", "code-strong",
+        "--allow-paid", "--implementation",
+    ])
     assert rc == 0
     assert captured["url"].endswith("/api/estate/run")
     assert captured["body"]["allow_paid_escalation"] is True
+    assert captured["body"]["mode"] == "implementation"
     assert captured["body"]["requirements"]["capabilities"] == ["code-strong"]
     assert captured["headers"]["Authorization"] == "Bearer ody_x"
+
+
+def test_preflight_sends_task_unit_to_live_estate_endpoint(client, monkeypatch):
+    client.main(["config", "set", "--url", "http://lab:7001", "--token", "ody_x"])
+    captured = {}
+
+    def fake_urlopen(req, timeout=None):
+        captured["url"] = req.full_url
+        captured["body"] = json.loads(req.data.decode())
+        return FakeResponse({
+            "ok": True,
+            "snapshot": {"eligible_hosts": [{"host_id": "test-lab", "eligible": True}]},
+            "units": [{"classification": "codex_eligible", "recommended_route": "codex-write"}],
+        })
+
+    monkeypatch.setattr(client.urllib.request, "urlopen", fake_urlopen)
+    rc = client.main([
+        "preflight", "implement the router", "--task-class", "bounded_code_implementation",
+        "--repo", "odysseus", "--capability", "code-strong",
+    ])
+
+    assert rc == 0
+    assert captured["url"].endswith("/api/estate/preflight")
+    unit = captured["body"]["units"][0]
+    assert unit["objective"] == "implement the router"
+    assert unit["repo"] == "odysseus"
+    assert unit["capabilities"] == ["code-strong"]
 
 
 def test_ask_reports_scope_denial_clearly(client, monkeypatch, capsys):
@@ -423,6 +454,7 @@ def test_sync_writes_skill_md(client, monkeypatch, tmp_path):
     skill_path = fake_home / ".claude" / "skills" / "aoteru-estate-routing" / "SKILL.md"
     assert skill_path.exists()
     content = skill_path.read_text()
+    assert "aoteru preflight" in content
     assert "aoteru auto" in content
     assert "aoteru lab" in content
     assert "aoteru home" in content

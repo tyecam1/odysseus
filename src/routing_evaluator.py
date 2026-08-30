@@ -270,6 +270,71 @@ def load_and_aggregate(*, since: Optional[datetime] = None) -> list[RouteAggrega
     return aggregate_routing_decisions([_AttrDict(d) for d in decisions])
 
 
+def _decision_value(decision, name, default=None):
+    """Read ORM/namespace rows and serialized decision fixtures uniformly."""
+    if isinstance(decision, dict):
+        return decision.get(name, default)
+    return getattr(decision, name, default)
+
+
+def compute_delegation_metrics(decisions: list) -> dict:
+    """Derive delegation outcomes from the extended decision log.
+
+    Rates use only applicable rows as their denominator: verification
+    ignores unattempted checks, while avoidable controller execution uses
+    units whose recommendation was a delegable lane.
+    """
+    eligible_lanes = {"codex_eligible", "remote_compute_eligible"}
+    eligible = [d for d in decisions if _decision_value(d, "recommended_route") in eligible_lanes]
+    retained = [
+        d for d in decisions
+        if _decision_value(d, "actual_route") == "controller"
+        or _decision_value(d, "executor") == "controller"
+    ]
+    dispatched = [
+        d for d in decisions
+        if _decision_value(d, "actual_route") not in (None, "", "controller")
+    ]
+    avoidable = [
+        d for d in retained
+        if _decision_value(d, "recommended_route") in eligible_lanes
+        and not _decision_value(d, "nondelegation_reason")
+    ]
+    codex_eligible = [d for d in decisions if _decision_value(d, "recommended_route") == "codex_eligible"]
+    remote_eligible = [d for d in decisions if _decision_value(d, "recommended_route") == "remote_compute_eligible"]
+    codex_dispatched = [
+        d for d in codex_eligible
+        if str(_decision_value(d, "actual_route", "")).startswith("codex")
+    ]
+    remote_dispatched = [
+        d for d in remote_eligible
+        if _decision_value(d, "actual_route") in {"deterministic", "local", "remote-compute"}
+    ]
+    verified = [d for d in decisions if _decision_value(d, "verification_outcome") is not None]
+    rerouted_or_escalated = [
+        d for d in decisions
+        if _decision_value(d, "escalated", False)
+        or int(_decision_value(d, "retries", 0) or 0) > 0
+        or bool(_decision_value(d, "escalation_reason"))
+    ]
+
+    return {
+        "delegation_eligible_units": len(eligible),
+        "units_dispatched": len(dispatched),
+        "units_retained_by_controller": len(retained),
+        "avoidable_controller_execution_rate": len(avoidable) / len(eligible) if eligible else 0.0,
+        "codex_eligible_units": len(codex_eligible),
+        "codex_dispatched_units": len(codex_dispatched),
+        "remote_compute_eligible_units": len(remote_eligible),
+        "remote_compute_dispatched_units": len(remote_dispatched),
+        "verification_success_rate": (
+            sum(_decision_value(d, "verification_outcome") == "pass" for d in verified) / len(verified)
+            if verified else 0.0
+        ),
+        "reroute_or_escalation_rate": len(rerouted_or_escalated) / len(decisions) if decisions else 0.0,
+    }
+
+
 def get_decision_by_id(decision_id: str) -> Optional[dict]:
     """The 'logs/result pointers surface' Workstream K's next_action asks
     for: every route/run response and RoutingDecision-referencing log
@@ -303,6 +368,9 @@ def get_decision_by_id(decision_id: str) -> Optional[dict]:
             "escalated": row.escalated,
             "escalation_reason": row.escalation_reason,
             "verification_outcome": row.verification_outcome,
+            "nondelegation_reason": row.nondelegation_reason,
+            "recommended_route": row.recommended_route,
+            "actual_route": row.actual_route,
             "status": row.status,
             "created_at": row.created_at.isoformat() if row.created_at else None,
             "updated_at": row.updated_at.isoformat() if row.updated_at else None,
