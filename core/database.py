@@ -808,15 +808,38 @@ class SourceEvent(TimestampMixin, Base):
     __tablename__ = "source_events"
 
     id            = Column(String, primary_key=True, index=True)
-    source        = Column(String, nullable=False, index=True)   # e.g. "chat", "claude-code-session", "import"
+    source        = Column(String, nullable=False, index=True)   # e.g. "chat", "claude-code-session", "import",
+                                                                    # or a future external adapter: "instagram", "whatsapp"
     external_id   = Column(String, nullable=True, index=True)    # stable id in the originating system, if any
-    content_hash  = Column(String, nullable=True, index=True)    # for incremental/idempotent ingest
+    content_hash  = Column(String, nullable=True, index=True)    # sha256 of normalized content, for incremental/idempotent ingest
     domain        = Column(String, nullable=False, default="neutral")  # misumi | obsidian-phd | neutral | ...
     sensitivity   = Column(String, nullable=False, default="normal")
     payload       = Column(Text, nullable=True)  # small pointer/excerpt, not the full source content
 
+    # --- External-ingest adapter contract fields (P1) ---
+    # Added for src/source_events.py's record_source_event(): a small, generic
+    # contract future importers (Instagram, WhatsApp, ...) call. Never store
+    # raw exported media/private message text/secrets here — only a stable
+    # reference + sha256 checksum, same philosophy as src/attachment_refs.py.
+    payload_ref      = Column(Text, nullable=True)     # small pointer/metadata only (e.g. JSON), never raw payload bytes
+    received_at      = Column(DateTime, nullable=True)  # when the adapter received/observed the event upstream
+    status           = Column(String, nullable=False, default="received")  # received | revised
+    # Revision trail: when the same (source, external_id) reappears with a
+    # different content_hash, the prior hash is recorded here (not silently
+    # dropped and not silently overwritten with no trace) and revision_count
+    # is bumped. content_hash always holds the latest value.
+    prior_content_hash = Column(String, nullable=True)
+    revision_count     = Column(Integer, nullable=False, default=0)
+
     __table_args__ = (
         Index('ix_source_events_source_external', 'source', 'external_id'),
+        # Idempotency guard for external-ingest adapters: at most one row per
+        # (source, external_id) among rows that actually carry an external_id.
+        # Partial (sqlite_where) so legacy/internal source_events rows with no
+        # external_id (e.g. "chat") are unaffected — same pattern as
+        # ParkLease.ix_park_leases_active_repo_unique above.
+        Index('ix_source_events_source_external_unique', 'source', 'external_id',
+              unique=True, sqlite_where=text("external_id IS NOT NULL")),
     )
 
 
@@ -2274,6 +2297,61 @@ def init_db():
     _migrate_encrypt_signatures()
     _migrate_encrypt_endpoint_keys()
     _migrate_backfill_task_folders()
+    _migrate_add_source_event_ingest_columns()
+
+
+def _migrate_add_source_event_ingest_columns():
+    """Add the external-ingest adapter columns to source_events (P1):
+    payload_ref, received_at, status, prior_content_hash, revision_count.
+    Additive/idempotent, same guarded ALTER TABLE pattern as every other
+    _migrate_add_* helper in this module. Also (re)creates the partial
+    unique index on (source, external_id) for rows that carry an
+    external_id — skips silently if pre-existing data would violate it,
+    same as the rest of this module treats a failed migration step (warn,
+    don't crash startup)."""
+    import sqlite3
+    db_path = DATABASE_URL.replace("sqlite:///", "")
+    if not os.path.exists(db_path):
+        return
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.execute("PRAGMA table_info(source_events)")
+        columns = [row[1] for row in cursor.fetchall()]
+        if not columns:
+            return
+        additions = [
+            ("payload_ref", "TEXT"),
+            ("received_at", "DATETIME"),
+            ("status", "TEXT DEFAULT 'received'"),
+            ("prior_content_hash", "TEXT"),
+            ("revision_count", "INTEGER DEFAULT 0"),
+        ]
+        added = []
+        for col, coltype in additions:
+            if col not in columns:
+                conn.execute(f"ALTER TABLE source_events ADD COLUMN {col} {coltype}")
+                added.append(col)
+        if added:
+            conn.execute("UPDATE source_events SET status = 'received' WHERE status IS NULL")
+            conn.execute("UPDATE source_events SET revision_count = 0 WHERE revision_count IS NULL")
+            conn.commit()
+            logging.getLogger(__name__).info(f"Migrated: added {added} columns to source_events")
+        try:
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ix_source_events_source_external_unique "
+                "ON source_events(source, external_id) WHERE external_id IS NOT NULL"
+            )
+            conn.commit()
+        except Exception as e:
+            logging.getLogger(__name__).warning(
+                f"source_events (source, external_id) unique index creation skipped: {e}"
+            )
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"source_events ingest-columns migration failed: {e}")
+    finally:
+        if conn:
+            conn.close()
 
 
 def _migrate_backfill_task_folders():
