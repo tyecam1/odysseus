@@ -1,0 +1,63 @@
+{
+  "status": "proposed",
+  "controls_routing": false,
+  "schema_version": 1,
+  "principle": "persona identity is independent of model identity; evaluate the cheapest plausible capability alias first",
+  "personas": {
+    "aoteru": {
+      "task_classes": ["intent-routing", "authority-classification", "coherence-review"],
+      "candidate_capabilities": ["local-fast", "local-strong"],
+      "metrics": ["routing-accuracy", "false-escalation-rate", "authority-classification", "coherence"]
+    },
+    "lelouch": {
+      "task_classes": ["workflow-decomposition", "runbook-execution", "tool-plan-generation"],
+      "candidate_capabilities": ["local-fast", "code-fast"],
+      "metrics": ["sequence-correctness", "precondition-coverage", "schema-adherence", "forbidden-action-rate"]
+    },
+    "kurisu": {
+      "task_classes": ["evidence-extraction", "provenance-classification", "contradiction-synthesis"],
+      "candidate_capabilities": ["local-fast", "local-strong"],
+      "metrics": ["provenance-fidelity", "uncertainty-preservation", "contradiction-recall", "unsupported-assertion-rate"]
+    },
+    "misato": {
+      "task_classes": ["household-care-assistance", "routine-assistance"],
+      "candidate_capabilities": ["local-fast"],
+      "metrics": ["constraint-adherence", "false-escalation-rate", "action-usefulness"]
+    },
+    "jin": {
+      "task_classes": ["music-selection", "record-selection", "event-selection"],
+      "candidate_capabilities": ["local-fast"],
+      "metrics": ["retrieval-grounding", "preference-fit", "unsupported-assertion-rate"]
+    },
+    "sanji": {
+      "task_classes": ["meal-planning", "stock-substitution", "shopping-delta"],
+      "candidate_capabilities": ["local-fast"],
+      "metrics": ["inventory-grounding", "constraint-adherence", "waste-minimisation", "unsupported-ingredient-rate"]
+    },
+    "l": {
+      "task_classes": ["anomaly-diagnosis", "budget-mechanism-diagnosis"],
+      "candidate_capabilities": ["local-fast", "local-strong"],
+      "metrics": ["evidence-chain-fidelity", "false-positive-mechanism-rate", "confidence-calibration"]
+    },
+    "ginko": {
+      "task_classes": ["environment-classification", "plant-classification", "image-observation"],
+      "candidate_capabilities": ["local-fast", "vision"],
+      "metrics": ["observation-grounding", "uncertainty-preservation", "classification-accuracy", "hazard-overclaim-rate"]
+    },
+    "ichigo": {
+      "task_classes": ["urgent-loop-triage", "closure-check"],
+      "candidate_capabilities": ["local-fast"],
+      "metrics": ["urgency-classification", "closure-evidence", "false-closure-rate"]
+    },
+    "giorno": {
+      "task_classes": ["improvement-proposal", "rollback-design"],
+      "candidate_capabilities": ["local-fast", "local-strong"],
+      "metrics": ["proposal-completeness", "observed-need-grounding", "rollback-quality", "overengineering-rate"]
+    },
+    "erwin": {
+      "task_classes": ["priority-ranking", "risk-ranking", "cost-of-delay-ranking"],
+      "candidate_capabilities": ["local-fast", "local-strong"],
+      "metrics": ["ranking-stability", "evidence-coverage", "risk-omission", "false-escalation-rate"]
+    }
+  }
+}
