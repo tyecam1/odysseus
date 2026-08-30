@@ -264,7 +264,30 @@ not before.
     override of a real gate. Do not spend further CI cycles chasing the
     source_events flake without new evidence; it is now well-documented
     for whoever picks it up.
-  last_verified_commit: 3a87800
+
+    OPERATOR DECISION (2026-08-30, resumed session): merge PR #25 as-is;
+    do not spend further programme budget on the source_events pytest
+    flake; record it and the pre-existing gitleaks finding as separate
+    maintenance debt (not this programme's responsibility unless new
+    evidence links them causally); treat Claude isolation:"remote" as
+    permanently unverified/unsafe for host placement — never treat it as
+    proof of remote execution again, use Odysseus routing + positively
+    verified hosts instead. PR #25 squash-merged to dev at
+    96dad17872fb78c184e9b1302977b2248d779b87. This phase is CLOSED.
+
+    MAINTENANCE DEBT (tracked here, not owned by this programme unless
+    it starts blocking a future phase):
+    (1) tests/test_source_events.py intermittently errors with 'no such
+    table: source_events' depending on test-execution order against the
+    repo's shared file-backed SQLite test DB — root cause not confirmed,
+    informational-only CI job (continue-on-error: true, pre-existing
+    repo policy), investigated across 3 CI round-trips this session with
+    temporary diagnostics (removed) before being explicitly told to
+    stop investigating further;
+    (2) gitleaks fails on a pre-existing finding in
+    evals/local_models/results/** from an unrelated 2026-08-22 commit,
+    unrelated to any file this programme has touched.
+  last_verified_commit: 96dad17
 
 - id: P2-instagram-export-importer
   outcome: >-
@@ -317,15 +340,26 @@ not before.
       it's been deleted this checkpoint)."
   human_action: none yet
   next_action: >-
-    Independently verified this checkpoint (diff scope confirmed exactly
-    the 3 declared files; foreman read src/instagram_importer.py,
-    tests/test_instagram_importer.py, and the fixture directly — schema-
-    drift handling, idempotency, collection-membership, and domain-
-    passthrough logic all look sound and the 8 tests assert real,
-    specific things, not placeholders). Holding P2's PR open action
-    until PR #25 (P1) merges to dev, then re-pointing/recreating this
-    branch's PR against dev so its diff is just P2's own 3 files.
-  last_verified_commit: 3a87800
+    PR #25 merged to dev (96dad178). Rebased: created a fresh branch
+    feat/external-ingest-instagram-importer-p2-rebased from dev HEAD
+    (non-destructive — the old feat/external-ingest-instagram-importer-p2
+    branch, based on pre-merge P1 commits, was left untouched rather than
+    force-updated or deleted, since force/delete ref operations are
+    correctly classifier-blocked here) and re-applied the same 3 files
+    (src/instagram_importer.py, tests/fixtures/
+    instagram_saved_posts_sample.json, tests/test_instagram_importer.py)
+    via the GitHub Contents API — no local checkout. Diff-scope
+    reconfirmed clean against the new dev HEAD (exactly these 3 files,
+    zero P1 noise). PR opened: https://github.com/tyecam1/odysseus/pull/29.
+    CI (the same deterministic GitHub Actions pytest job used for P1,
+    not a Claude/Codex dispatch — this is exactly the
+    "cheap/deterministic worker for routine work" lane per operator
+    instruction) is running against it now; check its result before
+    marking this phase complete. The stale feat/external-ingest-
+    instagram-importer-p2 branch (superseded, unmerged, no PR) can be
+    deleted by the operator whenever convenient — left alone here since
+    branch deletion wasn't asked for and costs nothing to leave.
+  last_verified_commit: 96dad17
 
 - id: P3-P10
   outcome: see docs/aoteru-external-knowledge-ingestion-programme.md phase
