@@ -153,23 +153,55 @@ not before.
       https://github.com/tyecam1/odysseus/pull/25 (base dev, head
       feat/external-ingest-source-event-p1). Not merged autonomously —
       merging to dev is left as an operator action."
+    - "V1 independent adversarial review (Codex CLI, cross-provider per
+      the programme's Claude-producer -> Codex-verifier convention):
+      `codex exec` given the full diff + task contract + acceptance tests
+      (not the producer's self-justification), asked to falsify
+      completion. Found 2 CONFIRMED defects and 2 PLAUSIBLE concerns —
+      this is exactly the value V1 review is for; V0 (pytest passing)
+      alone had missed a real production bug. CONFIRMED #1 (severity:
+      high): scripts/update_database.py's add_source_events_table() early-
+      returns when a source_events table already exists (true for every
+      real deployment of this repo, which already has one from an
+      unrelated prior workstream) — so it NEVER adds the new P1 columns
+      via that migration path; record_source_event() would crash with
+      'no column named payload_ref' on a real existing DB migrated only
+      via scripts/update_database.py. CONFIRMED #2: no size cap on
+      caller-supplied metadata -> payload_ref, so the module's own stated
+      small-pointer-only invariant is unenforced. PLAUSIBLE: revision
+      history keeps only one prior hash (not a full multi-revision
+      chain) — within the original task spec's looser wording, judgment
+      call; source/external_id stripped for validation but stored
+      un-stripped, so whitespace-padded variants could create separate
+      rows. Full review saved at
+      scratchpad/codex_review_p1_output.md this session (not committed to
+      the repo — a working artifact, not a durable record; this
+      programme-state entry is the durable summary)."
   commits:
     - a7cf330561607693ab093545354af476e6214d2d
   remaining_risks:
-    - "PR #25 not yet merged — P2 should not assume the SourceEvent
-      contract is on dev until this merges. If P2 work needs
-      src/source_events.py, branch it from
-      feat/external-ingest-source-event-p1 or wait for merge, not from
-      dev directly."
-    - "isolation:remote reliability gap (see evidence above) applies to
+    - "PR #25 not yet merged, and now has a known confirmed migration bug
+      pending fix (see V1 review evidence above) — do NOT merge PR #25
+      until the fix-it dispatch below lands and is itself independently
+      verified. P2 should not assume the SourceEvent contract is
+      production-safe until this closes. If P2 work needs
+      src/source_events.py, branch from feat/external-ingest-source-
+      event-p1 (already the case), not from dev."
+    - "isolation:remote reliability gap (see P1 evidence above) applies to
       every future implementation-lane dispatch in this programme until
       the underlying Claude Code product behaviour is confirmed fixed;
       logged as product feedback separately from this programme."
   human_action: >-
-    Review and merge (or request changes on) PR #25 when convenient — not
-    blocking further programme work, since P2 can branch from
-    feat/external-ingest-source-event-p1 if needed.
-  next_action: P2 smallest slice materialised below.
+    Review and merge (or request changes on) PR #25 once the fix-it
+    commit lands and is verified — not blocking further programme work,
+    since P2 can branch from feat/external-ingest-source-event-p1 if
+    needed.
+  next_action: >-
+    Fix-it worker dispatched this checkpoint for the 2 CONFIRMED defects
+    (legacy-table migration path + metadata size cap), same branch. On
+    return: independently verify (diff scope + direct read, same method
+    as before) and run a second Codex adversarial pass scoped to the
+    incremental fix before treating PR #25 as merge-ready.
   last_verified_commit: 3a87800
 
 - id: P2-instagram-export-importer
