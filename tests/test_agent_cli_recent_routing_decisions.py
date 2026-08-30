@@ -62,6 +62,7 @@ def test_recent_routing_decisions_summary_includes_expected_fields():
         db.add(_make_decision(
             task_class=marker, id=marker, executor="codex", model_alias="code-strong",
             status="complete", escalated=True, retries=1,
+            recommended_route="codex_eligible", actual_route="codex",
         ))
 
     module = load_module()
@@ -72,6 +73,8 @@ def test_recent_routing_decisions_summary_includes_expected_fields():
     assert row["model_alias"] == "code-strong"
     assert row["escalated"] is True
     assert row["retries"] == 1
+    assert row["recommended_route"] == "codex_eligible"
+    assert row["actual_route"] == "codex"
 
     with get_db_session() as db:
         db.query(RoutingDecision).filter(RoutingDecision.task_class == marker).delete(synchronize_session=False)

@@ -15,6 +15,7 @@ from src.routing_evaluator import (
     RECENCY_HALF_LIFE_DAYS,
     aggregate_routing_decisions,
     canonical_task_class,
+    compute_delegation_metrics,
 )
 
 
@@ -185,3 +186,42 @@ def test_to_dict_is_json_shaped_and_reports_evidence_flag():
 
 def test_empty_input_returns_empty_list():
     assert aggregate_routing_decisions([]) == []
+
+
+def test_delegation_metrics_cover_dispatch_retention_verification_and_escalation():
+    decisions = [
+        _decision(
+            recommended_route="codex_eligible", actual_route="codex-write",
+            executor="codex-write", verification_outcome="pass", escalated=True,
+            escalation_reason="insufficient_capability", nondelegation_reason=None,
+        ),
+        _decision(
+            recommended_route="remote_compute_eligible", actual_route="local",
+            executor="local", verification_outcome="pass", nondelegation_reason=None,
+        ),
+        _decision(
+            recommended_route="controller_retained", actual_route="controller",
+            executor="controller", verification_outcome=None,
+            nondelegation_reason="architecture_judgement",
+        ),
+        _decision(
+            recommended_route="remote_compute_eligible", actual_route="controller",
+            executor="controller", verification_outcome="fail",
+            nondelegation_reason=None,
+        ),
+    ]
+
+    metrics = compute_delegation_metrics(decisions)
+
+    assert metrics == {
+        "delegation_eligible_units": 3,
+        "units_dispatched": 2,
+        "units_retained_by_controller": 2,
+        "avoidable_controller_execution_rate": pytest.approx(1 / 3),
+        "codex_eligible_units": 1,
+        "codex_dispatched_units": 1,
+        "remote_compute_eligible_units": 2,
+        "remote_compute_dispatched_units": 1,
+        "verification_success_rate": pytest.approx(2 / 3),
+        "reroute_or_escalation_rate": pytest.approx(1 / 4),
+    }

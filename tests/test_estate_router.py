@@ -857,3 +857,163 @@ def test_run_task_paid_escalation_without_repo_field_passes_no_cwd_override(fixt
         "routing": {"allow_paid_escalation": True},
     })
     assert captured["cwd"] is None
+
+
+def test_scenario_a_implementation_mode_dispatches_codex_write_under_active_lease(
+        fixture_config, monkeypatch, tmp_path):
+    repo_path = tmp_path / "test-repo"
+    repo_path.mkdir()
+    (fixture_config / "repositories.yaml").write_text(yaml.safe_dump({
+        "repos": [{"id": "test-repo", "path": str(repo_path)}],
+    }))
+    recorded_route = {}
+    recorded_outcome = {}
+
+    def fake_record(task, **kwargs):
+        recorded_route.update(task=task, **kwargs)
+        return "implementation-decision"
+
+    monkeypatch.setattr(estate_router, "_record_decision", fake_record)
+    monkeypatch.setattr(
+        estate_router, "active_lease_for_repo",
+        lambda repo_id, host_id: {
+            "lease_id": "lease-1", "repo_id": repo_id, "host_id": host_id,
+            "worktree_path": str(repo_path), "allowed_write_scope": "repo",
+        },
+    )
+    captured = {}
+
+    def fake_codex_process(objective, **kwargs):
+        captured.update(objective=objective, **kwargs)
+        return {"ok": True, "provider": "codex-write", "output": "implemented", "latency_ms": 12}
+
+    monkeypatch.setattr(estate_router, "_execute_codex_with_sandbox", fake_codex_process)
+    monkeypatch.setattr(
+        estate_router, "_update_decision_outcome",
+        lambda decision_id, **kwargs: recorded_outcome.update(decision_id=decision_id, **kwargs),
+    )
+
+    result = estate_router.run_task({
+        "task_class": "bounded_code_implementation", "objective": "implement it", "repo": "test-repo",
+        "requirements": {"capabilities": ["reasoning-strong"]},
+        "routing": {"allow_paid_escalation": True, "mode": "implementation"},
+    })
+
+    assert result["ok"] is True
+    assert result["executed"] is True
+    assert result["route"]["executor"] == "codex-write"
+    assert captured["objective"] == "implement it"
+    assert captured["cwd"] == str(repo_path)
+    assert captured["sandbox"] == "workspace-write"
+    assert recorded_route["task"]["recommended_route"] == "codex_eligible"
+    assert recorded_outcome["actual_route"] == "codex-write"
+    assert recorded_outcome["executor"] == "codex-write"
+    assert recorded_outcome["verification_outcome"] == "pass"
+
+
+def test_record_decision_rejects_invalid_nondelegation_reason_even_off_preflight_path(fixture_config):
+    """`/api/estate/route` and `/api/estate/run` accept `nondelegation_reason`
+    on the raw envelope (routes/estate_routing_routes.py) without routing
+    through `delegation_preflight`'s validation — `_record_decision` must
+    re-validate itself so a caller can't stamp an arbitrary/junk reason
+    onto telemetry by skipping `/api/estate/preflight`."""
+    from src.routing_evaluator import get_decision_by_id
+
+    junk_id = estate_router._record_decision(
+        {"task_class": "audit", "nondelegation_reason": "because I said so"},
+        host_id="test-lab", executor="deterministic", model_alias=None,
+        concrete_model=None, status="complete",
+    )
+    assert get_decision_by_id(junk_id)["nondelegation_reason"] is None
+
+    fixed_id = estate_router._record_decision(
+        {"task_class": "audit", "nondelegation_reason": "architecture_judgement"},
+        host_id="test-lab", executor="deterministic", model_alias=None,
+        concrete_model=None, status="complete",
+    )
+    assert get_decision_by_id(fixed_id)["nondelegation_reason"] == "architecture_judgement"
+
+    freeform_id = estate_router._record_decision(
+        {"task_class": "audit", "nondelegation_reason": "other: bespoke evidence-backed reason"},
+        host_id="test-lab", executor="deterministic", model_alias=None,
+        concrete_model=None, status="complete",
+    )
+    assert get_decision_by_id(freeform_id)["nondelegation_reason"] == "other: bespoke evidence-backed reason"
+
+
+def test_implementation_mode_without_active_lease_hard_fails(fixture_config, monkeypatch, tmp_path):
+    repo_path = tmp_path / "test-repo"
+    repo_path.mkdir()
+    (fixture_config / "repositories.yaml").write_text(yaml.safe_dump({
+        "repos": [{"id": "test-repo", "path": str(repo_path)}],
+    }))
+    monkeypatch.setattr(estate_router, "_record_decision", lambda *a, **k: "implementation-decision")
+    monkeypatch.setattr(estate_router, "active_lease_for_repo", lambda repo_id, host_id: None)
+    called = []
+    monkeypatch.setattr(estate_router, "_execute_codex_with_sandbox", lambda *a, **k: called.append(True))
+    monkeypatch.setattr(estate_router, "_update_decision_outcome", lambda *a, **k: None)
+
+    result = estate_router.run_task({
+        "task_class": "bounded_code_implementation", "objective": "implement it", "repo": "test-repo",
+        "requirements": {"capabilities": ["reasoning-strong"]},
+        "routing": {"allow_paid_escalation": True, "mode": "implementation"},
+    })
+
+    assert result["ok"] is False
+    assert result["executed"] is False
+    assert "active non-stale lease" in result["execution_error"]
+    assert called == []
+
+
+def test_scenario_b_repetitive_compute_dispatches_to_remote_local_executor(fixture_config, monkeypatch):
+    monkeypatch.setattr(estate_router, "_record_decision", lambda *a, **k: "remote-decision")
+    monkeypatch.setattr(estate_router, "_ollama_model_live", lambda model, timeout=3.0: (True, "live"))
+    monkeypatch.setattr(
+        estate_router, "execute_local",
+        lambda model, objective, **kwargs: {"ok": True, "output": "scan complete", "latency_ms": 4},
+    )
+    outcome = {}
+    monkeypatch.setattr(estate_router, "_update_decision_outcome", lambda decision_id, **kwargs: outcome.update(kwargs))
+
+    result = estate_router.run_task({
+        "task_class": "batch_repository_scan", "objective": "scan repository",
+        "requirements": {"capabilities": ["local-fast"]},
+    })
+
+    assert result["executed"] is True
+    assert result["route"]["host"] == "test-lab"
+    assert result["route"]["executor"] == "local"
+    assert outcome["actual_route"] == "local"
+
+
+@pytest.mark.parametrize(
+    ("executor", "expected_sandbox"),
+    [("execute_codex", "read-only"), ("execute_codex_write", "workspace-write")],
+)
+def test_codex_lanes_preserve_distinct_sandbox_authority(
+        fixture_config, monkeypatch, tmp_path, executor, expected_sandbox):
+    import subprocess
+
+    monkeypatch.setattr(estate_router, "_codex_available", lambda: (True, "codex"))
+    captured = {}
+
+    def fake_run(args, **kwargs):
+        captured["args"] = args
+        output_path = args[args.index("-o") + 1]
+        estate_router.Path(output_path).write_text("done")
+        return type("Proc", (), {"returncode": 0, "stderr": ""})()
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    fn = getattr(estate_router, executor)
+    if executor == "execute_codex_write":
+        monkeypatch.setattr(estate_router, "resolve_repo_path", lambda repo_id: str(tmp_path))
+        monkeypatch.setattr(estate_router, "active_lease_for_repo", lambda repo_id, host_id: {
+            "lease_id": "lease-1", "worktree_path": str(tmp_path), "allowed_write_scope": "repo",
+        })
+        result = fn("do it", repo_id="test-repo", host_id="test-lab")
+    else:
+        result = fn("do it", cwd=str(tmp_path))
+
+    assert result["ok"] is True
+    sandbox_index = captured["args"].index("--sandbox")
+    assert captured["args"][sandbox_index + 1] == expected_sandbox

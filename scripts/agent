@@ -461,6 +461,9 @@ def _recent_routing_decisions_summary(limit: int = 10) -> list:
                     "status": row.status,
                     "escalated": row.escalated,
                     "retries": row.retries,
+                    "recommended_route": row.recommended_route,
+                    "actual_route": row.actual_route,
+                    "nondelegation_reason": row.nondelegation_reason,
                     "created_at": row.created_at.isoformat() if row.created_at else None,
                 }
                 for row in rows

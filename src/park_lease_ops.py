@@ -183,6 +183,35 @@ def active_leases_summary() -> list:
         return []
 
 
+def active_lease_for_repo(repo_id: str, host_id: str) -> Optional[dict]:
+    """Return the existing live write lease held by `host_id`, if any.
+
+    This is the read-side authority used by execution paths that need to
+    prove write access without acquiring it. Stale leases fail closed and
+    remain reclaimable only through the existing explicit park workflow.
+    """
+    try:
+        from core.database import ParkLease, get_db_session, park_lease_is_stale
+        with get_db_session() as db:
+            row = db.query(ParkLease).filter(
+                ParkLease.repo_id == repo_id,
+                ParkLease.host_id == host_id,
+                ParkLease.status == "active",
+            ).first()
+            if row is None or park_lease_is_stale(row):
+                return None
+            return {
+                "lease_id": row.id,
+                "repo_id": row.repo_id,
+                "host_id": row.host_id,
+                "worktree_path": row.worktree_path,
+                "allowed_write_scope": row.allowed_write_scope,
+                "heartbeat_at": row.heartbeat_at.isoformat() if row.heartbeat_at else None,
+            }
+    except Exception:
+        return None
+
+
 def release_repo(repo_id: str, host_id: Optional[str] = None) -> dict:
     """Release the caller's active lease. Raises NoActiveLease if none matches."""
     from core.database import ParkLease, get_db_session, utcnow_naive

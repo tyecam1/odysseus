@@ -19,6 +19,7 @@ from src.park_lease_ops import (
     ParkConflict,
     RepoNotClean,
     RepoNotResolvable,
+    active_lease_for_repo,
     active_leases_summary,
     git_is_clean,
     heartbeat_repo,
@@ -127,6 +128,28 @@ def test_active_leases_summary_degrades_to_empty_on_db_error(monkeypatch):
     monkeypatch.setattr(database, "get_db_session", boom)
 
     assert active_leases_summary() == []
+
+
+def test_active_lease_for_repo_returns_only_live_lease_held_by_requested_host():
+    park_repo("ops-repo", "test-lab", "/tmp/ops-repo")
+
+    lease = active_lease_for_repo("ops-repo", "test-lab")
+
+    assert lease["host_id"] == "test-lab"
+    assert lease["worktree_path"] == "/tmp/ops-repo"
+    assert lease["allowed_write_scope"] == "repo"
+    assert active_lease_for_repo("ops-repo", "other-host") is None
+
+
+def test_active_lease_for_repo_rejects_stale_lease():
+    stale_heartbeat = utcnow_naive() - timedelta(seconds=PARK_LEASE_STALE_SECONDS + 60)
+    with get_db_session() as db:
+        db.add(ParkLease(
+            id="stale-write-lease", repo_id="ops-repo", host_id="test-lab",
+            worktree_path="/tmp/ops-repo", status="active", heartbeat_at=stale_heartbeat,
+        ))
+
+    assert active_lease_for_repo("ops-repo", "test-lab") is None
 
 
 class TestGitIsClean:

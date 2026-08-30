@@ -12,9 +12,10 @@ runs and used immediately.
 
     aoteru config set --url http://<lab-tailnet-name>:7001 --token ody_...
     aoteru status
+    aoteru preflight "refactor the router" --repo odysseus
     aoteru route --capability code-fast
     aoteru ask "summarise the last 3 commits" --capability local-fast
-    aoteru ask "refactor X" --capability code-strong --allow-paid
+    aoteru ask "refactor X" --repo odysseus --capability code-strong --allow-paid --implementation
     aoteru park-status
     aoteru heartbeat <repo-id>
     aoteru release <repo-id>
@@ -164,6 +165,26 @@ def cmd_route(args: argparse.Namespace) -> int:
     return 0 if result["status"] == 200 else 1
 
 
+def cmd_preflight(args: argparse.Namespace) -> int:
+    """Obtain live delegation evidence before substantive work starts."""
+    cfg = _load_config()
+    unit = {
+        "task_class": args.task_class,
+        "repo": args.repo,
+        "capabilities": [args.capability] if args.capability else [],
+        "objective": args.objective,
+        "nondelegation_reason": args.nondelegation_reason,
+    }
+    if args.nondelegation_reason:
+        unit["requested_route"] = "controller_retained"
+    result = _request(cfg, "POST", "/api/estate/preflight", {"units": [unit]})
+    if result["status"] in (401, 403):
+        print(f"denied: {result['body']} — token needs estate:read or estate:execute scope")
+        return 1
+    print(json.dumps(result["body"], indent=2))
+    return 0 if result["status"] == 200 and result["body"].get("ok", False) else 1
+
+
 def cmd_park_status(args: argparse.Namespace) -> int:
     """Estate-wide active-lease view over HTTP
     (GET /api/estate/park/status) — the laptop-side equivalent of an
@@ -248,6 +269,8 @@ def cmd_ask(args: argparse.Namespace) -> int:
         "objective": args.objective,
         "allow_paid_escalation": bool(args.allow_paid),
     }
+    if args.implementation:
+        envelope["mode"] = "implementation"
     result = _request(cfg, "POST", "/api/estate/run", envelope, timeout=args.timeout)
     if result["status"] in (401, 403):
         print(f"denied: {result['body']} — token needs the estate:execute scope for `ask`")
@@ -279,6 +302,8 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
         "objective": args.task,
         "allow_paid_escalation": bool(args.allow_paid),
     }
+    if args.implementation:
+        envelope["mode"] = "implementation"
     result = _request(cfg, "POST", "/api/estate/run", envelope, timeout=args.timeout)
     if result["status"] in (401, 403):
         print(f"denied: {result['body']} — token needs the estate:execute scope for `{args.command}`")
@@ -305,7 +330,7 @@ def _estate_routing_skill_md() -> str:
         "---\n"
         "name: aoteru-estate-routing\n"
         "description: Route a task to an Aoteru estate worker (lab/home) "
-        "via `aoteru auto|lab|home \"<task>\"`, or list active sessions "
+        "via `aoteru auto|lab|home \"<task>\"`, preflight substantial work, or list active sessions "
         "via `aoteru where`. Use when the user wants work executed on a "
         "specific estate machine instead of locally — works from any "
         "repo/session on this laptop, no local Odysseus checkout needed.\n"
@@ -316,6 +341,8 @@ def _estate_routing_skill_md() -> str:
         "estate's Odysseus backend over HTTP; never hardcode a hostname, "
         "path, repo map, model name, or credential here — always resolve "
         "through the live `aoteru` command's own output.\n\n"
+        "- `aoteru preflight \"<task>\" [--repo <id>]` — obtain live "
+        "host/Codex/alias evidence and the required delegation lane before work starts.\n"
         "- `aoteru auto \"<task>\" [--repo <id>] [--capability <alias>]` "
         "— resolve the best available host from live estate state and "
         "execute.\n"
@@ -374,6 +401,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_route.add_argument("--repo", default=None)
     p_route.add_argument("--capability", default=None, help="capability alias, e.g. local-fast, code-strong")
 
+    p_preflight = sub.add_parser("preflight", help="classify task delegation from live estate evidence")
+    p_preflight.add_argument("objective")
+    p_preflight.add_argument("--task-class", default="unclassified")
+    p_preflight.add_argument("--repo", default=None)
+    p_preflight.add_argument("--capability", default=None)
+    p_preflight.add_argument(
+        "--nondelegation-reason", default=None,
+        help="fixed reason code, or 'other: ...', when explicitly retaining the unit",
+    )
+
     sub.add_parser("park-status", help="estate-wide active park-lease view")
 
     p_park = sub.add_parser("park", help="acquire a lease on the backend host for a registered repo")
@@ -393,6 +430,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_ask.add_argument("--capability", default=None)
     p_ask.add_argument("--allow-paid", action="store_true",
                         help="opt in to paid (Codex) escalation if local capability is unbound/unavailable")
+    p_ask.add_argument("--implementation", action="store_true",
+                       help="request lease-gated Codex workspace-write (requires --repo and --allow-paid)")
     p_ask.add_argument("--timeout", type=float, default=120.0)
 
     for mode, mode_help in (
@@ -407,6 +446,8 @@ def build_parser() -> argparse.ArgumentParser:
         p_mode.add_argument("--capability", default=None)
         p_mode.add_argument("--allow-paid", action="store_true",
                              help="opt in to paid (Codex) escalation if local capability is unbound/unavailable")
+        p_mode.add_argument("--implementation", action="store_true",
+                            help="request lease-gated Codex workspace-write (requires --repo and --allow-paid)")
         p_mode.add_argument("--timeout", type=float, default=120.0)
 
     sub.add_parser("where", help="list active logical estate sessions")
@@ -423,6 +464,7 @@ def main(argv: list[str] | None = None) -> int:
         "config": cmd_config,
         "status": cmd_status,
         "route": cmd_route,
+        "preflight": cmd_preflight,
         "ask": cmd_ask,
         "park-status": cmd_park_status,
         "park": cmd_park,

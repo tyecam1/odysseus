@@ -114,6 +114,17 @@ class TestRunTaskEnvelope:
             "alongside the nested routing.allow_paid_escalation"
         )
 
+    def test_implementation_mode_reaches_nested_routing_dict(self):
+        envelope = RunTaskEnvelope(
+            task_class="code", objective="implement", allow_paid_escalation=True,
+            mode="implementation",
+        )
+        task = envelope.to_task()
+        assert task["routing"] == {
+            "allow_paid_escalation": True,
+            "mode": "implementation",
+        }
+
     def test_task_envelope_still_has_no_objective_field(self):
         """Plain TaskEnvelope (route-only, no execution) is unaffected by
         the RunTaskEnvelope subclass addition."""
@@ -201,6 +212,40 @@ class TestRunRouteEndToEnd:
     def test_malformed_objective_type_rejected_cleanly(self, monkeypatch):
         client = self._client(monkeypatch)
         response = client.post("/api/estate/run", json={"task_class": "code", "objective": 12345})
+        assert response.status_code == 422
+
+
+class TestDelegationPreflightRoute:
+    def _client(self, monkeypatch):
+        monkeypatch.setenv("AUTH_ENABLED", "false")
+        app = FastAPI()
+        app.include_router(setup_estate_routing_routes())
+        return TestClient(app)
+
+    def test_post_preflight_passes_units_to_classifier(self, monkeypatch):
+        client = self._client(monkeypatch)
+        captured = {}
+        import routes.estate_routing_routes as mod
+
+        def fake_preflight(units):
+            captured["units"] = units
+            return {"ok": True, "snapshot": {"eligible_hosts": []}, "units": []}
+
+        monkeypatch.setattr(mod, "delegation_preflight", fake_preflight)
+        response = client.post("/api/estate/preflight", json={"units": [{
+            "task_class": "bounded_code_implementation",
+            "repo": "odysseus",
+            "capabilities": ["code-strong"],
+            "objective": "implement it",
+        }]})
+
+        assert response.status_code == 200
+        assert captured["units"][0]["task_class"] == "bounded_code_implementation"
+        assert captured["units"][0]["capabilities"] == ["code-strong"]
+
+    def test_post_preflight_rejects_empty_unit_list(self, monkeypatch):
+        client = self._client(monkeypatch)
+        response = client.post("/api/estate/preflight", json={"units": []})
         assert response.status_code == 422
 
 
