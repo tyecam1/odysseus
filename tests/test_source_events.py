@@ -4,7 +4,11 @@ only the neutral idempotent record/revision contract future importers call.
 """
 import pytest
 
-from src.source_events import SourceEventValidationError, record_source_event
+from src.source_events import (
+    MAX_PAYLOAD_REF_BYTES,
+    SourceEventValidationError,
+    record_source_event,
+)
 
 
 def _cleanup(source, external_id):
@@ -146,3 +150,30 @@ def test_never_stores_raw_content_only_hash_and_pointer():
 def test_metadata_must_be_dict_when_provided():
     with pytest.raises(SourceEventValidationError):
         record_source_event("instagram", "test-ext-3", "content", metadata="not-a-dict")
+
+
+def test_oversized_metadata_is_rejected():
+    # Comfortably over MAX_PAYLOAD_REF_BYTES once JSON-serialized.
+    oversized = {"blob": "x" * (MAX_PAYLOAD_REF_BYTES + 100)}
+    with pytest.raises(SourceEventValidationError):
+        record_source_event("instagram", "test-ext-3", "content", metadata=oversized)
+    assert _row_count("instagram", "test-ext-3") == 0
+
+
+def test_metadata_at_or_under_limit_is_accepted():
+    # A small pointer dict, comfortably under the cap, must still work.
+    row = record_source_event(
+        "instagram", "test-ext-3", "content", metadata={"path": "exports/small.json"}
+    )
+    assert row.payload_ref is not None
+    assert len(row.payload_ref.encode("utf-8")) <= MAX_PAYLOAD_REF_BYTES
+
+
+def test_source_and_external_id_whitespace_normalized_to_same_identity():
+    first = record_source_event("instagram", "test-ext-3", "hello")
+    second = record_source_event(" instagram ", " test-ext-3 ", "hello")
+
+    assert _row_count("instagram", "test-ext-3") == 1
+    assert first.id == second.id
+    assert second.source == "instagram"
+    assert second.external_id == "test-ext-3"
