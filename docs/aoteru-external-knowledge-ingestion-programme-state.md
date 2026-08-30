@@ -338,7 +338,6 @@ not before.
       this same laptop, not a genuinely separate host — no local
       checkout was left behind outside the session scratchpad, and
       it's been deleted this checkpoint)."
-  human_action: none yet
   next_action: >-
     PR #25 merged to dev (96dad178). Rebased: created a fresh branch
     feat/external-ingest-instagram-importer-p2-rebased from dev HEAD
@@ -359,6 +358,22 @@ not before.
     instagram-importer-p2 branch (superseded, unmerged, no PR) can be
     deleted by the operator whenever convenient — left alone here since
     branch deletion wasn't asked for and costs nothing to leave.
+
+    CI RESULT (deterministic verification, GitHub Actions — not a
+    Claude/Codex dispatch, per operator instruction to use the cheap/
+    deterministic lane for routine work): pytest -q on PR #29 —
+    5129 passed (5121 baseline + all 8 new Instagram-importer tests),
+    2 failed, 19 errors. The 2 failures and 19 errors are byte-for-byte
+    the same pre-existing signatures already logged as P1 maintenance
+    debt (test_park_lease_ops.py git-identity gap;
+    test_source_events.py table-order flake) — no new failures, no
+    regression from P2's own 3 files. This satisfies P2's verification
+    gate. Per operator instruction, not spending further budget
+    confirming this further or chasing the pre-existing flake.
+  human_action: >-
+    Review/merge PR #29 (https://github.com/tyecam1/odysseus/pull/29)
+    when convenient. Optional housekeeping: delete the superseded
+    feat/external-ingest-instagram-importer-p2 branch.
   last_verified_commit: 96dad17
 
 - id: P3-P10
