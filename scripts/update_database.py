@@ -70,11 +70,157 @@ def add_column_sqlite(db_path, table_name, column_name, column_type, default_val
     conn.commit()
     conn.close()
 
+def add_table_sqlite(db_path, table_name, create_table_sql):
+    """Create a table on an existing SQLite DB if it doesn't already exist."""
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    cursor.execute(create_table_sql)
+    conn.commit()
+    conn.close()
+
+
+def _upgrade_source_events_columns(engine, db_path):
+    """Add the P1 external-ingest columns to a `source_events` table that
+    pre-dates them.
+
+    `source_events` already existed in this repo before P1 (an unrelated
+    prior chat/session-provenance workstream), so `add_source_events_table`
+    below returning early when the table already exists left every real
+    deployment's table missing `payload_ref`/`received_at`/`status`/
+    `prior_content_hash`/`revision_count` — `record_source_event()` would
+    then fail with `OperationalError: no column named payload_ref`. This
+    mirrors core/database.py's `_migrate_add_source_event_ingest_columns()`
+    so both migration paths converge on the same schema. Additive/
+    idempotent: only adds columns that are actually missing.
+    """
+    additions = [
+        ("payload_ref", "TEXT", None),
+        ("received_at", "DATETIME", None),
+        ("status", "TEXT", "'received'"),
+        ("prior_content_hash", "TEXT", None),
+        ("revision_count", "INTEGER", "0"),
+    ]
+    added = []
+    for column_name, column_type, default_value in additions:
+        if check_column_exists(engine, "source_events", column_name):
+            continue
+        if db_path:  # SQLite
+            add_column_sqlite(db_path, "source_events", column_name, column_type, default_value)
+        else:  # Other databases
+            with engine.connect() as conn:
+                ddl = f"ALTER TABLE source_events ADD COLUMN {column_name} {column_type}"
+                if default_value is not None:
+                    ddl += f" DEFAULT {default_value}"
+                conn.execute(text(ddl))
+                conn.commit()
+        added.append(column_name)
+
+    if added:
+        print(f"Migrated: added {added} columns to source_events")
+        if db_path:
+            conn = sqlite3.connect(db_path)
+            try:
+                conn.execute("UPDATE source_events SET status = 'received' WHERE status IS NULL")
+                conn.execute("UPDATE source_events SET revision_count = 0 WHERE revision_count IS NULL")
+                conn.commit()
+            finally:
+                conn.close()
+        else:
+            with engine.connect() as conn:
+                conn.execute(text("UPDATE source_events SET status = 'received' WHERE status IS NULL"))
+                conn.execute(text("UPDATE source_events SET revision_count = 0 WHERE revision_count IS NULL"))
+                conn.commit()
+
+    # Idempotent even if no columns were added: the unique index may still
+    # be missing (e.g. a table that already had all 5 columns but not yet
+    # the index).
+    if db_path:
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ix_source_events_source_external_unique "
+                "ON source_events(source, external_id) WHERE external_id IS NOT NULL"
+            )
+            conn.commit()
+        except Exception as e:
+            print(f"source_events (source, external_id) unique index creation skipped: {e}")
+        finally:
+            conn.close()
+    else:
+        with engine.connect() as conn:
+            conn.execute(text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ix_source_events_source_external_unique "
+                "ON source_events(source, external_id) WHERE external_id IS NOT NULL"
+            ))
+            conn.commit()
+
+
+def add_source_events_table(engine, db_path):
+    """Add the source_events table for existing DBs that pre-date it
+    (external-ingest SourceEvent adapter contract, P1). A neutral
+    provenance/dedupe table future importers (Instagram, WhatsApp, ...)
+    call through src/source_events.py.record_source_event() — this
+    migration only creates the table shape; it never touches raw payload
+    content, only a small pointer (`payload_ref`) + a sha256 checksum
+    (`content_hash`), same as attachment_refs.py's philosophy for uploads.
+    """
+    inspector = inspect(engine)
+    if "source_events" in inspector.get_table_names():
+        # Table already existed (e.g. from the unrelated prior chat/session
+        # provenance workstream) — it may pre-date the P1 columns below.
+        _upgrade_source_events_columns(engine, db_path)
+        return
+
+    create_sql = """
+        CREATE TABLE IF NOT EXISTS source_events (
+            id TEXT PRIMARY KEY,
+            source TEXT NOT NULL,
+            external_id TEXT,
+            content_hash TEXT,
+            domain TEXT NOT NULL DEFAULT 'neutral',
+            sensitivity TEXT NOT NULL DEFAULT 'normal',
+            payload TEXT,
+            payload_ref TEXT,
+            received_at DATETIME,
+            status TEXT NOT NULL DEFAULT 'received',
+            prior_content_hash TEXT,
+            revision_count INTEGER NOT NULL DEFAULT 0,
+            created_at DATETIME NOT NULL,
+            updated_at DATETIME NOT NULL
+        )
+    """
+
+    if db_path:  # SQLite
+        print("Creating source_events table...")
+        add_table_sqlite(db_path, "source_events", create_sql)
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS ix_source_events_source_external "
+                "ON source_events(source, external_id)"
+            )
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ix_source_events_source_external_unique "
+                "ON source_events(source, external_id) WHERE external_id IS NOT NULL"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    else:  # Other databases
+        with engine.connect() as conn:
+            conn.execute(text(create_sql))
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_source_events_source_external "
+                "ON source_events(source, external_id)"
+            ))
+            conn.commit()
+
+
 def update_database():
     """Update the database schema and populate new columns."""
     # Create engine from DATABASE_URL
     engine = create_engine(DATABASE_URL)
-    
+
     # Extract database path from DATABASE_URL for SQLite
     db_path = None
     if "sqlite" in DATABASE_URL:
@@ -82,7 +228,7 @@ def update_database():
         # Handle relative paths
         if not os.path.isabs(db_path):
             db_path = os.path.join(os.path.dirname(__file__), db_path)
-    
+
     print(f"Updating database at: {DATABASE_URL}")
     
     # Start a transaction
@@ -108,6 +254,10 @@ def update_database():
                     conn.execute(text("ALTER TABLE sessions ADD COLUMN is_important BOOLEAN DEFAULT FALSE"))
                     conn.commit()
         
+        # Add source_events table if it doesn't exist (external-ingest
+        # SourceEvent adapter contract, P1)
+        add_source_events_table(engine, db_path)
+
         # Add message_count column if it doesn't exist
         if not check_column_exists(engine, 'sessions', 'message_count'):
             print("Adding message_count column...")
