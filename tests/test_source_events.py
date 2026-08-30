@@ -30,6 +30,30 @@ def _clean_test_rows():
     _cleanup("instagram", "test-ext-3")
 
 
+def test_aaa_diagnostic_source_events_table_exists():
+    """Temporary CI diagnostic (see docs/aoteru-external-knowledge-ingestion-programme-state.md):
+    CI's `pytest -q` run reports every test below as
+    `sqlalchemy.exc.OperationalError: no such table: source_events`, but
+    the full suite otherwise passes (5121 tests) and this table is defined
+    unconditionally in core/database.py's Base metadata, created by the
+    unconditional `Base.metadata.create_all(bind=engine)` in `init_db()`.
+    This dumps what the shared `engine` actually sees, to find out whether
+    the table plainly never got created, or something else is going on
+    (e.g. a different DB/engine object than expected).
+    """
+    from core.database import engine
+    from sqlalchemy import inspect as sa_inspect
+
+    tables = sorted(sa_inspect(engine).get_table_names())
+    print(f"DIAGNOSTIC engine.url={engine.url!r}")
+    print(f"DIAGNOSTIC table_count={len(tables)}")
+    print(f"DIAGNOSTIC tables={tables}")
+    assert "source_events" in tables, (
+        f"source_events missing from {len(tables)} tables seen via "
+        f"core.database.engine ({engine.url!r}): {tables}"
+    )
+
+
 def _row_count(source, external_id):
     from core.database import SourceEvent, get_db_session
     with get_db_session() as db:
