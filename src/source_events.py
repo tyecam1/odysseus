@@ -30,6 +30,12 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+# Hard cap on the serialized size of caller-supplied `metadata` (stored as
+# `payload_ref`). Enforces this module's own stated invariant that
+# `metadata` is a small pointer, never raw content — without a cap nothing
+# actually stopped a caller from passing megabytes of data through.
+MAX_PAYLOAD_REF_BYTES = 4096
+
 
 class SourceEventValidationError(ValueError):
     """Raised for malformed input to record_source_event.
@@ -86,7 +92,15 @@ def _payload_ref_json(metadata: Optional[dict]) -> Optional[str]:
         return None
     if not isinstance(metadata, dict):
         raise SourceEventValidationError("record_source_event 'metadata' must be a dict when provided")
-    return json.dumps(metadata, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str)
+    serialized = json.dumps(metadata, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str)
+    size = len(serialized.encode("utf-8"))
+    if size > MAX_PAYLOAD_REF_BYTES:
+        raise SourceEventValidationError(
+            f"record_source_event 'metadata' serializes to {size} bytes, "
+            f"exceeding the {MAX_PAYLOAD_REF_BYTES}-byte small-pointer-only limit "
+            "(pass a reference such as a file path or attachment id, not raw content)"
+        )
+    return serialized
 
 
 def record_source_event(
@@ -116,6 +130,11 @@ def record_source_event(
     `source`, missing `external_id`, or empty/missing `content`.
     """
     _validate_inputs(source, external_id, content)
+    # Normalize before storing/querying too, not just for validation, so
+    # e.g. "instagram" and " instagram " are the same identity rather than
+    # silently creating separate rows.
+    source = source.strip()
+    external_id = external_id.strip()
     payload_ref = _payload_ref_json(metadata)
     content_hash = _hash_content(content)
 
