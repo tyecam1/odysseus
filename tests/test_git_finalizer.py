@@ -195,6 +195,199 @@ def test_finalize_reports_no_changes_when_worktree_already_clean(isolated_worktr
     assert result["reason"] == "no_changes_to_finalize"
 
 
+def test_finalize_rejects_directory_level_allowed_path(isolated_worktree):
+    repo_id, host_id, branch, worktree_path = isolated_worktree
+    (worktree_path / "dir").mkdir()
+    (worktree_path / "dir" / "allowed.txt").write_text("a\n")
+
+    result = git_finalizer.finalize_scoped(
+        repo_id, host_id, expected_branch=branch,
+        allowed_paths=["dir/"],
+        commit_message="feat: x",
+    )
+
+    assert result["finalized"] is False
+    assert result["reason"].startswith("invalid_allowed_path")
+    assert _git("log", "-1", "--format=%s", cwd=worktree_path) == "init"
+
+
+def test_finalize_rejects_stray_nested_file_when_only_one_file_in_dir_is_allowed(isolated_worktree):
+    repo_id, host_id, branch, worktree_path = isolated_worktree
+    (worktree_path / "dir").mkdir()
+    (worktree_path / "dir" / "allowed.txt").write_text("a\n")
+    (worktree_path / "dir" / "stray.txt").write_text("b\n")
+
+    result = git_finalizer.finalize_scoped(
+        repo_id, host_id, expected_branch=branch,
+        allowed_paths=["dir/allowed.txt"],
+        commit_message="feat: x",
+    )
+
+    assert result["finalized"] is False
+    assert result["reason"] == "scope_violation"
+    assert result["unexpected_paths"] == ["dir/stray.txt"]
+    assert _git("log", "-1", "--format=%s", cwd=worktree_path) == "init"
+
+
+def test_finalize_succeeds_for_exact_nested_file_with_no_stray_sibling(isolated_worktree):
+    repo_id, host_id, branch, worktree_path = isolated_worktree
+    (worktree_path / "dir").mkdir()
+    (worktree_path / "dir" / "allowed.txt").write_text("a\n")
+
+    result = git_finalizer.finalize_scoped(
+        repo_id, host_id, expected_branch=branch,
+        allowed_paths=["dir/allowed.txt"],
+        commit_message="feat: x",
+    )
+
+    assert result["finalized"] is True
+    assert result["staged_paths"] == ["dir/allowed.txt"]
+
+
+def test_finalize_handles_filenames_with_spaces_quotes_and_literal_arrow(isolated_worktree):
+    repo_id, host_id, branch, worktree_path = isolated_worktree
+    tricky_name = 'weird "name" with -> arrow and spaces.txt'
+    (worktree_path / tricky_name).write_text("x\n")
+
+    result = git_finalizer.finalize_scoped(
+        repo_id, host_id, expected_branch=branch,
+        allowed_paths=[tricky_name],
+        commit_message="feat: tricky filename",
+    )
+
+    assert result["finalized"] is True
+    assert result["staged_paths"] == [tricky_name]
+
+
+def test_finalize_requires_both_names_of_a_real_rename_to_be_allowed(isolated_worktree):
+    repo_id, host_id, branch, worktree_path = isolated_worktree
+    (worktree_path / "old_name.txt").write_text("line one\nline two\nline three\nline four\nline five\n")
+    subprocess.run(["git", "-C", str(worktree_path), "add", "old_name.txt"], check=True)
+    subprocess.run(["git", "-C", str(worktree_path), "commit", "-q", "-m", "add old_name.txt"], check=True)
+    (worktree_path / "old_name.txt").rename(worktree_path / "new_name.txt")
+
+    only_new_name = git_finalizer.finalize_scoped(
+        repo_id, host_id, expected_branch=branch,
+        allowed_paths=["new_name.txt"],
+        commit_message="feat: rename",
+    )
+    assert only_new_name["finalized"] is False
+    assert only_new_name["reason"] == "scope_violation"
+    assert only_new_name["unexpected_paths"] == ["old_name.txt"]
+
+    both_names = git_finalizer.finalize_scoped(
+        repo_id, host_id, expected_branch=branch,
+        allowed_paths=["new_name.txt", "old_name.txt"],
+        commit_message="feat: rename",
+    )
+    assert both_names["finalized"] is True
+
+
+@pytest.mark.parametrize("bad_path", [
+    "/etc/passwd",
+    "../outside.txt",
+    "a/../../outside.txt",
+    "dir/",
+    "./file.txt",
+    ".",
+    "..",
+    "",
+    ":(icase)file.txt",
+])
+def test_finalize_rejects_unsafe_allowed_paths_before_touching_git(isolated_worktree, bad_path):
+    repo_id, host_id, branch, worktree_path = isolated_worktree
+    (worktree_path / "real_change.txt").write_text("x\n")
+
+    result = git_finalizer.finalize_scoped(
+        repo_id, host_id, expected_branch=branch,
+        allowed_paths=[bad_path],
+        commit_message="feat: x",
+    )
+
+    assert result["finalized"] is False
+    assert result["reason"].startswith("invalid_allowed_path")
+    assert _git("log", "-1", "--format=%s", cwd=worktree_path) == "init"
+    assert _git("status", "--porcelain", cwd=worktree_path) != ""
+
+
+def test_finalize_rejects_allowed_path_resolving_outside_worktree_via_symlink(isolated_worktree, tmp_path):
+    repo_id, host_id, branch, worktree_path = isolated_worktree
+    outside = tmp_path / "outside_target.txt"
+    outside.write_text("should never be touched\n")
+    (worktree_path / "escape_link").symlink_to(outside)
+
+    result = git_finalizer.finalize_scoped(
+        repo_id, host_id, expected_branch=branch,
+        allowed_paths=["escape_link"],
+        commit_message="feat: x",
+    )
+
+    assert result["finalized"] is False
+    assert result["reason"].startswith("invalid_allowed_path")
+
+
+def test_finalize_detects_concurrent_write_between_initial_check_and_commit(isolated_worktree, monkeypatch):
+    repo_id, host_id, branch, worktree_path = isolated_worktree
+    (worktree_path / "allowed.txt").write_text("a\n")
+
+    import src.git_finalizer as gf
+    real_status_paths = gf._status_paths
+    calls = {"n": 0}
+
+    def _racy_status_paths(repo_path):
+        calls["n"] += 1
+        result = real_status_paths(repo_path)
+        if calls["n"] == 1:
+            (worktree_path / "raced_in.txt").write_text("surprise\n")
+        return result
+
+    monkeypatch.setattr(gf, "_status_paths", _racy_status_paths)
+
+    result = gf.finalize_scoped(
+        repo_id, host_id, expected_branch=branch,
+        allowed_paths=["allowed.txt"],
+        commit_message="feat: x",
+    )
+
+    assert result["finalized"] is False
+    assert result["reason"] == "concurrent_write_detected"
+    assert result["unexpected_paths"] == ["raced_in.txt"]
+    assert _git("log", "-1", "--format=%s", cwd=worktree_path) == "init"
+
+
+def test_finalize_refuses_success_if_residual_dirt_appears_after_commit(isolated_worktree, monkeypatch):
+    repo_id, host_id, branch, worktree_path = isolated_worktree
+    (worktree_path / "allowed.txt").write_text("a\n")
+
+    import src.git_finalizer as gf
+    real_run_git = gf._run_git
+
+    def _run_git_then_dirty(repo_path, args, **kwargs):
+        result = real_run_git(repo_path, args, **kwargs)
+        if args and args[0] == "commit":
+            (worktree_path / "post_commit_surprise.txt").write_text("oops\n")
+        return result
+
+    monkeypatch.setattr(gf, "_run_git", _run_git_then_dirty)
+
+    result = gf.finalize_scoped(
+        repo_id, host_id, expected_branch=branch,
+        allowed_paths=["allowed.txt"],
+        commit_message="feat: x",
+        push=True,
+    )
+
+    assert result["finalized"] is False
+    assert result["committed"] is True
+    assert result["reason"] == "residual_dirty_state_after_commit"
+    assert result["unexpected_paths"] == ["post_commit_surprise.txt"]
+    assert "pushed" not in result
+    # The local commit is not rolled back (no silent reset/discard), but
+    # it must never have reached origin.
+    log = _git("log", "-1", "--format=%s", cwd=worktree_path)
+    assert log == "feat: x"
+
+
 def test_finalize_requires_allowed_paths():
     result = git_finalizer.finalize_scoped(
         "finalizer-repo", "test-lab",
