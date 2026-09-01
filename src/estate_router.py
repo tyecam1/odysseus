@@ -38,6 +38,7 @@ import yaml
 
 from src.runtime_paths import get_app_root
 from src.park_lease_ops import active_lease_for_repo
+from src import worktree_ops
 
 _CONFIG_DIR = Path(get_app_root()) / "config"
 
@@ -809,8 +810,7 @@ def execute_codex(objective: str, *, timeout: float = 180.0, cwd: Optional[str] 
 
 def _codex_write_authority(repo_id: str, host_id: str) -> dict:
     """Resolve the repo and prove its existing lease without acquiring one."""
-    repo_cwd = resolve_repo_path(repo_id)
-    if repo_cwd is None:
+    if resolve_repo_path(repo_id) is None:
         return {"ok": False, "error": f"implementation mode cannot resolve registered repo {repo_id!r} on this host"}
     lease = active_lease_for_repo(repo_id, host_id)
     if lease is None:
@@ -820,9 +820,21 @@ def _codex_write_authority(repo_id: str, host_id: str) -> dict:
         }
     if lease.get("allowed_write_scope") != "repo":
         return {"ok": False, "error": f"active lease for {repo_id!r} does not grant repo write scope"}
-    if Path(lease["worktree_path"]).resolve() != Path(repo_cwd).resolve():
-        return {"ok": False, "error": f"active lease worktree for {repo_id!r} does not match its resolved repo path"}
-    return {"ok": True, "cwd": repo_cwd, "lease_id": lease["lease_id"]}
+    branch = lease.get("branch")
+    if not branch:
+        return {"ok": False, "error": f"active lease for {repo_id!r} is missing an enforced branch"}
+    lease_path = lease.get("worktree_path")
+    if not lease_path:
+        return {"ok": False, "error": f"active lease for {repo_id!r} has no worktree_path"}
+    if worktree_ops.is_live_checkout_path(repo_id, lease_path):
+        return {"ok": False, "error": f"refusing implementation mode in live registered checkout for {repo_id!r}"}
+    verification = worktree_ops.verify_worktree(repo_id, lease_path, branch)
+    if not verification["ok"]:
+        return {
+            "ok": False,
+            "error": f"active lease worktree for {repo_id!r} failed verification: {verification['reason']}",
+        }
+    return {"ok": True, "cwd": verification["path"], "lease_id": lease["lease_id"]}
 
 
 def execute_codex_write(objective: str, *, repo_id: str, host_id: str,

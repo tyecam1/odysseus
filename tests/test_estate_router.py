@@ -6,6 +6,7 @@ break when the real estate/models registries change, and don't depend on
 this machine's actual hostname/tailnet state.
 """
 import socket
+from pathlib import Path
 
 import pytest
 import yaml
@@ -863,6 +864,8 @@ def test_scenario_a_implementation_mode_dispatches_codex_write_under_active_leas
         fixture_config, monkeypatch, tmp_path):
     repo_path = tmp_path / "test-repo"
     repo_path.mkdir()
+    worktree_path = tmp_path / "aoteru-worktrees" / "test-repo" / "feature"
+    worktree_path.mkdir(parents=True)
     (fixture_config / "repositories.yaml").write_text(yaml.safe_dump({
         "repos": [{"id": "test-repo", "path": str(repo_path)}],
     }))
@@ -878,8 +881,14 @@ def test_scenario_a_implementation_mode_dispatches_codex_write_under_active_leas
         estate_router, "active_lease_for_repo",
         lambda repo_id, host_id: {
             "lease_id": "lease-1", "repo_id": repo_id, "host_id": host_id,
-            "worktree_path": str(repo_path), "allowed_write_scope": "repo",
+            "worktree_path": str(worktree_path), "branch": "feature/demo", "allowed_write_scope": "repo",
         },
+    )
+    monkeypatch.setattr(estate_router.worktree_ops, "is_live_checkout_path", lambda repo_id, path: False)
+    monkeypatch.setattr(
+        estate_router.worktree_ops,
+        "verify_worktree",
+        lambda repo_id, path, branch: {"ok": True, "path": str(worktree_path), "branch": branch},
     )
     captured = {}
 
@@ -903,7 +912,7 @@ def test_scenario_a_implementation_mode_dispatches_codex_write_under_active_leas
     assert result["executed"] is True
     assert result["route"]["executor"] == "codex-write"
     assert captured["objective"] == "implement it"
-    assert captured["cwd"] == str(repo_path)
+    assert captured["cwd"] == str(worktree_path)
     assert captured["sandbox"] == "workspace-write"
     assert recorded_route["task"]["recommended_route"] == "codex_eligible"
     assert recorded_outcome["actual_route"] == "codex-write"
@@ -965,6 +974,65 @@ def test_implementation_mode_without_active_lease_hard_fails(fixture_config, mon
     assert called == []
 
 
+def test_codex_write_authority_denies_live_checkout_path_even_if_leased(fixture_config, monkeypatch, tmp_path):
+    repo_path = tmp_path / "test-repo"
+    repo_path.mkdir()
+    (fixture_config / "repositories.yaml").write_text(yaml.safe_dump({
+        "repos": [{"id": "test-repo", "path": str(repo_path)}],
+    }))
+    monkeypatch.setattr(
+        estate_router,
+        "active_lease_for_repo",
+        lambda repo_id, host_id: {
+            "lease_id": "lease-1",
+            "repo_id": repo_id,
+            "host_id": host_id,
+            "worktree_path": str(repo_path),
+            "branch": "feature/demo",
+            "allowed_write_scope": "repo",
+        },
+    )
+    monkeypatch.setattr(estate_router.worktree_ops, "is_live_checkout_path", lambda repo_id, path: True)
+
+    result = estate_router._codex_write_authority("test-repo", "test-lab")
+
+    assert result["ok"] is False
+    assert "live registered checkout" in result["error"]
+
+
+def test_codex_write_authority_denies_invalid_or_mismatched_worktree(fixture_config, monkeypatch, tmp_path):
+    repo_path = tmp_path / "test-repo"
+    repo_path.mkdir()
+    bad_worktree = tmp_path / "not-a-real-worktree"
+    bad_worktree.mkdir()
+    (fixture_config / "repositories.yaml").write_text(yaml.safe_dump({
+        "repos": [{"id": "test-repo", "path": str(repo_path)}],
+    }))
+    monkeypatch.setattr(
+        estate_router,
+        "active_lease_for_repo",
+        lambda repo_id, host_id: {
+            "lease_id": "lease-1",
+            "repo_id": repo_id,
+            "host_id": host_id,
+            "worktree_path": str(bad_worktree),
+            "branch": "feature/demo",
+            "allowed_write_scope": "repo",
+        },
+    )
+    monkeypatch.setattr(estate_router.worktree_ops, "is_live_checkout_path", lambda repo_id, path: False)
+    monkeypatch.setattr(
+        estate_router.worktree_ops,
+        "verify_worktree",
+        lambda repo_id, path, branch: {"ok": False, "reason": "path is not a registered linked git worktree for this repo"},
+    )
+
+    result = estate_router._codex_write_authority("test-repo", "test-lab")
+
+    assert result["ok"] is False
+    assert "failed verification" in result["error"]
+
+
 def test_scenario_b_repetitive_compute_dispatches_to_remote_local_executor(fixture_config, monkeypatch):
     monkeypatch.setattr(estate_router, "_record_decision", lambda *a, **k: "remote-decision")
     monkeypatch.setattr(estate_router, "_ollama_model_live", lambda model, timeout=3.0: (True, "live"))
@@ -1006,10 +1074,18 @@ def test_codex_lanes_preserve_distinct_sandbox_authority(
     monkeypatch.setattr(subprocess, "run", fake_run)
     fn = getattr(estate_router, executor)
     if executor == "execute_codex_write":
+        worktree_path = tmp_path / "isolated-worktree"
+        worktree_path.mkdir()
         monkeypatch.setattr(estate_router, "resolve_repo_path", lambda repo_id: str(tmp_path))
         monkeypatch.setattr(estate_router, "active_lease_for_repo", lambda repo_id, host_id: {
-            "lease_id": "lease-1", "worktree_path": str(tmp_path), "allowed_write_scope": "repo",
+            "lease_id": "lease-1", "worktree_path": str(worktree_path), "branch": "feature/demo", "allowed_write_scope": "repo",
         })
+        monkeypatch.setattr(estate_router.worktree_ops, "is_live_checkout_path", lambda repo_id, path: False)
+        monkeypatch.setattr(
+            estate_router.worktree_ops,
+            "verify_worktree",
+            lambda repo_id, path, branch: {"ok": True, "path": str(worktree_path), "branch": branch},
+        )
         result = fn("do it", repo_id="test-repo", host_id="test-lab")
     else:
         result = fn("do it", cwd=str(tmp_path))

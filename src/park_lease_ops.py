@@ -26,6 +26,8 @@ import subprocess
 import uuid
 from typing import Optional
 
+from src import worktree_ops
+
 
 class ParkConflict(Exception):
     """An active, non-stale lease already exists for this repo — fail closed."""
@@ -43,6 +45,10 @@ class RepoNotResolvable(Exception):
 class RepoNotClean(Exception):
     """The resolved worktree has uncommitted changes (or git itself
     failed) — fail closed rather than parking a dirty tree."""
+
+
+class WorktreeVerificationError(Exception):
+    """The requested implementation worktree could not be created or verified."""
 
 
 def git_is_clean(path: str) -> tuple[bool, str]:
@@ -80,11 +86,25 @@ def park_repo_by_id(
     stale-reclaim/live-conflict semantics, not re-derived."""
     from src.estate_router import resolve_repo_path
 
-    path = resolve_repo_path(repo_id)
-    if path is None:
+    live_path = resolve_repo_path(repo_id)
+    if live_path is None:
         raise RepoNotResolvable(
             f"{repo_id!r} is not a registered repo, or its root var/path doesn't resolve on this host"
         )
+    path = live_path
+    if branch:
+        try:
+            created = worktree_ops.create_or_reuse_worktree(repo_id, branch, base_ref="HEAD")
+        except RuntimeError as exc:
+            raise WorktreeVerificationError(
+                f"refusing to park {repo_id!r} on branch {branch!r}: {exc}"
+            ) from exc
+        verification = worktree_ops.verify_worktree(repo_id, created["path"], branch)
+        if not verification["ok"]:
+            raise WorktreeVerificationError(
+                f"refusing to park {repo_id!r} on branch {branch!r}: {verification['reason']}"
+            )
+        path = verification["path"]
     clean, reason = git_is_clean(path)
     if not clean:
         raise RepoNotClean(f"refusing to park {repo_id!r}: {reason} (fail-closed — commit/stash first)")
@@ -205,6 +225,7 @@ def active_lease_for_repo(repo_id: str, host_id: str) -> Optional[dict]:
                 "repo_id": row.repo_id,
                 "host_id": row.host_id,
                 "worktree_path": row.worktree_path,
+                "branch": row.branch,
                 "allowed_write_scope": row.allowed_write_scope,
                 "heartbeat_at": row.heartbeat_at.isoformat() if row.heartbeat_at else None,
             }
