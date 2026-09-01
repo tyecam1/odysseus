@@ -310,6 +310,79 @@ def test_authority_denial_creates_no_execution_row(runtime_db, monkeypatch, tmp_
     assert "execution_id" not in result
 
 
+def test_repeated_submission_against_same_lease_reuses_existing_execution(runtime_db, monkeypatch, tmp_path):
+    """Direct regression test for the 2026-09-01 incident root cause:
+    a caller (or a retry loop) submitting a second implementation-mode
+    dispatch against a lease that already has a non-terminal execution
+    must reuse that execution, not spawn a second worker. This is what
+    was actually missing -- the incident was the same lease receiving
+    repeated dispatches while one was already in flight."""
+    hold_event = threading.Event()
+    fake_popen = _fake_popen_factory(hold_event)
+    popen_call_count = 0
+
+    def _counting_popen(argv, **kwargs):
+        nonlocal popen_call_count
+        popen_call_count += 1
+        return fake_popen(argv, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", _counting_popen)
+    monkeypatch.setattr(estate_router, "_codex_available", lambda: (True, "/fake/codex"))
+    _fresh_authority(tmp_path, monkeypatch, lease_id="lease-shared")
+
+    first = estate_router.execute_codex_write_durable(
+        "first dispatch", repo_id="test-repo", host_id="test-lab", wait_timeout=0.2,
+    )
+    assert first["ok"] is True
+    assert first["lifecycle_state"] in ("accepted", "running")
+
+    second = estate_router.execute_codex_write_durable(
+        "second dispatch, same lease, while first still in flight",
+        repo_id="test-repo", host_id="test-lab", wait_timeout=0.2,
+    )
+
+    hold_event.set()
+
+    assert second.get("reused_existing_execution") is True
+    assert second["execution_id"] == first["execution_id"]
+    assert popen_call_count == 1, "a second worker/Codex process must not have been spawned"
+
+
+def test_new_submission_allowed_once_prior_execution_reaches_terminal_state(runtime_db, monkeypatch, tmp_path):
+    """The admission check only blocks *non-terminal* conflicts -- once
+    an execution finishes (success or failure), the lease is free again
+    and a fresh submission must be allowed to run for real, not be
+    permanently wedged behind a completed row."""
+    hold_event = threading.Event()
+    hold_event.set()
+    fake_popen = _fake_popen_factory(hold_event)
+    popen_call_count = 0
+
+    def _counting_popen(argv, **kwargs):
+        nonlocal popen_call_count
+        popen_call_count += 1
+        return fake_popen(argv, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", _counting_popen)
+    monkeypatch.setattr(estate_router, "_codex_available", lambda: (True, "/fake/codex"))
+    _fresh_authority(tmp_path, monkeypatch, lease_id="lease-shared-2")
+
+    first = estate_router.execute_codex_write_durable(
+        "first dispatch", repo_id="test-repo", host_id="test-lab", wait_timeout=1.0,
+    )
+    assert first.get("ok") is True
+    assert first.get("reused_existing_execution") is not True
+
+    second = estate_router.execute_codex_write_durable(
+        "second dispatch after first completed",
+        repo_id="test-repo", host_id="test-lab", wait_timeout=1.0,
+    )
+
+    assert second.get("reused_existing_execution") is not True
+    assert second["execution_id"] != first["execution_id"]
+    assert popen_call_count == 2
+
+
 def test_finalize_refuses_when_authority_now_denies_live_checkout(runtime_db, monkeypatch, tmp_path):
     """Branch-drift/live-checkout substitution between execution and
     finalisation must fail closed -- simulated here by authority

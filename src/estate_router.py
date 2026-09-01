@@ -1161,6 +1161,30 @@ def get_estate_execution(execution_id: str) -> Optional[dict]:
         db.close()
 
 
+def _in_flight_execution_for_lease(lease_id: str) -> Optional[dict]:
+    """Admission-control read: is there already a non-terminal
+    (accepted/running) EstateExecution under this exact lease? Grounded
+    in ParkLease's own single-active-lease-per-repo invariant
+    (ix_park_leases_active_repo_unique) -- at most one lease can be
+    active for a repo at a time, so at most one implementation
+    execution should legitimately be in flight against it at a time
+    either. The 2026-09-01 incident was not many repos under load, it
+    was the *same* lease receiving a new dispatch on top of one already
+    running, repeatedly, with no check that one was already in flight."""
+    from core.database import SessionLocal, EstateExecution
+    db = SessionLocal()
+    try:
+        row = db.query(EstateExecution).filter(
+            EstateExecution.lease_id == lease_id,
+            EstateExecution.lifecycle_state.in_(("accepted", "running")),
+        ).order_by(EstateExecution.submitted_at.desc()).first()
+        if row is None:
+            return None
+        return _estate_execution_provenance(row)
+    finally:
+        db.close()
+
+
 def execute_codex_write_durable(objective: str, *, repo_id: str, host_id: str,
                                 decision_id: Optional[str] = None,
                                 wait_timeout: float = 30.0,
@@ -1179,12 +1203,29 @@ def execute_codex_write_durable(objective: str, *, repo_id: str, host_id: str,
     is created -- a denied request creates no EstateExecution row, same
     as the prior synchronous `execute_codex_write` returning an
     authority-denied result without ever starting a process.
+
+    Admission control (P12.5, 2026-09-01 incident): a repeated dispatch
+    against a lease that already has a non-terminal execution reuses
+    that execution's id rather than spawning a second worker. This is
+    the bounded-concurrency/no-conflicting-simultaneous-execution/
+    reuse-in-progress-submissions invariant, implemented directly on
+    EstateExecution + ParkLease's existing single-active-lease
+    guarantee -- no new semaphore, queue or scheduler.
     """
     authority = _codex_write_authority(repo_id, host_id)
     if not authority["ok"]:
         return {
             "ok": False, "provider": "codex-write",
             "authority_denied": True, "error": authority["error"],
+        }
+
+    in_flight = _in_flight_execution_for_lease(authority["lease_id"])
+    if in_flight is not None:
+        return {
+            "ok": True, "provider": "codex-write",
+            "execution_id": in_flight["execution_id"],
+            "lifecycle_state": in_flight["lifecycle_state"],
+            "reused_existing_execution": True,
         }
 
     lease = active_lease_for_repo(repo_id, host_id) or {}
