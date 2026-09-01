@@ -782,6 +782,16 @@ def _execute_codex_with_sandbox(objective: str, *, sandbox: str, provider: str,
                 text=True,
                 start_new_session=True,
             )
+            # start_new_session=True makes the new process group's id equal
+            # to the leader's pid at the moment of creation. Capture it now
+            # rather than rediscovering it via os.getpgid(proc.pid) after a
+            # timeout: if the leader (e.g. a wrapper that forks a detached
+            # child and exits itself) has already exited by then, its pid no
+            # longer resolves to a live process and getpgid raises
+            # ProcessLookupError - silently leaving any surviving descendant
+            # (which inherited the same pgid, independent of the leader
+            # continuing to exist) unkilled.
+            process_group_id = proc.pid
             stdout, stderr = proc.communicate(timeout=timeout)
             latency_ms = int((time.monotonic() - started) * 1000)
             if proc.returncode != 0:
@@ -795,12 +805,15 @@ def _execute_codex_with_sandbox(objective: str, *, sandbox: str, provider: str,
                     "codex_binary": codex_binary}
         except subprocess.TimeoutExpired:
             try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                os.killpg(process_group_id, signal.SIGKILL)
             except ProcessLookupError:
                 pass
             except OSError:
                 pass
-            proc.communicate()
+            try:
+                proc.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
             return {"ok": False, "provider": provider, "error": f"codex exec timed out after {timeout}s",
                     "latency_ms": int((time.monotonic() - started) * 1000)}
         except Exception as e:

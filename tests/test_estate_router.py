@@ -785,6 +785,55 @@ def test_execute_codex_with_sandbox_kills_entire_process_group_on_timeout(tmp_pa
     assert _wait_for_pid_exit(child_pid), f"child pid {child_pid} still exists after timeout cleanup"
 
 
+def test_execute_codex_with_sandbox_kills_descendant_when_leader_exits_first(tmp_path, monkeypatch):
+    """Adversarial case controller review flagged: the wrapper/group leader
+    can exit before the timeout fires (e.g. it forked a detached child and
+    returned), leaving os.getpgid(proc.pid) unable to resolve a live
+    process by the time cleanup runs - but a descendant, which inherited
+    the same process group independent of the leader continuing to exist,
+    is still alive and still holds the inherited stdout/stderr pipe open,
+    so parent-side communicate() still times out.
+
+    A plain background job in this fixture stays a reachable zombie under
+    this test process until reaped, so os.getpgid(proc.pid) would still
+    happen to succeed even under the old (buggy) code in that narrow case -
+    that is exactly why this test forces the failure os.getpgid() would hit
+    in the wider real case (the leader pid no longer resolving at all, for
+    any reason - reaped by something else, a stale/reused pid, etc.)
+    directly, rather than relying on incidental zombie-reaping timing. The
+    retained process_group_id (captured immediately after Popen, never
+    rediscovered afterward) must still be enough to kill the descendant
+    even when os.getpgid(proc.pid) would raise."""
+    pid_dir = tmp_path / "pids"
+    pid_dir.mkdir()
+    monkeypatch.setenv("AOTERU_TEST_PID_DIR", str(pid_dir))
+    monkeypatch.setenv("AOTERU_TEST_MODE", "leader_exits_child_survives")
+    monkeypatch.setattr(estate_router, "_codex_available", lambda: (True, str(_CODEX_PROCESS_GROUP_FIXTURE)))
+
+    import os as _os
+
+    def _getpgid_fails_like_a_reaped_leader(pid):
+        raise ProcessLookupError(f"simulated: pid {pid} no longer resolves by cleanup time")
+
+    monkeypatch.setattr(_os, "getpgid", _getpgid_fails_like_a_reaped_leader)
+
+    result = estate_router._execute_codex_with_sandbox(
+        "leader-exits probe", sandbox="read-only", provider="codex", timeout=1.0, cwd=str(tmp_path),
+    )
+
+    assert result == {
+        "ok": False,
+        "provider": "codex",
+        "error": "codex exec timed out after 1.0s",
+        "latency_ms": result["latency_ms"],
+    }
+    child_pid = int((pid_dir / "child.pid").read_text().strip())
+    assert _wait_for_pid_exit(child_pid), (
+        f"descendant pid {child_pid} still exists after timeout cleanup - "
+        "cleanup must not depend on os.getpgid(proc.pid) resolving"
+    )
+
+
 def test_execute_codex_with_sandbox_success_shape_unchanged(tmp_path, monkeypatch):
     pid_dir = tmp_path / "pids"
     pid_dir.mkdir()
