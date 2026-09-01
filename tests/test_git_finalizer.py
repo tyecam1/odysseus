@@ -43,7 +43,10 @@ def isolated_worktree(tmp_path, monkeypatch):
     """A registered live checkout with a real bare origin remote, plus a
     real isolated linked worktree on a feature branch, plus a matching
     active ParkLease pointed at that worktree - the exact shape
-    finalize_scoped() is meant to operate on."""
+    finalize_scoped() is meant to operate on. `head` is the worktree's
+    HEAD at fixture setup time - the task's authorised starting commit,
+    the value every finalize_scoped() call in these tests must supply as
+    expected_head unless a test is deliberately exercising a mismatch."""
     import src.estate_router as estate_router
 
     live_path = _init_repo(tmp_path / "projects" / "finalizer-repo")
@@ -62,17 +65,19 @@ def isolated_worktree(tmp_path, monkeypatch):
     created = worktree_ops.create_or_reuse_worktree(repo_id, branch, base_ref="main")
     worktree_path = Path(created["path"])
     park_repo(repo_id, host_id, str(worktree_path), branch=branch)
+    head = _git("rev-parse", "HEAD", cwd=worktree_path)
 
-    return repo_id, host_id, branch, worktree_path
+    return repo_id, host_id, branch, worktree_path, head
 
 
 def test_finalize_stages_and_commits_only_the_allowed_files(isolated_worktree):
-    repo_id, host_id, branch, worktree_path = isolated_worktree
+    repo_id, host_id, branch, worktree_path, head = isolated_worktree
     (worktree_path / "src_change.py").write_text("x = 1\n")
 
     result = git_finalizer.finalize_scoped(
         repo_id, host_id,
         expected_branch=branch,
+        expected_head=head,
         allowed_paths=["src_change.py"],
         commit_message="feat: add src_change.py",
         push=True,
@@ -85,16 +90,21 @@ def test_finalize_stages_and_commits_only_the_allowed_files(isolated_worktree):
     assert _git("status", "--porcelain", cwd=worktree_path) == ""
     log = _git("log", "-1", "--name-only", "--format=", cwd=worktree_path)
     assert log.strip() == "src_change.py"
+    # The commit's own parent must be exactly the authorised starting
+    # HEAD - the direct proof this task's commit was built on top of
+    # nothing else.
+    assert _git("log", "-1", "--format=%P", cwd=worktree_path) == head
 
 
 def test_finalize_rejects_dirty_file_outside_allowed_scope(isolated_worktree):
-    repo_id, host_id, branch, worktree_path = isolated_worktree
+    repo_id, host_id, branch, worktree_path, head = isolated_worktree
     (worktree_path / "src_change.py").write_text("x = 1\n")
     (worktree_path / "tracked.txt").write_text("unexpected edit\n")
 
     result = git_finalizer.finalize_scoped(
         repo_id, host_id,
         expected_branch=branch,
+        expected_head=head,
         allowed_paths=["src_change.py"],
         commit_message="feat: add src_change.py",
     )
@@ -111,13 +121,14 @@ def test_finalize_rejects_dirty_file_outside_allowed_scope(isolated_worktree):
 
 
 def test_finalize_rejects_untracked_file_outside_allowed_scope(isolated_worktree):
-    repo_id, host_id, branch, worktree_path = isolated_worktree
+    repo_id, host_id, branch, worktree_path, head = isolated_worktree
     (worktree_path / "src_change.py").write_text("x = 1\n")
     (worktree_path / "stray_debug_notes.txt").write_text("oops, forgot this was here\n")
 
     result = git_finalizer.finalize_scoped(
         repo_id, host_id,
         expected_branch=branch,
+        expected_head=head,
         allowed_paths=["src_change.py"],
         commit_message="feat: add src_change.py",
     )
@@ -134,7 +145,7 @@ def test_finalize_never_uses_add_dash_a(isolated_worktree, monkeypatch):
     """Deterministic proof the recovered git add -A pattern is gone, not
     just that the observable behaviour looks safe: fail the test outright
     if -A is ever passed to git add."""
-    repo_id, host_id, branch, worktree_path = isolated_worktree
+    repo_id, host_id, branch, worktree_path, head = isolated_worktree
     (worktree_path / "src_change.py").write_text("x = 1\n")
 
     import src.git_finalizer as gf
@@ -150,6 +161,7 @@ def test_finalize_never_uses_add_dash_a(isolated_worktree, monkeypatch):
     result = gf.finalize_scoped(
         repo_id, host_id,
         expected_branch=branch,
+        expected_head=head,
         allowed_paths=["src_change.py"],
         commit_message="feat: add src_change.py",
     )
@@ -167,11 +179,13 @@ def test_finalize_refuses_live_checkout_even_if_leased(tmp_path, monkeypatch):
         lambda requested: str(live_path) if requested == repo_id else None,
     )
     park_repo(repo_id, host_id, str(live_path), branch="main")
+    head = _git("rev-parse", "HEAD", cwd=live_path)
     (live_path / "src_change.py").write_text("x = 1\n")
 
     result = git_finalizer.finalize_scoped(
         repo_id, host_id,
         expected_branch="main",
+        expected_head=head,
         allowed_paths=["src_change.py"],
         commit_message="feat: add src_change.py",
     )
@@ -182,11 +196,12 @@ def test_finalize_refuses_live_checkout_even_if_leased(tmp_path, monkeypatch):
 
 
 def test_finalize_reports_no_changes_when_worktree_already_clean(isolated_worktree):
-    repo_id, host_id, branch, worktree_path = isolated_worktree
+    repo_id, host_id, branch, worktree_path, head = isolated_worktree
 
     result = git_finalizer.finalize_scoped(
         repo_id, host_id,
         expected_branch=branch,
+        expected_head=head,
         allowed_paths=["src_change.py"],
         commit_message="feat: add src_change.py",
     )
@@ -196,12 +211,12 @@ def test_finalize_reports_no_changes_when_worktree_already_clean(isolated_worktr
 
 
 def test_finalize_rejects_directory_level_allowed_path(isolated_worktree):
-    repo_id, host_id, branch, worktree_path = isolated_worktree
+    repo_id, host_id, branch, worktree_path, head = isolated_worktree
     (worktree_path / "dir").mkdir()
     (worktree_path / "dir" / "allowed.txt").write_text("a\n")
 
     result = git_finalizer.finalize_scoped(
-        repo_id, host_id, expected_branch=branch,
+        repo_id, host_id, expected_branch=branch, expected_head=head,
         allowed_paths=["dir/"],
         commit_message="feat: x",
     )
@@ -212,13 +227,13 @@ def test_finalize_rejects_directory_level_allowed_path(isolated_worktree):
 
 
 def test_finalize_rejects_stray_nested_file_when_only_one_file_in_dir_is_allowed(isolated_worktree):
-    repo_id, host_id, branch, worktree_path = isolated_worktree
+    repo_id, host_id, branch, worktree_path, head = isolated_worktree
     (worktree_path / "dir").mkdir()
     (worktree_path / "dir" / "allowed.txt").write_text("a\n")
     (worktree_path / "dir" / "stray.txt").write_text("b\n")
 
     result = git_finalizer.finalize_scoped(
-        repo_id, host_id, expected_branch=branch,
+        repo_id, host_id, expected_branch=branch, expected_head=head,
         allowed_paths=["dir/allowed.txt"],
         commit_message="feat: x",
     )
@@ -230,12 +245,12 @@ def test_finalize_rejects_stray_nested_file_when_only_one_file_in_dir_is_allowed
 
 
 def test_finalize_succeeds_for_exact_nested_file_with_no_stray_sibling(isolated_worktree):
-    repo_id, host_id, branch, worktree_path = isolated_worktree
+    repo_id, host_id, branch, worktree_path, head = isolated_worktree
     (worktree_path / "dir").mkdir()
     (worktree_path / "dir" / "allowed.txt").write_text("a\n")
 
     result = git_finalizer.finalize_scoped(
-        repo_id, host_id, expected_branch=branch,
+        repo_id, host_id, expected_branch=branch, expected_head=head,
         allowed_paths=["dir/allowed.txt"],
         commit_message="feat: x",
     )
@@ -245,12 +260,12 @@ def test_finalize_succeeds_for_exact_nested_file_with_no_stray_sibling(isolated_
 
 
 def test_finalize_handles_filenames_with_spaces_quotes_and_literal_arrow(isolated_worktree):
-    repo_id, host_id, branch, worktree_path = isolated_worktree
+    repo_id, host_id, branch, worktree_path, head = isolated_worktree
     tricky_name = 'weird "name" with -> arrow and spaces.txt'
     (worktree_path / tricky_name).write_text("x\n")
 
     result = git_finalizer.finalize_scoped(
-        repo_id, host_id, expected_branch=branch,
+        repo_id, host_id, expected_branch=branch, expected_head=head,
         allowed_paths=[tricky_name],
         commit_message="feat: tricky filename",
     )
@@ -260,14 +275,15 @@ def test_finalize_handles_filenames_with_spaces_quotes_and_literal_arrow(isolate
 
 
 def test_finalize_requires_both_names_of_a_real_rename_to_be_allowed(isolated_worktree):
-    repo_id, host_id, branch, worktree_path = isolated_worktree
+    repo_id, host_id, branch, worktree_path, head = isolated_worktree
     (worktree_path / "old_name.txt").write_text("line one\nline two\nline three\nline four\nline five\n")
     subprocess.run(["git", "-C", str(worktree_path), "add", "old_name.txt"], check=True)
     subprocess.run(["git", "-C", str(worktree_path), "commit", "-q", "-m", "add old_name.txt"], check=True)
+    head = _git("rev-parse", "HEAD", cwd=worktree_path)
     (worktree_path / "old_name.txt").rename(worktree_path / "new_name.txt")
 
     only_new_name = git_finalizer.finalize_scoped(
-        repo_id, host_id, expected_branch=branch,
+        repo_id, host_id, expected_branch=branch, expected_head=head,
         allowed_paths=["new_name.txt"],
         commit_message="feat: rename",
     )
@@ -276,7 +292,7 @@ def test_finalize_requires_both_names_of_a_real_rename_to_be_allowed(isolated_wo
     assert only_new_name["unexpected_paths"] == ["old_name.txt"]
 
     both_names = git_finalizer.finalize_scoped(
-        repo_id, host_id, expected_branch=branch,
+        repo_id, host_id, expected_branch=branch, expected_head=head,
         allowed_paths=["new_name.txt", "old_name.txt"],
         commit_message="feat: rename",
     )
@@ -295,11 +311,11 @@ def test_finalize_requires_both_names_of_a_real_rename_to_be_allowed(isolated_wo
     ":(icase)file.txt",
 ])
 def test_finalize_rejects_unsafe_allowed_paths_before_touching_git(isolated_worktree, bad_path):
-    repo_id, host_id, branch, worktree_path = isolated_worktree
+    repo_id, host_id, branch, worktree_path, head = isolated_worktree
     (worktree_path / "real_change.txt").write_text("x\n")
 
     result = git_finalizer.finalize_scoped(
-        repo_id, host_id, expected_branch=branch,
+        repo_id, host_id, expected_branch=branch, expected_head=head,
         allowed_paths=[bad_path],
         commit_message="feat: x",
     )
@@ -311,13 +327,13 @@ def test_finalize_rejects_unsafe_allowed_paths_before_touching_git(isolated_work
 
 
 def test_finalize_rejects_allowed_path_resolving_outside_worktree_via_symlink(isolated_worktree, tmp_path):
-    repo_id, host_id, branch, worktree_path = isolated_worktree
+    repo_id, host_id, branch, worktree_path, head = isolated_worktree
     outside = tmp_path / "outside_target.txt"
     outside.write_text("should never be touched\n")
     (worktree_path / "escape_link").symlink_to(outside)
 
     result = git_finalizer.finalize_scoped(
-        repo_id, host_id, expected_branch=branch,
+        repo_id, host_id, expected_branch=branch, expected_head=head,
         allowed_paths=["escape_link"],
         commit_message="feat: x",
     )
@@ -327,7 +343,7 @@ def test_finalize_rejects_allowed_path_resolving_outside_worktree_via_symlink(is
 
 
 def test_finalize_detects_concurrent_write_between_initial_check_and_commit(isolated_worktree, monkeypatch):
-    repo_id, host_id, branch, worktree_path = isolated_worktree
+    repo_id, host_id, branch, worktree_path, head = isolated_worktree
     (worktree_path / "allowed.txt").write_text("a\n")
 
     import src.git_finalizer as gf
@@ -344,7 +360,7 @@ def test_finalize_detects_concurrent_write_between_initial_check_and_commit(isol
     monkeypatch.setattr(gf, "_status_paths", _racy_status_paths)
 
     result = gf.finalize_scoped(
-        repo_id, host_id, expected_branch=branch,
+        repo_id, host_id, expected_branch=branch, expected_head=head,
         allowed_paths=["allowed.txt"],
         commit_message="feat: x",
     )
@@ -356,7 +372,7 @@ def test_finalize_detects_concurrent_write_between_initial_check_and_commit(isol
 
 
 def test_finalize_refuses_success_if_residual_dirt_appears_after_commit(isolated_worktree, monkeypatch):
-    repo_id, host_id, branch, worktree_path = isolated_worktree
+    repo_id, host_id, branch, worktree_path, head = isolated_worktree
     (worktree_path / "allowed.txt").write_text("a\n")
 
     import src.git_finalizer as gf
@@ -371,7 +387,7 @@ def test_finalize_refuses_success_if_residual_dirt_appears_after_commit(isolated
     monkeypatch.setattr(gf, "_run_git", _run_git_then_dirty)
 
     result = gf.finalize_scoped(
-        repo_id, host_id, expected_branch=branch,
+        repo_id, host_id, expected_branch=branch, expected_head=head,
         allowed_paths=["allowed.txt"],
         commit_message="feat: x",
         push=True,
@@ -392,8 +408,98 @@ def test_finalize_requires_allowed_paths():
     result = git_finalizer.finalize_scoped(
         "finalizer-repo", "test-lab",
         expected_branch="main",
+        expected_head="0" * 40,
         allowed_paths=[],
         commit_message="feat: nothing",
     )
     assert result["finalized"] is False
     assert result["reason"] == "no_allowed_paths_supplied"
+
+
+def test_finalize_rejects_stale_branch_with_unrelated_commit_ahead_of_expected_head(isolated_worktree):
+    """The controller-identified defect: file scope alone does not bound
+    history. A reused/stale isolated branch can already carry an
+    unrelated commit B on top of the task's real authorised base A while
+    the working tree is completely clean of it - all file-scope checks
+    would pass, and pushing the task's own scope-correct commit on top
+    would publish B too. expected_head must catch this immediately, on
+    the very first worktree verification, before any file scope is even
+    considered."""
+    repo_id, host_id, branch, worktree_path, authorised_head = isolated_worktree
+
+    # Simulate a previous/other agent leaving an unrelated commit B on
+    # this same branch after the task's real authorised base.
+    (worktree_path / "unrelated_file.py").write_text("leftover = True\n")
+    subprocess.run(["git", "-C", str(worktree_path), "add", "unrelated_file.py"], check=True)
+    subprocess.run(["git", "-C", str(worktree_path), "commit", "-q", "-m", "unrelated commit B"], check=True)
+
+    # The current task's own, entirely legitimate, in-scope change.
+    (worktree_path / "allowed.py").write_text("x = 1\n")
+
+    result = git_finalizer.finalize_scoped(
+        repo_id, host_id,
+        expected_branch=branch,
+        expected_head=authorised_head,
+        allowed_paths=["allowed.py"],
+        commit_message="feat: allowed change",
+    )
+
+    assert result["finalized"] is False
+    assert result["reason"].startswith("worktree_verification_failed")
+    assert "head_mismatch" in result["reason"] or "HEAD mismatch" in result["reason"]
+    # Nothing was pushed - the bare origin must not have moved past main.
+    origin_refs = subprocess.run(
+        ["git", "-C", str(worktree_path), "ls-remote", "origin", branch],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    assert origin_refs.strip() == ""
+
+
+def test_finalize_rejects_when_head_moves_after_initial_verification_but_before_commit(isolated_worktree, monkeypatch):
+    """A concurrent writer race distinct from the file-scope race already
+    covered above: something else commits onto the branch AFTER
+    verify_worktree's initial expected_head check has already passed
+    (e.g. it ran in the small window before this call started touching
+    the worktree at all), but before this call actually commits. The
+    pre-commit HEAD re-check must catch this even though the earlier,
+    file-scope-only race detection would not (that only watches the
+    working tree, not the branch tip itself)."""
+    repo_id, host_id, branch, worktree_path, head = isolated_worktree
+    (worktree_path / "allowed.py").write_text("x = 1\n")
+
+    import src.git_finalizer as gf
+    real_verify_worktree = worktree_ops.verify_worktree
+    calls = {"n": 0}
+
+    def _racy_verify_worktree(*args, **kwargs):
+        calls["n"] += 1
+        result = real_verify_worktree(*args, **kwargs)
+        if calls["n"] == 1 and result["ok"]:
+            # Inject a commit onto the branch immediately after the
+            # initial verification succeeded, simulating another writer.
+            (worktree_path / "raced_commit_file.py").write_text("intruder = True\n")
+            subprocess.run(["git", "-C", str(worktree_path), "add", "raced_commit_file.py"], check=True)
+            subprocess.run(["git", "-C", str(worktree_path), "commit", "-q", "-m", "raced-in commit"], check=True)
+        return result
+
+    monkeypatch.setattr(gf.worktree_ops, "verify_worktree", _racy_verify_worktree)
+
+    result = gf.finalize_scoped(
+        repo_id, host_id, expected_branch=branch, expected_head=head,
+        allowed_paths=["allowed.py"],
+        commit_message="feat: allowed change",
+    )
+
+    assert result["finalized"] is False
+    assert result["reason"] == "head_moved_before_commit"
+    assert result["expected_head"] == head
+    assert result["actual_head"] != head
+    # The task's own commit must never have been created on top of the
+    # raced-in one.
+    log = _git("log", "-1", "--format=%s", cwd=worktree_path)
+    assert log == "raced-in commit"
+    origin_refs = subprocess.run(
+        ["git", "-C", str(worktree_path), "ls-remote", "origin", branch],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    assert origin_refs.strip() == ""

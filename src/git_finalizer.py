@@ -27,6 +27,19 @@ runs every path-taking git command with `--literal-pathspecs` so a
 filename can never be interpreted as pathspec magic. `allowed_paths` must
 be exact repo-relative file paths - never directories, globs, or
 traversal - validated before any git state is touched.
+
+Controller review also found that file scope alone does not bound
+*history*: a reused/stale isolated branch can already carry unrelated
+local commits on top of the task's real authorised base while having a
+completely clean working tree, and a scope-correct commit pushed on top
+of it publishes that unrelated history too. `finalize_scoped` therefore
+requires the caller's authorised task-start HEAD (`expected_head`) and
+enforces it twice - once via `worktree_ops.verify_worktree` before
+anything else runs, and again immediately before the commit itself (a
+worktree used concurrently by something else could have moved HEAD in
+between) - refusing to commit if the branch is not still exactly where
+the task began, and verifying the resulting commit's own first parent
+before ever permitting a push.
 """
 from __future__ import annotations
 
@@ -143,12 +156,16 @@ def finalize_scoped(
     host_id: str,
     *,
     expected_branch: str,
+    expected_head: str,
     allowed_paths: list[str],
     commit_message: str,
     push: bool = True,
 ) -> dict:
     """Commit (and by default push) only `allowed_paths` inside the
-    caller's verified isolated leased worktree for repo_id+host_id.
+    caller's verified isolated leased worktree for repo_id+host_id,
+    itself required to still be exactly at `expected_head` - the task's
+    authorised starting commit - both before this function does anything
+    else and again immediately before it commits.
 
     Fails closed - stages and commits nothing, and never resets/discards
     whatever it finds - whenever:
@@ -158,8 +175,14 @@ def finalize_scoped(
       repo_id+host_id;
     - the lease's worktree_path is the live registered checkout, or does
       not independently verify as a real linked worktree on
-      expected_branch (the same authority execute_codex_write depends
-      on - this can never diverge from what execution actually used);
+      expected_branch AT expected_head (the same authority
+      execute_codex_write depends on - this can never diverge from what
+      execution actually used) - a reused/stale branch carrying unrelated
+      commits on top of the authorised base is refused here, before
+      anything about file scope is even considered;
+    - HEAD has moved away from expected_head by the time this function is
+      about to commit (a concurrent writer race on the same worktree,
+      caught even though the initial check above already passed);
     - the worktree has no changes at all;
     - the worktree has ANY dirty or untracked path (exact file, not
       directory - untracked-files=all lists every file individually)
@@ -168,9 +191,15 @@ def finalize_scoped(
       authorised set, or anything new and unexpected appears in the
       worktree between the initial scope check and staging (a
       concurrent writer race) - re-checked immediately before commit;
+    - the resulting commit's own first parent is not exactly
+      expected_head (defence-in-depth beyond the pre-commit HEAD check);
     - the worktree is not completely clean immediately after commit -
       residual dirty/untracked content blocks reporting success and
       blocks push, even though a commit may already exist locally.
+
+    Never force-pushes, never resets, never rewrites or repairs
+    unexpected history - any mismatch simply stops finalisation and
+    leaves everything exactly as found for a human to inspect.
     """
     if not allowed_paths:
         return {"finalized": False, "reason": "no_allowed_paths_supplied"}
@@ -187,7 +216,9 @@ def finalize_scoped(
     if worktree_ops.is_live_checkout_path(repo_id, lease_path):
         return {"finalized": False, "reason": "refusing to finalize in the live registered checkout"}
 
-    verification = worktree_ops.verify_worktree(repo_id, lease_path, expected_branch)
+    verification = worktree_ops.verify_worktree(
+        repo_id, lease_path, expected_branch, expected_head=expected_head,
+    )
     if not verification["ok"]:
         return {
             "finalized": False,
@@ -265,6 +296,32 @@ def finalize_scoped(
             "unexpected_paths": sorted(post_stage_unexpected),
         }
 
+    # HEAD-authority re-check, immediately before committing: the initial
+    # verify_worktree(expected_head=...) call above already proved the
+    # branch started exactly where the task was authorised to start, but
+    # everything since then (status scans, staging) gave a concurrent
+    # writer on the same worktree a window to move HEAD (e.g. by
+    # committing something else). Re-read it fresh right before the
+    # commit that would otherwise be built on top of whatever HEAD
+    # currently is.
+    try:
+        pre_commit_head_proc = _run_git(repo_path, ["rev-parse", "HEAD"])
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"finalized": False, "reason": f"pre_commit_head_check_failed: {exc}"}
+    if pre_commit_head_proc.returncode != 0:
+        return {
+            "finalized": False,
+            "reason": f"pre_commit_head_check_failed: {pre_commit_head_proc.stderr.decode(errors='replace').strip() or 'git rev-parse failed'}",
+        }
+    pre_commit_head = pre_commit_head_proc.stdout.decode().strip()
+    if pre_commit_head != expected_head:
+        return {
+            "finalized": False,
+            "reason": "head_moved_before_commit",
+            "expected_head": expected_head,
+            "actual_head": pre_commit_head,
+        }
+
     # Path-limited commit as a second, independent enforcement of scope -
     # even if the index somehow held more than intended, this only ever
     # commits the authorised paths.
@@ -288,6 +345,30 @@ def finalize_scoped(
             "reason": f"commit_head_failed: {head_proc.stderr.decode(errors='replace').strip() or 'git rev-parse failed'}",
         }
     commit_sha = head_proc.stdout.decode().strip()
+
+    # Defence-in-depth beyond the pre-commit check above: the new commit
+    # this call just created must have expected_head as its own first
+    # parent - proving the commit really was built directly on the
+    # authorised base, not on anything else.
+    try:
+        parent_proc = _run_git(repo_path, ["rev-parse", f"{commit_sha}^"])
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"finalized": False, "committed": True, "commit_sha": commit_sha, "reason": f"parent_check_failed: {exc}"}
+    if parent_proc.returncode != 0:
+        return {
+            "finalized": False, "committed": True, "commit_sha": commit_sha,
+            "reason": f"parent_check_failed: {parent_proc.stderr.decode(errors='replace').strip() or 'git rev-parse failed'}",
+        }
+    actual_parent = parent_proc.stdout.decode().strip()
+    if actual_parent != expected_head:
+        return {
+            "finalized": False,
+            "committed": True,
+            "commit_sha": commit_sha,
+            "reason": "commit_parent_mismatch",
+            "expected_head": expected_head,
+            "actual_parent": actual_parent,
+        }
 
     # The worktree must be completely clean immediately after commit -
     # anything left dirty (whether from before staging that somehow
