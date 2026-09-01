@@ -32,7 +32,7 @@ import re
 import socket
 import uuid
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import yaml
 
@@ -744,7 +744,8 @@ def _codex_available() -> tuple[bool, str]:
 
 
 def _execute_codex_with_sandbox(objective: str, *, sandbox: str, provider: str,
-                                timeout: float = 180.0, cwd: Optional[str] = None) -> dict:
+                                timeout: float = 180.0, cwd: Optional[str] = None,
+                                on_started: Optional[Callable[[int], None]] = None) -> dict:
     """Share bounded CLI mechanics without making sandbox choice policy.
 
     Only the public advisory/write functions choose the sandbox. Keeping
@@ -792,6 +793,8 @@ def _execute_codex_with_sandbox(objective: str, *, sandbox: str, provider: str,
             # (which inherited the same pgid, independent of the leader
             # continuing to exist) unkilled.
             process_group_id = proc.pid
+            if on_started is not None:
+                on_started(process_group_id)
             stdout, stderr = proc.communicate(timeout=timeout)
             latency_ms = int((time.monotonic() - started) * 1000)
             if proc.returncode != 0:
@@ -903,6 +906,345 @@ def execute_codex_write(objective: str, *, repo_id: str, host_id: str,
     )
 
 
+_STALE_EXECUTION_ACCEPT_GRACE_SECONDS = 120
+# A worker's process can legitimately exit an instant before _run()
+# finishes writing its terminal state to the row -- a poll landing in
+# that narrow window must not have reconciliation relabel a row that is
+# genuinely about to succeed as "interrupted". Require the row to also
+# not have been touched recently before trusting an os.kill(pid, 0)
+# not-found result.
+_STALE_EXECUTION_PID_GRACE_SECONDS = 5
+
+
+def _estate_execution_provenance(execution) -> dict:
+    """Shared field projection for `EstateExecution` rows so the poll
+    route and any future caller see the same shape."""
+    return {
+        "execution_id": execution.id,
+        "decision_id": execution.decision_id,
+        "objective": execution.objective,
+        "executor": execution.executor,
+        "provider": execution.provider,
+        "host_id": execution.host_id,
+        "repo_id": execution.repo_id,
+        "lease_id": execution.lease_id,
+        "worktree_path": execution.worktree_path,
+        "branch": execution.branch,
+        "worker_pid": execution.worker_pid,
+        "process_group_id": execution.process_group_id,
+        "lifecycle_state": execution.lifecycle_state,
+        "submitted_at": execution.submitted_at.isoformat() if execution.submitted_at else None,
+        "started_at": execution.started_at.isoformat() if execution.started_at else None,
+        "finished_at": execution.finished_at.isoformat() if execution.finished_at else None,
+        "exit_status": execution.exit_status,
+        "result": json.loads(execution.result_json) if execution.result_json else None,
+        "error": execution.error,
+        "finalization": json.loads(execution.finalization_json) if execution.finalization_json else None,
+    }
+
+
+def _create_estate_execution(*, decision_id, objective, executor, provider,
+                              host_id, repo_id, lease_id, worktree_path, branch) -> str:
+    """Create the accepted-state durable execution record before the
+    worker starts. Committed synchronously so a promptly-returned
+    execution_id is guaranteed to already be queryable -- a caller that
+    polls immediately after submission must never see a 404 for a
+    request the server just accepted."""
+    from core.database import SessionLocal, EstateExecution
+    execution_id = str(uuid.uuid4())
+    db = SessionLocal()
+    try:
+        db.add(EstateExecution(
+            id=execution_id, decision_id=decision_id, objective=objective,
+            executor=executor, provider=provider, host_id=host_id, repo_id=repo_id,
+            lease_id=lease_id, worktree_path=worktree_path, branch=branch,
+            lifecycle_state="accepted",
+        ))
+        db.commit()
+    finally:
+        db.close()
+    return execution_id
+
+
+def _update_estate_execution(execution_id: str, **fields) -> None:
+    """Single write path for every EstateExecution transition (accepted
+    -> running -> terminal). Callers pass only the columns that changed
+    so an earlier update (e.g. `on_started` recording the pid) is never
+    clobbered by a later one that doesn't know about it."""
+    from core.database import SessionLocal, EstateExecution
+    db = SessionLocal()
+    try:
+        row = db.query(EstateExecution).filter(EstateExecution.id == execution_id).one_or_none()
+        if row is None:
+            return
+        for key, value in fields.items():
+            setattr(row, key, value)
+        db.commit()
+    finally:
+        db.close()
+
+
+def reconcile_stale_estate_executions(db, EstateExecution) -> int:
+    """Reconciliation for EstateExecution rows the backend's own process
+    no longer has any thread tracking -- e.g. after a service restart
+    while an execution was accepted/running. Mirrors
+    `scripts/agent`'s `_reconcile_stale_sessions()` (same lazy/on-query
+    invocation shape, one shared authority, never a second lifecycle
+    table) but improves on it: a recorded `worker_pid` lets existence be
+    checked directly with `os.kill(pid, 0)` instead of relying on
+    elapsed time alone. A row with no pid yet is left alone until
+    `_STALE_EXECUTION_ACCEPT_GRACE_SECONDS` has passed -- `on_started`
+    may simply not have fired yet. Never restarts a paid executor
+    invocation itself (incident finding: uncertain completion must not
+    trigger a blind retry) -- this only relabels state, it never calls
+    `_execute_codex_with_sandbox` again."""
+    import os
+    from datetime import datetime, timedelta, timezone
+    from core.database import utcnow_naive
+    cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=_STALE_EXECUTION_ACCEPT_GRACE_SECONDS)
+    cutoff_pid_grace = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=_STALE_EXECUTION_PID_GRACE_SECONDS)
+    in_flight = db.query(EstateExecution).filter(
+        EstateExecution.lifecycle_state.in_(("accepted", "running")),
+    ).all()
+    reconciled = 0
+    for row in in_flight:
+        pid = row.worker_pid
+        if pid is None:
+            if row.submitted_at is not None and row.submitted_at >= cutoff:
+                continue
+            reason = (
+                "reconciled: no worker_pid recorded and row is older than "
+                f"{_STALE_EXECUTION_ACCEPT_GRACE_SECONDS}s -- launch never confirmed"
+            )
+        else:
+            try:
+                os.kill(pid, 0)
+                continue
+            except ProcessLookupError:
+                touched_at = row.updated_at or row.submitted_at
+                if touched_at is not None and touched_at >= cutoff_pid_grace:
+                    continue  # too recent -- likely mid-legitimate-completion, not orphaned
+                reason = (
+                    "reconciled: recorded worker_pid no longer exists on this host -- backend "
+                    "likely restarted or the worker crashed while this execution was in flight"
+                )
+            except PermissionError:
+                continue
+        row.lifecycle_state = "interrupted"
+        row.finished_at = row.finished_at or utcnow_naive()
+        row.error = row.error or reason
+        reconciled += 1
+    db.commit()
+    return reconciled
+
+
+def get_estate_execution(execution_id: str) -> Optional[dict]:
+    """HTTP surface for GET /api/estate/run/{execution_id} -- the
+    authoritative persisted state a client polls for after receiving an
+    accepted response. Reconciles stale in-flight rows lazily on read
+    (same invocation shape as LogicalSession reconciliation) so a poll
+    after a backend restart reflects truthful state rather than a
+    permanently phantom "running" row."""
+    from core.database import SessionLocal, EstateExecution
+    db = SessionLocal()
+    try:
+        reconcile_stale_estate_executions(db, EstateExecution)
+        row = db.query(EstateExecution).filter(EstateExecution.id == execution_id).one_or_none()
+        if row is None:
+            return None
+        return _estate_execution_provenance(row)
+    finally:
+        db.close()
+
+
+def execute_codex_write_durable(objective: str, *, repo_id: str, host_id: str,
+                                decision_id: Optional[str] = None,
+                                wait_timeout: float = 30.0,
+                                timeout: float = 1800.0) -> dict:
+    """Durable wrapper around `_execute_codex_with_sandbox` that decouples
+    the caller's HTTP request lifetime from the underlying Codex
+    process's actual runtime (the >45s /api/estate/run problem must be
+    solved structurally, not by increasing an HTTP timeout). Does not
+    touch `_execute_codex_with_sandbox`'s own timeout/process-group-kill
+    handling (d8f9836/70844c3/8d529d5) at all -- that remains the single
+    execution watchdog/process-group authority; this only adds
+    persistence and a bounded wait before returning early. The worker
+    keeps running under that same watchdog either way.
+
+    Authority is resolved once, synchronously, before anything durable
+    is created -- a denied request creates no EstateExecution row, same
+    as the prior synchronous `execute_codex_write` returning an
+    authority-denied result without ever starting a process.
+    """
+    authority = _codex_write_authority(repo_id, host_id)
+    if not authority["ok"]:
+        return {
+            "ok": False, "provider": "codex-write",
+            "authority_denied": True, "error": authority["error"],
+        }
+
+    lease = active_lease_for_repo(repo_id, host_id) or {}
+    execution_id = _create_estate_execution(
+        decision_id=decision_id, objective=objective, executor="codex-write",
+        provider="codex", host_id=host_id, repo_id=repo_id,
+        lease_id=authority["lease_id"], worktree_path=authority["cwd"],
+        branch=lease.get("branch"),
+    )
+
+    import threading
+    from core.database import utcnow_naive
+
+    outcome: dict = {}
+
+    def _on_started(process_group_id: int) -> None:
+        _update_estate_execution(
+            execution_id, lifecycle_state="running",
+            worker_pid=process_group_id, process_group_id=process_group_id,
+            started_at=utcnow_naive(),
+        )
+
+    def _run() -> None:
+        result = _execute_codex_with_sandbox(
+            objective, sandbox="workspace-write", provider="codex-write",
+            timeout=timeout, cwd=authority["cwd"], on_started=_on_started,
+        )
+        outcome["result"] = result
+        if result.get("ok"):
+            final_state = "succeeded"
+        elif "timed out" in (result.get("error") or ""):
+            final_state = "timed_out"
+        else:
+            final_state = "failed"
+        _update_estate_execution(
+            execution_id, lifecycle_state=final_state,
+            finished_at=utcnow_naive(), result_json=json.dumps(result),
+            error=None if result.get("ok") else result.get("error"),
+            exit_status="0" if result.get("ok") else "1",
+        )
+        if decision_id:
+            gate = "pass" if result.get("ok") and (result.get("output") or "").strip() else "fail"
+            _update_decision_outcome(
+                decision_id, status="complete" if gate == "pass" else "failed",
+                deterministic_gate=gate, latency_ms=result.get("latency_ms"),
+                escalation_reason="insufficient_capability" if gate == "pass" else "worker_failed",
+                executor="codex-write", escalated=True, actual_route="codex-write",
+                verification_outcome=gate,
+            )
+
+    thread = threading.Thread(target=_run, name=f"codex-write-{execution_id}", daemon=True)
+    thread.start()
+    thread.join(wait_timeout)
+
+    if thread.is_alive():
+        # on_started may already have flipped the row to "running" by
+        # now (it fires right after Popen, before wait_timeout would
+        # typically elapse) -- report the row's actual current state
+        # rather than assuming "accepted", so a caller that polls
+        # immediately after this response sees a consistent state.
+        current = get_estate_execution(execution_id)
+        return {
+            "ok": True, "provider": "codex-write", "execution_id": execution_id,
+            "lifecycle_state": current["lifecycle_state"] if current else "accepted",
+        }
+    result = outcome.get("result", {})
+    return {**result, "execution_id": execution_id}
+
+
+def finalize_execution(*, execution_id: str, repo_id: str, host_id: str,
+                        commit_message: str) -> dict:
+    """Commit and push the changes made by a completed durable execution.
+
+    Reuses `_codex_write_authority` (never raw `resolve_repo_path`) so
+    the same worktree-verification/live-checkout-refusal invariant that
+    governs execution also governs finalisation -- the incident this
+    repairs was specifically a write landing in the live checkout, so
+    finalisation gets no separate, weaker cwd resolution. Re-verifies
+    authority, lease id, branch and worktree path immediately before
+    finalising rather than trusting the execution record's stored
+    values, so a lease released or reassigned between execution and
+    finalisation fails closed here rather than committing against a
+    stale or now-wrong path. Stages every dirty path individually
+    (never `git add -A`) so finalisation is traceable path-by-path; the
+    worktree's own dirty set is this execution's authorised scope by
+    construction of ParkLease's single-active-lease-per-repo invariant
+    (`ix_park_leases_active_repo_unique`) -- no other task can be
+    concurrently dirtying the same worktree.
+    """
+    from core.database import SessionLocal, EstateExecution, utcnow_naive
+    db = SessionLocal()
+    try:
+        execution = db.query(EstateExecution).filter(EstateExecution.id == execution_id).one_or_none()
+    finally:
+        db.close()
+    if execution is None:
+        return {"finalized": False, "reason": f"no execution found with id {execution_id!r}"}
+    if execution.lifecycle_state != "succeeded":
+        return {
+            "finalized": False,
+            "reason": f"execution is {execution.lifecycle_state!r}, not succeeded -- refusing to finalise",
+        }
+
+    authority = _codex_write_authority(repo_id, host_id)
+    if not authority["ok"]:
+        return {"finalized": False, "reason": f"authority re-verification failed: {authority['error']}"}
+    if authority["lease_id"] != execution.lease_id:
+        return {
+            "finalized": False,
+            "reason": f"lease drift: execution ran under {execution.lease_id!r}, "
+                      f"current active lease is {authority['lease_id']!r}",
+        }
+    if authority["cwd"] != execution.worktree_path:
+        return {
+            "finalized": False,
+            "reason": f"worktree drift: execution ran in {execution.worktree_path!r}, "
+                      f"current verified worktree is {authority['cwd']!r}",
+        }
+
+    repo_path = authority["cwd"]
+    import subprocess
+
+    def _run_git(argv):
+        return subprocess.run(["git"] + argv, cwd=repo_path, capture_output=True, text=True, timeout=60)
+
+    branch_proc = _run_git(["branch", "--show-current"])
+    actual_branch = branch_proc.stdout.strip()
+    if actual_branch != execution.branch:
+        return {
+            "finalized": False,
+            "reason": f"branch drift: execution ran on {execution.branch!r}, worktree is now on {actual_branch!r}",
+        }
+
+    status_proc = _run_git(["status", "--porcelain"])
+    dirty_paths = [line[3:] for line in status_proc.stdout.splitlines() if line.strip()]
+    if not dirty_paths:
+        return {"finalized": False, "reason": "no changes to finalize"}
+
+    add_proc = _run_git(["add", "--"] + dirty_paths)
+    if add_proc.returncode != 0:
+        return {"finalized": False, "reason": f"git add failed: {add_proc.stderr.strip()}"}
+
+    commit_proc = _run_git(["commit", "-m", commit_message])
+    if commit_proc.returncode != 0:
+        return {"finalized": False, "reason": f"git commit failed: {commit_proc.stderr.strip()}"}
+
+    commit_sha = _run_git(["rev-parse", "HEAD"]).stdout.strip()
+    push_proc = _run_git(["push", "origin", actual_branch])
+    finalization = {
+        "finalized": push_proc.returncode == 0,
+        "committed": True,
+        "pushed": push_proc.returncode == 0,
+        "commit_sha": commit_sha,
+        "branch": actual_branch,
+        "dirty_paths": dirty_paths,
+        "lease_id": authority["lease_id"],
+    }
+    if push_proc.returncode != 0:
+        finalization["push_error"] = push_proc.stderr.strip()
+
+    _update_estate_execution(execution_id, finalization_json=json.dumps(finalization))
+    return finalization
+
+
 # Provider dispatch table (Workstream C: "cheap/strong paid capability
 # aliases via config, not hardcoded names"). The *selection* of which
 # provider backs a given alias, and what name gets recorded as
@@ -919,7 +1261,7 @@ def execute_codex_write(objective: str, *, repo_id: str, host_id: str,
 # same way they already monkeypatch `execute_local`; binding the object
 # here at import time would silently stop honouring that patch.
 _PAID_PROVIDER_FUNCTION_NAMES = {"codex": "execute_codex"}
-_PAID_PROVIDER_WRITE_FUNCTION_NAMES = {"codex": "execute_codex_write"}
+_PAID_PROVIDER_WRITE_FUNCTION_NAMES = {"codex": "execute_codex_write_durable"}
 
 
 def _resolve_paid_provider(alias: Optional[str]) -> dict:
@@ -1050,7 +1392,8 @@ def run_task(task: dict) -> dict:
                         "escalation_reason": "write_lease_missing",
                         "verification_outcome": "fail",
                     }
-                result = provider_fn(paid_objective, repo_id=repo_id, host_id=host_id)
+                result = provider_fn(paid_objective, repo_id=repo_id, host_id=host_id,
+                                      decision_id=route["decision_id"])
                 if result.get("authority_denied"):
                     _update_decision_outcome(
                         route["decision_id"], status="blocked", deterministic_gate="fail",
@@ -1063,20 +1406,45 @@ def run_task(task: dict) -> dict:
                         "escalation_reason": "write_lease_missing",
                         "verification_outcome": "fail",
                     }
+                if result.get("lifecycle_state") in ("accepted", "running"):
+                    # Durable execution still in flight past
+                    # execute_codex_write_durable's bounded wait -- the
+                    # outcome is not decided yet, so no
+                    # _update_decision_outcome call here:
+                    # execute_codex_write_durable's own background
+                    # thread records the final decision outcome once it
+                    # actually finishes, the same code path a fast
+                    # completion below already went through.
+                    reason = (
+                        f"implementation-mode Codex execution accepted on {route['route']['host']} "
+                        "under the active repo lease -- poll GET /api/estate/run/{execution_id} "
+                        "for the terminal result"
+                    )
+                    return {
+                        **route, "ok": True, "executed": True, "execution": result,
+                        "execution_id": result["execution_id"],
+                        "deterministic_gate": "pending", "verification_outcome": "pending",
+                        "escalation_reason": None, "reason": reason,
+                    }
             else:
                 result = provider_fn(paid_objective, cwd=repo_cwd)
             gate = "pass" if result.get("ok") and (result.get("output") or "").strip() else "fail"
-            _update_decision_outcome(
-                route["decision_id"],
-                status="complete" if gate == "pass" else "failed",
-                deterministic_gate=gate,
-                latency_ms=result.get("latency_ms"),
-                escalation_reason="insufficient_capability" if gate == "pass" else "worker_failed",
-                executor=executor_name,
-                escalated=True,
-                actual_route=executor_name,
-                verification_outcome=gate,
-            )
+            if not implementation_mode:
+                _update_decision_outcome(
+                    route["decision_id"],
+                    status="complete" if gate == "pass" else "failed",
+                    deterministic_gate=gate,
+                    latency_ms=result.get("latency_ms"),
+                    escalation_reason="insufficient_capability" if gate == "pass" else "worker_failed",
+                    executor=executor_name,
+                    escalated=True,
+                    actual_route=executor_name,
+                    verification_outcome=gate,
+                )
+            # implementation_mode, terminal within execute_codex_write_durable's
+            # wait_timeout: the decision outcome was already recorded by
+            # its background thread (see above), so only the response is
+            # built here -- recording it again would be a duplicate write.
             reason = (
                 f"local capability was insufficient; {executor_name} executed on "
                 f"{route['route']['host']}" + (" under the active repo lease" if implementation_mode else " read-only")
@@ -1091,6 +1459,7 @@ def run_task(task: dict) -> dict:
             }
             return {
                 **route, "executed": True, "execution": result,
+                "execution_id": result.get("execution_id"),
                 "deterministic_gate": gate, "verification_outcome": gate,
                 "escalation_reason": "insufficient_capability" if gate == "pass" else "worker_failed",
             }

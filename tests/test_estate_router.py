@@ -1031,6 +1031,17 @@ def test_scenario_a_implementation_mode_dispatches_codex_write_under_active_leas
         estate_router, "_update_decision_outcome",
         lambda decision_id, **kwargs: recorded_outcome.update(decision_id=decision_id, **kwargs),
     )
+    # execute_codex_write_durable persists an EstateExecution row around
+    # the call above -- mocked here the same way _record_decision/
+    # _update_decision_outcome already are, so this test stays isolated
+    # from real DB schema/state rather than needing to provision the
+    # estate_executions table itself.
+    created_executions = {}
+    monkeypatch.setattr(
+        estate_router, "_create_estate_execution",
+        lambda **kwargs: created_executions.setdefault("id", "exec-scenario-a") or "exec-scenario-a",
+    )
+    monkeypatch.setattr(estate_router, "_update_estate_execution", lambda execution_id, **kwargs: None)
 
     result = estate_router.run_task({
         "task_class": "bounded_code_implementation", "objective": "implement it", "repo": "test-repo",
@@ -1041,6 +1052,7 @@ def test_scenario_a_implementation_mode_dispatches_codex_write_under_active_leas
     assert result["ok"] is True
     assert result["executed"] is True
     assert result["route"]["executor"] == "codex-write"
+    assert result["execution_id"] == "exec-scenario-a"
     assert captured["objective"] == "implement it"
     assert captured["cwd"] == str(worktree_path)
     assert captured["sandbox"] == "workspace-write"
