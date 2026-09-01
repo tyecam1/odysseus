@@ -743,6 +743,116 @@ def _codex_available() -> tuple[bool, str]:
     return True, binary
 
 
+def _proc_stat_fields(pid: int) -> Optional[tuple[str, int]]:
+    """(state, ppid) from /proc/<pid>/stat, the only dependency-free way
+    to read this (no psutil in this codebase). The comm field is
+    parenthesised and may itself contain spaces or parens, so split on
+    the *last* ')' rather than whitespace-splitting the whole line --
+    everything after it is state/ppid/pgrp/session/... in fixed order."""
+    try:
+        with open(f"/proc/{pid}/stat", "r") as f:
+            raw = f.read()
+        rest = raw.rsplit(")", 1)[1].split()
+        return rest[0], int(rest[1])  # state=[0], ppid=[1]
+    except (FileNotFoundError, ProcessLookupError, IndexError, ValueError, OSError):
+        return None
+
+
+def _proc_ppid(pid: int) -> Optional[int]:
+    fields = _proc_stat_fields(pid)
+    return fields[1] if fields else None
+
+
+def _proc_is_live_nonzombie(pid: int) -> bool:
+    """True only for a process that can still hold resources (pipes,
+    CPU, an unreaped worktree lock, etc.) -- a zombie ('Z') already
+    received its kill and is just awaiting reap by its parent (which,
+    once its own leader has also been killed, is typically PID 1 taking
+    over promptly, not instant). Re-scanning after a kill must not count
+    an already-dead zombie as "still alive" merely because /proc/<pid>
+    has not been removed yet."""
+    fields = _proc_stat_fields(pid)
+    return fields is not None and fields[0] != "Z"
+
+
+def _process_tree_pids(root_pid: int) -> list[int]:
+    """Every live descendant of root_pid (root included), found by
+    scanning /proc rather than relying on process-group/session
+    membership -- a descendant that has escaped into its own process
+    group (observed live: a codex-spawned MCP server child calls
+    something equivalent to setpgid(0, 0), landing in its own pgid
+    while remaining in the parent's session) is still found here,
+    because this walks real parent-child links instead."""
+    import os as _os
+    children: dict[int, list[int]] = {}
+    try:
+        pids = [int(name) for name in _os.listdir("/proc") if name.isdigit()]
+    except OSError:
+        return [root_pid]
+    for pid in pids:
+        ppid = _proc_ppid(pid)
+        if ppid is not None:
+            children.setdefault(ppid, []).append(pid)
+    tree = [root_pid]
+    frontier = [root_pid]
+    while frontier:
+        next_frontier: list[int] = []
+        for pid in frontier:
+            for child in children.get(pid, []):
+                if child not in tree:
+                    tree.append(child)
+                    next_frontier.append(child)
+        frontier = next_frontier
+    return tree
+
+
+def _kill_process_tree(root_pid: int, process_group_id: int, *, reap_timeout: float = 5.0) -> dict:
+    """Timeout cleanup for a codex-launched process, robust to a
+    descendant that has left the leader's process group. Kills both the
+    process group (cheap, covers the common case, unchanged behaviour
+    for a tree with no escapees) AND every PID found by walking real
+    /proc parent-child links (covers an escapee like the observed MCP
+    server child), then re-scans /proc to prove the whole tree is
+    actually gone rather than assuming the kill succeeded. Fails closed:
+    returns ok=False with the surviving pids if any remain, instead of
+    silently reporting a clean kill.
+    """
+    import os as _os
+    import signal as _signal
+    import time as _time
+
+    tree_before = _process_tree_pids(root_pid)
+
+    try:
+        _os.killpg(process_group_id, _signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    except OSError:
+        pass
+
+    for pid in tree_before:
+        try:
+            _os.kill(pid, _signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except OSError:
+            pass
+
+    deadline = _time.monotonic() + reap_timeout
+    still_alive = tree_before
+    while _time.monotonic() < deadline:
+        still_alive = [pid for pid in tree_before if _proc_is_live_nonzombie(pid)]
+        if not still_alive:
+            break
+        _time.sleep(0.2)
+
+    return {
+        "ok": not still_alive,
+        "attempted_pids": tree_before,
+        "still_alive_pids": still_alive,
+    }
+
+
 def _execute_codex_with_sandbox(objective: str, *, sandbox: str, provider: str,
                                 timeout: float = 180.0, cwd: Optional[str] = None,
                                 on_started: Optional[Callable[[int], None]] = None) -> dict:
@@ -807,21 +917,14 @@ def _execute_codex_with_sandbox(objective: str, *, sandbox: str, provider: str,
             return {"ok": True, "provider": provider, "output": output, "latency_ms": latency_ms,
                     "codex_binary": codex_binary}
         except subprocess.TimeoutExpired:
-            cleanup_incomplete = False
-            try:
-                os.killpg(process_group_id, signal.SIGKILL)
-            except ProcessLookupError:
-                # The process group is already gone - nothing left to kill,
-                # cleanup is complete, not incomplete.
-                pass
-            except OSError:
-                # killpg itself failed for some other reason (e.g. a
-                # permission issue) - the group may still be alive. Do not
-                # silently treat this the same as "already gone"; surface
-                # it in the result below rather than hiding an orphan-risk
-                # condition behind an ok:False response indistinguishable
-                # from a clean kill.
-                cleanup_incomplete = True
+            # Tree-aware cleanup: killpg alone is insufficient when a
+            # descendant (observed live: the MCP server codex spawns)
+            # has moved into its own process group while staying in the
+            # same session -- walk real /proc parent-child links so
+            # cleanup reaches it too, then re-scan to prove the tree is
+            # actually gone rather than assuming the kill worked.
+            cleanup = _kill_process_tree(process_group_id, process_group_id)
+            cleanup_incomplete = not cleanup["ok"]
             try:
                 proc.communicate(timeout=5)
             except subprocess.TimeoutExpired:
@@ -838,6 +941,7 @@ def _execute_codex_with_sandbox(objective: str, *, sandbox: str, provider: str,
             }
             if cleanup_incomplete:
                 result["cleanup_incomplete"] = True
+                result["cleanup_still_alive_pids"] = cleanup["still_alive_pids"]
             return result
         except Exception as e:
             return {"ok": False, "provider": provider, "error": str(e),
