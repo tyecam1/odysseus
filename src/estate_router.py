@@ -752,6 +752,8 @@ def _execute_codex_with_sandbox(objective: str, *, sandbox: str, provider: str,
     one place prevents the narrow write lane drifting from the established
     paid-worker behavior.
     """
+    import os
+    import signal
     import subprocess
     import tempfile
     import time
@@ -765,7 +767,7 @@ def _execute_codex_with_sandbox(objective: str, *, sandbox: str, provider: str,
     with tempfile.TemporaryDirectory(prefix="p12-codex-") as scratch:
         out_path = str(Path(scratch) / "codex-last-message.txt")
         try:
-            proc = subprocess.run(
+            proc = subprocess.Popen(
                 [
                     codex_binary, "exec",
                     "--sandbox", sandbox,
@@ -775,19 +777,30 @@ def _execute_codex_with_sandbox(objective: str, *, sandbox: str, provider: str,
                     "-o", out_path,
                     objective,
                 ],
-                capture_output=True, text=True, timeout=timeout,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                start_new_session=True,
             )
+            stdout, stderr = proc.communicate(timeout=timeout)
             latency_ms = int((time.monotonic() - started) * 1000)
             if proc.returncode != 0:
                 return {
                     "ok": False, "provider": provider, "latency_ms": latency_ms,
-                    "error": f"codex exec exited {proc.returncode}: {(proc.stderr or '')[-500:]}",
+                    "error": f"codex exec exited {proc.returncode}: {(stderr or '')[-500:]}",
                     "codex_binary": codex_binary,
                 }
             output = Path(out_path).read_text().strip() if Path(out_path).exists() else ""
             return {"ok": True, "provider": provider, "output": output, "latency_ms": latency_ms,
                     "codex_binary": codex_binary}
         except subprocess.TimeoutExpired:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            except OSError:
+                pass
+            proc.communicate()
             return {"ok": False, "provider": provider, "error": f"codex exec timed out after {timeout}s",
                     "latency_ms": int((time.monotonic() - started) * 1000)}
         except Exception as e:

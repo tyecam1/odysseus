@@ -6,12 +6,15 @@ break when the real estate/models registries change, and don't depend on
 this machine's actual hostname/tailnet state.
 """
 import socket
+import time
 from pathlib import Path
 
 import pytest
 import yaml
 
 import src.estate_router as estate_router
+
+_CODEX_PROCESS_GROUP_FIXTURE = Path(__file__).parent / "fixtures" / "codex_process_group_probe.sh"
 
 
 @pytest.fixture
@@ -38,6 +41,16 @@ def fixture_config(tmp_path, monkeypatch):
     monkeypatch.setattr(estate_router, "_CONFIG_DIR", config_dir)
     monkeypatch.setattr(socket, "gethostname", lambda: "THIS-HOST")
     return config_dir
+
+
+def _wait_for_pid_exit(pid: int, *, timeout: float = 5.0) -> bool:
+    proc_path = Path(f"/proc/{pid}")
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not proc_path.exists():
+            return True
+        time.sleep(0.05)
+    return not proc_path.exists()
 
 
 def test_eligible_hosts_excludes_interface_role(fixture_config):
@@ -749,6 +762,48 @@ class TestResolveCodexBinary:
         assert "not found" in source
 
 
+def test_execute_codex_with_sandbox_kills_entire_process_group_on_timeout(tmp_path, monkeypatch):
+    pid_dir = tmp_path / "pids"
+    pid_dir.mkdir()
+    monkeypatch.setenv("AOTERU_TEST_PID_DIR", str(pid_dir))
+    monkeypatch.setenv("AOTERU_TEST_MODE", "timeout")
+    monkeypatch.setattr(estate_router, "_codex_available", lambda: (True, str(_CODEX_PROCESS_GROUP_FIXTURE)))
+
+    result = estate_router._execute_codex_with_sandbox(
+        "timeout probe", sandbox="read-only", provider="codex", timeout=1.0, cwd=str(tmp_path),
+    )
+
+    assert result == {
+        "ok": False,
+        "provider": "codex",
+        "error": "codex exec timed out after 1.0s",
+        "latency_ms": result["latency_ms"],
+    }
+    wrapper_pid = int((pid_dir / "wrapper.pid").read_text().strip())
+    child_pid = int((pid_dir / "child.pid").read_text().strip())
+    assert _wait_for_pid_exit(wrapper_pid), f"wrapper pid {wrapper_pid} still exists after timeout cleanup"
+    assert _wait_for_pid_exit(child_pid), f"child pid {child_pid} still exists after timeout cleanup"
+
+
+def test_execute_codex_with_sandbox_success_shape_unchanged(tmp_path, monkeypatch):
+    pid_dir = tmp_path / "pids"
+    pid_dir.mkdir()
+    monkeypatch.setenv("AOTERU_TEST_PID_DIR", str(pid_dir))
+    monkeypatch.setenv("AOTERU_TEST_MODE", "success")
+    monkeypatch.setenv("AOTERU_TEST_OUTPUT_TEXT", "fixture success output")
+    monkeypatch.setattr(estate_router, "_codex_available", lambda: (True, str(_CODEX_PROCESS_GROUP_FIXTURE)))
+
+    result = estate_router._execute_codex_with_sandbox(
+        "success probe", sandbox="read-only", provider="codex", timeout=5.0, cwd=str(tmp_path),
+    )
+
+    assert result["ok"] is True
+    assert result["provider"] == "codex"
+    assert result["output"] == "fixture success output"
+    assert result["codex_binary"] == str(_CODEX_PROCESS_GROUP_FIXTURE)
+    assert isinstance(result["latency_ms"], int)
+
+
 class TestResolveRepoPath:
     """docs/aoteru-final-convergence-activation.agent-task.md item 4:
     grounding a paid-escalation task in its actual repo. Regression
@@ -1065,13 +1120,18 @@ def test_codex_lanes_preserve_distinct_sandbox_authority(
     monkeypatch.setattr(estate_router, "_codex_available", lambda: (True, "codex"))
     captured = {}
 
-    def fake_run(args, **kwargs):
-        captured["args"] = args
-        output_path = args[args.index("-o") + 1]
-        estate_router.Path(output_path).write_text("done")
-        return type("Proc", (), {"returncode": 0, "stderr": ""})()
+    class FakeProc:
+        def __init__(self, args, **kwargs):
+            captured["args"] = args
+            output_path = args[args.index("-o") + 1]
+            estate_router.Path(output_path).write_text("done")
+            self.returncode = 0
+            self.pid = 4242
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
+        def communicate(self, timeout=None):
+            return ("", "")
+
+    monkeypatch.setattr(subprocess, "Popen", FakeProc)
     fn = getattr(estate_router, executor)
     if executor == "execute_codex_write":
         worktree_path = tmp_path / "isolated-worktree"
