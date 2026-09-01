@@ -46,6 +46,17 @@ from pathlib import Path
 CONFIG_DIR = Path.home() / ".aoteru"
 CONFIG_PATH = CONFIG_DIR / "client.json"
 
+# ask/auto/lab/home's --timeout default. The backend's own execution route
+# watchdog (routes/estate_routing_routes.py's EXECUTION_ROUTE_TIMEOUT) waits
+# up to 210s for the Codex worker's 180s bound to resolve before it returns
+# a 504 - a client default below that can abandon a normal implementation
+# call while the server is still legitimately working on it. Keep this
+# strictly above the server watchdog (worker-owned bound < route watchdog <
+# client timeout) so the client is always the last one to give up, not the
+# first. An explicit --timeout still overrides this for callers who know
+# they want something else.
+_DEFAULT_EXECUTION_TIMEOUT = 240.0
+
 
 def _load_config() -> dict:
     if not CONFIG_PATH.exists():
@@ -432,7 +443,7 @@ def build_parser() -> argparse.ArgumentParser:
                         help="opt in to paid (Codex) escalation if local capability is unbound/unavailable")
     p_ask.add_argument("--implementation", action="store_true",
                        help="request lease-gated Codex workspace-write (requires --repo and --allow-paid)")
-    p_ask.add_argument("--timeout", type=float, default=120.0)
+    p_ask.add_argument("--timeout", type=float, default=_DEFAULT_EXECUTION_TIMEOUT)
 
     for mode, mode_help in (
         ("auto", "resolve + execute a task on the best available estate host"),
@@ -448,7 +459,7 @@ def build_parser() -> argparse.ArgumentParser:
                              help="opt in to paid (Codex) escalation if local capability is unbound/unavailable")
         p_mode.add_argument("--implementation", action="store_true",
                             help="request lease-gated Codex workspace-write (requires --repo and --allow-paid)")
-        p_mode.add_argument("--timeout", type=float, default=120.0)
+        p_mode.add_argument("--timeout", type=float, default=_DEFAULT_EXECUTION_TIMEOUT)
 
     sub.add_parser("where", help="list active logical estate sessions")
 

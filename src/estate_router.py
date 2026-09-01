@@ -752,6 +752,8 @@ def _execute_codex_with_sandbox(objective: str, *, sandbox: str, provider: str,
     one place prevents the narrow write lane drifting from the established
     paid-worker behavior.
     """
+    import os
+    import signal
     import subprocess
     import tempfile
     import time
@@ -765,7 +767,7 @@ def _execute_codex_with_sandbox(objective: str, *, sandbox: str, provider: str,
     with tempfile.TemporaryDirectory(prefix="p12-codex-") as scratch:
         out_path = str(Path(scratch) / "codex-last-message.txt")
         try:
-            proc = subprocess.run(
+            proc = subprocess.Popen(
                 [
                     codex_binary, "exec",
                     "--sandbox", sandbox,
@@ -775,21 +777,65 @@ def _execute_codex_with_sandbox(objective: str, *, sandbox: str, provider: str,
                     "-o", out_path,
                     objective,
                 ],
-                capture_output=True, text=True, timeout=timeout,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                start_new_session=True,
             )
+            # start_new_session=True makes the new process group's id equal
+            # to the leader's pid at the moment of creation. Capture it now
+            # rather than rediscovering it via os.getpgid(proc.pid) after a
+            # timeout: if the leader (e.g. a wrapper that forks a detached
+            # child and exits itself) has already exited by then, its pid no
+            # longer resolves to a live process and getpgid raises
+            # ProcessLookupError - silently leaving any surviving descendant
+            # (which inherited the same pgid, independent of the leader
+            # continuing to exist) unkilled.
+            process_group_id = proc.pid
+            stdout, stderr = proc.communicate(timeout=timeout)
             latency_ms = int((time.monotonic() - started) * 1000)
             if proc.returncode != 0:
                 return {
                     "ok": False, "provider": provider, "latency_ms": latency_ms,
-                    "error": f"codex exec exited {proc.returncode}: {(proc.stderr or '')[-500:]}",
+                    "error": f"codex exec exited {proc.returncode}: {(stderr or '')[-500:]}",
                     "codex_binary": codex_binary,
                 }
             output = Path(out_path).read_text().strip() if Path(out_path).exists() else ""
             return {"ok": True, "provider": provider, "output": output, "latency_ms": latency_ms,
                     "codex_binary": codex_binary}
         except subprocess.TimeoutExpired:
-            return {"ok": False, "provider": provider, "error": f"codex exec timed out after {timeout}s",
-                    "latency_ms": int((time.monotonic() - started) * 1000)}
+            cleanup_incomplete = False
+            try:
+                os.killpg(process_group_id, signal.SIGKILL)
+            except ProcessLookupError:
+                # The process group is already gone - nothing left to kill,
+                # cleanup is complete, not incomplete.
+                pass
+            except OSError:
+                # killpg itself failed for some other reason (e.g. a
+                # permission issue) - the group may still be alive. Do not
+                # silently treat this the same as "already gone"; surface
+                # it in the result below rather than hiding an orphan-risk
+                # condition behind an ok:False response indistinguishable
+                # from a clean kill.
+                cleanup_incomplete = True
+            try:
+                proc.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                # Bounded reap so a cleanup call itself can never hang
+                # indefinitely - but if it still hasn't drained by then,
+                # something is holding the output pipes open past a
+                # reasonable window and that must be visible, not treated
+                # as a definite success.
+                cleanup_incomplete = True
+            result = {
+                "ok": False, "provider": provider,
+                "error": f"codex exec timed out after {timeout}s",
+                "latency_ms": int((time.monotonic() - started) * 1000),
+            }
+            if cleanup_incomplete:
+                result["cleanup_incomplete"] = True
+            return result
         except Exception as e:
             return {"ok": False, "provider": provider, "error": str(e),
                     "latency_ms": int((time.monotonic() - started) * 1000)}

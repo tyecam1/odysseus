@@ -48,6 +48,41 @@ def test_client_is_stdlib_only():
     assert found <= STDLIB, f"non-stdlib import(s) found: {found - STDLIB}"
 
 
+@pytest.mark.parametrize("argv", [
+    ["ask", "an objective"],
+    ["auto", "a task"],
+    ["lab", "a task"],
+    ["home", "a task"],
+])
+def test_execution_commands_default_timeout_exceeds_server_watchdog(argv):
+    """A normal ask/auto/lab/home invocation with no --timeout must not
+    silently abandon a request the server is still legitimately working
+    on: the client default must stay above the server's own execution
+    route watchdog (210s) so the client is always the last one to give up,
+    per worker-owned bound < route watchdog < client timeout. Parses a
+    real argv with no --timeout flag at all - proves the default path
+    itself, not just that a constant happens to hold the right value."""
+    spec = importlib.util.spec_from_file_location("aoteru_client_parser_check", CLIENT_PATH)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    parser = mod.build_parser()
+    args = parser.parse_args(argv)
+
+    assert args.timeout == mod._DEFAULT_EXECUTION_TIMEOUT
+    assert args.timeout > 210.0, (
+        f"default --timeout ({args.timeout}s) must exceed the server's execution "
+        "route watchdog (210s) or a normal command can time out client-side while "
+        "the server is still legitimately executing it"
+    )
+
+
+def test_execution_commands_timeout_still_overridable(client):
+    parser = client.build_parser()
+    args = parser.parse_args(["ask", "an objective", "--timeout", "5"])
+    assert args.timeout == 5.0
+
+
 @pytest.fixture
 def client(monkeypatch, tmp_path):
     spec = importlib.util.spec_from_file_location("aoteru_client", CLIENT_PATH)

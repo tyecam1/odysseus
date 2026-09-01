@@ -10,13 +10,20 @@ entirely, must not be able to drive estate routing/execution), and
 `allow_paid_escalation` must actually reach `run_task()`'s existing opt-in
 gate rather than being silently dropped by the envelope.
 """
+import asyncio
+import time
 from types import SimpleNamespace
 
 import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
-from routes.estate_routing_routes import RunTaskEnvelope, TaskEnvelope, _scope_owner, setup_estate_routing_routes
+from routes.estate_routing_routes import (
+    RunTaskEnvelope,
+    TaskEnvelope,
+    _scope_owner,
+    setup_estate_routing_routes,
+)
 
 
 def _cookie_request(*, current_user="operator"):
@@ -144,6 +151,26 @@ class TestRunRouteEndToEnd:
         app.include_router(setup_estate_routing_routes())
         return TestClient(app)
 
+    def _app(self, monkeypatch):
+        monkeypatch.setenv("AUTH_ENABLED", "false")
+        app = FastAPI()
+        app.include_router(setup_estate_routing_routes())
+        return app
+
+    def _endpoint(self, app, path, method):
+        def _iter_routes(routes):
+            for route in routes:
+                original_router = getattr(route, "original_router", None)
+                if original_router is not None:
+                    yield from _iter_routes(original_router.routes)
+                    continue
+                yield route
+
+        for route in _iter_routes(app.router.routes):
+            if getattr(route, "path", None) == path and method in getattr(route, "methods", set()):
+                return route.endpoint
+        raise AssertionError(f"route {method} {path} not found")
+
     def test_post_run_objective_reaches_run_task(self, monkeypatch):
         client = self._client(monkeypatch)
         captured = {}
@@ -213,6 +240,133 @@ class TestRunRouteEndToEnd:
         client = self._client(monkeypatch)
         response = client.post("/api/estate/run", json={"task_class": "code", "objective": 12345})
         assert response.status_code == 422
+
+    @pytest.mark.asyncio
+    async def test_run_route_offloads_blocking_run_task_from_event_loop(self, monkeypatch):
+        app = self._app(monkeypatch)
+        run_endpoint = self._endpoint(app, "/api/estate/run", "POST")
+        hosts_endpoint = self._endpoint(app, "/api/estate/route/hosts", "GET")
+        import routes.estate_routing_routes as mod
+
+        def fake_run_task(task):
+            time.sleep(0.5)
+            return {"ok": True, "executed": True}
+
+        monkeypatch.setattr(mod, "run_task", fake_run_task)
+        monkeypatch.setattr(mod, "eligible_hosts", lambda repo=None: [{"host_id": "test-lab", "eligible": True}])
+
+        req = _cookie_request()
+        start = time.monotonic()
+        slow_call = asyncio.create_task(run_endpoint(req, RunTaskEnvelope(task_class="code", objective="slow")))
+        await asyncio.sleep(0.05)
+        yielded_after = time.monotonic() - start
+        hosts_started = time.monotonic()
+        hosts_result = await hosts_endpoint(req, None)
+        hosts_elapsed = time.monotonic() - hosts_started
+
+        assert yielded_after < 0.3, "event loop should stay responsive while run_task sleeps in a worker thread"
+        assert hosts_elapsed < 0.1
+        assert hosts_result == {"hosts": [{"host_id": "test-lab", "eligible": True}]}
+        assert slow_call.done() is False
+        await slow_call
+
+    def test_execution_route_uses_a_single_watchdog_regardless_of_mode(self, monkeypatch):
+        """Controller review of an earlier amendment: asyncio.wait_for()
+        around asyncio.to_thread() cannot forcibly terminate the worker
+        thread it wraps - a timeout only stops awaiting it, the underlying
+        execution keeps running to its own natural completion regardless.
+        A shorter "ordinary mode" bound therefore does not save anything -
+        it just makes the client give up early while the real work
+        continues unseen server-side. There must be exactly one watchdog,
+        set above every executor's own worst-case bound, applied
+        identically whether or not mode == "implementation"."""
+        client = self._client(monkeypatch)
+        import routes.estate_routing_routes as mod
+
+        monkeypatch.setattr(mod, "_EXECUTION_ROUTE_TIMEOUT", 1.0)
+        monkeypatch.setattr(mod, "run_task", lambda task: time.sleep(1.4) or {"ok": True})
+
+        ordinary = client.post("/api/estate/run", json={"task_class": "code", "objective": "advise"})
+        implementation = client.post("/api/estate/run", json={
+            "task_class": "code", "objective": "implement", "mode": "implementation",
+        })
+
+        assert ordinary.status_code == 504
+        assert implementation.status_code == 504
+        assert ordinary.json() == {"detail": "Request exceeded 1s timeout"}
+        assert implementation.json() == {"detail": "Request exceeded 1s timeout"}, (
+            "implementation mode must not get its own separate, shorter-labelled "
+            "watchdog value - both modes share the exact same bound"
+        )
+
+    def test_execution_route_never_times_out_while_worker_stays_within_its_declared_bound(self, monkeypatch):
+        """The actual proof that a route timeout cannot fire while its
+        executor is still legitimately within the supported timeout
+        hierarchy (worker-owned bound < route watchdog < client timeout):
+        simulate a worker that takes just under the (test-shrunk) route
+        watchdog, matching how a real worker respecting its own bound
+        would behave, and confirm the response is the real result, never
+        a 504 - there is no "request ends while execution survives" gap
+        as long as the hierarchy holds."""
+        client = self._client(monkeypatch)
+        import routes.estate_routing_routes as mod
+
+        monkeypatch.setattr(mod, "_EXECUTION_ROUTE_TIMEOUT", 3.0)
+        monkeypatch.setattr(mod, "run_task", lambda task: time.sleep(2.5) or {"ok": True, "executed": True})
+
+        response = client.post("/api/estate/run", json={"task_class": "code", "objective": "advise"})
+
+        assert response.status_code == 200
+        assert response.json() == {"ok": True, "executed": True}
+
+    def test_execution_route_watchdog_exceeds_every_real_executor_bound(self):
+        """Structural proof against the actual (unmocked) production
+        constants, not shrunk test values: worker-owned hard bound <
+        route watchdog < client timeout must hold by construction. Reads
+        each executor's own default via introspection rather than
+        hardcoding the numbers again here, so this fails the moment
+        someone raises a worker bound without also raising the watchdog."""
+        import inspect
+
+        import routes.estate_routing_routes as mod
+        import src.estate_router as estate_router_mod
+
+        codex_timeout = inspect.signature(estate_router_mod.execute_codex).parameters["timeout"].default
+        codex_write_timeout = inspect.signature(estate_router_mod.execute_codex_write).parameters["timeout"].default
+        local_sig = inspect.signature(estate_router_mod.execute_local).parameters
+        local_worst_case = local_sig["timeout"].default * (1 + local_sig["max_retries"].default)
+
+        assert mod._EXECUTION_ROUTE_TIMEOUT > codex_timeout
+        assert mod._EXECUTION_ROUTE_TIMEOUT > codex_write_timeout
+        assert mod._EXECUTION_ROUTE_TIMEOUT > local_worst_case
+
+    def test_implementation_mode_invalid_lease_failure_does_not_take_timeout_path(self, monkeypatch):
+        client = self._client(monkeypatch)
+        import routes.estate_routing_routes as mod
+
+        monkeypatch.setattr(mod, "_EXECUTION_ROUTE_TIMEOUT", 2.0)
+        started = time.monotonic()
+        monkeypatch.setattr(mod, "run_task", lambda task: {
+            "ok": False,
+            "executed": False,
+            "execution_error": "implementation mode requires an active non-stale lease for 'test-repo' held by 'test-lab'",
+            "escalation_reason": "write_lease_missing",
+            "verification_outcome": "fail",
+        })
+
+        response = client.post("/api/estate/run", json={
+            "task_class": "bounded_code_implementation",
+            "objective": "implement",
+            "repo": "test-repo",
+            "mode": "implementation",
+        })
+
+        assert time.monotonic() - started < 0.5
+        assert response.status_code == 200
+        assert response.json()["execution_error"] == (
+            "implementation mode requires an active non-stale lease for 'test-repo' held by 'test-lab'"
+        )
+        assert response.json()["escalation_reason"] == "write_lease_missing"
 
 
 class TestDelegationPreflightRoute:
