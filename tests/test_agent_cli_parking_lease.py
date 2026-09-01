@@ -12,6 +12,8 @@ stale lease handling ... are incomplete." Covers:
 import argparse
 import importlib.machinery
 import importlib.util
+import json
+import subprocess
 import sys
 import uuid
 from datetime import timedelta
@@ -58,6 +60,13 @@ def agent_cli(monkeypatch):
     monkeypatch.setattr(module, "_resolve_current_host", lambda estate, hostname: estate["hosts"][0])
     monkeypatch.setattr(module.socket, "gethostname", lambda: "THIS-HOST")
     monkeypatch.setattr(module, "_git_is_clean", lambda path: (True, "clean"))
+    import src.estate_router as estate_router
+    monkeypatch.setattr(
+        estate_router, "resolve_repo_path",
+        lambda repo_id: "/tmp/test-repo" if repo_id == "test-repo" else None,
+    )
+    import src.park_lease_ops as park_lease_ops
+    monkeypatch.setattr(park_lease_ops, "git_is_clean", lambda path: (True, "clean"))
     return module
 
 
@@ -198,3 +207,61 @@ def test_status_active_park_leases_summary_degrades_to_empty_on_db_error(agent_c
     monkeypatch.setattr(database, "get_db_session", boom)
 
     assert agent_cli._active_park_leases_summary() == []
+
+
+def test_cmd_park_branch_uses_isolated_worktree_not_live_checkout(monkeypatch, capsys, tmp_path):
+    import src.estate_router as estate_router
+    from core.database import ParkLease, get_db_session
+
+    module = load_module()
+    live_repo = tmp_path / "projects" / "odysseus-aoteru"
+    live_repo.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(live_repo)], check=True)
+    subprocess.run(["git", "-C", str(live_repo), "checkout", "-q", "-b", "main"], check=True)
+    subprocess.run(["git", "-C", str(live_repo), "config", "user.name", "Test User"], check=True)
+    subprocess.run(["git", "-C", str(live_repo), "config", "user.email", "test@example.com"], check=True)
+    (live_repo / "f.txt").write_text("x")
+    subprocess.run(["git", "-C", str(live_repo), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(live_repo), "commit", "-q", "-m", "init"], check=True)
+
+    monkeypatch.setattr(module, "_load_host_local", lambda: {})
+    monkeypatch.setattr(module, "_load_yaml", lambda name: {"hosts": [{"id": "test-lab", "hostname": "THIS-HOST", "role": "lab"}]})
+    monkeypatch.setattr(module, "_resolve_repos", lambda host_local: [{"id": "test-repo", "exists": True, "path": str(live_repo)}])
+    monkeypatch.setattr(module, "_repo_by_id", lambda repos, repo_id: repos[0] if repo_id == "test-repo" else None)
+    monkeypatch.setattr(module, "_resolve_current_host", lambda estate, hostname: estate["hosts"][0])
+    monkeypatch.setattr(module.socket, "gethostname", lambda: "THIS-HOST")
+    monkeypatch.setattr(module, "_git_is_clean", lambda path: (_ for _ in ()).throw(AssertionError("cmd_park should not call _git_is_clean directly")))
+    monkeypatch.setattr(estate_router, "resolve_repo_path", lambda repo_id: str(live_repo))
+
+    with get_db_session() as db:
+        db.query(ParkLease).filter(ParkLease.repo_id == "test-repo").delete(synchronize_session=False)
+
+    module.cmd_park(_args(branch="feature/lease"))
+    body = json.loads(capsys.readouterr().out)
+
+    assert body["ok"] is True
+    assert body["repo_id"] == "test-repo"
+    assert body["branch"] == "feature/lease"
+    assert body["worktree_path"] != str(live_repo)
+
+    branch = subprocess.run(
+        ["git", "-C", body["worktree_path"], "rev-parse", "--abbrev-ref", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert branch == "feature/lease"
+
+    with get_db_session() as db:
+        row = db.query(ParkLease).filter(
+            ParkLease.repo_id == "test-repo",
+            ParkLease.status == "active",
+        ).first()
+        assert row is not None
+        assert row.worktree_path == body["worktree_path"]
+        assert row.worktree_path != str(live_repo)
+        assert row.branch == "feature/lease"
+        assert db.query(ParkLease).filter(
+            ParkLease.repo_id == "test-repo",
+            ParkLease.worktree_path == str(live_repo),
+        ).count() == 0
