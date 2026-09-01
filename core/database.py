@@ -914,6 +914,7 @@ class RoutingDecision(TimestampMixin, Base):
     __tablename__ = "routing_decisions"
 
     id                    = Column(String, primary_key=True, index=True)
+    execution_id          = Column(String, nullable=True, unique=True, index=True)
     task_class            = Column(String, nullable=False, index=True)
     complexity            = Column(String, nullable=True)  # trivial | routine | hard | frontier
     consequence           = Column(String, nullable=True)  # low | medium | high
@@ -933,6 +934,10 @@ class RoutingDecision(TimestampMixin, Base):
     recommended_route     = Column(String, nullable=True)
     actual_route          = Column(String, nullable=True)
     status                = Column(String, nullable=False)  # complete | blocked | failed | needs_escalation
+    lifecycle_state       = Column(String, nullable=True)  # accepted | running | succeeded | failed | cancelled | timed_out | outcome_pending
+    worker_pid            = Column(Integer, nullable=True)
+    result_json           = Column(Text, nullable=True)
+    finished_at           = Column(DateTime, nullable=True)
 
     __table_args__ = (
         Index('ix_routing_decisions_class_host', 'task_class', 'host_id'),
@@ -2211,7 +2216,7 @@ def _migrate_seed_email_account():
 # constraints will fail. To perform such operations, foreign_keys must be
 # temporarily disabled around the migration workflow.
 def _migrate_add_routing_delegation_columns():
-    """Add delegation telemetry without replacing historical decisions."""
+    """Add delegation/execution telemetry without replacing history."""
     db_path = _sqlite_db_path(engine.url)
     if db_path is None or not os.path.exists(db_path):
         return
@@ -2224,6 +2229,21 @@ def _migrate_add_routing_delegation_columns():
         for name in ("nondelegation_reason", "recommended_route", "actual_route"):
             if name not in columns:
                 conn.execute(f"ALTER TABLE routing_decisions ADD COLUMN {name} TEXT")
+        additions = [
+            ("execution_id", "TEXT"),
+            ("lifecycle_state", "TEXT"),
+            ("worker_pid", "INTEGER"),
+            ("result_json", "TEXT"),
+            ("finished_at", "DATETIME"),
+        ]
+        for name, coltype in additions:
+            if name not in columns:
+                conn.execute(f"ALTER TABLE routing_decisions ADD COLUMN {name} {coltype}")
+        conn.execute("UPDATE routing_decisions SET execution_id = id WHERE execution_id IS NULL")
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ix_routing_decisions_execution_id "
+            "ON routing_decisions (execution_id)"
+        )
         conn.commit()
     except Exception as e:
         logging.getLogger(__name__).warning(f"routing_decisions delegation migration failed: {e}")

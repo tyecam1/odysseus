@@ -30,6 +30,16 @@ def test_detect_vendor_uses_endpoint_kind_then_host_and_common_local_ports():
     assert detect_vendor("http://localhost:7000/v1") == VENDOR_GENERIC_OPENAI
 
 
+def test_normalize_capability_accepts_aliases_hyphens_and_spaces():
+    assert mc.normalize_capability("tools") == mc.CAP_TOOL_CALL
+    assert mc.normalize_capability("tool-calls") == mc.CAP_TOOL_CALL
+    assert mc.normalize_capability("image editing") == mc.CAP_IMAGE_EDITING
+    assert mc.normalize_capability("structured-outputs") == mc.CAP_STRUCTURED_OUTPUT
+    assert mc.normalize_capability("reasoning effort") == mc.CAP_REASONING
+    assert mc.normalize_capability("search") == mc.CAP_WEB_SEARCH
+    assert mc.normalize_capability("not-a-real-capability") == ""
+
+
 def test_generic_openai_reader_keeps_basic_model_payload_unknown():
     records = generic_openai.records_from_payload(
         {
@@ -623,6 +633,38 @@ def test_llamacpp_openai_model_list_without_native_capability_shape_stays_unknow
     assert records[0].capability.capabilities == ()
     assert records[0].capability_assertions == ()
     assert surfaces(records[0]) == set()
+
+
+def test_llamacpp_server_model_capabilities_normalize_aliases_and_skip_family_tokens():
+    records = llamacpp.records_from_payload(
+        {
+            "models": [
+                {
+                    "id": "local-chat.gguf",
+                    "capabilities": [
+                        "completion",
+                        "tool-calls",
+                        "structured outputs",
+                        "thinking",
+                        "vision",
+                        "embedding",
+                        "rerank",
+                    ],
+                }
+            ]
+        }
+    )
+
+    assert len(records) == 1
+    record = records[0]
+    assert record.capability.family == mc.FAMILY_CHAT
+    assert record.capability.capabilities == (
+        mc.CAP_TOOL_CALL,
+        mc.CAP_STRUCTURED_OUTPUT,
+        mc.CAP_REASONING,
+        mc.CAP_VISION,
+    )
+    assert surfaces(record) == {"chat"}
 
 
 def test_llamacpp_props_payload_reports_unsupported_modalities_without_model_list():

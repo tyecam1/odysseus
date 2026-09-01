@@ -80,12 +80,12 @@ def _capability_tokens_from_server_model(raw: Mapping[str, Any]) -> tuple[str, .
 
 def _family_from_server_model(raw: Mapping[str, Any]) -> str:
     capabilities = {compact_str(value).lower().replace("-", "_") for value in as_list(raw.get("capabilities"))}
+    if "completion" in capabilities or "completions" in capabilities or "chat" in capabilities:
+        return mc.FAMILY_CHAT
     if "embedding" in capabilities or "embeddings" in capabilities:
         return mc.FAMILY_EMBEDDING
     if "rerank" in capabilities or "reranking" in capabilities:
         return mc.FAMILY_RERANK
-    if "completion" in capabilities or "completions" in capabilities or "chat" in capabilities:
-        return mc.FAMILY_CHAT
     return mc.FAMILY_UNKNOWN
 
 

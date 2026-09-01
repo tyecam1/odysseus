@@ -28,18 +28,31 @@ rather than hardcoding "always lab".
 from __future__ import annotations
 
 import json
+import os
 import re
+import signal
 import socket
+import subprocess
+import tempfile
+import threading
+import time
 import uuid
 from pathlib import Path
 from typing import Optional
 
 import yaml
+from sqlalchemy.exc import IntegrityError
 
 from src.runtime_paths import get_app_root
 from src.park_lease_ops import active_lease_for_repo
 
 _CONFIG_DIR = Path(get_app_root()) / "config"
+_CODEX_EXEC_TIMEOUT_SECONDS = 180.0
+_REQUEST_HARD_TIMEOUT_SECONDS = float(os.getenv("REQUEST_HARD_TIMEOUT", "45"))
+_EXECUTION_WAIT_MARGIN_SECONDS = 5.0
+_EXECUTION_POLL_INTERVAL_SECONDS = 0.2
+_ACTIVE_EXECUTION_STATES = {"accepted", "running"}
+_TERMINAL_EXECUTION_STATES = {"succeeded", "failed", "cancelled", "timed_out"}
 
 
 class RoutingConfigError(RuntimeError):
@@ -613,6 +626,73 @@ def _update_decision_outcome(decision_id: str, *, status: str, deterministic_gat
         logging.getLogger(__name__).exception("routing_decisions outcome update failed; execution result is unaffected")
 
 
+def _load_execution_decision(execution_id: str) -> Optional[dict]:
+    """Fetch the execution-tracking fields for a known execution id."""
+    from core.database import RoutingDecision, get_db_session
+    try:
+        with get_db_session() as db:
+            row = db.query(RoutingDecision).filter(RoutingDecision.execution_id == execution_id).first()
+            if row is None:
+                return None
+            return {
+                "decision_id": row.id,
+                "execution_id": row.execution_id,
+                "lifecycle_state": row.lifecycle_state,
+                "worker_pid": row.worker_pid,
+                "result_json": row.result_json,
+                "finished_at": row.finished_at,
+            }
+    except Exception:
+        import logging
+        logging.getLogger(__name__).exception("routing_decisions execution lookup failed")
+        return None
+
+
+def _update_execution_decision(decision_id: str, execution_id: str, *, lifecycle_state: str,
+                               provider: str, worker_pid: Optional[int] = None,
+                               result: Optional[dict] = None, finished_at=None) -> None:
+    """Persist execution lifecycle state on the existing routing row."""
+    if decision_id.startswith("decision-unrecorded-"):
+        return
+    from core.database import RoutingDecision, get_db_session
+    try:
+        with get_db_session() as db:
+            row = db.query(RoutingDecision).filter(RoutingDecision.id == decision_id).first()
+            if row is None:
+                row = db.query(RoutingDecision).filter(RoutingDecision.execution_id == execution_id).first()
+            if row is None:
+                return
+            row.execution_id = execution_id
+            row.lifecycle_state = lifecycle_state
+            if worker_pid is not None:
+                row.worker_pid = worker_pid
+            if result is not None:
+                row.result_json = json.dumps(result)
+            if finished_at is not None:
+                row.finished_at = finished_at
+    except IntegrityError:
+        import logging
+        logging.getLogger(__name__).exception("routing_decisions execution update collided on execution_id")
+    except Exception:
+        import logging
+        logging.getLogger(__name__).exception("routing_decisions execution update failed")
+
+
+def _execution_state_result(*, execution_id: str, lifecycle_state: str, provider: str,
+                            worker_pid: Optional[int] = None) -> dict:
+    """Shape for non-terminal execution polling responses."""
+    result = {
+        "ok": True,
+        "execution_id": execution_id,
+        "lifecycle_state": lifecycle_state,
+        "provider": provider,
+        "reason": "codex execution still in progress, poll by execution_id",
+    }
+    if worker_pid is not None:
+        result["worker_pid"] = worker_pid
+    return result
+
+
 def _retryable_local_error(exc: Exception) -> bool:
     """Classify a local-execution failure as retryable. Only transient
     transport failures (connection refused/reset, DNS hiccup, upstream
@@ -743,7 +823,10 @@ def _codex_available() -> tuple[bool, str]:
 
 
 def _execute_codex_with_sandbox(objective: str, *, sandbox: str, provider: str,
-                                timeout: float = 180.0, cwd: Optional[str] = None) -> dict:
+                                timeout: float = 180.0, cwd: Optional[str] = None,
+                                execution_id: Optional[str] = None,
+                                decision_id: Optional[str] = None,
+                                wait_timeout: Optional[float] = None) -> dict:
     """Share bounded CLI mechanics without making sandbox choice policy.
 
     Only the public advisory/write functions choose the sandbox. Keeping
@@ -757,41 +840,132 @@ def _execute_codex_with_sandbox(objective: str, *, sandbox: str, provider: str,
 
     available, detail = _codex_available()
     if not available:
-        return {"ok": False, "error": f"codex unavailable: {detail}", "provider": provider}
+        result = {"ok": False, "error": f"codex unavailable: {detail}", "provider": provider}
+        if execution_id and decision_id:
+            from core.database import utcnow_naive
+            _update_execution_decision(
+                decision_id, execution_id,
+                lifecycle_state="failed", provider=provider,
+                result=result, finished_at=utcnow_naive(),
+            )
+        return result
     codex_binary = detail  # _codex_available() returns the resolved binary path on success
+
+    if execution_id is None or decision_id is None:
+        wait_timeout = timeout
 
     started = time.monotonic()
     with tempfile.TemporaryDirectory(prefix="p12-codex-") as scratch:
         out_path = str(Path(scratch) / "codex-last-message.txt")
-        try:
-            proc = subprocess.run(
-                [
-                    codex_binary, "exec",
-                    "--sandbox", sandbox,
-                    "--ephemeral",
-                    "--skip-git-repo-check",
-                    "-C", cwd or scratch,
-                    "-o", out_path,
-                    objective,
-                ],
-                capture_output=True, text=True, timeout=timeout,
-            )
-            latency_ms = int((time.monotonic() - started) * 1000)
-            if proc.returncode != 0:
-                return {
-                    "ok": False, "provider": provider, "latency_ms": latency_ms,
-                    "error": f"codex exec exited {proc.returncode}: {(proc.stderr or '')[-500:]}",
-                    "codex_binary": codex_binary,
-                }
-            output = Path(out_path).read_text().strip() if Path(out_path).exists() else ""
-            return {"ok": True, "provider": provider, "output": output, "latency_ms": latency_ms,
-                    "codex_binary": codex_binary}
-        except subprocess.TimeoutExpired:
+        outcome: dict = {}
+
+        def _run_codex_process() -> None:
+            try:
+                proc = subprocess.Popen(
+                    [
+                        codex_binary, "exec",
+                        "--sandbox", sandbox,
+                        "--ephemeral",
+                        "--skip-git-repo-check",
+                        "-C", cwd or scratch,
+                        "-o", out_path,
+                        objective,
+                    ],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    start_new_session=True,
+                )
+                if execution_id and decision_id:
+                    running_result = _execution_state_result(
+                        execution_id=execution_id,
+                        lifecycle_state="running",
+                        provider=provider,
+                        worker_pid=proc.pid,
+                    )
+                    _update_execution_decision(
+                        decision_id, execution_id,
+                        lifecycle_state="running", provider=provider,
+                        worker_pid=proc.pid, result=running_result,
+                    )
+                try:
+                    _stdout, stderr = proc.communicate(timeout=timeout)
+                    latency_ms = int((time.monotonic() - started) * 1000)
+                    if proc.returncode != 0:
+                        outcome["result"] = {
+                            "ok": False, "provider": provider, "latency_ms": latency_ms,
+                            "error": f"codex exec exited {proc.returncode}: {(stderr or '')[-500:]}",
+                            "codex_binary": codex_binary,
+                        }
+                        final_state = "failed"
+                    else:
+                        output = Path(out_path).read_text().strip() if Path(out_path).exists() else ""
+                        outcome["result"] = {
+                            "ok": True, "provider": provider, "output": output, "latency_ms": latency_ms,
+                            "codex_binary": codex_binary,
+                        }
+                        final_state = "succeeded"
+                    if execution_id and decision_id:
+                        from core.database import utcnow_naive
+                        _update_execution_decision(
+                            decision_id, execution_id,
+                            lifecycle_state=final_state, provider=provider,
+                            worker_pid=proc.pid, result=outcome["result"],
+                            finished_at=utcnow_naive(),
+                        )
+                except subprocess.TimeoutExpired:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                    try:
+                        proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        proc.wait()
+                    latency_ms = int((time.monotonic() - started) * 1000)
+                    outcome["result"] = {
+                        "ok": False,
+                        "provider": provider,
+                        "error": f"codex exec timed out after {timeout}s and was terminated",
+                        "latency_ms": latency_ms,
+                    }
+                    if execution_id and decision_id:
+                        from core.database import utcnow_naive
+                        _update_execution_decision(
+                            decision_id, execution_id,
+                            lifecycle_state="timed_out", provider=provider,
+                            worker_pid=proc.pid, result=outcome["result"],
+                            finished_at=utcnow_naive(),
+                        )
+            except Exception as e:
+                latency_ms = int((time.monotonic() - started) * 1000)
+                outcome["result"] = {"ok": False, "provider": provider, "error": str(e), "latency_ms": latency_ms}
+                if execution_id and decision_id:
+                    from core.database import utcnow_naive
+                    _update_execution_decision(
+                        decision_id, execution_id,
+                        lifecycle_state="failed", provider=provider,
+                        result=outcome["result"], finished_at=utcnow_naive(),
+                    )
+
+        thread = threading.Thread(
+            target=_run_codex_process,
+            name=f"codex-exec-{execution_id or provider}",
+            daemon=True,
+        )
+        thread.start()
+        thread.join(wait_timeout)
+        if thread.is_alive():
+            if execution_id and decision_id:
+                return _execution_state_result(
+                    execution_id=execution_id,
+                    lifecycle_state="outcome_pending",
+                    provider=provider,
+                )
             return {"ok": False, "provider": provider, "error": f"codex exec timed out after {timeout}s",
                     "latency_ms": int((time.monotonic() - started) * 1000)}
-        except Exception as e:
-            return {"ok": False, "provider": provider, "error": str(e),
-                    "latency_ms": int((time.monotonic() - started) * 1000)}
+        return outcome.get("result", {
+            "ok": False, "provider": provider,
+            "error": "codex execution ended without a result",
+            "latency_ms": int((time.monotonic() - started) * 1000),
+        })
 
 
 def execute_codex(objective: str, *, timeout: float = 180.0, cwd: Optional[str] = None) -> dict:
@@ -826,7 +1000,9 @@ def _codex_write_authority(repo_id: str, host_id: str) -> dict:
 
 
 def execute_codex_write(objective: str, *, repo_id: str, host_id: str,
-                        timeout: float = 180.0) -> dict:
+                        timeout: float = 180.0, execution_id: Optional[str] = None,
+                        decision_id: Optional[str] = None,
+                        wait_timeout: Optional[float] = None) -> dict:
     """Run Codex workspace-write inside a previously validated lease.
 
     This function independently proves the active lease and resolved
@@ -841,7 +1017,8 @@ def execute_codex_write(objective: str, *, repo_id: str, host_id: str,
         }
     return _execute_codex_with_sandbox(
         objective, sandbox="workspace-write", provider="codex-write", timeout=timeout,
-        cwd=authority["cwd"],
+        cwd=authority["cwd"], execution_id=execution_id, decision_id=decision_id,
+        wait_timeout=wait_timeout,
     )
 
 
@@ -967,6 +1144,38 @@ def run_task(task: dict) -> dict:
             repo_cwd = resolve_repo_path(task.get("repo")) if task.get("repo") else None
             executor_name = provider_name
             if implementation_mode:
+                execution_id = task.get("execution_id") or str(uuid.uuid4())
+                existing_execution = _load_execution_decision(execution_id)
+                if existing_execution and existing_execution.get("lifecycle_state") in _ACTIVE_EXECUTION_STATES:
+                    if existing_execution.get("result_json"):
+                        try:
+                            return json.loads(existing_execution["result_json"])
+                        except json.JSONDecodeError:
+                            pass
+                    return _execution_state_result(
+                        execution_id=execution_id,
+                        lifecycle_state=existing_execution["lifecycle_state"],
+                        provider="codex-write",
+                        worker_pid=existing_execution.get("worker_pid"),
+                    )
+                if existing_execution and existing_execution.get("lifecycle_state") in _TERMINAL_EXECUTION_STATES:
+                    if existing_execution.get("result_json"):
+                        try:
+                            return json.loads(existing_execution["result_json"])
+                        except json.JSONDecodeError:
+                            return {
+                                "ok": False,
+                                "provider": "codex-write",
+                                "execution_id": execution_id,
+                                "error": "stored execution result_json is not valid JSON",
+                            }
+                    return {
+                        "ok": False,
+                        "provider": "codex-write",
+                        "execution_id": execution_id,
+                        "error": f"execution {execution_id} has terminal lifecycle_state "
+                                 f"{existing_execution.get('lifecycle_state')!r} but no stored result_json",
+                    }
                 executor_name = f"{provider_name}-write"
                 error = None
                 repo_id = task.get("repo")
@@ -992,6 +1201,16 @@ def run_task(task: dict) -> dict:
                         "escalation_reason": "write_lease_missing",
                         "verification_outcome": "fail",
                     }
+                accepted_result = _execution_state_result(
+                    execution_id=execution_id,
+                    lifecycle_state="accepted",
+                    provider="codex-write",
+                )
+                _update_execution_decision(
+                    route["decision_id"], execution_id,
+                    lifecycle_state="accepted", provider="codex-write",
+                    result=accepted_result,
+                )
                 result = provider_fn(paid_objective, repo_id=repo_id, host_id=host_id)
                 if result.get("authority_denied"):
                     _update_decision_outcome(
@@ -1005,6 +1224,16 @@ def run_task(task: dict) -> dict:
                         "escalation_reason": "write_lease_missing",
                         "verification_outcome": "fail",
                     }
+                result = provider_fn(
+                    paid_objective,
+                    repo_id=repo_id,
+                    host_id=host_id,
+                    execution_id=execution_id,
+                    decision_id=route["decision_id"],
+                    wait_timeout=max(0.0, _REQUEST_HARD_TIMEOUT_SECONDS - _EXECUTION_WAIT_MARGIN_SECONDS),
+                )
+                if result.get("lifecycle_state") == "outcome_pending":
+                    return result
             else:
                 result = provider_fn(paid_objective, cwd=repo_cwd)
             gate = "pass" if result.get("ok") and (result.get("output") or "").strip() else "fail"

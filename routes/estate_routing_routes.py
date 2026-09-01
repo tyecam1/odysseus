@@ -18,12 +18,14 @@ from src.auth_helpers import require_user
 from src.delegation_preflight import delegation_preflight
 from src.estate_router import (
     RoutingConfigError,
+    _load_execution_decision,
     current_host_id,
     eligible_hosts,
     resolve_alias,
     resolve_route,
     run_task,
 )
+from src.git_finalizer import finalize
 from src.park_lease_ops import (
     NoActiveLease,
     ParkConflict,
@@ -175,6 +177,15 @@ class DelegationPreflightEnvelope(BaseModel):
     units: List[DelegationPreflightUnit] = Field(min_length=1)
 
 
+class FinalizeExecutionEnvelope(BaseModel):
+    repo_id: str
+    host_id: str
+    expected_branch: str
+    execution_id: str
+    commit_message: str
+    expected_base_head: Optional[str] = None
+
+
 def setup_estate_routing_routes() -> APIRouter:
     router = APIRouter(prefix="/api/estate", tags=["estate-routing"])
 
@@ -199,6 +210,27 @@ def setup_estate_routing_routes() -> APIRouter:
         _scope_owner(request, {"estate:execute"})
         task = envelope.to_task()
         return _route_call(run_task, task)
+
+    @router.get("/run/{execution_id}")
+    async def get_run_execution(request: Request, execution_id: str):
+        _scope_owner(request, {"estate:execute"})
+        row = _route_call(_load_execution_decision, execution_id)
+        if row is None:
+            raise HTTPException(404, f"no execution decision found with id {execution_id!r}")
+        return row
+
+    @router.post("/finalize")
+    async def finalize_execution(request: Request, envelope: FinalizeExecutionEnvelope):
+        _scope_owner(request, {"estate:execute"})
+        return _route_call(
+            finalize,
+            repo_id=envelope.repo_id,
+            host_id=envelope.host_id,
+            expected_branch=envelope.expected_branch,
+            execution_id=envelope.execution_id,
+            commit_message=envelope.commit_message,
+            expected_base_head=envelope.expected_base_head,
+        )
 
     @router.get("/route/hosts")
     async def route_hosts(request: Request, repo: Optional[str] = None):
