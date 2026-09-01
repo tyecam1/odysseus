@@ -204,17 +204,18 @@ def cmd_park(args):
             f"session/operator to acquire the lease, not a remote insert from here."
         )
 
-    clean, reason = _git_is_clean(repo["path"])
-    if not clean:
-        fail(f"refusing to park {args.repo_id!r}: {reason} (fail-closed — commit/stash first)")
-
     ops = _park_lease_ops()
     try:
-        result = ops.park_repo(
-            args.repo_id, host_id, repo["path"],
+        result = ops.park_repo_by_id(
+            args.repo_id, host_id,
             branch=args.branch, session_id=args.session,
         )
-    except ops.ParkConflict as e:
+    except (
+        ops.ParkConflict,
+        ops.RepoNotResolvable,
+        ops.RepoNotClean,
+        ops.WorktreeVerificationError,
+    ) as e:
         fail(str(e))
         return
 

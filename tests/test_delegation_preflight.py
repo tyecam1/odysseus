@@ -1,4 +1,5 @@
 """Acceptance coverage for the delegation preflight boundary."""
+import pytest
 import src.delegation_preflight as preflight
 
 
@@ -27,9 +28,11 @@ def test_scenario_a_substantial_code_recommends_live_codex(monkeypatch):
     monkeypatch.setattr(preflight.estate_router, "eligible_hosts", lambda repo_id=None: _hosts())
     monkeypatch.setattr(preflight.estate_router, "_codex_available", lambda: (True, "/bin/codex"))
     monkeypatch.setattr(preflight.estate_router, "current_host_id", lambda: "test-lab")
-    monkeypatch.setattr(preflight.estate_router, "active_lease_for_repo", lambda repo_id, host_id: {
-        "lease_id": "lease-1", "repo_id": repo_id, "host_id": host_id,
-    })
+    monkeypatch.setattr(
+        preflight.estate_router,
+        "_codex_write_authority",
+        lambda repo_id, host_id: {"ok": True, "lease_id": "lease-1", "cwd": "/tmp/worktree"},
+    )
     monkeypatch.setattr(
         preflight.estate_router, "resolve_route",
         lambda task, record_decision=False: {
@@ -133,7 +136,14 @@ def test_codex_write_preflight_rejects_missing_existing_lease(monkeypatch):
     monkeypatch.setattr(preflight.estate_router, "eligible_hosts", lambda repo_id=None: _hosts())
     monkeypatch.setattr(preflight.estate_router, "_codex_available", lambda: (True, "/bin/codex"))
     monkeypatch.setattr(preflight.estate_router, "current_host_id", lambda: "test-lab")
-    monkeypatch.setattr(preflight.estate_router, "active_lease_for_repo", lambda repo_id, host_id: None)
+    monkeypatch.setattr(
+        preflight.estate_router,
+        "_codex_write_authority",
+        lambda repo_id, host_id: {
+            "ok": False,
+            "error": f"implementation mode requires an active non-stale lease for {repo_id!r} held by {host_id!r}",
+        },
+    )
     monkeypatch.setattr(preflight.estate_router, "_resolve_paid_provider", lambda alias: {"provider": "codex"})
     monkeypatch.setattr(
         preflight.estate_router, "resolve_route",
@@ -149,7 +159,82 @@ def test_codex_write_preflight_rejects_missing_existing_lease(monkeypatch):
 
     assert result["ok"] is False
     assert result["units"][0]["write_authority"]["ready"] is False
-    assert "active non-stale repo lease" in result["units"][0]["reason"]
+    assert "active non-stale lease" in result["units"][0]["reason"]
+
+
+def test_codex_write_preflight_uses_authority_result_when_ready(monkeypatch):
+    monkeypatch.setattr(preflight.estate_router, "eligible_hosts", lambda repo_id=None: _hosts())
+    monkeypatch.setattr(preflight.estate_router, "_codex_available", lambda: (True, "/bin/codex"))
+    monkeypatch.setattr(preflight.estate_router, "current_host_id", lambda: "test-lab")
+    monkeypatch.setattr(preflight.estate_router, "active_lease_for_repo", lambda repo_id, host_id: (_ for _ in ()).throw(AssertionError("preflight must not reimplement write authority via active_lease_for_repo")))
+    calls = []
+    monkeypatch.setattr(
+        preflight.estate_router,
+        "_codex_write_authority",
+        lambda repo_id, host_id: calls.append((repo_id, host_id)) or {"ok": True, "lease_id": "lease-iso", "cwd": "/tmp/isolated"},
+    )
+    monkeypatch.setattr(preflight.estate_router, "_resolve_paid_provider", lambda alias: {"provider": "codex"})
+    monkeypatch.setattr(
+        preflight.estate_router, "resolve_route",
+        lambda task, record_decision=False: {
+            **_route(ok=False, executor="none"),
+            "route": {"host": "test-lab", "executor": "none", "model_alias": "code-strong"},
+        },
+    )
+
+    result = preflight.delegation_preflight([{
+        "task_class": "code_implementation", "repo": "odysseus",
+    }])
+
+    unit = result["units"][0]
+    assert unit["ok"] is True
+    assert unit["write_authority"] == {
+        "ready": True,
+        "host_id": "test-lab",
+        "lease_id": "lease-iso",
+        "reason": "active non-stale repo lease matches the execution host",
+    }
+    assert calls == [("odysseus", "test-lab")]
+
+
+@pytest.mark.parametrize("authority_error", [
+    "refusing implementation mode in live registered checkout for 'odysseus'",
+    "active lease for 'odysseus' is missing an enforced branch",
+    "active lease worktree for 'odysseus' failed verification: branch mismatch",
+    "active lease worktree for 'odysseus' failed verification: path is not a registered linked git worktree for this repo",
+])
+def test_codex_write_preflight_surfaces_authority_denial_reason(monkeypatch, authority_error):
+    monkeypatch.setattr(preflight.estate_router, "eligible_hosts", lambda repo_id=None: _hosts())
+    monkeypatch.setattr(preflight.estate_router, "_codex_available", lambda: (True, "/bin/codex"))
+    monkeypatch.setattr(preflight.estate_router, "current_host_id", lambda: "test-lab")
+    monkeypatch.setattr(preflight.estate_router, "active_lease_for_repo", lambda repo_id, host_id: (_ for _ in ()).throw(AssertionError("preflight must not use active_lease_for_repo directly")))
+    monkeypatch.setattr(
+        preflight.estate_router,
+        "_codex_write_authority",
+        lambda repo_id, host_id: {"ok": False, "error": authority_error},
+    )
+    monkeypatch.setattr(preflight.estate_router, "_resolve_paid_provider", lambda alias: {"provider": "codex"})
+    monkeypatch.setattr(
+        preflight.estate_router, "resolve_route",
+        lambda task, record_decision=False: {
+            **_route(ok=False, executor="none"),
+            "route": {"host": "test-lab", "executor": "none", "model_alias": "code-strong"},
+        },
+    )
+
+    result = preflight.delegation_preflight([{
+        "task_class": "code_implementation", "repo": "odysseus",
+    }])
+
+    unit = result["units"][0]
+    assert unit["ok"] is False
+    assert unit["write_authority"] == {
+        "ready": False,
+        "host_id": "test-lab",
+        "lease_id": None,
+        "reason": authority_error,
+    }
+    assert unit["reason"] == authority_error
 
 
 def test_read_only_code_review_with_repo_does_not_require_write_lease(monkeypatch):

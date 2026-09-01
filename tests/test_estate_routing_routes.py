@@ -322,6 +322,20 @@ class TestParkAcquireRoute:
         response = client.post("/api/estate/park/my-repo")
         assert response.status_code == 409
 
+    def test_park_worktree_verification_error_returns_409(self, monkeypatch):
+        client = self._client(monkeypatch)
+        import routes.estate_routing_routes as mod
+
+        monkeypatch.setattr(mod, "current_host_id", lambda: "test-lab")
+
+        def boom(repo_id, host_id, *, branch=None, session_id=None):
+            raise mod.WorktreeVerificationError(f"refusing to park {repo_id!r} on branch 'main': verification failed")
+        monkeypatch.setattr(mod, "park_repo_by_id", boom)
+
+        response = client.post("/api/estate/park/my-repo", params={"branch": "main"})
+        assert response.status_code == 409
+        assert response.json()["detail"] == "refusing to park 'my-repo' on branch 'main': verification failed"
+
     def test_park_unregistered_host_returns_503(self, monkeypatch):
         client = self._client(monkeypatch)
         import routes.estate_routing_routes as mod

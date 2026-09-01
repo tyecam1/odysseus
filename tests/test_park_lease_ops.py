@@ -10,6 +10,7 @@ stale-reclaim/conflict/heartbeat/release lifecycle end-to-end through
 scripts/agent; this file tests the extracted ops functions directly.
 """
 from datetime import timedelta
+from pathlib import Path
 
 import pytest
 
@@ -19,6 +20,7 @@ from src.park_lease_ops import (
     ParkConflict,
     RepoNotClean,
     RepoNotResolvable,
+    WorktreeVerificationError,
     active_lease_for_repo,
     active_leases_summary,
     git_is_clean,
@@ -32,10 +34,14 @@ from src.park_lease_ops import (
 @pytest.fixture(autouse=True)
 def _clean_leases():
     with get_db_session() as db:
-        db.query(ParkLease).filter(ParkLease.repo_id.in_(["ops-repo", "ops-conflict-repo"])).delete(synchronize_session=False)
+        db.query(ParkLease).filter(
+            ParkLease.repo_id.in_(["ops-repo", "ops-conflict-repo", "ops-branch-repo"])
+        ).delete(synchronize_session=False)
     yield
     with get_db_session() as db:
-        db.query(ParkLease).filter(ParkLease.repo_id.in_(["ops-repo", "ops-conflict-repo"])).delete(synchronize_session=False)
+        db.query(ParkLease).filter(
+            ParkLease.repo_id.in_(["ops-repo", "ops-conflict-repo", "ops-branch-repo"])
+        ).delete(synchronize_session=False)
 
 
 def test_park_repo_creates_active_lease():
@@ -137,6 +143,7 @@ def test_active_lease_for_repo_returns_only_live_lease_held_by_requested_host():
 
     assert lease["host_id"] == "test-lab"
     assert lease["worktree_path"] == "/tmp/ops-repo"
+    assert lease["branch"] is None
     assert lease["allowed_write_scope"] == "repo"
     assert active_lease_for_repo("ops-repo", "other-host") is None
 
@@ -156,6 +163,8 @@ class TestGitIsClean:
     def test_clean_worktree_reports_clean(self, tmp_path):
         import subprocess
         subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+        subprocess.run(["git", "-C", str(tmp_path), "config", "user.name", "Test User"], check=True)
+        subprocess.run(["git", "-C", str(tmp_path), "config", "user.email", "test@example.com"], check=True)
         (tmp_path / "f.txt").write_text("x")
         subprocess.run(["git", "-C", str(tmp_path), "add", "-A"], check=True)
         subprocess.run(["git", "-C", str(tmp_path), "commit", "-q", "-m", "init"], check=True)
@@ -184,6 +193,9 @@ class TestParkRepoById:
     def _clean_git_repo(self, tmp_path):
         import subprocess
         subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+        subprocess.run(["git", "-C", str(tmp_path), "checkout", "-q", "-b", "main"], check=True)
+        subprocess.run(["git", "-C", str(tmp_path), "config", "user.name", "Test User"], check=True)
+        subprocess.run(["git", "-C", str(tmp_path), "config", "user.email", "test@example.com"], check=True)
         (tmp_path / "f.txt").write_text("x")
         subprocess.run(["git", "-C", str(tmp_path), "add", "-A"], check=True)
         subprocess.run(["git", "-C", str(tmp_path), "commit", "-q", "-m", "init"], check=True)
@@ -214,12 +226,40 @@ class TestParkRepoById:
         clean_repo = self._clean_git_repo(tmp_path)
         monkeypatch.setattr(estate_router, "resolve_repo_path", lambda repo_id: str(clean_repo))
 
-        result = park_repo_by_id("ops-repo", "test-lab", branch="main")
+        result = park_repo_by_id("ops-repo", "test-lab")
         assert result["repo_id"] == "ops-repo"
         assert result["worktree_path"] == str(clean_repo)
-        assert result["branch"] == "main"
+        assert result["branch"] is None
 
         with get_db_session() as db:
             row = db.query(ParkLease).filter(ParkLease.repo_id == "ops-repo", ParkLease.status == "active").first()
             assert row is not None
             assert row.worktree_path == str(clean_repo)
+
+    def test_branch_park_acquires_isolated_worktree_never_live_checkout(self, monkeypatch, tmp_path):
+        import subprocess
+        import src.estate_router as estate_router
+
+        clean_repo = self._clean_git_repo(tmp_path / "projects" / "odysseus-aoteru")
+        monkeypatch.setattr(estate_router, "resolve_repo_path", lambda repo_id: str(clean_repo))
+
+        result = park_repo_by_id("ops-branch-repo", "test-lab", branch="feature/lease")
+
+        assert result["repo_id"] == "ops-branch-repo"
+        assert result["branch"] == "feature/lease"
+        assert result["worktree_path"] != str(clean_repo)
+        assert Path(result["worktree_path"]).exists()
+        branch = subprocess.run(
+            ["git", "-C", result["worktree_path"], "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        assert branch == "feature/lease"
+
+        with get_db_session() as db:
+            row = db.query(ParkLease).filter(ParkLease.repo_id == "ops-branch-repo", ParkLease.status == "active").first()
+            assert row is not None
+            assert row.worktree_path == result["worktree_path"]
+            assert row.worktree_path != str(clean_repo)
+            assert row.branch == "feature/lease"

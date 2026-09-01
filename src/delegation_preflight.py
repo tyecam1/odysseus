@@ -154,19 +154,23 @@ def delegation_preflight(units: Iterable[dict]) -> dict:
             if write_required:
                 route_host = (route.get("route") or {}).get("host")
                 backend_host = estate_router.current_host_id()
-                lease = (
-                    estate_router.active_lease_for_repo(unit["repo"], backend_host)
+                authority = (
+                    estate_router._codex_write_authority(unit["repo"], backend_host)
                     if backend_host and backend_host == route_host else None
                 )
-                write_ready = lease is not None
+                write_ready = bool(authority and authority.get("ok"))
                 write_authority = {
                     "ready": write_ready,
                     "host_id": backend_host,
-                    "lease_id": lease.get("lease_id") if lease else None,
+                    "lease_id": authority.get("lease_id") if authority else None,
                     "reason": (
                         "active non-stale repo lease matches the execution host"
                         if write_ready else
-                        "codex-write requires an active non-stale repo lease held by the execution host"
+                        (
+                            authority.get("error")
+                            if authority is not None else
+                            "codex-write requires an active non-stale repo lease held by the execution host"
+                        )
                     ),
                 }
             ok = host_ready and codex_live and provider == "codex" and write_ready

@@ -29,6 +29,7 @@ from src.park_lease_ops import (
     ParkConflict,
     RepoNotClean,
     RepoNotResolvable,
+    WorktreeVerificationError,
     active_leases_summary,
     heartbeat_repo,
     park_repo_by_id,
@@ -265,6 +266,8 @@ def setup_estate_routing_routes() -> APIRouter:
         except RepoNotResolvable as e:
             raise HTTPException(404, str(e)) from e
         except RepoNotClean as e:
+            raise HTTPException(409, str(e)) from e
+        except WorktreeVerificationError as e:
             raise HTTPException(409, str(e)) from e
         except ParkConflict as e:
             raise HTTPException(409, str(e)) from e
