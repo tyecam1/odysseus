@@ -1,0 +1,78 @@
+{
+  "status": "proposed",
+  "controls_routing": false,
+  "schema_version": 1,
+  "purpose": "machine-readable evidence contract for Misumi persona/model calibration runs; records observations without authorising routing changes",
+  "required_fields": [
+    "evaluation_id",
+    "persona",
+    "task_class",
+    "fixture_id",
+    "fixture_provenance",
+    "capability_alias",
+    "resolved_model",
+    "model_configuration",
+    "validator",
+    "validator_result",
+    "metrics",
+    "latency_ms",
+    "cost_observation",
+    "fallback_event",
+    "escalation_trigger",
+    "source_commit",
+    "observed_at",
+    "freshness",
+    "status"
+  ],
+  "allowed_statuses": [
+    "observed",
+    "reported",
+    "inferred",
+    "candidate_pattern",
+    "candidate_mechanism",
+    "proposed",
+    "ratified",
+    "rejected",
+    "archived"
+  ],
+  "freshness": {
+    "required": true,
+    "fields": ["observed_at", "valid_until", "stale"],
+    "fail_closed_when_stale_for_routing_review": true
+  },
+  "provenance": {
+    "required": true,
+    "minimum": ["fixture_provenance", "source_commit", "resolved_model", "model_configuration"]
+  },
+  "graph_mapping": {
+    "nodes": [
+      "Persona",
+      "TaskClass",
+      "CapabilityAlias",
+      "ConcreteModel",
+      "Evaluation",
+      "Metric",
+      "FailureMode",
+      "Validator",
+      "Regression",
+      "Evidence"
+    ],
+    "edges": [
+      "Persona-performs-TaskClass",
+      "Evaluation-tests-TaskClass",
+      "Evaluation-uses-CapabilityAlias",
+      "CapabilityAlias-resolves_to-ConcreteModel",
+      "Validator-checks-Evaluation",
+      "Evaluation-observes-Metric",
+      "Evaluation-observes-FailureMode",
+      "Evidence-supports-Evaluation",
+      "Regression-derived_from-Evaluation"
+    ]
+  },
+  "routing_boundary": {
+    "evaluation_record_may_change_routing": false,
+    "routing_change_requires_separate_evidence_review": true,
+    "material_tradeoff_requires_ratification": true,
+    "persona_promotion_must_remain_interactive": true
+  }
+}
