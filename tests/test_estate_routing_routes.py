@@ -270,66 +270,81 @@ class TestRunRouteEndToEnd:
         assert slow_call.done() is False
         await slow_call
 
-    def test_implementation_mode_uses_longer_route_timeout_than_ordinary_mode(self, monkeypatch):
+    def test_execution_route_uses_a_single_watchdog_regardless_of_mode(self, monkeypatch):
+        """Controller review of an earlier amendment: asyncio.wait_for()
+        around asyncio.to_thread() cannot forcibly terminate the worker
+        thread it wraps - a timeout only stops awaiting it, the underlying
+        execution keeps running to its own natural completion regardless.
+        A shorter "ordinary mode" bound therefore does not save anything -
+        it just makes the client give up early while the real work
+        continues unseen server-side. There must be exactly one watchdog,
+        set above every executor's own worst-case bound, applied
+        identically whether or not mode == "implementation"."""
         client = self._client(monkeypatch)
         import routes.estate_routing_routes as mod
 
-        monkeypatch.setattr(mod, "_ORDINARY_RUN_TIMEOUT", 1.0)
-        monkeypatch.setattr(mod, "_IMPLEMENTATION_ROUTE_TIMEOUT", 2.0)
+        monkeypatch.setattr(mod, "_EXECUTION_ROUTE_TIMEOUT", 1.0)
+        monkeypatch.setattr(mod, "run_task", lambda task: time.sleep(1.4) or {"ok": True})
 
-        def fake_run_task(task):
-            time.sleep(1.2)
-            return {"ok": True, "executed": True, "mode": task.get("routing", {}).get("mode")}
-
-        monkeypatch.setattr(mod, "run_task", fake_run_task)
-
-        response = client.post("/api/estate/run", json={
-            "task_class": "code",
-            "objective": "implement",
-            "mode": "implementation",
+        ordinary = client.post("/api/estate/run", json={"task_class": "code", "objective": "advise"})
+        implementation = client.post("/api/estate/run", json={
+            "task_class": "code", "objective": "implement", "mode": "implementation",
         })
+
+        assert ordinary.status_code == 504
+        assert implementation.status_code == 504
+        assert ordinary.json() == {"detail": "Request exceeded 1s timeout"}
+        assert implementation.json() == {"detail": "Request exceeded 1s timeout"}, (
+            "implementation mode must not get its own separate, shorter-labelled "
+            "watchdog value - both modes share the exact same bound"
+        )
+
+    def test_execution_route_never_times_out_while_worker_stays_within_its_declared_bound(self, monkeypatch):
+        """The actual proof that a route timeout cannot fire while its
+        executor is still legitimately within the supported timeout
+        hierarchy (worker-owned bound < route watchdog < client timeout):
+        simulate a worker that takes just under the (test-shrunk) route
+        watchdog, matching how a real worker respecting its own bound
+        would behave, and confirm the response is the real result, never
+        a 504 - there is no "request ends while execution survives" gap
+        as long as the hierarchy holds."""
+        client = self._client(monkeypatch)
+        import routes.estate_routing_routes as mod
+
+        monkeypatch.setattr(mod, "_EXECUTION_ROUTE_TIMEOUT", 3.0)
+        monkeypatch.setattr(mod, "run_task", lambda task: time.sleep(2.5) or {"ok": True, "executed": True})
+
+        response = client.post("/api/estate/run", json={"task_class": "code", "objective": "advise"})
 
         assert response.status_code == 200
-        assert response.json() == {"ok": True, "executed": True, "mode": "implementation"}
+        assert response.json() == {"ok": True, "executed": True}
 
-    def test_implementation_mode_still_returns_structured_504_when_its_own_bound_is_exceeded(self, monkeypatch):
-        client = self._client(monkeypatch)
+    def test_execution_route_watchdog_exceeds_every_real_executor_bound(self):
+        """Structural proof against the actual (unmocked) production
+        constants, not shrunk test values: worker-owned hard bound <
+        route watchdog < client timeout must hold by construction. Reads
+        each executor's own default via introspection rather than
+        hardcoding the numbers again here, so this fails the moment
+        someone raises a worker bound without also raising the watchdog."""
+        import inspect
+
         import routes.estate_routing_routes as mod
+        import src.estate_router as estate_router_mod
 
-        monkeypatch.setattr(mod, "_ORDINARY_RUN_TIMEOUT", 1.0)
-        monkeypatch.setattr(mod, "_IMPLEMENTATION_ROUTE_TIMEOUT", 2.0)
-        monkeypatch.setattr(mod, "run_task", lambda task: time.sleep(2.2) or {"ok": True})
+        codex_timeout = inspect.signature(estate_router_mod.execute_codex).parameters["timeout"].default
+        codex_write_timeout = inspect.signature(estate_router_mod.execute_codex_write).parameters["timeout"].default
+        local_sig = inspect.signature(estate_router_mod.execute_local).parameters
+        local_worst_case = local_sig["timeout"].default * (1 + local_sig["max_retries"].default)
 
-        response = client.post("/api/estate/run", json={
-            "task_class": "code",
-            "objective": "implement",
-            "mode": "implementation",
-        })
-
-        assert response.status_code == 504
-        assert response.json() == {"detail": "Request exceeded 2s timeout"}
-
-    def test_ordinary_run_timeout_behavior_is_unchanged(self, monkeypatch):
-        client = self._client(monkeypatch)
-        import routes.estate_routing_routes as mod
-
-        monkeypatch.setattr(mod, "_ORDINARY_RUN_TIMEOUT", 1.0)
-        monkeypatch.setattr(mod, "_IMPLEMENTATION_ROUTE_TIMEOUT", 2.0)
-        monkeypatch.setattr(mod, "run_task", lambda task: time.sleep(1.2) or {"ok": True})
-
-        response = client.post("/api/estate/run", json={
-            "task_class": "code",
-            "objective": "advise",
-        })
-
-        assert response.status_code == 504
-        assert response.json() == {"detail": "Request exceeded 1s timeout"}
+        assert mod._EXECUTION_ROUTE_TIMEOUT > codex_timeout
+        assert mod._EXECUTION_ROUTE_TIMEOUT > codex_write_timeout
+        assert mod._EXECUTION_ROUTE_TIMEOUT > local_worst_case
 
     def test_implementation_mode_invalid_lease_failure_does_not_take_timeout_path(self, monkeypatch):
         client = self._client(monkeypatch)
         import routes.estate_routing_routes as mod
 
-        monkeypatch.setattr(mod, "_IMPLEMENTATION_ROUTE_TIMEOUT", 2.0)
+        monkeypatch.setattr(mod, "_EXECUTION_ROUTE_TIMEOUT", 2.0)
         started = time.monotonic()
         monkeypatch.setattr(mod, "run_task", lambda task: {
             "ok": False,

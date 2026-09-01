@@ -804,18 +804,38 @@ def _execute_codex_with_sandbox(objective: str, *, sandbox: str, provider: str,
             return {"ok": True, "provider": provider, "output": output, "latency_ms": latency_ms,
                     "codex_binary": codex_binary}
         except subprocess.TimeoutExpired:
+            cleanup_incomplete = False
             try:
                 os.killpg(process_group_id, signal.SIGKILL)
             except ProcessLookupError:
+                # The process group is already gone - nothing left to kill,
+                # cleanup is complete, not incomplete.
                 pass
             except OSError:
-                pass
+                # killpg itself failed for some other reason (e.g. a
+                # permission issue) - the group may still be alive. Do not
+                # silently treat this the same as "already gone"; surface
+                # it in the result below rather than hiding an orphan-risk
+                # condition behind an ok:False response indistinguishable
+                # from a clean kill.
+                cleanup_incomplete = True
             try:
                 proc.communicate(timeout=5)
             except subprocess.TimeoutExpired:
-                pass
-            return {"ok": False, "provider": provider, "error": f"codex exec timed out after {timeout}s",
-                    "latency_ms": int((time.monotonic() - started) * 1000)}
+                # Bounded reap so a cleanup call itself can never hang
+                # indefinitely - but if it still hasn't drained by then,
+                # something is holding the output pipes open past a
+                # reasonable window and that must be visible, not treated
+                # as a definite success.
+                cleanup_incomplete = True
+            result = {
+                "ok": False, "provider": provider,
+                "error": f"codex exec timed out after {timeout}s",
+                "latency_ms": int((time.monotonic() - started) * 1000),
+            }
+            if cleanup_incomplete:
+                result["cleanup_incomplete"] = True
+            return result
         except Exception as e:
             return {"ok": False, "provider": provider, "error": str(e),
                     "latency_ms": int((time.monotonic() - started) * 1000)}

@@ -48,12 +48,25 @@ from src.park_lease_ops import (
 # kicks in. 8 MB comfortably covers a handful of realistic photos plus a
 # long text prompt while still rejecting a clearly abusive payload.
 _MAX_OBJECTIVE_BYTES = 8 * 1024 * 1024
-# Re-read the same env var app.py's global middleware uses rather than importing
-# REQUEST_HARD_TIMEOUT from app.py, which would create a routes<->app circular import.
-_ORDINARY_RUN_TIMEOUT = float(os.getenv("REQUEST_HARD_TIMEOUT", "45"))
-# Must stay above execute_codex_write()/execute_codex()'s own 180s subprocess bound so
-# the worker-level timeout fires first and returns its established structured result.
-_IMPLEMENTATION_ROUTE_TIMEOUT = float(os.getenv("IMPLEMENTATION_ROUTE_TIMEOUT", "210"))
+# asyncio.wait_for() around asyncio.to_thread() can only stop *awaiting*
+# the thread it wraps - it cannot forcibly terminate the OS thread once
+# started, so the executor keeps running to its own natural completion
+# regardless of what this watchdog decides. That means this is not a "give
+# implementation mode more time, keep ordinary calls short" knob: it must
+# exceed the worst-case bound of EVERY executor run_task() can invoke
+# through this route - ordinary or implementation alike - or a client can
+# receive a 504 while the real execution keeps running unseen server-side,
+# and retry into duplicate/overlapping work. That is exactly the failure
+# class Phase B exists to close, just moved to a different boundary.
+# Worst-case executor bounds today: execute_codex()/execute_codex_write()'s
+# 180s Codex subprocess timeout; execute_local()'s 60s x (1 + 1 retry) = 120s
+# worst case. Re-read the same-shaped env var name app.py's global
+# middleware uses rather than importing REQUEST_HARD_TIMEOUT from app.py,
+# which would create a routes<->app circular import; ordinary non-execution
+# HTTP surfaces keep using that middleware's own 45s bound unchanged - this
+# route alone needs the larger one and is exempted from that middleware
+# entirely (see app.py's _TIMEOUT_EXEMPT_PREFIXES).
+_EXECUTION_ROUTE_TIMEOUT = float(os.getenv("EXECUTION_ROUTE_TIMEOUT", "210"))
 
 
 def _scope_owner(request: Request, allowed: set[str]) -> str:
@@ -207,18 +220,13 @@ def setup_estate_routing_routes() -> APIRouter:
         convergence.md finding #6)."""
         _scope_owner(request, {"estate:execute"})
         task = envelope.to_task()
-        route_timeout = (
-            _IMPLEMENTATION_ROUTE_TIMEOUT
-            if envelope.mode == "implementation"
-            else _ORDINARY_RUN_TIMEOUT
-        )
         try:
             return await asyncio.wait_for(
                 asyncio.to_thread(_route_call, run_task, task),
-                timeout=route_timeout,
+                timeout=_EXECUTION_ROUTE_TIMEOUT,
             )
         except asyncio.TimeoutError as e:
-            raise HTTPException(504, f"Request exceeded {route_timeout:.0f}s timeout") from e
+            raise HTTPException(504, f"Request exceeded {_EXECUTION_ROUTE_TIMEOUT:.0f}s timeout") from e
 
     @router.get("/route/hosts")
     async def route_hosts(request: Request, repo: Optional[str] = None):

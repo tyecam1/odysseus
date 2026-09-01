@@ -769,9 +769,11 @@ def test_execute_codex_with_sandbox_kills_entire_process_group_on_timeout(tmp_pa
     monkeypatch.setenv("AOTERU_TEST_MODE", "timeout")
     monkeypatch.setattr(estate_router, "_codex_available", lambda: (True, str(_CODEX_PROCESS_GROUP_FIXTURE)))
 
+    started = time.monotonic()
     result = estate_router._execute_codex_with_sandbox(
         "timeout probe", sandbox="read-only", provider="codex", timeout=1.0, cwd=str(tmp_path),
     )
+    elapsed = time.monotonic() - started
 
     assert result == {
         "ok": False,
@@ -779,6 +781,13 @@ def test_execute_codex_with_sandbox_kills_entire_process_group_on_timeout(tmp_pa
         "error": "codex exec timed out after 1.0s",
         "latency_ms": result["latency_ms"],
     }
+    # Must return promptly after the 1s worker timeout, not block for
+    # anywhere near the fixture child's full 30s natural lifetime - a slow
+    # return here would mean cleanup is relying on the child dying on its
+    # own rather than actually killing it (see the leader-exits test below
+    # for exactly this masking failure mode against the prior
+    # implementation).
+    assert elapsed < 10.0, f"took {elapsed:.1f}s to return - cleanup should be prompt, not waiting on natural exit"
     wrapper_pid = int((pid_dir / "wrapper.pid").read_text().strip())
     child_pid = int((pid_dir / "child.pid").read_text().strip())
     assert _wait_for_pid_exit(wrapper_pid), f"wrapper pid {wrapper_pid} still exists after timeout cleanup"
@@ -817,9 +826,11 @@ def test_execute_codex_with_sandbox_kills_descendant_when_leader_exits_first(tmp
 
     monkeypatch.setattr(_os, "getpgid", _getpgid_fails_like_a_reaped_leader)
 
+    started = time.monotonic()
     result = estate_router._execute_codex_with_sandbox(
         "leader-exits probe", sandbox="read-only", provider="codex", timeout=1.0, cwd=str(tmp_path),
     )
+    elapsed = time.monotonic() - started
 
     assert result == {
         "ok": False,
@@ -827,6 +838,21 @@ def test_execute_codex_with_sandbox_kills_descendant_when_leader_exits_first(tmp
         "error": "codex exec timed out after 1.0s",
         "latency_ms": result["latency_ms"],
     }
+    # The critical proof, not just a nice-to-have: against the prior
+    # implementation (os.killpg(os.getpgid(proc.pid), ...) plus an
+    # unbounded final proc.communicate()), killpg never runs here (getpgid
+    # raises), so the descendant is never actually killed - it only dies
+    # ~30s later on its own, once its sleep completes, while the unbounded
+    # communicate() blocks the whole call waiting for that. By the time
+    # _wait_for_pid_exit runs afterward the descendant would already be
+    # gone *on its own*, incorrectly satisfying a PID-existence-only
+    # assertion and masking the fact that cleanup never actually killed
+    # anything. This wall-clock bound is what actually distinguishes
+    # "killed promptly" from "happened to die naturally while we waited".
+    assert elapsed < 10.0, (
+        f"took {elapsed:.1f}s to return - if this is anywhere near the fixture "
+        "child's full 30s sleep, cleanup let it die naturally instead of killing it"
+    )
     child_pid = int((pid_dir / "child.pid").read_text().strip())
     assert _wait_for_pid_exit(child_pid), (
         f"descendant pid {child_pid} still exists after timeout cleanup - "
