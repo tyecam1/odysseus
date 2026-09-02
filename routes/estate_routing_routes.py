@@ -22,6 +22,7 @@ from src.estate_router import (
     RoutingConfigError,
     current_host_id,
     eligible_hosts,
+    get_estate_execution,
     resolve_alias,
     resolve_route,
     run_task,
@@ -249,6 +250,20 @@ def setup_estate_routing_routes() -> APIRouter:
         row = get_decision_by_id(decision_id)
         if row is None:
             raise HTTPException(404, f"no routing decision found with id {decision_id!r}")
+        return row
+
+    @router.get("/run/{execution_id}")
+    async def get_run_execution(request: Request, execution_id: str):
+        """Poll route for a durable implementation-mode execution
+        accepted by POST /api/estate/run -- the other half of the
+        structural fix for the >45s problem: a client that received
+        execution_id in an "accepted"/"pending" response comes back here
+        for the authoritative persisted terminal state instead of
+        blocking the original HTTP request past any timeout."""
+        _scope_owner(request, {"estate:read", "estate:execute"})
+        row = _route_call(get_estate_execution, execution_id)
+        if row is None:
+            raise HTTPException(404, f"no execution found with id {execution_id!r}")
         return row
 
     @router.get("/sessions")

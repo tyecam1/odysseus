@@ -939,6 +939,83 @@ class RoutingDecision(TimestampMixin, Base):
     )
 
 
+class EstateExecution(TimestampMixin, Base):
+    """Durable record of one implementation-mode (write) Codex execution,
+    decoupled from the HTTP request lifetime that submitted it (P12.4:
+    "the >45s /api/estate/run problem must be solved structurally, not
+    by increasing an HTTP timeout"). One row per `execute_codex_write`
+    invocation dispatched through `run_task`'s implementation-mode lane.
+
+    Deliberately its own table rather than reusing an existing one:
+    `RoutingDecision` is explicitly "not a second job/queue system"
+    per its own docstring above and predates any execution having a
+    lifecycle at all; `LogicalSession` is native Claude/Codex/local
+    *session* identity for the laptop routing skill to resume, not
+    per-invocation execution state, and can exist without ever
+    acquiring a lease; `ScheduledTask`/`TaskRun` are cron/event
+    automation, tightly coupled to a recurring task definition an
+    ad-hoc estate execution has no relationship to. This is the one
+    authoritative lifecycle for an ad-hoc write execution's own
+    accepted -> running -> terminal progression, its worker/process-
+    group provenance, and its finalisation outcome — so a future
+    incident can answer "what wrote this checkout?" from these rows
+    instead of shell history, mtimes and /proc (see recovery/
+    odysseus-live-dirty-20260901-162516 for what that reconstruction
+    looked like without this table).
+
+    `decision_id` links back to the `RoutingDecision` row `run_task()`
+    already records for the same request — that row keeps recording
+    the routing outcome; this one records the execution outcome. The
+    two are updated independently since a decision is recorded at
+    dispatch time but an execution may still be running.
+    """
+    __tablename__ = "estate_executions"
+
+    id                = Column(String, primary_key=True, index=True)  # execution_id
+    # Deliberately not a ForeignKey: decision recording and execution
+    # creation are not atomically coupled (a test or edge-case caller
+    # may supply a decision_id with no corresponding RoutingDecision
+    # row), and this execution's own correctness must not depend on
+    # that row existing.
+    decision_id       = Column(String, nullable=True, index=True)
+    objective         = Column(Text, nullable=False)
+    executor          = Column(String, nullable=False)   # e.g. "codex-write"
+    provider          = Column(String, nullable=False)   # e.g. "codex"
+    host_id           = Column(String, nullable=False, index=True)
+    repo_id           = Column(String, nullable=False, index=True)
+    lease_id          = Column(String, nullable=True)
+    worktree_path     = Column(String, nullable=True)
+    branch            = Column(String, nullable=True)
+    worker_pid        = Column(Integer, nullable=True)
+    process_group_id  = Column(Integer, nullable=True)
+    # accepted | running | succeeded | failed | timed_out | interrupted
+    lifecycle_state   = Column(String, nullable=False, default="accepted", index=True)
+    submitted_at      = Column(DateTime, nullable=False, default=utcnow_naive)
+    started_at        = Column(DateTime, nullable=True)
+    finished_at       = Column(DateTime, nullable=True)
+    exit_status       = Column(String, nullable=True)
+    result_json       = Column(Text, nullable=True)
+    error             = Column(Text, nullable=True)
+    finalization_json = Column(Text, nullable=True)
+
+    __table_args__ = (
+        Index('ix_estate_executions_host_state', 'host_id', 'lifecycle_state'),
+        # Mirrors ParkLease's own ix_park_leases_active_repo_unique
+        # pattern: the actual single-writer guarantee for admission
+        # control, not just the in-Python check in
+        # _in_flight_execution_for_lease, which is a read that cannot
+        # be atomic with the later insert on its own. Two truly
+        # concurrent callers can both pass that read; only one insert
+        # can satisfy this constraint, so the loser gets a real
+        # IntegrityError (_ConcurrentExecutionExists) to handle, not a
+        # silently-overwritten admission decision.
+        Index(
+            'ix_estate_executions_active_lease_unique', 'lease_id', unique=True,
+            sqlite_where=text("lifecycle_state IN ('accepted', 'running')"),
+        ),
+    )
+
+
 class BenchmarkResult(TimestampMixin, Base):
     """Per-model/task-class local benchmark evidence (LM1,
     docs/aoteru-local-model-benchmark-routing.agent-task.md). Extends the

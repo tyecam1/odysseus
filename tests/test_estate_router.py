@@ -794,6 +794,103 @@ def test_execute_codex_with_sandbox_kills_entire_process_group_on_timeout(tmp_pa
     assert _wait_for_pid_exit(child_pid), f"child pid {child_pid} still exists after timeout cleanup"
 
 
+def test_execute_codex_with_sandbox_kills_process_that_escaped_pgid(tmp_path, monkeypatch):
+    """The actual incident-observed topology (2026-09-01): a codex-
+    launched MCP server descendant called setpgid(0, 0), landing in its
+    own process group while staying in the leader's session. Proves the
+    tree-walk cleanup (which reads real /proc parent-child links, not
+    process-group membership) reaches it -- os.killpg(leader_pgid,
+    SIGKILL) alone, the prior implementation, provably cannot: it only
+    signals processes still in that one pgid, and this descendant left
+    it deliberately."""
+    pid_dir = tmp_path / "pids"
+    pid_dir.mkdir()
+    monkeypatch.setenv("AOTERU_TEST_PID_DIR", str(pid_dir))
+    monkeypatch.setenv("AOTERU_TEST_MODE", "escaped_pgid")
+    monkeypatch.setattr(estate_router, "_codex_available", lambda: (True, str(_CODEX_PROCESS_GROUP_FIXTURE)))
+
+    started = time.monotonic()
+    result = estate_router._execute_codex_with_sandbox(
+        "escaped-pgid probe", sandbox="read-only", provider="codex", timeout=1.0, cwd=str(tmp_path),
+    )
+    elapsed = time.monotonic() - started
+
+    assert result["ok"] is False
+    assert result.get("cleanup_incomplete") is not True, (
+        f"cleanup reported incomplete for the escaped descendant: {result}"
+    )
+    assert elapsed < 10.0, f"took {elapsed:.1f}s to return - cleanup should be prompt"
+
+    wrapper_pid = int((pid_dir / "wrapper.pid").read_text().strip())
+    child_pid = int((pid_dir / "child.pid").read_text().strip())
+    escaped_pid = int((pid_dir / "escaped_child.pid").read_text().strip())
+    assert child_pid == escaped_pid, "fixture wiring sanity check"
+
+    assert _wait_for_pid_exit(wrapper_pid), f"wrapper pid {wrapper_pid} still exists after cleanup"
+    assert _wait_for_pid_exit(escaped_pid), (
+        f"escaped-pgid descendant {escaped_pid} still exists after cleanup -- "
+        "process-group-only kill would have left this one running"
+    )
+
+
+def test_kill_process_tree_reports_incomplete_when_a_pid_cannot_be_reaped(monkeypatch):
+    """Fail-closed contract: if a descendant genuinely cannot be
+    confirmed terminated within the reap window, _kill_process_tree
+    must say so rather than silently reporting a clean kill.
+
+    Entirely synthetic -- fake pids that were never real processes,
+    os.kill/os.killpg fully mocked (never call the real syscall), and
+    _process_tree_pids mocked so the tree is exactly these fake pids.
+    Must never touch the real pid/pgid of the test process itself."""
+    import os as _os
+
+    fake_root_pid = 1234567  # never a real pid on this host
+    fake_pgid = 7654321
+    immortal_pid = 999999999  # simulates a descendant that never disappears
+    kill_calls = []
+    killpg_calls = []
+
+    def _fake_kill(pid, sig):
+        kill_calls.append((pid, sig))
+        # No real process backs any of these pids -- nothing to do.
+
+    def _fake_killpg(pgid, sig):
+        killpg_calls.append((pgid, sig))
+
+    fake_root_starttime = 100
+    immortal_starttime = 42
+
+    def _fake_stat_fields(pid):
+        # Both pids "exist" with a starttime matching their tree
+        # snapshot (so the pid-reuse-safety check lets the kill attempt
+        # through for both) -- fake_root_pid reports as a zombie ('Z',
+        # already dead, just unreaped) so it correctly drops out of the
+        # post-kill still-alive re-scan, while immortal_pid reports as
+        # genuinely running ('S') forever, exercising the fail-closed
+        # path this test is actually about.
+        if pid == fake_root_pid:
+            return ("Z", 1, fake_root_starttime)
+        if pid == immortal_pid:
+            return ("S", 1, immortal_starttime)
+        return None
+
+    monkeypatch.setattr(_os, "kill", _fake_kill)
+    monkeypatch.setattr(_os, "killpg", _fake_killpg)
+    monkeypatch.setattr(estate_router, "_proc_stat_fields", _fake_stat_fields)
+    monkeypatch.setattr(
+        estate_router, "_process_tree_pids",
+        lambda root: {root: fake_root_starttime, immortal_pid: immortal_starttime},
+    )
+
+    outcome = estate_router._kill_process_tree(fake_root_pid, fake_pgid, reap_timeout=0.5)
+
+    assert outcome["ok"] is False
+    assert immortal_pid in outcome["still_alive_pids"]
+    assert killpg_calls == [(fake_pgid, __import__("signal").SIGKILL)]
+    assert (fake_root_pid, __import__("signal").SIGKILL) in kill_calls
+    assert (immortal_pid, __import__("signal").SIGKILL) in kill_calls
+
+
 def test_execute_codex_with_sandbox_kills_descendant_when_leader_exits_first(tmp_path, monkeypatch):
     """Adversarial case controller review flagged: the wrapper/group leader
     can exit before the timeout fires (e.g. it forked a detached child and
@@ -1031,6 +1128,17 @@ def test_scenario_a_implementation_mode_dispatches_codex_write_under_active_leas
         estate_router, "_update_decision_outcome",
         lambda decision_id, **kwargs: recorded_outcome.update(decision_id=decision_id, **kwargs),
     )
+    # execute_codex_write_durable persists an EstateExecution row around
+    # the call above -- mocked here the same way _record_decision/
+    # _update_decision_outcome already are, so this test stays isolated
+    # from real DB schema/state rather than needing to provision the
+    # estate_executions table itself.
+    created_executions = {}
+    monkeypatch.setattr(
+        estate_router, "_create_estate_execution",
+        lambda **kwargs: created_executions.setdefault("id", "exec-scenario-a") or "exec-scenario-a",
+    )
+    monkeypatch.setattr(estate_router, "_update_estate_execution", lambda execution_id, **kwargs: None)
 
     result = estate_router.run_task({
         "task_class": "bounded_code_implementation", "objective": "implement it", "repo": "test-repo",
@@ -1041,6 +1149,7 @@ def test_scenario_a_implementation_mode_dispatches_codex_write_under_active_leas
     assert result["ok"] is True
     assert result["executed"] is True
     assert result["route"]["executor"] == "codex-write"
+    assert result["execution_id"] == "exec-scenario-a"
     assert captured["objective"] == "implement it"
     assert captured["cwd"] == str(worktree_path)
     assert captured["sandbox"] == "workspace-write"

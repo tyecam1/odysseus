@@ -23,6 +23,33 @@ if [ "$mode" = "timeout" ]; then
     exit 0
 fi
 
+if [ "$mode" = "escaped_pgid" ]; then
+    # Models the topology actually observed live during the 2026-09-01
+    # incident: a codex-launched MCP server child called something
+    # equivalent to setpgid(0, 0), landing in its own process group
+    # while remaining in the parent's session (confirmed with real
+    # ps -eo pid,ppid,pgid,sid evidence during the incident). A plain
+    # os.killpg(leader_pgid, SIGKILL) cannot reach a descendant like
+    # this; only walking real parent-child links (or signalling the
+    # whole session) does.
+    python3 -c "
+import os, sys, time
+os.setpgid(0, 0)
+sys.stdout.write(str(os.getpid()) + chr(10))
+sys.stdout.flush()
+time.sleep(30)
+" > "$pid_dir/escaped_child.pid" &
+    printf '%s\n' "$!" > "$pid_dir/child.pid"
+    printf '%s\n' "$$" > "$pid_dir/wrapper.pid"
+    # Give the child a moment to actually call setpgid before this
+    # script (and therefore the timeout clock) proceeds, so the test
+    # can rely on the escape having genuinely happened by the time it
+    # inspects pgid.
+    sleep 0.3
+    sleep 30
+    exit 0
+fi
+
 if [ "$mode" = "leader_exits_child_survives" ]; then
     # The background child inherits this script's stdout/stderr (the pipes
     # the Python parent is reading via communicate()) with no redirection,
