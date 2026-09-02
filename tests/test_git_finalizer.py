@@ -455,6 +455,144 @@ def test_finalize_rejects_stale_branch_with_unrelated_commit_ahead_of_expected_h
     assert origin_refs.strip() == ""
 
 
+def test_finalize_refuses_push_if_head_moves_after_commit_before_push(isolated_worktree, monkeypatch):
+    """The controller-identified final gap: file/history checks can all
+    pass and produce a valid commit_sha, but `git push origin
+    <expected_branch>` pushes whatever the mutable branch ref resolves
+    to at push time - not necessarily commit_sha. Simulates a writer
+    landing an unrelated commit D right after this call's own
+    residual-dirty check (the last step before the pre-push HEAD check) -
+    D leaves the working tree clean, so it would NOT be caught by the
+    residual-dirt check itself - only the dedicated pre-push
+    HEAD-identity check catches it."""
+    repo_id, host_id, branch, worktree_path, head = isolated_worktree
+    (worktree_path / "allowed.py").write_text("x = 1\n")
+
+    import src.git_finalizer as gf
+    real_status_paths = gf._status_paths
+    calls = {"n": 0}
+
+    def _status_paths_then_extra_commit(repo_path):
+        calls["n"] += 1
+        result = real_status_paths(repo_path)
+        if calls["n"] == 3:
+            # The 3rd _status_paths call is the post-commit residual
+            # check, which has already run (and found the tree clean) by
+            # the time this fires. Inject the race right after it.
+            (worktree_path / "unrelated_D.py").write_text("intruder = True\n")
+            subprocess.run(["git", "-C", str(worktree_path), "add", "unrelated_D.py"], check=True)
+            subprocess.run(["git", "-C", str(worktree_path), "commit", "-q", "-m", "unrelated commit D"], check=True)
+        return result
+
+    monkeypatch.setattr(gf, "_status_paths", _status_paths_then_extra_commit)
+
+    result = gf.finalize_scoped(
+        repo_id, host_id, expected_branch=branch, expected_head=head,
+        allowed_paths=["allowed.py"],
+        commit_message="feat: allowed change",
+        push=True,
+    )
+
+    assert result["finalized"] is False
+    assert result["committed"] is True
+    assert result["pushed"] is False
+    assert result["reason"] == "head_moved_before_push"
+    origin_refs = subprocess.run(
+        ["git", "-C", str(worktree_path), "ls-remote", "origin", branch],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    assert origin_refs.strip() == "", "nothing should have reached origin"
+
+
+def test_finalize_push_targets_immutable_commit_sha_not_moved_branch_tip(isolated_worktree, monkeypatch):
+    """Even a race landing AFTER the pre-push HEAD check has already
+    passed must not be able to publish anything beyond the validated
+    commit: pushing `commit_sha:refs/heads/<branch>` explicitly, rather
+    than the mutable branch ref, means a commit that lands in the
+    instant between the check and the push call itself still cannot
+    reach the remote."""
+    repo_id, host_id, branch, worktree_path, head = isolated_worktree
+    (worktree_path / "allowed.py").write_text("x = 1\n")
+
+    import src.git_finalizer as gf
+    real_run_git = gf._run_git
+    calls = {"rev_parse_head": 0}
+
+    def _racy_run_git(repo_path, args, **kwargs):
+        result = real_run_git(repo_path, args, **kwargs)
+        if args == ["rev-parse", "HEAD"]:
+            calls["rev_parse_head"] += 1
+            if calls["rev_parse_head"] == 3:
+                # The 3rd rev-parse HEAD is the pre-push check, which has
+                # already run and passed by the time this hook fires.
+                # Simulate a writer landing a commit in the gap right
+                # after that check completed, before push actually runs.
+                (worktree_path / "unrelated_E.py").write_text("late = True\n")
+                subprocess.run(["git", "-C", str(worktree_path), "add", "unrelated_E.py"], check=True)
+                subprocess.run(["git", "-C", str(worktree_path), "commit", "-q", "-m", "unrelated commit E"], check=True)
+        return result
+
+    monkeypatch.setattr(gf, "_run_git", _racy_run_git)
+
+    result = gf.finalize_scoped(
+        repo_id, host_id, expected_branch=branch, expected_head=head,
+        allowed_paths=["allowed.py"],
+        commit_message="feat: allowed change",
+        push=True,
+    )
+
+    assert result["finalized"] is True
+    assert result["pushed"] is True
+    remote_sha = subprocess.run(
+        ["git", "-C", str(worktree_path), "ls-remote", "origin", branch],
+        capture_output=True, text=True, check=True,
+    ).stdout.split()[0]
+    local_head = _git("rev-parse", "HEAD", cwd=worktree_path)
+    assert remote_sha == result["commit_sha"]
+    assert local_head != result["commit_sha"], "the local branch should have moved past the pushed commit"
+    assert remote_sha != local_head, "only the authorised commit reached origin, not the later racing one"
+
+
+def test_finalize_push_fails_safely_when_remote_branch_independently_diverged(isolated_worktree, tmp_path):
+    """A completely separate writer (a different clone) independently
+    pushes its own commit under the same branch name to the shared
+    origin - a genuine, ordinary non-fast-forward situation. Pushing the
+    validated commit_sha explicitly (no --force) must fail safely and
+    leave the remote's diverged history untouched, exactly like a normal
+    git push would."""
+    repo_id, host_id, branch, worktree_path, head = isolated_worktree
+    (worktree_path / "allowed.py").write_text("x = 1\n")
+
+    bare_path = _git("remote", "get-url", "origin", cwd=worktree_path)
+    other_clone = tmp_path / "other-clone"
+    subprocess.run(["git", "clone", "-q", bare_path, str(other_clone)], check=True)
+    subprocess.run(["git", "-C", str(other_clone), "config", "user.name", "Other Writer"], check=True)
+    subprocess.run(["git", "-C", str(other_clone), "config", "user.email", "other@example.com"], check=True)
+    subprocess.run(["git", "-C", str(other_clone), "checkout", "-q", "-b", branch, "origin/main"], check=True)
+    (other_clone / "diverged.py").write_text("elsewhere = True\n")
+    subprocess.run(["git", "-C", str(other_clone), "add", "diverged.py"], check=True)
+    subprocess.run(["git", "-C", str(other_clone), "commit", "-q", "-m", "diverged commit"], check=True)
+    subprocess.run(["git", "-C", str(other_clone), "push", "-q", "origin", branch], check=True)
+    diverged_sha = _git("rev-parse", "HEAD", cwd=other_clone)
+
+    result = git_finalizer.finalize_scoped(
+        repo_id, host_id, expected_branch=branch, expected_head=head,
+        allowed_paths=["allowed.py"],
+        commit_message="feat: allowed change",
+        push=True,
+    )
+
+    assert result["finalized"] is False
+    assert result["committed"] is True
+    assert result["pushed"] is False
+    assert result["reason"].startswith("push_failed")
+    remote_sha = subprocess.run(
+        ["git", "-C", str(worktree_path), "ls-remote", "origin", branch],
+        capture_output=True, text=True, check=True,
+    ).stdout.split()[0]
+    assert remote_sha == diverged_sha, "the diverged remote history must be untouched, not force-overwritten"
+
+
 def test_finalize_rejects_when_head_moves_after_initial_verification_but_before_commit(isolated_worktree, monkeypatch):
     """A concurrent writer race distinct from the file-scope race already
     covered above: something else commits onto the branch AFTER

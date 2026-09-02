@@ -195,7 +195,17 @@ def finalize_scoped(
       expected_head (defence-in-depth beyond the pre-commit HEAD check);
     - the worktree is not completely clean immediately after commit -
       residual dirty/untracked content blocks reporting success and
-      blocks push, even though a commit may already exist locally.
+      blocks push, even though a commit may already exist locally;
+    - HEAD no longer points at exactly the validated commit_sha
+      immediately before push (another concurrent commit landed on the
+      branch after this call's own commit) - the mutable branch ref is
+      never pushed; only the already-authorised commit_sha itself is
+      ever sent to the remote (`push origin <commit_sha>:refs/heads/
+      <expected_branch>`), so a race landing after this final check
+      still cannot publish anything beyond what was validated;
+    - the remote branch has independently diverged - ordinary git
+      non-fast-forward protection applies (no --force), so this fails
+      safely rather than overwriting remote history.
 
     Never force-pushes, never resets, never rewrites or repairs
     unexpected history - any mismatch simply stops finalisation and
@@ -401,8 +411,44 @@ def finalize_scoped(
         result["pushed"] = False
         return result
 
+    # Re-verify local HEAD still points at exactly the commit that just
+    # passed every scope/history check, immediately before pushing - a
+    # concurrent writer could have advanced the branch with an unrelated
+    # commit in the window since. Refuse rather than let `git push origin
+    # <branch>` publish whatever the mutable branch ref currently
+    # resolves to.
     try:
-        push_proc = _run_git(repo_path, ["push", "origin", expected_branch], timeout=60)
+        pre_push_head_proc = _run_git(repo_path, ["rev-parse", "HEAD"])
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        result.update({"finalized": False, "pushed": False, "reason": f"pre_push_head_check_failed: {exc}"})
+        return result
+    if pre_push_head_proc.returncode != 0:
+        result.update({
+            "finalized": False, "pushed": False,
+            "reason": f"pre_push_head_check_failed: {pre_push_head_proc.stderr.decode(errors='replace').strip() or 'git rev-parse failed'}",
+        })
+        return result
+    pre_push_head = pre_push_head_proc.stdout.decode().strip()
+    if pre_push_head != commit_sha:
+        result.update({
+            "finalized": False, "pushed": False,
+            "reason": "head_moved_before_push",
+            "expected_commit_sha": commit_sha,
+            "actual_head": pre_push_head,
+        })
+        return result
+
+    # Push the immutable commit_sha itself, not the mutable branch ref -
+    # even if HEAD moves again in the instant between the check above and
+    # the push actually running, only this exact, already-authorised
+    # commit can ever be sent to the remote. No --force: ordinary git
+    # non-fast-forward protection still applies, so an independently
+    # diverged remote branch safely rejects this push rather than being
+    # overwritten.
+    try:
+        push_proc = _run_git(
+            repo_path, ["push", "origin", f"{commit_sha}:refs/heads/{expected_branch}"], timeout=60,
+        )
     except (OSError, subprocess.TimeoutExpired) as exc:
         result.update({"finalized": False, "pushed": False, "reason": f"push_failed: {exc}"})
         return result
