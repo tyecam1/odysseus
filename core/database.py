@@ -1000,6 +1000,19 @@ class EstateExecution(TimestampMixin, Base):
 
     __table_args__ = (
         Index('ix_estate_executions_host_state', 'host_id', 'lifecycle_state'),
+        # Mirrors ParkLease's own ix_park_leases_active_repo_unique
+        # pattern: the actual single-writer guarantee for admission
+        # control, not just the in-Python check in
+        # _in_flight_execution_for_lease, which is a read that cannot
+        # be atomic with the later insert on its own. Two truly
+        # concurrent callers can both pass that read; only one insert
+        # can satisfy this constraint, so the loser gets a real
+        # IntegrityError (_ConcurrentExecutionExists) to handle, not a
+        # silently-overwritten admission decision.
+        Index(
+            'ix_estate_executions_active_lease_unique', 'lease_id', unique=True,
+            sqlite_where=text("lifecycle_state IN ('accepted', 'running')"),
+        ),
     )
 
 

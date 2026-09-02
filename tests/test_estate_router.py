@@ -857,15 +857,30 @@ def test_kill_process_tree_reports_incomplete_when_a_pid_cannot_be_reaped(monkey
     def _fake_killpg(pgid, sig):
         killpg_calls.append((pgid, sig))
 
+    fake_root_starttime = 100
+    immortal_starttime = 42
+
     def _fake_stat_fields(pid):
+        # Both pids "exist" with a starttime matching their tree
+        # snapshot (so the pid-reuse-safety check lets the kill attempt
+        # through for both) -- fake_root_pid reports as a zombie ('Z',
+        # already dead, just unreaped) so it correctly drops out of the
+        # post-kill still-alive re-scan, while immortal_pid reports as
+        # genuinely running ('S') forever, exercising the fail-closed
+        # path this test is actually about.
+        if pid == fake_root_pid:
+            return ("Z", 1, fake_root_starttime)
         if pid == immortal_pid:
-            return ("S", 1)
-        return None  # every other fake pid "doesn't exist"
+            return ("S", 1, immortal_starttime)
+        return None
 
     monkeypatch.setattr(_os, "kill", _fake_kill)
     monkeypatch.setattr(_os, "killpg", _fake_killpg)
     monkeypatch.setattr(estate_router, "_proc_stat_fields", _fake_stat_fields)
-    monkeypatch.setattr(estate_router, "_process_tree_pids", lambda root: [root, immortal_pid])
+    monkeypatch.setattr(
+        estate_router, "_process_tree_pids",
+        lambda root: {root: fake_root_starttime, immortal_pid: immortal_starttime},
+    )
 
     outcome = estate_router._kill_process_tree(fake_root_pid, fake_pgid, reap_timeout=0.5)
 

@@ -743,17 +743,21 @@ def _codex_available() -> tuple[bool, str]:
     return True, binary
 
 
-def _proc_stat_fields(pid: int) -> Optional[tuple[str, int]]:
-    """(state, ppid) from /proc/<pid>/stat, the only dependency-free way
-    to read this (no psutil in this codebase). The comm field is
-    parenthesised and may itself contain spaces or parens, so split on
-    the *last* ')' rather than whitespace-splitting the whole line --
-    everything after it is state/ppid/pgrp/session/... in fixed order."""
+def _proc_stat_fields(pid: int) -> Optional[tuple[str, int, int]]:
+    """(state, ppid, starttime) from /proc/<pid>/stat, the only
+    dependency-free way to read this (no psutil in this codebase). The
+    comm field is parenthesised and may itself contain spaces or
+    parens, so split on the *last* ')' rather than whitespace-splitting
+    the whole line -- everything after it is state/ppid/pgrp/session/...
+    in fixed order; starttime (ticks since boot) is field 20 of that
+    fixed order, i.e. rest[19] once state=rest[0]. starttime is what
+    makes PID-reuse detection possible: two different process instances
+    that happen to share a pid can never share a starttime."""
     try:
         with open(f"/proc/{pid}/stat", "r") as f:
             raw = f.read()
         rest = raw.rsplit(")", 1)[1].split()
-        return rest[0], int(rest[1])  # state=[0], ppid=[1]
+        return rest[0], int(rest[1]), int(rest[19])  # state, ppid, starttime
     except (FileNotFoundError, ProcessLookupError, IndexError, ValueError, OSError):
         return None
 
@@ -763,32 +767,47 @@ def _proc_ppid(pid: int) -> Optional[int]:
     return fields[1] if fields else None
 
 
-def _proc_is_live_nonzombie(pid: int) -> bool:
+def _proc_is_live_nonzombie(pid: int, expected_starttime: Optional[int] = None) -> bool:
     """True only for a process that can still hold resources (pipes,
     CPU, an unreaped worktree lock, etc.) -- a zombie ('Z') already
     received its kill and is just awaiting reap by its parent (which,
     once its own leader has also been killed, is typically PID 1 taking
     over promptly, not instant). Re-scanning after a kill must not count
     an already-dead zombie as "still alive" merely because /proc/<pid>
-    has not been removed yet."""
+    has not been removed yet.
+
+    When expected_starttime is given, a pid whose current starttime
+    doesn't match it is treated as gone (not "still alive") -- the
+    original target already exited and this pid number has since been
+    reused by an unrelated process; that unrelated process is not what
+    the caller is waiting on."""
     fields = _proc_stat_fields(pid)
-    return fields is not None and fields[0] != "Z"
+    if fields is None:
+        return False
+    state, _ppid, starttime = fields
+    if expected_starttime is not None and starttime != expected_starttime:
+        return False
+    return state != "Z"
 
 
-def _process_tree_pids(root_pid: int) -> list[int]:
+def _process_tree_pids(root_pid: int) -> dict[int, int]:
     """Every live descendant of root_pid (root included), found by
     scanning /proc rather than relying on process-group/session
     membership -- a descendant that has escaped into its own process
     group (observed live: a codex-spawned MCP server child calls
     something equivalent to setpgid(0, 0), landing in its own pgid
     while remaining in the parent's session) is still found here,
-    because this walks real parent-child links instead."""
+    because this walks real parent-child links instead. Returns
+    {pid: starttime} rather than a bare list so a caller can later
+    detect pid reuse (a killed pid's number reassigned to an unrelated
+    process before cleanup gets to it) rather than trusting pid alone."""
     import os as _os
     children: dict[int, list[int]] = {}
     try:
         pids = [int(name) for name in _os.listdir("/proc") if name.isdigit()]
     except OSError:
-        return [root_pid]
+        fields = _proc_stat_fields(root_pid)
+        return {root_pid: fields[2] if fields else 0}
     for pid in pids:
         ppid = _proc_ppid(pid)
         if ppid is not None:
@@ -803,7 +822,11 @@ def _process_tree_pids(root_pid: int) -> list[int]:
                     tree.append(child)
                     next_frontier.append(child)
         frontier = next_frontier
-    return tree
+    result: dict[int, int] = {}
+    for pid in tree:
+        fields = _proc_stat_fields(pid)
+        result[pid] = fields[2] if fields else 0
+    return result
 
 
 def _kill_process_tree(root_pid: int, process_group_id: int, *, reap_timeout: float = 5.0) -> dict:
@@ -816,12 +839,18 @@ def _kill_process_tree(root_pid: int, process_group_id: int, *, reap_timeout: fl
     actually gone rather than assuming the kill succeeded. Fails closed:
     returns ok=False with the surviving pids if any remain, instead of
     silently reporting a clean kill.
+
+    PID-reuse safe: every pid is snapshotted with its starttime before
+    signalling and re-checked against that same starttime afterward, so
+    a target that already exited and whose pid number has since been
+    reused by an unrelated process is never signalled or reported as
+    "still alive" -- the unrelated occupant is left alone either way.
     """
     import os as _os
     import signal as _signal
     import time as _time
 
-    tree_before = _process_tree_pids(root_pid)
+    tree_before = _process_tree_pids(root_pid)  # {pid: starttime}
 
     try:
         _os.killpg(process_group_id, _signal.SIGKILL)
@@ -830,7 +859,10 @@ def _kill_process_tree(root_pid: int, process_group_id: int, *, reap_timeout: fl
     except OSError:
         pass
 
-    for pid in tree_before:
+    for pid, starttime in tree_before.items():
+        current = _proc_stat_fields(pid)
+        if current is None or current[2] != starttime:
+            continue  # already gone, or this pid now belongs to someone else
         try:
             _os.kill(pid, _signal.SIGKILL)
         except ProcessLookupError:
@@ -839,16 +871,19 @@ def _kill_process_tree(root_pid: int, process_group_id: int, *, reap_timeout: fl
             pass
 
     deadline = _time.monotonic() + reap_timeout
-    still_alive = tree_before
+    still_alive: list[int] = list(tree_before)
     while _time.monotonic() < deadline:
-        still_alive = [pid for pid in tree_before if _proc_is_live_nonzombie(pid)]
+        still_alive = [
+            pid for pid, starttime in tree_before.items()
+            if _proc_is_live_nonzombie(pid, expected_starttime=starttime)
+        ]
         if not still_alive:
             break
         _time.sleep(0.2)
 
     return {
         "ok": not still_alive,
-        "attempted_pids": tree_before,
+        "attempted_pids": list(tree_before),
         "still_alive_pids": still_alive,
     }
 
@@ -1047,13 +1082,31 @@ def _estate_execution_provenance(execution) -> dict:
     }
 
 
+class _ConcurrentExecutionExists(Exception):
+    """Raised by _create_estate_execution when the database-level
+    admission-control constraint (ix_estate_executions_active_lease)
+    rejects a second non-terminal row for a lease that already has
+    one -- the safety net under _in_flight_execution_for_lease's own
+    check-then-act read, which two truly concurrent callers can both
+    pass before either has inserted."""
+
+
 def _create_estate_execution(*, decision_id, objective, executor, provider,
                               host_id, repo_id, lease_id, worktree_path, branch) -> str:
     """Create the accepted-state durable execution record before the
     worker starts. Committed synchronously so a promptly-returned
     execution_id is guaranteed to already be queryable -- a caller that
     polls immediately after submission must never see a 404 for a
-    request the server just accepted."""
+    request the server just accepted.
+
+    Raises _ConcurrentExecutionExists if the database's own partial
+    unique index (not just the earlier in-Python check, which is a
+    read that cannot be atomic with this write) rejects the insert
+    because another non-terminal execution already holds this lease --
+    closes the TOCTOU window between _in_flight_execution_for_lease's
+    read and this write.
+    """
+    from sqlalchemy.exc import IntegrityError
     from core.database import SessionLocal, EstateExecution
     execution_id = str(uuid.uuid4())
     db = SessionLocal()
@@ -1064,7 +1117,11 @@ def _create_estate_execution(*, decision_id, objective, executor, provider,
             lease_id=lease_id, worktree_path=worktree_path, branch=branch,
             lifecycle_state="accepted",
         ))
-        db.commit()
+        try:
+            db.commit()
+        except IntegrityError:
+            db.rollback()
+            raise _ConcurrentExecutionExists(lease_id)
     finally:
         db.close()
     return execution_id
@@ -1170,10 +1227,17 @@ def _in_flight_execution_for_lease(lease_id: str) -> Optional[dict]:
     execution should legitimately be in flight against it at a time
     either. The 2026-09-01 incident was not many repos under load, it
     was the *same* lease receiving a new dispatch on top of one already
-    running, repeatedly, with no check that one was already in flight."""
+    running, repeatedly, with no check that one was already in flight.
+
+    Reconciles stale rows first (same call get_estate_execution makes)
+    -- without this, a row whose worker crashed and that nobody has
+    happened to poll yet would read as "in flight" forever, permanently
+    blocking every future dispatch against that lease even though
+    nothing is actually running."""
     from core.database import SessionLocal, EstateExecution
     db = SessionLocal()
     try:
+        reconcile_stale_estate_executions(db, EstateExecution)
         row = db.query(EstateExecution).filter(
             EstateExecution.lease_id == lease_id,
             EstateExecution.lifecycle_state.in_(("accepted", "running")),
@@ -1229,12 +1293,34 @@ def execute_codex_write_durable(objective: str, *, repo_id: str, host_id: str,
         }
 
     lease = active_lease_for_repo(repo_id, host_id) or {}
-    execution_id = _create_estate_execution(
-        decision_id=decision_id, objective=objective, executor="codex-write",
-        provider="codex", host_id=host_id, repo_id=repo_id,
-        lease_id=authority["lease_id"], worktree_path=authority["cwd"],
-        branch=lease.get("branch"),
-    )
+    try:
+        execution_id = _create_estate_execution(
+            decision_id=decision_id, objective=objective, executor="codex-write",
+            provider="codex", host_id=host_id, repo_id=repo_id,
+            lease_id=authority["lease_id"], worktree_path=authority["cwd"],
+            branch=lease.get("branch"),
+        )
+    except _ConcurrentExecutionExists:
+        # Lost the race to a truly concurrent caller between the read
+        # above and this insert -- reuse whichever execution actually
+        # won, same contract as the in_flight branch above.
+        winner = _in_flight_execution_for_lease(authority["lease_id"])
+        if winner is not None:
+            return {
+                "ok": True, "provider": "codex-write",
+                "execution_id": winner["execution_id"],
+                "lifecycle_state": winner["lifecycle_state"],
+                "reused_existing_execution": True,
+            }
+        # Vanishingly unlikely (winner already reconciled to terminal
+        # between the constraint violation and this re-read) -- fail
+        # closed rather than silently spawning a worker with no
+        # admission check having actually passed.
+        return {
+            "ok": False, "provider": "codex-write",
+            "error": f"admission control conflict for lease {authority['lease_id']!r} "
+                     "could not be resolved to a reusable execution",
+        }
 
     import threading
     from core.database import utcnow_naive
