@@ -343,9 +343,22 @@ def test_repeated_submission_against_same_lease_reuses_existing_execution(runtim
 
     hold_event.set()
 
+    # Let the first dispatch's background thread actually finish and
+    # write its terminal state before the test (and therefore the
+    # runtime_db fixture's engine.dispose()/file deletion) returns --
+    # otherwise that write races the fixture teardown.
+    deadline = time.monotonic() + 2.0
+    state = None
+    while time.monotonic() < deadline:
+        state = estate_router.get_estate_execution(first["execution_id"])
+        if state and state["lifecycle_state"] not in ("accepted", "running"):
+            break
+        time.sleep(0.02)
+
     assert second.get("reused_existing_execution") is True
     assert second["execution_id"] == first["execution_id"]
     assert popen_call_count == 1, "a second worker/Codex process must not have been spawned"
+    assert state is not None and state["lifecycle_state"] == "succeeded"
 
 
 def test_new_submission_allowed_once_prior_execution_reaches_terminal_state(runtime_db, monkeypatch, tmp_path):
