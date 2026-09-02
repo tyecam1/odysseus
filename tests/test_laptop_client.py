@@ -209,6 +209,217 @@ def test_ask_sends_allow_paid_escalation_flag(client, monkeypatch):
     assert captured["headers"]["Authorization"] == "Bearer ody_x"
 
 
+def test_ask_reads_multiline_objective_from_file(client, monkeypatch, tmp_path):
+    """The core Phase D case: aoteru.cmd's %* batch expansion (and
+    Windows argv quoting more generally) corrupts a multiline objective
+    passed as a plain positional argument. --objective-file bypasses argv
+    entirely - the objective text never touches the shell/command-line
+    layer at all."""
+    client.main(["config", "set", "--url", "http://lab:7001", "--token", "ody_x"])
+    objective_path = tmp_path / "objective.txt"
+    multiline_text = "line one\nline two with -> an arrow\nline three\n"
+    objective_path.write_text(multiline_text, encoding="utf-8")
+
+    captured = {}
+
+    def fake_urlopen(req, timeout=None):
+        captured["body"] = json.loads(req.data.decode())
+        return FakeResponse({"ok": True, "executed": True})
+    monkeypatch.setattr(client.urllib.request, "urlopen", fake_urlopen)
+
+    rc = client.main(["ask", "--objective-file", str(objective_path), "--repo", "odysseus"])
+
+    assert rc == 0
+    assert captured["body"]["objective"] == multiline_text
+
+
+def test_ask_reads_objective_with_embedded_quotes_from_file(client, monkeypatch, tmp_path):
+    client.main(["config", "set", "--url", "http://lab:7001", "--token", "ody_x"])
+    objective_path = tmp_path / "objective.txt"
+    quote_heavy_text = 'do the thing with "quoted words" and \'single quotes\' and $vars and `backticks`'
+    objective_path.write_text(quote_heavy_text, encoding="utf-8")
+
+    captured = {}
+
+    def fake_urlopen(req, timeout=None):
+        captured["body"] = json.loads(req.data.decode())
+        return FakeResponse({"ok": True, "executed": True})
+    monkeypatch.setattr(client.urllib.request, "urlopen", fake_urlopen)
+
+    rc = client.main(["ask", "--objective-file", str(objective_path)])
+
+    assert rc == 0
+    assert captured["body"]["objective"] == quote_heavy_text
+
+
+def test_ask_reads_unicode_objective_from_file(client, monkeypatch, tmp_path):
+    client.main(["config", "set", "--url", "http://lab:7001", "--token", "ody_x"])
+    objective_path = tmp_path / "objective.txt"
+    unicode_text = "summarise the r\u00e9sum\u00e9 \u2014 include \u65e5\u672c\u8a9e notes \U0001F600"
+    objective_path.write_text(unicode_text, encoding="utf-8")
+
+    captured = {}
+
+    def fake_urlopen(req, timeout=None):
+        captured["body"] = json.loads(req.data.decode())
+        return FakeResponse({"ok": True, "executed": True})
+    monkeypatch.setattr(client.urllib.request, "urlopen", fake_urlopen)
+
+    rc = client.main(["ask", "--objective-file", str(objective_path)])
+
+    assert rc == 0
+    assert captured["body"]["objective"] == unicode_text
+
+
+def test_ask_reads_long_objective_from_file(client, monkeypatch, tmp_path):
+    """Long enough to comfortably exceed real-world shell/argv length
+    limits if it were ever passed as a positional argument - proof the
+    file transport has no such ceiling."""
+    client.main(["config", "set", "--url", "http://lab:7001", "--token", "ody_x"])
+    objective_path = tmp_path / "objective.txt"
+    long_text = ("implement the feature described below.\n\n" + "detail line.\n" * 5000)
+    objective_path.write_text(long_text, encoding="utf-8")
+
+    captured = {}
+
+    def fake_urlopen(req, timeout=None):
+        captured["body"] = json.loads(req.data.decode())
+        return FakeResponse({"ok": True, "executed": True})
+    monkeypatch.setattr(client.urllib.request, "urlopen", fake_urlopen)
+
+    rc = client.main(["ask", "--objective-file", str(objective_path)])
+
+    assert rc == 0
+    assert captured["body"]["objective"] == long_text
+    assert len(captured["body"]["objective"]) > 60000
+
+
+def test_ask_accepts_flags_before_and_after_objective_file(client, monkeypatch, tmp_path):
+    """--objective-file must compose normally with other flags regardless
+    of position, exactly like ordinary argparse options - including when
+    the positional objective is omitted entirely (nargs="?")."""
+    client.main(["config", "set", "--url", "http://lab:7001", "--token", "ody_x"])
+    objective_path = tmp_path / "objective.txt"
+    objective_path.write_text("do the thing\n", encoding="utf-8")
+
+    captured_calls = []
+
+    def fake_urlopen(req, timeout=None):
+        captured_calls.append(json.loads(req.data.decode()))
+        return FakeResponse({"ok": True, "executed": True})
+    monkeypatch.setattr(client.urllib.request, "urlopen", fake_urlopen)
+
+    rc1 = client.main(["ask", "--objective-file", str(objective_path), "--repo", "odysseus", "--allow-paid"])
+    rc2 = client.main(["ask", "--repo", "odysseus", "--objective-file", str(objective_path), "--allow-paid"])
+    rc3 = client.main(["ask", "--repo", "odysseus", "--allow-paid", "--objective-file", str(objective_path)])
+
+    assert (rc1, rc2, rc3) == (0, 0, 0)
+    for body in captured_calls:
+        assert body["objective"] == "do the thing\n"
+        assert body["repo"] == "odysseus"
+        assert body["allow_paid_escalation"] is True
+
+
+def test_ask_reads_objective_from_stdin_via_dash(client, monkeypatch):
+    client.main(["config", "set", "--url", "http://lab:7001", "--token", "ody_x"])
+
+    captured = {}
+
+    def fake_urlopen(req, timeout=None):
+        captured["body"] = json.loads(req.data.decode())
+        return FakeResponse({"ok": True, "executed": True})
+    monkeypatch.setattr(client.urllib.request, "urlopen", fake_urlopen)
+
+    import io
+    stdin_text = "multiline\nobjective\nfrom stdin\n"
+    monkeypatch.setattr(client.sys, "stdin", type("_Stdin", (), {"buffer": io.BytesIO(stdin_text.encode("utf-8"))})())
+
+    rc = client.main(["ask", "-"])
+
+    assert rc == 0
+    assert captured["body"]["objective"] == stdin_text
+
+
+def test_ask_rejects_both_positional_objective_and_objective_file(client, tmp_path):
+    client.main(["config", "set", "--url", "http://lab:7001", "--token", "ody_x"])
+    objective_path = tmp_path / "objective.txt"
+    objective_path.write_text("from file\n", encoding="utf-8")
+
+    with pytest.raises(SystemExit):
+        client.main(["ask", "also a positional value", "--objective-file", str(objective_path)])
+
+
+def test_ask_requires_some_objective_source(client):
+    client.main(["config", "set", "--url", "http://lab:7001", "--token", "ody_x"])
+
+    with pytest.raises(SystemExit):
+        client.main(["ask"])
+
+
+def test_ask_single_line_positional_objective_still_works_unchanged(client, monkeypatch):
+    """Backward compatibility: existing single-line usage with no
+    --objective-file and no stdin marker is completely unaffected."""
+    client.main(["config", "set", "--url", "http://lab:7001", "--token", "ody_x"])
+
+    captured = {}
+
+    def fake_urlopen(req, timeout=None):
+        captured["body"] = json.loads(req.data.decode())
+        return FakeResponse({"ok": True, "executed": True})
+    monkeypatch.setattr(client.urllib.request, "urlopen", fake_urlopen)
+
+    rc = client.main(["ask", "summarise the last 3 commits", "--capability", "local-fast"])
+
+    assert rc == 0
+    assert captured["body"]["objective"] == "summarise the last 3 commits"
+    assert captured["body"]["requirements"]["capabilities"] == ["local-fast"]
+
+
+def test_dispatch_auto_reads_multiline_task_from_file(client, monkeypatch, tmp_path):
+    """auto/lab/home (cmd_dispatch, positional named `task`) get the same
+    --objective-file transport as ask/preflight."""
+    client.main(["config", "set", "--url", "http://lab:7001", "--token", "ody_x"])
+    task_path = tmp_path / "task.txt"
+    multiline_task = "refactor this:\n\ndef f():\n    pass\n"
+    task_path.write_text(multiline_task, encoding="utf-8")
+
+    captured = {}
+
+    def fake_urlopen(req, timeout=None):
+        captured["body"] = json.loads(req.data.decode())
+        return FakeResponse({"ok": True, "executed": True})
+    monkeypatch.setattr(client.urllib.request, "urlopen", fake_urlopen)
+
+    rc = client.main(["auto", "--objective-file", str(task_path), "--repo", "odysseus"])
+
+    assert rc == 0
+    assert captured["body"]["objective"] == multiline_task
+    assert captured["body"]["placement"]["requested_host"] == "auto"
+
+
+def test_preflight_reads_multiline_objective_from_file(client, monkeypatch, tmp_path):
+    client.main(["config", "set", "--url", "http://lab:7001", "--token", "ody_x"])
+    objective_path = tmp_path / "objective.txt"
+    multiline_text = "step one\nstep two\n"
+    objective_path.write_text(multiline_text, encoding="utf-8")
+
+    captured = {}
+
+    def fake_urlopen(req, timeout=None):
+        captured["body"] = json.loads(req.data.decode())
+        return FakeResponse({
+            "ok": True,
+            "snapshot": {"eligible_hosts": []},
+            "units": [{"classification": "codex_eligible"}],
+        })
+    monkeypatch.setattr(client.urllib.request, "urlopen", fake_urlopen)
+
+    rc = client.main(["preflight", "--objective-file", str(objective_path), "--repo", "odysseus"])
+
+    assert rc == 0
+    assert captured["body"]["units"][0]["objective"] == multiline_text
+
+
 def test_preflight_sends_task_unit_to_live_estate_endpoint(client, monkeypatch):
     client.main(["config", "set", "--url", "http://lab:7001", "--token", "ody_x"])
     captured = {}
