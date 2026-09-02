@@ -79,6 +79,46 @@ def _save_config(cfg: dict) -> None:
         pass
 
 
+def _resolve_objective_text(value: str | None, objective_file: str | None, *, label: str = "objective") -> str:
+    """Resolve the actual objective/task text regardless of transport.
+
+    Windows argv quoting (via aoteru.cmd's `%*` batch expansion, and
+    Windows command-line argument parsing more generally) corrupts a
+    multiline or otherwise quote-heavy objective passed as a plain
+    positional argument. --objective-file (any size, any content, never
+    touches argv at all) and `-` as the positional value (read from
+    stdin, same guarantee) both sidestep that entirely. Exactly one of
+    positional-value / --objective-file / stdin must be used - supplying
+    both a positional value and --objective-file is rejected outright
+    rather than silently preferring one. Existing single-line positional
+    usage is completely unaffected: a plain string value, with no
+    --objective-file and no stdin marker, is returned exactly as before.
+    """
+    if objective_file is not None and value is not None:
+        raise SystemExit(
+            f"{label} was given both as a positional argument and --objective-file — provide exactly one"
+        )
+    if objective_file is not None:
+        try:
+            return Path(objective_file).read_text(encoding="utf-8")
+        except OSError as e:
+            raise SystemExit(f"cannot read --objective-file {objective_file!r}: {e}")
+    if value == "-":
+        # sys.stdin.buffer bypasses the console's locale-dependent text
+        # codec entirely (relevant on Windows, where the default stdin
+        # encoding depends on the active console codepage and is not
+        # reliably UTF-8) - decoded explicitly as UTF-8 here instead, the
+        # same encoding used for --objective-file and for the positional
+        # argument's own bytes on any modern OS.
+        return sys.stdin.buffer.read().decode("utf-8")
+    if value is not None:
+        return value
+    raise SystemExit(
+        f"{label} is required: pass it as a positional argument, use --objective-file <path>, "
+        "or pass - as the positional argument to read from stdin"
+    )
+
+
 def _request(cfg: dict, method: str, path: str, body: dict | None = None, timeout: float = 30.0) -> dict:
     url = (cfg.get("url") or "").rstrip("/")
     if not url:
@@ -179,11 +219,12 @@ def cmd_route(args: argparse.Namespace) -> int:
 def cmd_preflight(args: argparse.Namespace) -> int:
     """Obtain live delegation evidence before substantive work starts."""
     cfg = _load_config()
+    objective = _resolve_objective_text(args.objective, args.objective_file)
     unit = {
         "task_class": args.task_class,
         "repo": args.repo,
         "capabilities": [args.capability] if args.capability else [],
-        "objective": args.objective,
+        "objective": objective,
         "nondelegation_reason": args.nondelegation_reason,
     }
     if args.nondelegation_reason:
@@ -273,11 +314,12 @@ def cmd_release(args: argparse.Namespace) -> int:
 
 def cmd_ask(args: argparse.Namespace) -> int:
     cfg = _load_config()
+    objective = _resolve_objective_text(args.objective, args.objective_file)
     envelope = {
         "task_class": args.task_class,
         "repo": args.repo,
         "requirements": {"capabilities": [args.capability] if args.capability else []},
-        "objective": args.objective,
+        "objective": objective,
         "allow_paid_escalation": bool(args.allow_paid),
     }
     if args.implementation:
@@ -305,12 +347,13 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
     `scripts/agent`'s `agent claude`, which fails the same way truthfully
     rather than pretending)."""
     cfg = _load_config()
+    task = _resolve_objective_text(args.task, args.objective_file, label="task")
     envelope = {
         "task_class": args.task_class,
         "repo": args.repo,
         "requirements": {"capabilities": [args.capability] if args.capability else []},
         "placement": {"requested_host": args.command},
-        "objective": args.task,
+        "objective": task,
         "allow_paid_escalation": bool(args.allow_paid),
     }
     if args.implementation:
@@ -413,7 +456,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_route.add_argument("--capability", default=None, help="capability alias, e.g. local-fast, code-strong")
 
     p_preflight = sub.add_parser("preflight", help="classify task delegation from live estate evidence")
-    p_preflight.add_argument("objective")
+    p_preflight.add_argument(
+        "objective", nargs="?", default=None,
+        help="the objective text, or - to read it from stdin (see --objective-file for multiline/quote-heavy text)",
+    )
+    p_preflight.add_argument(
+        "--objective-file", default=None,
+        help="read the objective from this file instead of the positional argument - the robust transport "
+             "for multiline or quote-heavy text, immune to shell/argv quoting (including aoteru.cmd on Windows)",
+    )
     p_preflight.add_argument("--task-class", default="unclassified")
     p_preflight.add_argument("--repo", default=None)
     p_preflight.add_argument("--capability", default=None)
@@ -435,7 +486,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_release.add_argument("repo_id")
 
     p_ask = sub.add_parser("ask", help="route and execute an objective")
-    p_ask.add_argument("objective")
+    p_ask.add_argument(
+        "objective", nargs="?", default=None,
+        help="the objective text, or - to read it from stdin (see --objective-file for multiline/quote-heavy text)",
+    )
+    p_ask.add_argument(
+        "--objective-file", default=None,
+        help="read the objective from this file instead of the positional argument - the robust transport "
+             "for multiline or quote-heavy text, immune to shell/argv quoting (including aoteru.cmd on Windows)",
+    )
     p_ask.add_argument("--task-class", default="unclassified")
     p_ask.add_argument("--repo", default=None)
     p_ask.add_argument("--capability", default=None)
@@ -451,7 +510,15 @@ def build_parser() -> argparse.ArgumentParser:
         ("home", "resolve + execute a task, forced to the home worker"),
     ):
         p_mode = sub.add_parser(mode, help=mode_help)
-        p_mode.add_argument("task")
+        p_mode.add_argument(
+            "task", nargs="?", default=None,
+            help="the task text, or - to read it from stdin (see --objective-file for multiline/quote-heavy text)",
+        )
+        p_mode.add_argument(
+            "--objective-file", default=None,
+            help="read the task from this file instead of the positional argument - the robust transport "
+                 "for multiline or quote-heavy text, immune to shell/argv quoting (including aoteru.cmd on Windows)",
+        )
         p_mode.add_argument("--task-class", default="unclassified")
         p_mode.add_argument("--repo", default=None)
         p_mode.add_argument("--capability", default=None)
