@@ -11,16 +11,34 @@ already-shut-down concern by the time this module ever runs.
 
 Browser authority is deliberately the narrowest possible: an explicit
 ALLOW-list of Meta/Instagram URL path prefixes needed for the official
-Download/Transfer Your Information self-service workflow, checked before
-every navigation and re-checked against the page's actual URL after
-navigation (in case of a redirect), plus an explicit DENY-list of known-
-dangerous areas (posting, messaging, follows, profile/account/credential
-edits) that fails closed even if a path would otherwise be allow-listed.
-Any URL that is not explicitly allowed is denied by default - this is a
-default-deny gate, not a default-allow gate with exceptions. A denied
-navigation raises `MetaAutomationPolicyViolation` immediately and aborts
-the whole run; it never silently continues on a different page than
-expected.
+Download/Transfer Your Information self-service workflow, plus an explicit
+DENY-list of known-dangerous areas (posting, messaging, follows, profile/
+account/credential edits) that fails closed even if a path would otherwise
+be allow-listed. Any URL that is not explicitly allowed is denied by
+default - this is a default-deny gate, not a default-allow gate with
+exceptions.
+
+The policy is enforced at the network-request boundary, not only around
+this module's own `page.goto()` calls: `_install_navigation_guard()`
+installs a `context.route()` handler that evaluates every MAIN-FRAME
+navigation request (including one triggered by Meta's own UI via a click
+this module did not initiate as a `goto`, and including a redirect chain)
+against the same allow/deny policy before the browser is ever allowed to
+complete it - a disallowed request is `route.abort()`-ed, not merely
+detected after the fact. Ordinary subresources (scripts, CSS, images, XHR)
+and iframe navigations are left untouched (`route.continue_()`
+unconditionally) so an allowed page still renders normally; only a
+top-level document-navigation request is evaluated. Because the route is
+registered at the BROWSER-CONTEXT level rather than per-page, it already
+covers every page/popup the context creates - including one opened after
+this call, by a click with `target="_blank"` or `window.open()` - from the
+moment that page exists, with no race window where a brand-new page's
+first navigation could complete before a handler gets attached to it. No
+click can escape this authority by opening a new target. The
+pre-navigation `_guard(url)` call and the post-navigation
+`_guard(page.url)` re-check (in case of a redirect) remain in place as
+defence-in-depth on top of the network-layer guard, not as the only line
+of defence.
 
 This module only ever performs the official, user-initiated Meta self-
 service data-export request/check/download flow - the same thing a human
@@ -150,13 +168,88 @@ class ExportRequestResult:
     provenance: dict = field(default_factory=dict)
 
 
+@dataclass
+class _NavigationGuardState:
+    """Shared across a page and every popup/new page opened from it, so a
+    violation is recorded regardless of which target it happened on."""
+    blocked_urls: list = field(default_factory=list)
+
+
+def _install_navigation_guard(context, page, *, is_allowed=_is_allowed_url) -> "_NavigationGuardState":
+    """Enforce the allow/deny policy at the Playwright network-request
+    boundary rather than only around this module's own `page.goto()`
+    calls. A `context.route()` handler evaluates every MAIN-FRAME
+    navigation request - including one Meta's own UI triggers via a click
+    this module never called `goto` for, and including each hop of a
+    redirect chain - before the browser is allowed to complete it; a
+    disallowed request is `route.abort()`-ed outright. Ordinary
+    subresources (scripts, CSS, images, XHR) and iframe navigations always
+    `route.continue_()` unconditionally, so an allowed page still renders
+    normally.
+
+    Registered at the BROWSER-CONTEXT level (not per-page) deliberately:
+    Playwright applies a context-level route to every page that belongs to
+    the context, including one created after this call (a popup opened by
+    `target="_blank"` or `window.open()`), from the moment that page
+    exists - there is no race window in which a brand-new page's first
+    navigation could complete before a per-page handler got attached to
+    it, which a naive `page.route()`-per-popup approach would have. `is_
+    allowed` is overridable purely so tests can point the guard at a local
+    fixture origin instead of the real Meta allow-list; production callers
+    always use the default.
+    """
+    state = _NavigationGuardState()
+
+    def _route_handler(route):
+        request = route.request
+        if request.is_navigation_request():
+            try:
+                is_main_frame = request.frame == request.frame.page.main_frame
+            except Exception:
+                # The very first navigation request of a brand-new page
+                # (e.g. a popup just opened via target="_blank" or
+                # window.open()) has no Frame object yet - Playwright
+                # raises accessing request.frame in that case. A new
+                # page's first navigation is necessarily its own main
+                # frame (it cannot be a sub-frame of a page that doesn't
+                # exist yet), so treat it as one rather than letting it
+                # fall through unguarded.
+                is_main_frame = True
+            if is_main_frame and not is_allowed(request.url):
+                state.blocked_urls.append(request.url)
+                route.abort()
+                return
+        route.continue_()
+
+    context.route("**/*", _route_handler)
+    # Lets _guarded_goto() below notice a mid-navigation (e.g. redirect)
+    # block on the specific page it was called with, without a separate
+    # lookup table.
+    page._nav_guard_state = state
+    return state
+
+
 def _guarded_goto(page, url: str, *, expect_authenticated: bool = True) -> None:
     """Navigate only if `url` passes the allow/deny gate, then re-check
     the page's ACTUAL resulting URL (a redirect can land somewhere the
     original URL alone would not reveal) against the same gate, and
-    against session-expiry, before returning control to the caller."""
+    against session-expiry, before returning control to the caller. If
+    `_install_navigation_guard()` has been installed on `page`, a redirect
+    that the network-layer guard already aborted mid-navigation is
+    reported as a clean `MetaAutomationPolicyViolation` instead of a raw
+    Playwright navigation error."""
     _guard(url)
-    page.goto(url, wait_until="domcontentloaded")
+    state = getattr(page, "_nav_guard_state", None)
+    blocked_before = len(state.blocked_urls) if state is not None else 0
+    try:
+        page.goto(url, wait_until="domcontentloaded")
+    except Exception:
+        if state is not None and len(state.blocked_urls) > blocked_before:
+            raise MetaAutomationPolicyViolation(
+                f"navigation to {url!r} was blocked at the network-request boundary "
+                f"(redirected to a disallowed target: {state.blocked_urls[blocked_before:]})"
+            )
+        raise
     _guard(page.url)
     if expect_authenticated and _looks_like_login_or_challenge(page.url):
         raise MetaSessionExpired(
@@ -250,6 +343,7 @@ def request_and_download_instagram_export(
         )
         try:
             page = context.pages[0] if context.pages else context.new_page()
+            _install_navigation_guard(context, page)
             downloaded_path = _run_export_workflow(
                 page, poll_interval_seconds=poll_interval_seconds, poll_timeout_seconds=poll_timeout_seconds,
             )

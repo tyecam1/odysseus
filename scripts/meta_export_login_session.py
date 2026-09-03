@@ -66,6 +66,7 @@ import argparse
 import glob
 import os
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -104,6 +105,27 @@ def _find_chromium_binary() -> str:
     )
 
 
+def _verify_profile_permissions(profile_dir: Path) -> list[str]:
+    """Recursively check every file/dir already written under `profile_dir`
+    for group/world read/write/execute bits. Returns a list of human-
+    readable violation descriptions - empty means everything Chromium
+    wrote (cookies, session state, the SQLite databases it keeps its
+    login state in, etc.) is 0700/0600-or-stricter. Does not raise itself;
+    `cmd_start()` decides how loud to be, and tests exercise this function
+    directly against a fixture directory without launching a browser."""
+    violations: list[str] = []
+    if not profile_dir.exists():
+        return violations
+    for path in profile_dir.rglob("*"):
+        try:
+            mode = stat.S_IMODE(path.stat().st_mode)
+        except OSError:
+            continue
+        if mode & 0o077:
+            violations.append(f"{path} (mode {oct(mode)})")
+    return violations
+
+
 def cmd_start(args: argparse.Namespace) -> int:
     if PID_FILE.exists():
         try:
@@ -114,32 +136,44 @@ def cmd_start(args: argparse.Namespace) -> int:
         except (ValueError, ProcessLookupError, PermissionError):
             PID_FILE.unlink(missing_ok=True)
 
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
-    os.chmod(STATE_DIR, 0o700)
-    STOP_FLAG.unlink(missing_ok=True)
-
-    PROFILE_DIR.mkdir(parents=True, exist_ok=True)
-    os.chmod(PROFILE_DIR, 0o700)
-
     chrome = _find_chromium_binary()
     port = args.port
     minutes = args.minutes
 
-    proc = subprocess.Popen(
-        [
-            chrome,
-            "--headless=new",
-            f"--remote-debugging-port={port}",
-            "--remote-debugging-address=127.0.0.1",
-            f"--user-data-dir={PROFILE_DIR}",
-            "--no-first-run",
-            "--no-default-browser-check",
-            START_URL,
-        ],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
+    # Restrictive permissions must exist BEFORE Chromium ever writes a
+    # single cookie/session file, not just be chmodded onto the profile
+    # root afterward - chmodding the root dir after the fact does nothing
+    # for files a less-restrictive umask already let Chromium create
+    # underneath it. umask is inherited by the forked Chromium child
+    # process at Popen() time, so every file/dir it creates for the whole
+    # lifetime of that process is covered by this one change - it is safe
+    # to restore the parent's umask immediately after Popen() returns.
+    _prior_umask = os.umask(0o077)
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        os.chmod(STATE_DIR, 0o700)
+        STOP_FLAG.unlink(missing_ok=True)
+
+        PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+        os.chmod(PROFILE_DIR, 0o700)
+
+        proc = subprocess.Popen(
+            [
+                chrome,
+                "--headless=new",
+                f"--remote-debugging-port={port}",
+                "--remote-debugging-address=127.0.0.1",
+                f"--user-data-dir={PROFILE_DIR}",
+                "--no-first-run",
+                "--no-default-browser-check",
+                START_URL,
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    finally:
+        os.umask(_prior_umask)
     PID_FILE.write_text(str(proc.pid))
 
     print(f"Meta/Instagram login session started (pid {proc.pid}), bounded to {minutes} minutes.")
@@ -185,6 +219,16 @@ def cmd_start(args: argparse.Namespace) -> int:
 
     print("Login session ended. The authenticated profile (if login succeeded) "
           f"persists at {PROFILE_DIR} for the steady-state automation to reuse.")
+
+    violations = _verify_profile_permissions(PROFILE_DIR)
+    if violations:
+        print(f"WARNING: {len(violations)} file(s) under {PROFILE_DIR} are group/world "
+              "readable/writable/executable and should not be:")
+        for violation in violations:
+            print(f"  - {violation}")
+    else:
+        print(f"Verified: no profile/session file under {PROFILE_DIR} is group/world "
+              "readable, writable, or executable.")
     return 0
 
 
