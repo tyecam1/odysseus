@@ -9,14 +9,19 @@ fully headless=new, internal-only, with no network-reachable surface
 whatsoever; the login session's temporary debugging port is a separate,
 already-shut-down concern by the time this module ever runs.
 
-Browser authority is deliberately the narrowest possible: an explicit
-ALLOW-list of Meta/Instagram URL path prefixes needed for the official
-Download/Transfer Your Information self-service workflow, plus an explicit
-DENY-list of known-dangerous areas (posting, messaging, follows, profile/
-account/credential edits) that fails closed even if a path would otherwise
-be allow-listed. Any URL that is not explicitly allowed is denied by
-default - this is a default-deny gate, not a default-allow gate with
-exceptions.
+Browser authority is deliberately the narrowest possible: `https` only
+(a plain-`http` URL is rejected outright, deterministically, by this
+policy itself - never relying on the browser's own HSTS behaviour to
+upgrade it), an explicit ALLOW-list of Meta/Instagram URL path prefixes
+needed for the official Download/Transfer Your Information self-service
+workflow (Accounts Center's own root is allowed as an EXACT path, not a
+prefix - the rest of that host is only allowed under the one path prefix
+this workflow has concrete evidence of needing,
+`/info_and_permissions/dyi/`), plus an explicit DENY-list of known-
+dangerous areas (posting, messaging, follows, profile/account/credential
+edits) that fails closed even if a path would otherwise be allow-listed.
+Any URL that is not explicitly allowed is denied by default - this is a
+default-deny gate, not a default-allow gate with exceptions.
 
 The policy is enforced at the network-request boundary, not only around
 this module's own `page.goto()` calls: `_install_navigation_guard()`
@@ -84,6 +89,14 @@ PROFILE_DIR = Path.home() / ".aoteru" / "meta-export-browser-profile"
 # Default-deny gate: only these path prefixes, on these hosts, are ever
 # navigated to. Anything else - including a same-host page not on this
 # list - is refused before the browser is ever told to go there.
+#
+# accountscenter.instagram.com deliberately does NOT list "/" here: "/" is
+# an EXACT-match-only entry in _ALLOWED_EXACT_PATHS below, not a prefix -
+# path.startswith("/") is true for every path on the host, which would
+# make the whole host effectively allow-all. The one path prefix listed
+# here for that host, /info_and_permissions/dyi/, is the only one with
+# concrete evidence (the export-workflow tests) of actually being needed;
+# extend it only with the same evidence bar, not speculatively.
 _ALLOWED_HOSTS_AND_PREFIXES: dict[str, tuple[str, ...]] = {
     "www.instagram.com": (
         "/accounts/login/",
@@ -93,11 +106,21 @@ _ALLOWED_HOSTS_AND_PREFIXES: dict[str, tuple[str, ...]] = {
         "/challenge/",
         "/two_factor/",
     ),
-    "accountscenter.instagram.com": ("/",),
+    "accountscenter.instagram.com": ("/info_and_permissions/dyi/",),
     "www.facebook.com": (
         "/help/instagram/",
         "/accountscenter/",
     ),
+}
+
+# Exact-path-only allowances: unlike _ALLOWED_HOSTS_AND_PREFIXES, these
+# must match the request path exactly (ignoring only the query string) -
+# never treated as a startswith() prefix. Accounts Center's own landing
+# page is the entry point into the whole export workflow, but nothing
+# else on that host should be reachable just by virtue of sharing that
+# leading "/".
+_ALLOWED_EXACT_PATHS: dict[str, tuple[str, ...]] = {
+    "accountscenter.instagram.com": ("/",),
 }
 
 # Explicit deny, checked AFTER the allow-list and overriding it even for an
@@ -132,6 +155,11 @@ class MetaSessionExpired(RuntimeError):
 
 def _is_allowed_url(url: str) -> bool:
     parsed = urlparse(url)
+    if parsed.scheme != "https":
+        # Deterministic ourselves - never rely on the browser's own HSTS
+        # behaviour to upgrade a plain-http URL before we'd otherwise
+        # evaluate it.
+        return False
     host = parsed.netloc
     path = parsed.path or "/"
     full = path + (("?" + parsed.query) if parsed.query else "")
@@ -139,6 +167,9 @@ def _is_allowed_url(url: str) -> bool:
     for denied in _DENIED_PATH_SUBSTRINGS:
         if denied in full:
             return False
+
+    if path in _ALLOWED_EXACT_PATHS.get(host, ()):
+        return True
 
     prefixes = _ALLOWED_HOSTS_AND_PREFIXES.get(host)
     if prefixes is None:

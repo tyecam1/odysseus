@@ -52,6 +52,9 @@ def test_allowed_urls_pass(url):
     "https://www.evil-instagram-lookalike.com/accounts/login/",  # wrong host entirely
     "https://www.facebook.com/",  # facebook.com root, not an allow-listed sub-path
     "https://accountscenter.facebook.com/",  # wrong subdomain
+    "https://accountscenter.instagram.com/arbitrary-unrelated-surface/",  # same host, but not the export path or the exact root
+    "http://accountscenter.instagram.com/",  # otherwise-allowed host/path, but not https
+    "http://www.instagram.com/accounts/login/",  # otherwise-allowed host/path, but not https
 ])
 def test_disallowed_urls_fail(url):
     assert _is_allowed_url(url) is False
@@ -63,6 +66,21 @@ def test_deny_list_overrides_an_otherwise_matching_allow_prefix():
     deny-list is checked first and wins even against a prefix match."""
     assert _is_allowed_url("https://www.instagram.com/accounts/edit/") is True
     assert _is_allowed_url("https://www.instagram.com/accounts/edit/?step=name") is False
+
+
+def test_accountscenter_root_is_allowed_only_as_an_exact_path_not_a_prefix():
+    """accountscenter.instagram.com's "/" must not act as a startswith()
+    prefix - that would allow-list the entire host. Only the exact root,
+    and the one path prefix with concrete evidence of being required
+    (/info_and_permissions/dyi/), are allowed."""
+    assert _is_allowed_url("https://accountscenter.instagram.com/") is True
+    assert _is_allowed_url("https://accountscenter.instagram.com/info_and_permissions/dyi/") is True
+    assert _is_allowed_url("https://accountscenter.instagram.com/arbitrary-unrelated-surface/") is False
+
+
+def test_https_is_required_even_for_an_otherwise_allowed_host_and_path():
+    assert _is_allowed_url("https://accountscenter.instagram.com/") is True
+    assert _is_allowed_url("http://accountscenter.instagram.com/") is False
 
 
 def test_guard_raises_for_disallowed_url():
