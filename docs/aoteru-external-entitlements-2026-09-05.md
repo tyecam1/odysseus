@@ -22,6 +22,19 @@ Before GLM can become routing-eligible, the existing model-host routing contract
 
 Copilot requires no autonomous routing qualification because it remains outside the worker router by design.
 
+## GLM harness integration target
+
+Integrate GLM as a **sidecar provider on the existing Claude Code harness**, not as a second coding environment:
+
+```text
+claude      -> existing Anthropic Claude Code path, unchanged
+claude-glm  -> same Claude Code executable + host-local Z.AI provider overrides
+```
+
+The `claude-glm` launcher should be host-local, reversible, and expose provider variables only to its child process. Keep the Z.AI secret under a provider-specific local name such as `ZAI_GLM_CODING_KEY`; never persist it in Git, `~/.claude/settings.json`, a repository `.env`, or global `ANTHROPIC_*` environment variables. Current provider endpoint/model mappings are implementation details of that host-local launcher and should be rechecked against live provider documentation rather than hard-coded into Odysseus routing policy.
+
+After the sidecar command is smoke-tested, qualify GLM on representative bounded repository tasks before adding it as an eligible paid provider. Extend the existing paid-provider/Claude Code execution path rather than creating a GLM-specific router, queue, task state, or second Claude installation.
+
 ## Google integration gap
 
 The free Google student entitlement has material potential value for long-context document/research work, independent second-provider review and Google-native research surfaces, but it is not currently available to the estate through the same direct CLI/provider path used by Codex or GLM. That creates a bounded integration need rather than a reason to add another cockpit.
