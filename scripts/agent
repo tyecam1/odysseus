@@ -14,7 +14,7 @@ file rather than a second launcher/config system.
     agent park <repo_id> [--host ID]   # acquire a write lease (fails closed on dirty/conflict; reclaims a stale lease)
     agent release <repo_id> [--host ID]
     agent heartbeat <repo_id> [--host ID]   # renew an active lease's heartbeat_at (run periodically during work)
-    agent claude <auto|lab|home> "<task>" [--repo ID]   # resolve + dispatch, fails truthfully if unreachable
+    agent claude <auto|lab|home> "<task>" [--repo ID] [--effort low|medium|high|highest]   # resolve + dispatch, fails truthfully if unreachable
     agent claude where                                    # active logical sessions
 
 Reads the four canonical registries in config/*.yaml (committed, no secrets,
@@ -269,6 +269,10 @@ def _session_db():
 
 
 _STALE_ACTIVE_SESSION_SECONDS = 300
+# Bounded, same spirit as src.estate_router's codex/local execution
+# timeouts — a hung native claude launch must not hang `agent claude`
+# indefinitely.
+_CLAUDE_LAUNCH_TIMEOUT_SECONDS = 600.0
 
 
 def _reconcile_stale_sessions(db, LogicalSession) -> int:
@@ -380,6 +384,8 @@ def cmd_claude(args):
         )
 
     import shutil as _shutil
+    import subprocess
+    import time
     import uuid
     claude_bin = _shutil.which("claude")
 
@@ -395,32 +401,104 @@ def cmd_claude(args):
     # or unimplemented-launch call).
     if claude_bin is None:
         failure_reason = "claude CLI is not installed on this host — cannot launch a native session"
-    else:
-        # claude_bin present: launch non-interactively in the resolved
-        # worktree. Unreachable in this environment (no `claude` binary
-        # here — see evidence doc) so deliberately not implemented
-        # speculatively; the interface above (session already recorded,
-        # repo/host already resolved) is what a future session with the
-        # binary present extends, not redesigns.
-        failure_reason = "claude CLI found but native launch is not yet implemented"
+        with get_db_session() as db:
+            _reconcile_stale_sessions(db, LogicalSession)
+            db.add(LogicalSession(
+                id=session_id, host_id=host["id"], repo_id=repo_id,
+                worktree_path=repo["path"] if repo else None,
+                engine="claude", status="failed",
+                last_result=json.dumps({"error": failure_reason}),
+            ))
+        emit({
+            "ok": False, "mode": args.mode, "host_id": host["id"], "session_id": session_id,
+            "repo_id": repo_id, "task": args.task, "error": failure_reason,
+        }, args)
+        sys.exit(1)
 
+    # docs/aoteru-model-effort-routing.agent-task.md: reuse the one
+    # canonical routing<->Claude-Code effort mapping (src.estate_router,
+    # shared with the claude-glm candidate lane) rather than a second copy
+    # here — --effort is omitted entirely (Claude Code's own default
+    # applies) unless the caller passes a recognised rung.
+    from src.estate_router import _CLAUDE_EFFORT_MAP
+    claude_effort = _CLAUDE_EFFORT_MAP.get(args.effort)
+    effort_args = ["--effort", claude_effort] if claude_effort else []
+
+    # `status="active"` only from here on — the row above this point was
+    # never written; a real process is about to start (same invariant the
+    # prior "no binary"/"not implemented" paths preserved by never writing
+    # "active" for a launch that never happened).
     with get_db_session() as db:
         _reconcile_stale_sessions(db, LogicalSession)
         db.add(LogicalSession(
             id=session_id, host_id=host["id"], repo_id=repo_id,
             worktree_path=repo["path"] if repo else None,
-            engine="claude", status="failed",
-            last_result=json.dumps({"error": failure_reason}),
+            engine="claude", status="active",
         ))
 
-    # Emit the structured JSON (a caller parsing "ok" gets the detail) AND
-    # exit nonzero — a caller that only checks the exit code (shell `&&`,
-    # CI) must see this as a failure too, not silent success.
+    # Non-interactive, bounded, print-mode launch in the resolved worktree —
+    # same shape as the claude-glm candidate sidecar (src.estate_router.
+    # execute_claude_glm), which invokes this identical binary/JSON
+    # envelope, and the same bounded-subprocess discipline as
+    # execute_codex/execute_local elsewhere in this estate. The task string
+    # goes over stdin, not argv, to avoid shell/argv quoting entirely.
+    ok, claude_session_id, output, error = False, None, None, None
+    started = time.monotonic()
+    try:
+        proc = subprocess.Popen(
+            [claude_bin, "--print", "--output-format", "json", *effort_args],
+            cwd=repo["path"] if repo else None,
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        stdout, stderr = proc.communicate(args.task, timeout=_CLAUDE_LAUNCH_TIMEOUT_SECONDS)
+        latency_ms = int((time.monotonic() - started) * 1000)
+        if proc.returncode != 0:
+            error = f"claude exited {proc.returncode}: {(stderr or '')[-500:]}"
+        else:
+            raw = (stdout or "").strip()
+            try:
+                payload = json.loads(raw)
+            except json.JSONDecodeError:
+                error = "claude returned malformed JSON"
+            else:
+                if not isinstance(payload, dict) or payload.get("is_error"):
+                    claude_session_id = payload.get("session_id") if isinstance(payload, dict) else None
+                    error = str(payload.get("error") if isinstance(payload, dict) else "invalid response")
+                else:
+                    claude_session_id = payload.get("session_id")
+                    result_text = payload.get("result") or payload.get("output") or payload.get("text") or ""
+                    output = str(result_text)
+                    ok = bool(output.strip())
+                    if not ok:
+                        error = "claude returned an empty response"
+    except subprocess.TimeoutExpired:
+        try:
+            proc.kill()
+            proc.communicate(timeout=5)
+        except Exception:
+            pass
+        latency_ms = int((time.monotonic() - started) * 1000)
+        error = f"claude timed out after {_CLAUDE_LAUNCH_TIMEOUT_SECONDS}s"
+    except Exception as exc:
+        latency_ms = int((time.monotonic() - started) * 1000)
+        error = str(exc)
+
+    with get_db_session() as db:
+        row = db.query(LogicalSession).filter(LogicalSession.id == session_id).one_or_none()
+        if row is not None:
+            row.status = "closed" if ok else "failed"
+            row.claude_session_id = claude_session_id
+            row.last_result = json.dumps({
+                "ok": ok, "output": output, "error": error, "latency_ms": latency_ms,
+            })
+
     emit({
-        "ok": False, "mode": args.mode, "host_id": host["id"], "session_id": session_id,
-        "repo_id": repo_id, "task": args.task, "error": failure_reason,
+        "ok": ok, "mode": args.mode, "host_id": host["id"], "session_id": session_id,
+        "repo_id": repo_id, "task": args.task, "claude_session_id": claude_session_id,
+        "error": error,
     }, args)
-    sys.exit(1)
+    if not ok:
+        sys.exit(1)
 
 
 def _active_park_leases_summary() -> list:
@@ -744,6 +822,9 @@ def _build_parser():
     pc.add_argument("mode", choices=["auto", "lab", "home", "where"])
     pc.add_argument("task", nargs="?", default=None)
     pc.add_argument("--repo", default=None)
+    pc.add_argument("--effort", default=None, choices=["low", "medium", "high", "highest"],
+                     help="reasoning-effort rung forwarded to claude --effort (see "
+                          "src.estate_router._CLAUDE_EFFORT_MAP); omitted uses Claude Code's own default")
     pc.set_defaults(func=cmd_claude)
 
     pe = sub.add_parser("explain", parents=[parent], help="'why this route?' diagnostic for one capability alias")

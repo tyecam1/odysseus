@@ -5,6 +5,7 @@ Uses a fixture config dir (not the real repo config/) so these tests don't
 break when the real estate/models registries change, and don't depend on
 this machine's actual hostname/tailnet state.
 """
+import json
 import socket
 import time
 from pathlib import Path
@@ -1563,3 +1564,95 @@ def test_run_task_omits_effort_for_paid_provider_without_support(fixture_config,
     })
     assert result["executed"] is True
     assert received["effort"] is None
+
+
+# --- claude-glm effort wiring (docs/aoteru-model-effort-routing.agent-task.md) ---
+
+def test_execute_claude_glm_forwards_effort_as_flag(monkeypatch):
+    import subprocess
+    monkeypatch.setattr(estate_router, "_resolve_claude_glm_launcher", lambda: ("claude-glm", "available"))
+    captured = {}
+
+    class FakeProcess:
+        returncode = 0
+
+        def communicate(self, prompt, timeout):
+            return (json.dumps({"result": "done"}), "")
+
+    def fake_popen(args, **kwargs):
+        captured["args"] = args
+        return FakeProcess()
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    estate_router.execute_claude_glm("inspect repository", effort="high")
+    assert "--effort" in captured["args"]
+    assert captured["args"][captured["args"].index("--effort") + 1] == "high"
+
+
+def test_execute_claude_glm_highest_maps_to_claude_xhigh(monkeypatch):
+    import subprocess
+    monkeypatch.setattr(estate_router, "_resolve_claude_glm_launcher", lambda: ("claude-glm", "available"))
+    captured = {}
+
+    class FakeProcess:
+        returncode = 0
+
+        def communicate(self, prompt, timeout):
+            return (json.dumps({"result": "done"}), "")
+
+    def fake_popen(args, **kwargs):
+        captured["args"] = args
+        return FakeProcess()
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    estate_router.execute_claude_glm("inspect repository", effort="highest")
+    assert captured["args"][captured["args"].index("--effort") + 1] == "xhigh"
+
+
+def test_execute_claude_glm_no_effort_omits_flag_unchanged(monkeypatch):
+    import subprocess
+    monkeypatch.setattr(estate_router, "_resolve_claude_glm_launcher", lambda: ("claude-glm", "available"))
+    captured = {}
+
+    class FakeProcess:
+        returncode = 0
+
+        def communicate(self, prompt, timeout):
+            return (json.dumps({"result": "done"}), "")
+
+    def fake_popen(args, **kwargs):
+        captured["args"] = args
+        return FakeProcess()
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    estate_router.execute_claude_glm("inspect repository")
+    assert "--effort" not in captured["args"]
+
+
+def test_run_task_forwards_effort_to_glm_candidate_when_opted_in(fixture_config, monkeypatch):
+    (fixture_config / "models.yaml").write_text(yaml.safe_dump({
+        "paid_providers": [
+            {"name": "codex", "concrete_model_label": "codex-cli"},
+            {"name": "glm", "concrete_model_label": "glm-5.3", "routing_eligible": False,
+             "candidate_only": True, "supports_effort": True},
+        ],
+        "default_paid_provider": "codex",
+        "capabilities": [{"alias": "code-strong", "binding": None}],
+    }))
+    monkeypatch.setattr(estate_router, "_record_decision", lambda *a, **k: "fake-decision-id")
+    monkeypatch.setattr(estate_router, "_update_decision_outcome", lambda *a, **k: None)
+    received = {}
+
+    def fake_execute_claude_glm(objective, **k):
+        received.update(k)
+        return {"ok": True, "output": "done", "latency_ms": 1, "provider": "glm"}
+
+    monkeypatch.setattr(estate_router, "execute_claude_glm", fake_execute_claude_glm)
+
+    result = estate_router.run_task({
+        "task_class": "coding", "objective": "fix it", "complexity": "frontier",
+        "requirements": {"capabilities": ["code-strong"]},
+        "routing": {"allow_paid_escalation": True, "candidate_provider": "glm", "candidate_opt_in": True},
+    })
+    assert result["executed"] is True
+    assert received["effort"] == "highest"

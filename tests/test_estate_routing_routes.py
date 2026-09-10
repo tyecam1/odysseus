@@ -104,7 +104,11 @@ class TestRunTaskEnvelope:
     def test_allow_paid_escalation_defaults_false(self):
         envelope = RunTaskEnvelope(task_class="code", objective="do the thing")
         task = envelope.to_task()
-        assert task["routing"] == {"allow_paid_escalation": False}
+        assert task["routing"] == {
+            "allow_paid_escalation": False,
+            "candidate_opt_in": False,
+            "allow_unqualified_candidate": False,
+        }
 
     def test_allow_paid_escalation_true_reaches_task_dict(self):
         """The exact field src.estate_router.run_task() reads via
@@ -115,7 +119,11 @@ class TestRunTaskEnvelope:
             task_class="code", objective="do the thing", allow_paid_escalation=True,
         )
         task = envelope.to_task()
-        assert task["routing"] == {"allow_paid_escalation": True}
+        assert task["routing"] == {
+            "allow_paid_escalation": True,
+            "candidate_opt_in": False,
+            "allow_unqualified_candidate": False,
+        }
         assert "allow_paid_escalation" not in task, (
             "the top-level pydantic field must not leak into the task dict "
             "alongside the nested routing.allow_paid_escalation"
@@ -130,6 +138,8 @@ class TestRunTaskEnvelope:
         assert task["routing"] == {
             "allow_paid_escalation": True,
             "mode": "implementation",
+            "candidate_opt_in": False,
+            "allow_unqualified_candidate": False,
         }
 
     def test_task_envelope_still_has_no_objective_field(self):
