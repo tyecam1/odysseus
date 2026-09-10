@@ -612,7 +612,9 @@ def test_resolve_paid_provider_uses_alias_specific_config(fixture_config, monkey
     }))
 
     choice = estate_router._resolve_paid_provider("code-strong")
-    assert choice == {"provider": "other-provider", "concrete_model_label": "other-cli"}
+    assert choice == {
+        "provider": "other-provider", "concrete_model_label": "other-cli", "supports_effort": False,
+    }
 
 
 def test_resolve_paid_provider_falls_back_to_default(fixture_config):
@@ -621,7 +623,9 @@ def test_resolve_paid_provider_falls_back_to_default(fixture_config):
     like reasoning-strong (no paid_provider entry in the fixture) still
     escalate to codex today, from config rather than a hardcoded literal."""
     choice = estate_router._resolve_paid_provider("reasoning-strong")
-    assert choice == {"provider": "codex", "concrete_model_label": "codex-cli"}
+    assert choice == {
+        "provider": "codex", "concrete_model_label": "codex-cli", "supports_effort": False,
+    }
 
 
 def test_resolve_paid_provider_no_config_fails_truthfully(fixture_config):
@@ -1457,3 +1461,105 @@ def test_codex_lanes_preserve_distinct_sandbox_authority(
     assert result["ok"] is True
     sandbox_index = captured["args"].index("--sandbox")
     assert captured["args"][sandbox_index + 1] == expected_sandbox
+
+
+# --- codex effort wiring (docs/aoteru-model-effort-routing.agent-task.md) ---
+
+def _fake_codex_popen(captured):
+    class FakeProc:
+        def __init__(self, args, **kwargs):
+            captured["args"] = args
+            output_path = args[args.index("-o") + 1]
+            estate_router.Path(output_path).write_text("done")
+            self.returncode = 0
+            self.pid = 4242
+
+        def communicate(self, timeout=None):
+            return ("", "")
+
+    return FakeProc
+
+
+def test_execute_codex_forwards_effort_as_model_reasoning_effort_flag(monkeypatch, tmp_path):
+    import subprocess
+    monkeypatch.setattr(estate_router, "_codex_available", lambda: (True, "codex"))
+    captured = {}
+    monkeypatch.setattr(subprocess, "Popen", _fake_codex_popen(captured))
+
+    estate_router.execute_codex("do it", cwd=str(tmp_path), effort="high")
+
+    assert "-c" in captured["args"]
+    c_index = captured["args"].index("-c")
+    assert captured["args"][c_index + 1] == "model_reasoning_effort=high"
+
+
+def test_execute_codex_highest_maps_to_codex_high(monkeypatch, tmp_path):
+    import subprocess
+    monkeypatch.setattr(estate_router, "_codex_available", lambda: (True, "codex"))
+    captured = {}
+    monkeypatch.setattr(subprocess, "Popen", _fake_codex_popen(captured))
+
+    estate_router.execute_codex("do it", cwd=str(tmp_path), effort="highest")
+
+    c_index = captured["args"].index("-c")
+    assert captured["args"][c_index + 1] == "model_reasoning_effort=high"
+
+
+def test_execute_codex_no_effort_omits_flag_unchanged(monkeypatch, tmp_path):
+    import subprocess
+    monkeypatch.setattr(estate_router, "_codex_available", lambda: (True, "codex"))
+    captured = {}
+    monkeypatch.setattr(subprocess, "Popen", _fake_codex_popen(captured))
+
+    estate_router.execute_codex("do it", cwd=str(tmp_path))
+
+    assert "-c" not in captured["args"]
+
+
+def test_run_task_forwards_effort_to_paid_escalation_when_provider_supports_it(fixture_config, monkeypatch):
+    """docs/aoteru-model-effort-routing.agent-task.md: codex's paid_provider
+    entry (config/models.yaml) declares supports_effort, so a needs_escalation
+    route's resolved effort must reach execute_codex — without this changing
+    which provider/executor gets selected (routing/authority unchanged)."""
+    (fixture_config / "models.yaml").write_text(yaml.safe_dump({
+        "paid_providers": [{"name": "codex", "concrete_model_label": "codex-cli", "supports_effort": True}],
+        "default_paid_provider": "codex",
+        "capabilities": [{"alias": "code-strong", "binding": None, "paid_provider": "codex"}],
+    }))
+    monkeypatch.setattr(estate_router, "_record_decision", lambda *a, **k: "fake-decision-id")
+    monkeypatch.setattr(estate_router, "_update_decision_outcome", lambda *a, **k: None)
+    received = {}
+
+    def fake_execute_codex(objective, **k):
+        received.update(k)
+        return {"ok": True, "output": "done", "latency_ms": 1}
+
+    monkeypatch.setattr(estate_router, "execute_codex", fake_execute_codex)
+
+    result = estate_router.run_task({
+        "task_class": "coding", "objective": "fix it", "complexity": "hard",
+        "requirements": {"capabilities": ["code-strong"]},
+        "routing": {"allow_paid_escalation": True},
+    })
+    assert result["executed"] is True
+    assert received["effort"] == "high"
+
+
+def test_run_task_omits_effort_for_paid_provider_without_support(fixture_config, monkeypatch):
+    monkeypatch.setattr(estate_router, "_record_decision", lambda *a, **k: "fake-decision-id")
+    monkeypatch.setattr(estate_router, "_update_decision_outcome", lambda *a, **k: None)
+    received = {}
+
+    def fake_execute_codex(objective, **k):
+        received.update(k)
+        return {"ok": True, "output": "done", "latency_ms": 1}
+
+    monkeypatch.setattr(estate_router, "execute_codex", fake_execute_codex)
+
+    result = estate_router.run_task({
+        "task_class": "coding", "objective": "fix it", "complexity": "hard",
+        "requirements": {"capabilities": ["code-strong"]},
+        "routing": {"allow_paid_escalation": True},
+    })
+    assert result["executed"] is True
+    assert received["effort"] is None

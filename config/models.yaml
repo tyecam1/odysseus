@@ -41,6 +41,11 @@
 paid_providers:
   - name: codex
     concrete_model_label: codex-cli
+    # `codex exec` already accepts `-c model_reasoning_effort=<low|medium|
+    # high>` — a real, verified-working invocation option (not speculative;
+    # see src.estate_router._CODEX_EFFORT_MAP), so route.effort is safe to
+    # forward here.
+    supports_effort: true
 default_paid_provider: codex
 
 # Optional per-capability `supports_effort: true` (docs/aoteru-model-

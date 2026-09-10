@@ -953,15 +953,32 @@ def _kill_process_tree(root_pid: int, process_group_id: int, *, reap_timeout: fl
     }
 
 
+# docs/aoteru-model-effort-routing.agent-task.md: `codex exec` already
+# supports a real, configurable reasoning-effort control (`-c
+# model_reasoning_effort=<value>`) — verified-working, not speculative
+# (e.g. the Sol mutating lane in a sibling repo's
+# automation/docs/current-capabilities.md uses this exact flag in
+# production). Codex's own vocabulary is minimal/low/medium/high; routing's
+# is low/medium/high/highest — "highest" maps to "high", codex has no
+# stronger rung.
+_CODEX_EFFORT_MAP = {"low": "low", "medium": "medium", "high": "high", "highest": "high"}
+
+
 def _execute_codex_with_sandbox(objective: str, *, sandbox: str, provider: str,
                                 timeout: float = 180.0, cwd: Optional[str] = None,
-                                on_started: Optional[Callable[[int], None]] = None) -> dict:
+                                on_started: Optional[Callable[[int], None]] = None,
+                                effort: Optional[str] = None) -> dict:
     """Share bounded CLI mechanics without making sandbox choice policy.
 
     Only the public advisory/write functions choose the sandbox. Keeping
     credential checks, ephemeral execution, timeout, and error handling in
     one place prevents the narrow write lane drifting from the established
     paid-worker behavior.
+
+    `effort`: forwarded as `-c model_reasoning_effort=<mapped>` when it maps
+    to a known Codex rung (see `_CODEX_EFFORT_MAP`); omitted or unrecognised
+    leaves the `codex exec` invocation exactly as before this parameter
+    existed (Codex's own configured default applies).
     """
     import os
     import signal
@@ -974,6 +991,9 @@ def _execute_codex_with_sandbox(objective: str, *, sandbox: str, provider: str,
         return {"ok": False, "error": f"codex unavailable: {detail}", "provider": provider}
     codex_binary = detail  # _codex_available() returns the resolved binary path on success
 
+    codex_effort = _CODEX_EFFORT_MAP.get(effort)
+    effort_args = ["-c", f"model_reasoning_effort={codex_effort}"] if codex_effort else []
+
     started = time.monotonic()
     with tempfile.TemporaryDirectory(prefix="p12-codex-") as scratch:
         out_path = str(Path(scratch) / "codex-last-message.txt")
@@ -982,6 +1002,7 @@ def _execute_codex_with_sandbox(objective: str, *, sandbox: str, provider: str,
                 [
                     codex_binary, "exec",
                     "--sandbox", sandbox,
+                    *effort_args,
                     "--ephemeral",
                     "--skip-git-repo-check",
                     "-C", cwd or scratch,
@@ -1048,7 +1069,8 @@ def _execute_codex_with_sandbox(objective: str, *, sandbox: str, provider: str,
                     "latency_ms": int((time.monotonic() - started) * 1000)}
 
 
-def execute_codex(objective: str, *, timeout: float = 180.0, cwd: Optional[str] = None) -> dict:
+def execute_codex(objective: str, *, timeout: float = 180.0, cwd: Optional[str] = None,
+                  effort: Optional[str] = None) -> dict:
     """Run the existing paid Codex lane as bounded, read-only advice.
 
     This remains the default escalation contract: bounded, ephemeral, and
@@ -1057,7 +1079,7 @@ def execute_codex(objective: str, *, timeout: float = 180.0, cwd: Optional[str] 
     authority is isolated in `execute_codex_write`.
     """
     return _execute_codex_with_sandbox(
-        objective, sandbox="read-only", provider="codex", timeout=timeout, cwd=cwd,
+        objective, sandbox="read-only", provider="codex", timeout=timeout, cwd=cwd, effort=effort,
     )
 
 
@@ -1091,7 +1113,7 @@ def _codex_write_authority(repo_id: str, host_id: str) -> dict:
 
 
 def execute_codex_write(objective: str, *, repo_id: str, host_id: str,
-                        timeout: float = 180.0) -> dict:
+                        timeout: float = 180.0, effort: Optional[str] = None) -> dict:
     """Run Codex workspace-write inside a previously validated lease.
 
     This function independently proves the active lease and resolved
@@ -1106,7 +1128,7 @@ def execute_codex_write(objective: str, *, repo_id: str, host_id: str,
         }
     return _execute_codex_with_sandbox(
         objective, sandbox="workspace-write", provider="codex-write", timeout=timeout,
-        cwd=authority["cwd"],
+        cwd=authority["cwd"], effort=effort,
     )
 
 
@@ -1317,7 +1339,8 @@ def _in_flight_execution_for_lease(lease_id: str) -> Optional[dict]:
 def execute_codex_write_durable(objective: str, *, repo_id: str, host_id: str,
                                 decision_id: Optional[str] = None,
                                 wait_timeout: float = 30.0,
-                                timeout: float = 1800.0) -> dict:
+                                timeout: float = 1800.0,
+                                effort: Optional[str] = None) -> dict:
     """Durable wrapper around `_execute_codex_with_sandbox` that decouples
     the caller's HTTP request lifetime from the underlying Codex
     process's actual runtime (the >45s /api/estate/run problem must be
@@ -1402,7 +1425,7 @@ def execute_codex_write_durable(objective: str, *, repo_id: str, host_id: str,
     def _run() -> None:
         result = _execute_codex_with_sandbox(
             objective, sandbox="workspace-write", provider="codex-write",
-            timeout=timeout, cwd=authority["cwd"], on_started=_on_started,
+            timeout=timeout, cwd=authority["cwd"], on_started=_on_started, effort=effort,
         )
         outcome["result"] = result
         if result.get("ok"):
@@ -1578,6 +1601,11 @@ def _resolve_paid_provider(alias: Optional[str]) -> dict:
     return {
         "provider": provider_name,
         "concrete_model_label": provider_entry.get("concrete_model_label", provider_name),
+        # Config-declared (config/models.yaml paid_providers[].supports_effort),
+        # same discipline as resolve_alias's local-capability supports_effort —
+        # a caller decides whether to forward route.effort into this
+        # provider's invocation from this flag, not by guessing.
+        "supports_effort": bool(provider_entry.get("supports_effort")),
     }
 
 
@@ -1661,6 +1689,14 @@ def run_task(task: dict) -> dict:
             # override) for an unknown/unresolved repo id rather than
             # guessing a path.
             repo_cwd = resolve_repo_path(task.get("repo")) if task.get("repo") else None
+            # Paid-provider effort support is a property of the provider
+            # actually invoked here (config/models.yaml paid_providers[]),
+            # not of the local capability that failed to resolve above —
+            # `provider_choice["supports_effort"]` reflects that directly,
+            # never `route["route"]["effort_supported"]` (which describes
+            # the local alias). Never changes provider_name/provider_fn
+            # selection above; only what argument reaches it.
+            paid_effort = route["route"].get("effort") if provider_choice.get("supports_effort") else None
             executor_name = provider_name
             if implementation_mode:
                 executor_name = f"{provider_name}-write"
@@ -1689,7 +1725,7 @@ def run_task(task: dict) -> dict:
                         "verification_outcome": "fail",
                     }
                 result = provider_fn(paid_objective, repo_id=repo_id, host_id=host_id,
-                                      decision_id=route["decision_id"])
+                                      decision_id=route["decision_id"], effort=paid_effort)
                 if result.get("authority_denied"):
                     _update_decision_outcome(
                         route["decision_id"], status="blocked", deterministic_gate="fail",
@@ -1723,7 +1759,7 @@ def run_task(task: dict) -> dict:
                         "escalation_reason": None, "reason": reason,
                     }
             else:
-                result = provider_fn(paid_objective, cwd=repo_cwd)
+                result = provider_fn(paid_objective, cwd=repo_cwd, effort=paid_effort)
             gate = "pass" if result.get("ok") and (result.get("output") or "").strip() else "fail"
             if not implementation_mode:
                 _update_decision_outcome(
