@@ -1083,6 +1083,160 @@ def execute_codex(objective: str, *, timeout: float = 180.0, cwd: Optional[str] 
     )
 
 
+def _resolve_claude_glm_launcher() -> tuple[Optional[str], str]:
+    """Resolve only the host-local GLM launcher; never fall back to Claude."""
+    import shutil
+    candidates = [shutil.which("claude-glm")]
+    if os.name == "nt":
+        candidates.extend([
+            str(Path.home() / ".local" / "bin" / "claude-glm.cmd"),
+            str(Path.home() / ".local" / "bin" / "claude-glm"),
+        ])
+    for candidate in candidates:
+        if candidate and Path(candidate).exists():
+            return candidate, "available"
+    return None, "claude-glm launcher is unavailable on this host"
+
+
+# docs/aoteru-model-effort-routing.agent-task.md: claude-glm forwards
+# straight to the same Claude Code binary (see note in config/models.yaml),
+# so Claude Code's own real, documented `--effort <level>` flag (`claude
+# --help`) applies unchanged. Claude's vocabulary is low/medium/high/
+# xhigh/max; routing's is low/medium/high/highest. "highest" maps to
+# "xhigh" (one rung above "high"), not "max" — "max" is Claude's most
+# expensive tier and routing's "highest" means "the strongest rung this
+# task's complexity warrants", not "spend the most possible regardless".
+_CLAUDE_EFFORT_MAP = {"low": "low", "medium": "medium", "high": "high", "highest": "xhigh"}
+
+
+def execute_claude_glm(objective: str, *, timeout: float = 180.0,
+                       cwd: Optional[str] = None, effort: Optional[str] = None) -> dict:
+    """Run the host-local GLM Claude Code launcher with inherited context.
+
+    Provider configuration and authentication stay inside the launcher. The
+    subprocess receives only the objective on stdin, avoiding argv quoting and
+    preventing provider credentials from entering Odysseus configuration.
+
+    `effort`: forwarded as `--effort <mapped>` (see `_CLAUDE_EFFORT_MAP`)
+    when it maps to a known Claude Code rung; omitted or unrecognised
+    leaves the launcher invocation exactly as before this parameter
+    existed (Claude Code's own configured default applies).
+    """
+    import json as _json
+    import subprocess
+    import time
+    launcher, detail = _resolve_claude_glm_launcher()
+    if not launcher:
+        return {"ok": False, "provider": "glm", "error": detail}
+    claude_effort = _CLAUDE_EFFORT_MAP.get(effort)
+    effort_args = ["--effort", claude_effort] if claude_effort else []
+    started = time.monotonic()
+    try:
+        proc = subprocess.Popen(
+            [launcher, "--print", "--output-format", "json", *effort_args],
+            cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True,
+        )
+        stdout, stderr = proc.communicate(objective, timeout=timeout)
+        latency_ms = int((time.monotonic() - started) * 1000)
+        if proc.returncode != 0:
+            return {"ok": False, "provider": "glm", "latency_ms": latency_ms,
+                    "error": f"claude-glm exited {proc.returncode}: {(stderr or '')[-500:]}"}
+        raw = (stdout or "").strip()
+        try:
+            payload = _json.loads(raw)
+        except _json.JSONDecodeError:
+            return {"ok": False, "provider": "glm", "latency_ms": latency_ms,
+                    "error": "claude-glm returned malformed JSON"}
+        if not isinstance(payload, dict) or payload.get("is_error"):
+            return {"ok": False, "provider": "glm", "latency_ms": latency_ms,
+                    "error": str(payload.get("error") if isinstance(payload, dict) else "invalid response")}
+        output = payload.get("result") or payload.get("output") or payload.get("text") or ""
+        result = {"ok": bool(str(output).strip()), "provider": "glm",
+                  "model": payload.get("model") or "glm-5.3", "output": str(output),
+                  "latency_ms": latency_ms}
+        if isinstance(payload.get("usage"), dict):
+            result["usage"] = payload["usage"]
+        if not result["ok"]:
+            result["error"] = "claude-glm returned an empty response"
+        return result
+    except FileNotFoundError:
+        return {"ok": False, "provider": "glm", "error": "claude-glm launcher is unavailable on this host"}
+    except subprocess.TimeoutExpired:
+        try:
+            proc.kill()
+            proc.communicate(timeout=5)
+        except Exception:
+            pass
+        return {"ok": False, "provider": "glm",
+                "error": f"claude-glm timed out after {timeout}s",
+                "latency_ms": int((time.monotonic() - started) * 1000)}
+    except Exception as exc:
+        return {"ok": False, "provider": "glm", "error": str(exc),
+                "latency_ms": int((time.monotonic() - started) * 1000)}
+
+
+def execute_claude_glm_write(objective: str, *, repo_id: str, host_id: str,
+                             decision_id: Optional[str] = None,
+                             timeout: float = 1800.0, effort: Optional[str] = None) -> dict:
+    """Lease-gated GLM implementation lane using the existing authority."""
+    authority = _codex_write_authority(repo_id, host_id)
+    if not authority["ok"]:
+        return {"ok": False, "provider": "glm-write", "authority_denied": True,
+                "error": authority["error"]}
+    return execute_claude_glm(objective, timeout=timeout, cwd=authority["cwd"], effort=effort)
+
+
+def execute_claude_glm_write_durable(objective: str, *, repo_id: str, host_id: str,
+                                     decision_id: Optional[str] = None,
+                                     wait_timeout: float = 30.0,
+                                     timeout: float = 1800.0,
+                                     effort: Optional[str] = None) -> dict:
+    """Use the existing EstateExecution lifecycle for the GLM candidate."""
+    authority = _codex_write_authority(repo_id, host_id)
+    if not authority["ok"]:
+        return {"ok": False, "provider": "glm-write", "authority_denied": True,
+                "error": authority["error"]}
+    in_flight = _in_flight_execution_for_lease(authority["lease_id"])
+    if in_flight is not None:
+        return {"ok": True, "provider": in_flight["provider"],
+                "execution_id": in_flight["execution_id"],
+                "lifecycle_state": in_flight["lifecycle_state"],
+                "reused_existing_execution": True}
+    lease = active_lease_for_repo(repo_id, host_id) or {}
+    execution_id = _create_estate_execution(
+        decision_id=decision_id, objective=objective, executor="glm-write",
+        provider="glm", host_id=host_id, repo_id=repo_id,
+        lease_id=authority["lease_id"], worktree_path=authority["cwd"],
+        branch=lease.get("branch"),
+    )
+    import threading
+    from core.database import utcnow_naive
+    outcome = {}
+    def _run():
+        _update_estate_execution(execution_id, lifecycle_state="running", started_at=utcnow_naive())
+        result = execute_claude_glm(objective, timeout=timeout, cwd=authority["cwd"], effort=effort)
+        outcome["result"] = result
+        state = "succeeded" if result.get("ok") else ("timed_out" if "timed out" in result.get("error", "") else "failed")
+        _update_estate_execution(execution_id, lifecycle_state=state, finished_at=utcnow_naive(),
+                                 result_json=json.dumps(result), error=None if result.get("ok") else result.get("error"),
+                                 exit_status="0" if result.get("ok") else "1")
+        if decision_id:
+            gate = "pass" if result.get("ok") else "fail"
+            _update_decision_outcome(decision_id, status="complete" if gate == "pass" else "failed",
+                                     deterministic_gate=gate, latency_ms=result.get("latency_ms"),
+                                     escalation_reason="insufficient_capability" if gate == "pass" else "worker_failed",
+                                     executor="glm-write", escalated=True, actual_route="glm-write",
+                                     verification_outcome=gate)
+    thread = threading.Thread(target=_run, name=f"glm-write-{execution_id}", daemon=True)
+    thread.start(); thread.join(wait_timeout)
+    if thread.is_alive():
+        current = get_estate_execution(execution_id)
+        return {"ok": True, "provider": "glm", "execution_id": execution_id,
+                "lifecycle_state": current["lifecycle_state"] if current else "accepted"}
+    return {**outcome.get("result", {}), "execution_id": execution_id}
+
+
 def _codex_write_authority(repo_id: str, host_id: str) -> dict:
     """Resolve the repo and prove its existing lease without acquiring one."""
     if resolve_repo_path(repo_id) is None:
@@ -1583,7 +1737,8 @@ _PAID_PROVIDER_FUNCTION_NAMES = {"codex": "execute_codex"}
 _PAID_PROVIDER_WRITE_FUNCTION_NAMES = {"codex": "execute_codex_write_durable"}
 
 
-def _resolve_paid_provider(alias: Optional[str]) -> dict:
+def _resolve_paid_provider(alias: Optional[str], requested_provider: Optional[str] = None,
+                           candidate_opt_in: bool = False) -> dict:
     """Which paid provider backs `alias`'s escalation, read from
     config/models.yaml rather than hardcoded. Resolution order: the
     alias's own `paid_provider` (if the alias is registered and sets
@@ -1593,11 +1748,16 @@ def _resolve_paid_provider(alias: Optional[str]) -> dict:
     or `{"provider": None, "reason": ...}`."""
     models = _load_yaml("models")
     entry = next((c for c in models.get("capabilities", []) if c.get("alias") == alias), None) if alias else None
-    provider_name = (entry or {}).get("paid_provider") or models.get("default_paid_provider")
+    provider_name = requested_provider or (entry or {}).get("paid_provider") or models.get("default_paid_provider")
     if not provider_name:
         return {"provider": None, "reason": "no paid_provider configured for this alias and no default_paid_provider set"}
     registry = {p["name"]: p for p in models.get("paid_providers", []) if p.get("name")}
     provider_entry = registry.get(provider_name, {})
+    if not provider_entry:
+        return {"provider": None, "reason": f"unknown paid provider {provider_name!r}"}
+    if not provider_entry.get("routing_eligible", True):
+        if not (provider_entry.get("candidate_only") and candidate_opt_in):
+            return {"provider": None, "reason": f"paid provider {provider_name!r} is candidate-only; explicit candidate opt-in is required"}
     return {
         "provider": provider_name,
         "concrete_model_label": provider_entry.get("concrete_model_label", provider_name),
@@ -1662,12 +1822,15 @@ def run_task(task: dict) -> dict:
         implementation_mode = routing.get("mode") == "implementation"
         if route.get("route", {}).get("executor") == "none" and route.get("decision_id") \
                 and allow_paid and (task.get("objective") is not None):
-            provider_choice = _resolve_paid_provider(route["route"].get("model_alias"))
-            provider_name = provider_choice.get("provider")
-            provider_functions = (
-                _PAID_PROVIDER_WRITE_FUNCTION_NAMES if implementation_mode
-                else _PAID_PROVIDER_FUNCTION_NAMES
+            routing = task.get("routing") or {}
+            requested_provider = routing.get("paid_provider") or routing.get("candidate_provider")
+            candidate_opt_in = bool(routing.get("candidate_opt_in") or routing.get("allow_unqualified_candidate"))
+            provider_choice = _resolve_paid_provider(
+                route["route"].get("model_alias"), requested_provider, candidate_opt_in,
             )
+            provider_name = provider_choice.get("provider")
+            provider_functions = ({**_PAID_PROVIDER_WRITE_FUNCTION_NAMES, "glm": "execute_claude_glm_write_durable"}
+                                  if implementation_mode else {**_PAID_PROVIDER_FUNCTION_NAMES, "glm": "execute_claude_glm"})
             provider_fn_name = provider_functions.get(provider_name)
             provider_fn = globals().get(provider_fn_name) if provider_fn_name else None
             if provider_name is None or provider_fn is None:

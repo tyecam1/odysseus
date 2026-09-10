@@ -41,11 +41,27 @@
 paid_providers:
   - name: codex
     concrete_model_label: codex-cli
+    routing_eligible: true
     # `codex exec` already accepts `-c model_reasoning_effort=<low|medium|
     # high>` — a real, verified-working invocation option (not speculative;
     # see src.estate_router._CODEX_EFFORT_MAP), so route.effort is safe to
     # forward here.
     supports_effort: true
+  - name: glm
+    concrete_model_label: glm-5.3
+    launcher: claude-glm
+    routing_eligible: false
+    candidate_only: true
+    # The claude-glm launcher invokes the same Claude Code installation
+    # (see note below) — Claude Code's own `--effort <level>` is a real,
+    # verified invocation option (claude --help), so this is genuine
+    # provider support, not speculative, same evidence bar as codex above.
+    supports_effort: true
+    note: >-
+      Host-local Claude Code sidecar. The launcher owns Z.AI endpoint,
+      model and credential setup; Odysseus never reads or sets those values.
+      Candidate selection is explicit and remains blocked from normal routing
+      until paired benchmark evidence qualifies it.
 default_paid_provider: codex
 
 # Optional per-capability `supports_effort: true` (docs/aoteru-model-
