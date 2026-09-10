@@ -43,6 +43,15 @@ paid_providers:
     concrete_model_label: codex-cli
 default_paid_provider: codex
 
+# Optional per-capability `supports_effort: true` (docs/aoteru-model-
+# effort-routing.agent-task.md) declares that the bound model's provider
+# has a configurable reasoning-effort control `src.estate_router.execute_local`
+# can actually forward (via `llm_call`'s `effort` kwarg). Absent/false is
+# the truthful default for every alias below — all currently bound aliases
+# resolve through execute_local's Ollama native API, which has no such
+# control (see llm_call's Mistral-only reasoning_effort branch). Setting
+# this without a provider that really honors it would just be a no-op
+# flag, not evidence.
 capabilities:
   - alias: local-fast
     binding: qwen3:8b

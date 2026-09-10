@@ -346,7 +346,16 @@ def resolve_alias(alias: str) -> dict:
             "alias": alias, "resolved": False, "concrete_model": binding,
             "reason": f"bound but not currently live: {live_reason}",
         }
-    return {"alias": alias, "resolved": True, "concrete_model": binding, "evidence": entry.get("evidence")}
+    return {
+        "alias": alias, "resolved": True, "concrete_model": binding, "evidence": entry.get("evidence"),
+        # Config-declared, not inferred — no bound alias in config/models.yaml
+        # currently sets this (every bound local capability resolves through
+        # execute_local's Ollama native API, which has no reasoning-effort
+        # control today; see execute_local's docstring). Read here rather
+        # than re-derived so a future provider that does support it only
+        # needs a one-line config change, not new router code.
+        "supports_effort": bool(entry.get("supports_effort")),
+    }
 
 
 def _record_decision(task: dict, *, host_id, executor, model_alias, concrete_model, status) -> str:
@@ -398,6 +407,40 @@ _UNVERIFIABLE_BUDGET_FIELDS = (
     "max_worker_calls", "max_paid_calls", "max_frontier_calls",
     "max_context_tokens", "latency_priority",
 )
+
+# Task doc: docs/aoteru-model-effort-routing.agent-task.md — reuses the
+# existing task.complexity envelope field (already in the canonical
+# envelope, docs/aoteru-model-host-routing-contract.md) as the default
+# reasoning-effort signal, rather than inventing a second taxonomy.
+_COMPLEXITY_DEFAULT_EFFORT = {
+    "trivial": "low",
+    "routine": "medium",
+    "hard": "high",
+    "frontier": "highest",
+}
+_VALID_EFFORTS = frozenset(_COMPLEXITY_DEFAULT_EFFORT.values())
+
+
+def _resolve_effort(task: dict) -> tuple[Optional[str], str]:
+    """Effort never widens model authority/eligibility (task's completion
+    gate #6) — this only picks a value to *offer* a provider that already
+    supports configurable reasoning effort; it plays no part in which
+    alias/host/executor gets selected above.
+
+    An explicit `task["routing"]["effort"]` override wins (the `routing`
+    block already carries other per-route knobs like `quality_floor` —
+    the natural existing place for this, not a new top-level field). An
+    unrecognised explicit value is ignored, not fabricated into one of
+    the known rungs — falls through to the complexity default instead.
+    Otherwise `task["complexity"]` supplies the default via the mapping
+    above. No complexity and no override: effort is unresolved (None)."""
+    explicit = (task.get("routing") or {}).get("effort")
+    if explicit in _VALID_EFFORTS:
+        return explicit, "explicit"
+    default = _COMPLEXITY_DEFAULT_EFFORT.get(task.get("complexity"))
+    if default is not None:
+        return default, "complexity_default"
+    return None, "none"
 
 
 def resolve_route(task: dict, *, record_decision: bool = True) -> dict:
@@ -544,6 +587,9 @@ def resolve_route(task: dict, *, record_decision: bool = True) -> dict:
         unresolved = next((r.get("reason") for r in capability_resolutions if not r.get("resolved")), None)
         route_reason = f"{host['host_id']} is eligible; local capability needs escalation: {unresolved or 'constraint failed'}"
 
+    effort, effort_source = _resolve_effort(task)
+    effort_supported = bool(alias_result.get("supports_effort"))
+
     result = {
         "ok": status != "needs_escalation",
         "route": {
@@ -552,6 +598,15 @@ def resolve_route(task: dict, *, record_decision: bool = True) -> dict:
             "model_alias": alias,
             "concrete_model": alias_result.get("concrete_model"),
             "reason": route_reason,
+            # Never widens authority/eligibility above — see _resolve_effort.
+            # `effort_supported` says whether the resolved provider/model
+            # actually has a configurable reasoning-effort control to apply
+            # it to (config/models.yaml capabilities[].supports_effort);
+            # `effort` itself is always the resolved rung so a caller can
+            # see what *would* apply either way.
+            "effort": effort,
+            "effort_source": effort_source,
+            "effort_supported": effort_supported,
         },
         "reason": route_reason,
         "verification_outcome": None,
@@ -630,7 +685,7 @@ def _retryable_local_error(exc: Exception) -> bool:
 
 
 def execute_local(concrete_model: str, objective: "str | list[dict]", *, timeout: float = 60.0,
-                   max_retries: int = 1) -> dict:
+                   max_retries: int = 1, effort: Optional[str] = None) -> dict:
     """WHAT actually happens once WHERE+WHAT have been resolved: the one
     provider-neutral bounded execution/result path this lab-first slice
     can run for real right now (no claude/codex binary or paid
@@ -664,7 +719,16 @@ def execute_local(concrete_model: str, objective: "str | list[dict]", *, timeout
     A deterministic upstream rejection (`HTTPException`, e.g. bad
     request/model-not-found) never retries. The paid path
     (`execute_codex`) intentionally has no retry logic at all — never
-    blindly repeat a paid prompt (Workstream C invariant)."""
+    blindly repeat a paid prompt (Workstream C invariant).
+
+    `effort` (optional): forwarded to `llm_call` unchanged — `llm_call`
+    itself decides whether the resolved provider actually has a
+    configurable reasoning-effort control (currently only Mistral
+    thinking-capable models; see `resolve_route`'s `route.effort`/
+    `route.effort_supported`). This call always targets `_OLLAMA_BASE`
+    (Ollama's native API), which has no such control, so `effort` is a
+    no-op here today — passed through for provider-neutrality, not because
+    it currently changes anything."""
     from fastapi import HTTPException
 
     from src.llm_core import llm_call
@@ -683,7 +747,8 @@ def execute_local(concrete_model: str, objective: "str | list[dict]", *, timeout
     while attempts <= max_retries:
         attempts += 1
         try:
-            output = llm_call(_OLLAMA_BASE, concrete_model, messages, timeout=int(timeout), num_ctx=num_ctx)
+            output = llm_call(_OLLAMA_BASE, concrete_model, messages, timeout=int(timeout), num_ctx=num_ctx,
+                               effort=effort)
         except HTTPException as e:
             # A deterministic upstream rejection (bad request, model not
             # found, etc.) — retrying would not change it.
@@ -1701,7 +1766,8 @@ def run_task(task: dict) -> dict:
     if not objective:
         return {**route, "executed": False, "execution_error": "no objective provided to execute"}
 
-    result = execute_local(concrete_model, objective)
+    route_effort = route["route"].get("effort") if route["route"].get("effort_supported") else None
+    result = execute_local(concrete_model, objective, effort=route_effort)
     gate = "pass" if result.get("ok") and (result.get("output") or "").strip() else "fail"
     _update_decision_outcome(
         route["decision_id"],

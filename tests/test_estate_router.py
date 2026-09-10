@@ -113,6 +113,7 @@ def test_resolve_alias_bound_and_live(fixture_config, monkeypatch):
     assert result == {
         "alias": "local-fast", "resolved": True,
         "concrete_model": "test-model-fast", "evidence": None,
+        "supports_effort": False,
     }
 
 
@@ -318,6 +319,125 @@ def test_resolve_route_unbound_alias_needs_escalation_not_silent_failure(fixture
     assert route["ok"] is False
     assert route["route"]["executor"] == "none"
     assert route["alias_resolution"]["resolved"] is False
+
+
+# --- effort: docs/aoteru-model-effort-routing.agent-task.md ---
+
+def test_resolve_route_effort_defaults_from_complexity(fixture_config, monkeypatch):
+    monkeypatch.setattr(estate_router, "_record_decision", lambda *a, **k: "fake-decision-id")
+    monkeypatch.setattr(estate_router, "_ollama_model_live", lambda model, timeout=3.0: (True, "live"))
+    route = estate_router.resolve_route({
+        "task_class": "coding", "complexity": "hard",
+        "requirements": {"capabilities": ["local-fast"]},
+    })
+    assert route["route"]["effort"] == "high"
+    assert route["route"]["effort_source"] == "complexity_default"
+
+
+@pytest.mark.parametrize("complexity,expected", [
+    ("trivial", "low"), ("routine", "medium"), ("hard", "high"), ("frontier", "highest"),
+])
+def test_resolve_route_effort_complexity_mapping(fixture_config, monkeypatch, complexity, expected):
+    monkeypatch.setattr(estate_router, "_record_decision", lambda *a, **k: "fake-decision-id")
+    route = estate_router.resolve_route({"task_class": "audit", "complexity": complexity})
+    assert route["route"]["effort"] == expected
+
+
+def test_resolve_route_effort_explicit_override_wins_over_complexity(fixture_config, monkeypatch):
+    monkeypatch.setattr(estate_router, "_record_decision", lambda *a, **k: "fake-decision-id")
+    route = estate_router.resolve_route({
+        "task_class": "audit", "complexity": "trivial", "routing": {"effort": "highest"},
+    })
+    assert route["route"]["effort"] == "highest"
+    assert route["route"]["effort_source"] == "explicit"
+
+
+def test_resolve_route_effort_invalid_explicit_override_falls_back_to_complexity_default(fixture_config, monkeypatch):
+    monkeypatch.setattr(estate_router, "_record_decision", lambda *a, **k: "fake-decision-id")
+    route = estate_router.resolve_route({
+        "task_class": "audit", "complexity": "routine", "routing": {"effort": "not-a-real-rung"},
+    })
+    assert route["route"]["effort"] == "medium"
+    assert route["route"]["effort_source"] == "complexity_default"
+
+
+def test_resolve_route_effort_absent_without_complexity_or_override(fixture_config, monkeypatch):
+    monkeypatch.setattr(estate_router, "_record_decision", lambda *a, **k: "fake-decision-id")
+    route = estate_router.resolve_route({"task_class": "audit"})
+    assert route["route"]["effort"] is None
+    assert route["route"]["effort_source"] == "none"
+
+
+def test_resolve_route_effort_unsupported_provider_flagged_not_applied(fixture_config, monkeypatch):
+    """No bound alias declares `supports_effort` today — the route still
+    resolves the rung (so a caller can see what was requested), but
+    `effort_supported` is False, and this must not change the resolved
+    alias/model/executor (authority is unaffected by effort)."""
+    monkeypatch.setattr(estate_router, "_record_decision", lambda *a, **k: "fake-decision-id")
+    monkeypatch.setattr(estate_router, "_ollama_model_live", lambda model, timeout=3.0: (True, "live"))
+    route = estate_router.resolve_route({
+        "task_class": "coding", "complexity": "frontier",
+        "requirements": {"capabilities": ["local-fast"]},
+    })
+    assert route["route"]["effort"] == "highest"
+    assert route["route"]["effort_supported"] is False
+    assert route["route"]["executor"] == "local"
+    assert route["route"]["concrete_model"] == "test-model-fast"
+
+
+def test_resolve_route_effort_supported_provider_flagged(fixture_config, monkeypatch):
+    monkeypatch.setattr(estate_router, "_record_decision", lambda *a, **k: "fake-decision-id")
+    monkeypatch.setattr(estate_router, "_ollama_model_live", lambda model, timeout=3.0: (True, "live"))
+    (fixture_config / "models.yaml").write_text(yaml.safe_dump({
+        "capabilities": [
+            {"alias": "local-fast", "binding": "test-model-fast", "supports_effort": True},
+        ],
+    }))
+    route = estate_router.resolve_route({
+        "task_class": "coding", "complexity": "hard",
+        "requirements": {"capabilities": ["local-fast"]},
+    })
+    assert route["route"]["effort"] == "high"
+    assert route["route"]["effort_supported"] is True
+
+
+def test_run_task_forwards_effort_to_execute_local_only_when_supported(fixture_config, monkeypatch):
+    monkeypatch.setattr(estate_router, "_record_decision", lambda *a, **k: "fake-decision-id")
+    monkeypatch.setattr(estate_router, "_ollama_model_live", lambda model, timeout=3.0: (True, "live"))
+    received = {}
+
+    def fake_execute_local(model, objective, **k):
+        received.update(k)
+        return {"ok": True, "output": "pong", "latency_ms": 1}
+
+    monkeypatch.setattr(estate_router, "execute_local", fake_execute_local)
+    estate_router.run_task({
+        "task_class": "coding", "objective": "say pong", "complexity": "hard",
+        "requirements": {"capabilities": ["local-fast"]},
+    })
+    assert received["effort"] is None  # local-fast doesn't declare supports_effort
+
+
+def test_run_task_forwards_effort_value_when_alias_supports_it(fixture_config, monkeypatch):
+    monkeypatch.setattr(estate_router, "_record_decision", lambda *a, **k: "fake-decision-id")
+    monkeypatch.setattr(estate_router, "_ollama_model_live", lambda model, timeout=3.0: (True, "live"))
+    (fixture_config / "models.yaml").write_text(yaml.safe_dump({
+        "capabilities": [
+            {"alias": "local-fast", "binding": "test-model-fast", "supports_effort": True},
+        ],
+    }))
+    received = {}
+
+    def fake_execute_local(model, objective, **k):
+        received.update(k)
+        return {"ok": True, "output": "pong", "latency_ms": 1}
+
+    monkeypatch.setattr(estate_router, "execute_local", fake_execute_local)
+    estate_router.run_task({
+        "task_class": "coding", "objective": "say pong", "complexity": "hard",
+        "requirements": {"capabilities": ["local-fast"]},
+    })
+    assert received["effort"] == "high"
 
 
 # --- run_task / execute_local: closes "resolves routes but does not execute them" ---

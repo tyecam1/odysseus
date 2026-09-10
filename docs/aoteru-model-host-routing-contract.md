@@ -197,6 +197,13 @@ task:
     local_first: true
     paid_allowed: true
     cross_provider_required: false
+    effort:  # optional override: low | medium | high | highest — defaults
+             # from `complexity` (trivial->low, routine->medium, hard->high,
+             # frontier->highest) when absent. Applied to a provider only
+             # when its resolved model has a configurable reasoning-effort
+             # control; never widens model/verification/write authority or
+             # task eligibility. See src.estate_router.resolve_route's
+             # `route.effort`/`route.effort_supported`.
 
   budget:
     max_worker_calls:

@@ -1762,7 +1762,7 @@ def normalize_model_id(
 def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LLMConfig.DEFAULT_TEMPERATURE,
              max_tokens: int = LLMConfig.DEFAULT_MAX_TOKENS, headers: Optional[Dict] = None,
              timeout: int = LLMConfig.DEFAULT_TIMEOUT, prompt_type: Optional[str] = None,
-             num_ctx: Optional[int] = None) -> str:
+             num_ctx: Optional[int] = None, effort: Optional[str] = None) -> str:
     """Synchronous LLM call with optional prompt type enhancement.
 
     ``num_ctx`` (Ollama only): explicit context-window override. When
@@ -1775,7 +1775,16 @@ def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LL
     262144, so an un-bounded 8K-prompt call still allocates a 262144-token
     KV cache, which is real, measured LM1 evidence (see
     docs/aoteru-local-model-benchmark-routing.agent-task.md), not a
-    hypothetical."""
+    hypothetical.
+
+    ``effort`` (Mistral thinking-capable models only, the sole provider in
+    this sync path with a configurable reasoning-effort control — see
+    ``_MISTRAL_REASONING_EFFORT``): one of "low"/"medium"/"high"/"highest"
+    (routing's own vocabulary, src.estate_router's complexity->effort
+    default), mapped to Mistral's "low"/"medium"/"high" ("highest" ->
+    "high", Mistral has no stronger rung). Omitted or any other provider:
+    behaviour is unchanged — falls back to the existing
+    ``_MISTRAL_REASONING_EFFORT`` env-configured default."""
     h = _provider_headers(_detect_provider(url))
     # Tolerate headers that arrive as a JSON string (some sessions stored them
     # double-encoded) — otherwise h.update() throws "dictionary update sequence
@@ -1837,7 +1846,8 @@ def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LL
             payload[tok_key] = max_tokens
         _apply_local_generation_stability(payload, target_url, model)
         if provider == "mistral" and _supports_thinking(model):
-            payload["reasoning_effort"] = _MISTRAL_REASONING_EFFORT
+            _mistral_effort = {"low": "low", "medium": "medium", "high": "high", "highest": "high"}.get(effort)
+            payload["reasoning_effort"] = _mistral_effort or _MISTRAL_REASONING_EFFORT
     try:
         note_model_activity(target_url, model)
         r = httpx_post_kimi_aware(target_url, h, json=payload, timeout=timeout)
