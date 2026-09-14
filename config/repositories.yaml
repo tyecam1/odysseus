@@ -9,11 +9,16 @@
 # `authority` names the repo that owns the concepts documented in
 # docs/aoteru-estate-execution-contract.md's Authority section. Odysseus
 # never becomes the canonical owner of another repo's domain content by
-# being the one that indexes/discovers it.
+# being the one that indexes/discovers/routes/executes it.
+#
+# Repository identity truths:
+# - obsidian-phd = PhD work and research knowledgebase.
+# - misumi = flat/personal/household knowledgebase and policy surface.
+# - odysseus = domain-neutral backend/runtime; not a durable domain knowledgebase.
 
 repos:
   - id: odysseus
-    description: Aoteru target — canonical estate runtime (this repo)
+    description: Aoteru/Odysseus backend and canonical estate runtime; not a durable domain knowledgebase
     authority: odysseus
     remote: https://github.com/tyecam1/odysseus.git
     root_var: AI_ROOT
@@ -34,7 +39,7 @@ repos:
     role: capability-source
 
   - id: misumi
-    description: Aoteru persona and household policy
+    description: Flat/personal/household knowledgebase and policy surface; includes Aoteru persona and personal-memory policy
     authority: misumi
     remote: https://github.com/tyecam1/misumi.git
     default_branch: main
@@ -49,10 +54,11 @@ repos:
       controlled lab-side location for governance/validation, per
       docs/aoteru-final-convergence-activation.agent-task.md item B) —
       this does NOT redefine misumi's canonical location, which stays a
-      home-host decision.
+      home-host decision. Misumi remains the durable flat/household
+      knowledge authority regardless of where Odysseus executes work for it.
 
   - id: obsidian-phd
-    description: PhD knowledge, research workflow, evidence/trust/write gates
+    description: PhD work and research knowledgebase; research workflow, evidence/trust/write gates, projects and manuscripts
     authority: obsidian-phd
     remote: https://github.com/tyecam1/obsidian-PhD.git
     default_branch: main
@@ -67,7 +73,8 @@ repos:
       lab-side location for governance/validation, per docs/aoteru-
       final-convergence-activation.agent-task.md item B) — this does NOT
       redefine obsidian-PhD's canonical location, which stays a
-      home-host decision.
+      home-host decision. obsidian-PhD remains the durable PhD research
+      authority regardless of where Odysseus executes work for it.
 
   - id: s2-e1-ros2-measurement-spine
     description: >-
