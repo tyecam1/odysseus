@@ -932,6 +932,7 @@ class RoutingDecision(TimestampMixin, Base):
     nondelegation_reason  = Column(String, nullable=True)
     recommended_route     = Column(String, nullable=True)
     actual_route          = Column(String, nullable=True)
+    executed_host_id      = Column(String, nullable=True, index=True)  # attested host that actually ran the work; null if nothing executed
     status                = Column(String, nullable=False)  # complete | blocked | failed | needs_escalation
 
     __table_args__ = (
@@ -2298,7 +2299,7 @@ def _migrate_add_routing_delegation_columns():
         columns = [row[1] for row in conn.execute("PRAGMA table_info(routing_decisions)").fetchall()]
         if not columns:
             return
-        for name in ("nondelegation_reason", "recommended_route", "actual_route"):
+        for name in ("nondelegation_reason", "recommended_route", "actual_route", "executed_host_id"):
             if name not in columns:
                 conn.execute(f"ALTER TABLE routing_decisions ADD COLUMN {name} TEXT")
         conn.commit()

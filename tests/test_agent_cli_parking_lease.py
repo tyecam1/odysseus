@@ -153,7 +153,14 @@ def test_eligible_hosts_ignores_stale_conflicting_lease(monkeypatch, tmp_path):
     config_dir.mkdir()
     (config_dir / "estate.yaml").write_text(yaml.safe_dump({
         "hosts": [
-            {"id": "test-lab", "hostname": "THIS-HOST", "role": "lab", "tailscale": True},
+            {
+                "id": "test-lab",
+                "hostname": "THIS-HOST",
+                "role": "lab",
+                "tailscale": True,
+                "identity_verified": True,
+                "worker": {"enabled": True, "transport": "local", "qualified_executors": ["local"]},
+            },
         ],
     }))
     (config_dir / "models.yaml").write_text(yaml.safe_dump({"capabilities": []}))

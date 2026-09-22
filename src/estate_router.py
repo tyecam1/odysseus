@@ -615,7 +615,8 @@ def _update_decision_outcome(decision_id: str, *, status: str, deterministic_gat
                              latency_ms: Optional[int] = None, escalation_reason: Optional[str] = None,
                              executor: Optional[str] = None, escalated: Optional[bool] = None,
                              actual_route: Optional[str] = None,
-                             verification_outcome: Optional[str] = None) -> None:
+                             verification_outcome: Optional[str] = None,
+                             executed_host_id: Optional[str] = None) -> None:
     """Execution happens after `resolve_route()` already wrote its
     decision row — update that same row with the real outcome rather than
     writing a second telemetry row for one routed task (`RoutingDecision`
@@ -644,6 +645,8 @@ def _update_decision_outcome(decision_id: str, *, status: str, deterministic_gat
                     row.actual_route = actual_route
                 if verification_outcome is not None:
                     row.verification_outcome = verification_outcome
+                if executed_host_id is not None:
+                    row.executed_host_id = executed_host_id
     except Exception:
         import logging
         logging.getLogger(__name__).exception("routing_decisions outcome update failed; execution result is unaffected")
@@ -1419,6 +1422,70 @@ def _resolve_paid_provider(alias: Optional[str]) -> dict:
     }
 
 
+def _dispatch_read_only(host_id: str, executor: str, task: dict, *, concrete_model: Optional[str] = None,
+                        timeout: Optional[float] = None) -> dict:
+    """Dispatch one read-only execution (`local` inference or advisory
+    `codex`) to the worker on `host_id`, replacing the historical
+    in-process `execute_local`/`execute_codex` calls from `run_task`
+    (Stage 3, D1/D2: host selection was metadata because nothing between
+    selection and execution actually read `route.host`). Every call —
+    even one routed to this same host — crosses `estate_worker_client`, so
+    `placement.attested` in the result is always backed by a real
+    attestation, not an assumption that "local" means "here".
+
+    Never raises: a transport, protocol or attestation failure comes back
+    as `{"ok": False, "error": ..., "error_code": ...}` with `placement`
+    still populated (`attested: False`), matching every other truthful-
+    failure shape in this module. There is no retry on another host and
+    no in-process fallback — the whole point of this seam is that a
+    worker failure is reported as a worker failure, not silently absorbed
+    by executing here instead."""
+    from src.estate_worker_client import WorkerTransportError, call_worker
+
+    objective = task.get("objective")
+    placement = {"routed_host": host_id, "executed_host": None, "attested": False, "transport": None}
+    try:
+        host_cfg = _load_yaml("estate")
+        host_entry = next((h for h in host_cfg.get("hosts", []) if h.get("id") == host_id), None)
+        placement["transport"] = (host_entry.get("worker") or {}).get("transport") if host_entry else None
+    except RoutingConfigError:
+        pass
+
+    if executor == "local":
+        payload = {
+            "kind": "local-inference",
+            "model": concrete_model,
+            "objective": objective,
+            "timeout_s": float(timeout or 60.0),
+        }
+    elif executor == "codex":
+        payload = {
+            "kind": "codex-readonly",
+            "objective": objective if isinstance(objective, str) else str(objective),
+            "timeout_s": float(timeout or 180.0),
+        }
+        repo_id = task.get("repo")
+        if repo_id:
+            payload["repo_id"] = repo_id
+    else:
+        return {
+            "ok": False, "error": f"_dispatch_read_only does not support executor {executor!r}",
+            "error_code": "bad_request", "placement": placement,
+        }
+
+    try:
+        response = call_worker(host_id, "execute", payload, deadline_s=payload["timeout_s"] + 15)
+    except WorkerTransportError as exc:
+        return {"ok": False, "error": str(exc), "error_code": exc.code, "placement": placement}
+
+    result = dict(response["result"])
+    attested_host = response["attestation"]["host_id"]
+    placement["executed_host"] = attested_host
+    placement["attested"] = attested_host == host_id
+    result["placement"] = placement
+    return result
+
+
 def run_task(task: dict) -> dict:
     """Closes the execution gap: `resolve_route()` alone only answers
     WHERE+WHAT, it never calls a model. `run_task()` routes first (same
@@ -1487,18 +1554,6 @@ def run_task(task: dict) -> dict:
                 )}
             objective = task.get("objective")
             paid_objective = objective if isinstance(objective, str) else str(objective)
-            # Ground the paid worker in the task's actual repo if one was
-            # named (docs/aoteru-final-convergence-activation.agent-
-            # task.md item 4: "a task that cannot read its repo is a
-            # failed qualification, even if the CLI process exits zero").
-            # Without this, execute_codex() defaults to an empty scratch
-            # dir regardless of what repo the task is about — confirmed
-            # live: a real repo_reconnaissance task previously reported
-            # 'No src/ directory found' because it was never pointed at
-            # the repo at all. resolve_repo_path() returns None (no cwd
-            # override) for an unknown/unresolved repo id rather than
-            # guessing a path.
-            repo_cwd = resolve_repo_path(task.get("repo")) if task.get("repo") else None
             executor_name = provider_name
             if implementation_mode:
                 executor_name = f"{provider_name}-write"
@@ -1561,7 +1616,13 @@ def run_task(task: dict) -> dict:
                         "escalation_reason": None, "reason": reason,
                     }
             else:
-                result = provider_fn(paid_objective, cwd=repo_cwd)
+                # Dispatched to the worker on route['route']['host'] rather
+                # than called in-process (Stage 3, D2): the worker resolves
+                # `task['repo']` to a real path on *its own* host (see
+                # `_verb_execute` -> `resolve_repo_path`), which is what
+                # actually grounds a repo-aware task now that host
+                # selection can name a host other than this backend.
+                result = _dispatch_read_only(route["route"]["host"], "codex", task, timeout=180.0)
             gate = "pass" if result.get("ok") and (result.get("output") or "").strip() else "fail"
             if not implementation_mode:
                 _update_decision_outcome(
@@ -1574,6 +1635,7 @@ def run_task(task: dict) -> dict:
                     escalated=True,
                     actual_route=executor_name,
                     verification_outcome=gate,
+                    executed_host_id=(result.get("placement") or {}).get("executed_host"),
                 )
             # implementation_mode, terminal within execute_codex_write_durable's
             # wait_timeout: the decision outcome was already recorded by
@@ -1596,6 +1658,7 @@ def run_task(task: dict) -> dict:
                 "execution_id": result.get("execution_id"),
                 "deterministic_gate": gate, "verification_outcome": gate,
                 "escalation_reason": "insufficient_capability" if gate == "pass" else "worker_failed",
+                "placement": result.get("placement"),
             }
         return {**route, "executed": False}
 
@@ -1604,7 +1667,7 @@ def run_task(task: dict) -> dict:
     if not objective:
         return {**route, "executed": False, "execution_error": "no objective provided to execute"}
 
-    result = execute_local(concrete_model, objective)
+    result = _dispatch_read_only(route["route"]["host"], "local", task, concrete_model=concrete_model, timeout=60.0)
     gate = "pass" if result.get("ok") and (result.get("output") or "").strip() else "fail"
     _update_decision_outcome(
         route["decision_id"],
@@ -1614,9 +1677,11 @@ def run_task(task: dict) -> dict:
         escalation_reason=None if gate == "pass" else "worker_failed",
         actual_route="local",
         verification_outcome=gate,
+        executed_host_id=(result.get("placement") or {}).get("executed_host"),
     )
     return {
         **route, "executed": True, "execution": result,
         "deterministic_gate": gate, "verification_outcome": gate,
         "escalation_reason": None if gate == "pass" else "worker_failed",
+        "placement": result.get("placement"),
     }

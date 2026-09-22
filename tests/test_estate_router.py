@@ -371,10 +371,18 @@ def test_resolve_route_unbound_alias_needs_escalation_not_silent_failure(fixture
 
 # --- run_task / execute_local: closes "resolves routes but does not execute them" ---
 
+def _fake_placement(host_id: str) -> dict:
+    return {"routed_host": host_id, "executed_host": host_id, "attested": True, "transport": "local"}
+
+
 def test_run_task_executes_local_route_and_persists_outcome(fixture_config, monkeypatch):
     monkeypatch.setattr(estate_router, "_record_decision", lambda *a, **k: "fake-decision-id")
     monkeypatch.setattr(estate_router, "_ollama_model_live", lambda model, timeout=3.0: (True, "live"))
-    monkeypatch.setattr(estate_router, "execute_local", lambda model, objective, **k: {"ok": True, "output": "pong", "latency_ms": 42})
+
+    def fake_dispatch(host_id, executor, task, **k):
+        assert executor == "local"
+        return {"ok": True, "output": "pong", "latency_ms": 42, "placement": _fake_placement(host_id)}
+    monkeypatch.setattr(estate_router, "_dispatch_read_only", fake_dispatch)
     recorded = {}
     monkeypatch.setattr(estate_router, "_update_decision_outcome", lambda decision_id, **k: recorded.update(k))
 
@@ -387,22 +395,24 @@ def test_run_task_executes_local_route_and_persists_outcome(fixture_config, monk
     assert result["deterministic_gate"] == "pass"
     assert recorded["status"] == "complete"
     assert recorded["deterministic_gate"] == "pass"
+    assert recorded["executed_host_id"] == "test-lab"
 
 
 def test_run_task_passes_multimodal_objective_through_unmodified(fixture_config, monkeypatch):
     """P12.2: run_task() must carry OpenAI-style multimodal content
-    (text + image_url blocks) through to execute_local() unchanged, not
-    stringify or drop it — closing the gap LM4 found where vision tasks
-    had to bypass run_task() and call resolve_route()+llm_call directly."""
+    (text + image_url blocks) through to the worker dispatch unchanged,
+    not stringify or drop it — closing the gap LM4 found where vision
+    tasks had to bypass run_task() and call resolve_route()+llm_call
+    directly."""
     monkeypatch.setattr(estate_router, "_record_decision", lambda *a, **k: "fake-decision-id")
     monkeypatch.setattr(estate_router, "_ollama_model_live", lambda model, timeout=3.0: (True, "live"))
     received = {}
 
-    def fake_execute_local(model, objective, **k):
-        received["objective"] = objective
-        return {"ok": True, "output": "7421", "latency_ms": 10}
+    def fake_dispatch(host_id, executor, task, **k):
+        received["objective"] = task["objective"]
+        return {"ok": True, "output": "7421", "latency_ms": 10, "placement": _fake_placement(host_id)}
 
-    monkeypatch.setattr(estate_router, "execute_local", fake_execute_local)
+    monkeypatch.setattr(estate_router, "_dispatch_read_only", fake_dispatch)
 
     multimodal_objective = [
         {"type": "text", "text": "What number is shown?"},
@@ -507,8 +517,11 @@ def test_run_task_escalates_to_codex_when_opted_in(fixture_config, monkeypatch):
     paid worker and updates the same RoutingDecision row (executor=codex,
     escalated=True) rather than writing a second telemetry row."""
     monkeypatch.setattr(estate_router, "_record_decision", lambda *a, **k: "fake-decision-id")
-    monkeypatch.setattr(estate_router, "execute_codex",
-                         lambda objective, **k: {"ok": True, "provider": "codex", "output": "done", "latency_ms": 99})
+
+    def fake_dispatch(host_id, executor, task, **k):
+        assert executor == "codex"
+        return {"ok": True, "provider": "codex", "output": "done", "latency_ms": 99, "placement": _fake_placement(host_id)}
+    monkeypatch.setattr(estate_router, "_dispatch_read_only", fake_dispatch)
     recorded = {}
     monkeypatch.setattr(estate_router, "_update_decision_outcome", lambda decision_id, **k: recorded.update(k))
 
@@ -523,6 +536,7 @@ def test_run_task_escalates_to_codex_when_opted_in(fixture_config, monkeypatch):
     assert result["execution"]["output"] == "done"
     assert recorded["executor"] == "codex"
     assert recorded["escalated"] is True
+    assert recorded["executed_host_id"] == "test-lab"
 
 
 def test_resolve_paid_provider_uses_alias_specific_config(fixture_config, monkeypatch):
@@ -720,7 +734,12 @@ def test_execute_local_uses_bounded_context_not_full_window(fixture_config, monk
 
 def test_run_task_end_to_end_uses_bounded_context(fixture_config, monkeypatch):
     """Same repair, exercised through the full run_task -> execute_local ->
-    llm_call production path, not just execute_local in isolation."""
+    llm_call production path, not just execute_local in isolation.
+    `_dispatch_read_only` is patched to call `execute_local` directly
+    in-process (the real worker/transport seam is exercised separately
+    by test_estate_worker_client.py's LocalTransport integration test) —
+    this test's job is only to prove the bounded-context selection
+    still runs on that path."""
     monkeypatch.setattr(estate_router, "_record_decision", lambda *a, **k: "fake-decision-id")
     monkeypatch.setattr(estate_router, "_ollama_model_live", lambda model, timeout=3.0: (True, "live"))
     monkeypatch.setattr(estate_router, "_update_decision_outcome", lambda *a, **k: None)
@@ -735,6 +754,12 @@ def test_run_task_end_to_end_uses_bounded_context(fixture_config, monkeypatch):
         return "pong"
     import src.llm_core as llm_core
     monkeypatch.setattr(llm_core, "llm_call", fake_llm_call)
+
+    def fake_dispatch(host_id, executor, task, *, concrete_model=None, timeout=None):
+        result = estate_router.execute_local(concrete_model, task["objective"], timeout=timeout or 60.0)
+        result["placement"] = _fake_placement(host_id)
+        return result
+    monkeypatch.setattr(estate_router, "_dispatch_read_only", fake_dispatch)
 
     result = estate_router.run_task({
         "task_class": "coding", "objective": "say pong",
@@ -1077,63 +1102,42 @@ class TestResolveRepoPath:
         assert estate_router.resolve_repo_path("test-repo") is None
 
 
-def test_run_task_paid_escalation_grounds_codex_in_the_named_repo(fixture_config, monkeypatch, tmp_path):
-    """The exact live-confirmed regression: without cwd grounding, codex
+def test_dispatch_read_only_grounds_codex_in_the_named_repo(fixture_config, monkeypatch):
+    """The exact live-confirmed regression: without repo grounding, codex
     escalation always ran against an empty scratch dir regardless of
-    task['repo']."""
-    (fixture_config / "models.yaml").write_text(yaml.safe_dump({
-        "paid_providers": [{"name": "codex", "concrete_model_label": "codex-cli"}],
-        "default_paid_provider": "codex",
-        "capabilities": [{"alias": "code-strong", "binding": None, "paid_provider": "codex"}],
-    }))
-    (fixture_config / "repositories.yaml").write_text(yaml.safe_dump({
-        "repos": [{"id": "test-repo", "path": "${TEST_ROOT}/test-repo"}],
-    }))
-    real_path = tmp_path / "resolved" / "test-repo"
-    real_path.mkdir(parents=True)
-    home = tmp_path / "fakehome"
-    (home / ".aoteru").mkdir(parents=True)
-    (home / ".aoteru" / "config.local.json").write_text(
-        __import__("json").dumps({"TEST_ROOT": str(tmp_path / "resolved")})
-    )
-    monkeypatch.setattr(estate_router.Path, "home", lambda: home)
-
-    monkeypatch.setattr(estate_router, "_record_decision", lambda *a, **k: "fake-decision-id")
-    monkeypatch.setattr(estate_router, "_update_decision_outcome", lambda *a, **k: None)
+    task['repo']. Grounding now happens on the worker — it resolves
+    `repo_id` to a real path on its own host (Stage 3, D3) — so this
+    proves only that `_dispatch_read_only` forwards `task['repo']` as
+    `repo_id` in the worker payload; the path resolution itself is
+    `resolve_repo_path`'s own tests above."""
     captured = {}
 
-    def fake_execute_codex(objective, **kwargs):
-        captured.update(kwargs)
-        return {"ok": True, "provider": "codex", "output": "done", "latency_ms": 1}
-    monkeypatch.setattr(estate_router, "execute_codex", fake_execute_codex)
+    def fake_call_worker(host_id, verb, payload, *, deadline_s):
+        captured.update(payload)
+        return {"result": {"ok": True, "output": "done"}, "attestation": {"host_id": host_id}}
 
-    estate_router.run_task({
-        "task_class": "coding", "objective": "fix the bug", "repo": "test-repo",
-        "requirements": {"capabilities": ["code-strong"]},
-        "routing": {"allow_paid_escalation": True},
-    })
-    assert captured["cwd"] == str(real_path)
+    import src.estate_worker_client as estate_worker_client
+    monkeypatch.setattr(estate_worker_client, "call_worker", fake_call_worker)
+
+    estate_router._dispatch_read_only("test-lab", "codex", {"objective": "fix the bug", "repo": "test-repo"})
+    assert captured["repo_id"] == "test-repo"
 
 
-def test_run_task_paid_escalation_without_repo_field_passes_no_cwd_override(fixture_config, monkeypatch):
-    """No task['repo'] named at all — must not guess a cwd; execute_codex
+def test_dispatch_read_only_without_repo_field_passes_no_repo_id(fixture_config, monkeypatch):
+    """No task['repo'] named at all — must not guess a repo_id; the worker
     keeps its own default (empty scratch dir) rather than this function
-    inventing a path."""
-    monkeypatch.setattr(estate_router, "_record_decision", lambda *a, **k: "fake-decision-id")
-    monkeypatch.setattr(estate_router, "_update_decision_outcome", lambda *a, **k: None)
+    inventing one."""
     captured = {}
 
-    def fake_execute_codex(objective, **kwargs):
-        captured.update(kwargs)
-        return {"ok": True, "provider": "codex", "output": "done", "latency_ms": 1}
-    monkeypatch.setattr(estate_router, "execute_codex", fake_execute_codex)
+    def fake_call_worker(host_id, verb, payload, *, deadline_s):
+        captured.update(payload)
+        return {"result": {"ok": True, "output": "done"}, "attestation": {"host_id": host_id}}
 
-    estate_router.run_task({
-        "task_class": "coding", "objective": "fix the bug",
-        "requirements": {"capabilities": ["code-strong"]},
-        "routing": {"allow_paid_escalation": True},
-    })
-    assert captured["cwd"] is None
+    import src.estate_worker_client as estate_worker_client
+    monkeypatch.setattr(estate_worker_client, "call_worker", fake_call_worker)
+
+    estate_router._dispatch_read_only("test-lab", "codex", {"objective": "fix the bug"})
+    assert "repo_id" not in captured
 
 
 def test_scenario_a_implementation_mode_dispatches_codex_write_under_active_lease(
