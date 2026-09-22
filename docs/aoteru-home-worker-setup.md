@@ -58,8 +58,25 @@ Authorize its **public** key on home with a forced command and every
 restriction option, so the key can only ever run the worker entry point:
 
 ```
-command="<python> -m src.estate_worker --root E:\aoteru\odysseus-aoteru",no-pty,no-port-forwarding,no-agent-forwarding,no-X11-forwarding ssh-ed25519 AAAA... aoteru-worker-lab
+command="cmd.exe /c cd /d E:\aoteru\odysseus-aoteru && venv\Scripts\python.exe -m src.estate_worker --root E:\aoteru\odysseus-aoteru",no-pty,no-port-forwarding,no-agent-forwarding,no-X11-forwarding ssh-ed25519 AAAA... aoteru-worker-lab
 ```
+
+The explicit `cd /d E:\aoteru\odysseus-aoteru &&` is required, not
+cosmetic: `python -m src.estate_worker` has to *import* `src.estate_worker`
+before argparse ever runs, so `--root` (which does the rest of the work —
+chdir, sys.path, `_CONFIG_DIR`, see `main()` in `src/estate_worker.py`) is
+too late to fix its own import. Python's `-m` resolves that import
+against whatever is on `sys.path`, which for `-m` means the process's
+*current working directory* — and an OpenSSH forced command runs with
+whatever starting directory that session happens to have, not necessarily
+this checkout. Without the `cd` first, `-m src.estate_worker` fails with
+`No module named src.estate_worker` before the worker ever gets a chance
+to run, regardless of what `--root` says. Using
+`E:\aoteru\odysseus-aoteru\venv\Scripts\python.exe` (the dedicated
+checkout's own venv interpreter, not whatever `python` resolves to on
+`PATH` for that session) is required for the same reason `--root` names
+this checkout explicitly — the forced command must be self-contained and
+not depend on ambient session state.
 
 If the home account is an administrator, this goes in
 `C:\ProgramData\ssh\administrators_authorized_keys` (OpenSSH on Windows
@@ -110,15 +127,29 @@ sshd job object can silently refuse `CREATE_BREAKAWAY_FROM_JOB`, which
 would mean a "detached" spawn actually dies the moment the SSH session
 that started it closes.
 
-On home, set `AOTERU_WORKER_SELFTEST=1` in the environment of the SSH
-session you'll use for this check (not persisted, not set anywhere a
-routed request would see it). From lab:
+On home, by hand (RDP, an existing interactive session — anything other
+than a routed request), create the sentinel file that gates this check:
+
+```
+mkdir %USERPROFILE%\.aoteru 2>nul
+type nul > %USERPROFILE%\.aoteru\worker_selftest_enabled
+```
+
+This is a file, not an environment variable, because every `call_worker()`
+call from lab — including the `start` call in step 1 below — opens its
+own fresh forced-command SSH session (`SshTransport`, `src/
+estate_worker_client.py`), which never inherits environment set in some
+other interactive session. A file under `~/.aoteru/` is visible to all of
+them: the `start` call's session, and the detached spooled process it
+launches. `src/estate_worker.py:_selftest_enabled()` reads this file; it
+gates only the bounded `noop-sleep` kind and has no effect on
+`codex-write`, which has its own, unrelated authority checks. From lab:
 
 1. `start` a no-op spooled runner: `call_worker('desktop-in7o23d', 'start', {"execution_id": "<uuid>", "kind": "noop-sleep", "timeout_s": 60}, deadline_s=20)`.
-2. Close that SSH session (the one with `AOTERU_WORKER_SELFTEST=1` set —
-   a fresh `call_worker` call from lab opens its own session and does not
-   need the flag).
-3. Wait 30 seconds, then `call_worker('desktop-in7o23d', 'status', {"execution_id": "<uuid>"}, deadline_s=20)`.
+2. Wait 30 seconds, then `call_worker('desktop-in7o23d', 'status', {"execution_id": "<uuid>"}, deadline_s=20)`.
+3. On home, delete the sentinel file
+   (`del %USERPROFILE%\.aoteru\worker_selftest_enabled`) so `noop-sleep`
+   goes back to refusing outside an explicit, operator-controlled check.
 
 **Stop gate:** if `process_alive` is not `true` at that point, the runner
 did not survive the session close. Record this in

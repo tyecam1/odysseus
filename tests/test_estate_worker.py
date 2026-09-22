@@ -152,6 +152,45 @@ def test_start_is_idempotent_and_spawns_once(fixture_config, monkeypatch):
     assert len(spawn_calls) == 1
 
 
+def test_noop_sleep_start_refused_without_selftest_sentinel(fixture_config, monkeypatch):
+    """Stage 4 review finding: the self-test gate must be disabled by
+    default. `_selftest_enabled()` reads a home-local sentinel file under
+    `~/.aoteru/`, not an environment variable -- `fixture_config` doesn't
+    create that file, so this must refuse the same way whether or not
+    `AOTERU_WORKER_SELFTEST` happens to be set in the test process's own
+    environment (it must have no effect at all any more)."""
+    monkeypatch.setenv("AOTERU_WORKER_SELFTEST", "1")
+    response = _call("start", {"execution_id": "selftest-1", "kind": "noop-sleep", "timeout_s": 1})
+    assert response["ok"] is False
+    assert response["error"]["code"] == "bad_request"
+    assert "self-test mode" in response["error"]["message"]
+
+
+def test_noop_sleep_start_accepted_when_sentinel_file_present(fixture_config, monkeypatch):
+    monkeypatch.setattr(estate_worker, "_WORKER_SELFTEST_SENTINEL_PATH", fixture_config["root"] / "selftest-enabled")
+    estate_worker._WORKER_SELFTEST_SENTINEL_PATH.touch()
+
+    spawn_calls = []
+
+    def fake_spawn(argv, cwd, log_path):
+        spawn_calls.append((argv, cwd, log_path))
+        return {"pid": 123, "create_time": 456}
+    monkeypatch.setattr(estate_worker.estate_worker_procs, "spawn_detached", fake_spawn)
+
+    result = _call("start", {"execution_id": "selftest-2", "kind": "noop-sleep", "timeout_s": 1})["result"]
+    assert result["accepted"] is True
+    assert len(spawn_calls) == 1
+
+
+def test_selftest_enabled_reads_the_sentinel_file_only(tmp_path, monkeypatch):
+    monkeypatch.setattr(estate_worker, "_WORKER_SELFTEST_SENTINEL_PATH", tmp_path / "worker_selftest_enabled")
+    assert estate_worker._selftest_enabled() is False
+    estate_worker._WORKER_SELFTEST_SENTINEL_PATH.touch()
+    assert estate_worker._selftest_enabled() is True
+    estate_worker._WORKER_SELFTEST_SENTINEL_PATH.unlink()
+    assert estate_worker._selftest_enabled() is False
+
+
 def _write_spool(execution_id, state, result=None):
     spool = estate_worker._SPOOL_ROOT / execution_id
     spool.mkdir(parents=True)
@@ -328,3 +367,30 @@ def test_cli_round_trip_returns_zero_for_handled_refusal(fixture_config):
     assert response["ok"] is False
     assert response["error"]["code"] == "identity_unregistered"
     assert validate_response(response, request) == (True, None)
+
+
+def test_cli_from_an_arbitrary_starting_directory_cannot_import_the_module(fixture_config, tmp_path):
+    """Stage 4 review finding: `python -m src.estate_worker --root
+    <checkout>` cannot import `src.estate_worker` at all unless the
+    checkout root is already on `sys.path` (via cwd or PYTHONPATH) --
+    `--root` runs too late, inside `main()`, to fix its own import. This
+    is why the forced SSH command documented in
+    docs/aoteru-home-worker-setup.md now explicitly `cd`s into the
+    checkout before invoking `-m`, rather than assuming the SSH session
+    happens to start there (the previous, broken assumption)."""
+    project_root = str(Path(__file__).parents[1])
+    elsewhere = tmp_path / "not-the-checkout"
+    elsewhere.mkdir()
+    environment = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+
+    completed = subprocess.run(
+        [sys.executable, "-m", "src.estate_worker", "--root", project_root],
+        input="{}",
+        text=True,
+        capture_output=True,
+        cwd=str(elsewhere),
+        env=environment,
+        timeout=15,
+    )
+    assert completed.returncode != 0
+    assert "No module named" in completed.stderr

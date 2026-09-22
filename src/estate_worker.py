@@ -31,6 +31,21 @@ _SPOOL_TTL_SECONDS = 7 * 24 * 60 * 60
 _TERMINAL_STATES = frozenset({"succeeded", "failed", "timed_out"})
 _EXECUTION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _WORKER_CAPABILITIES_PATH = Path.home() / ".aoteru" / "worker_capabilities.json"
+_WORKER_SELFTEST_SENTINEL_PATH = Path.home() / ".aoteru" / "worker_selftest_enabled"
+
+
+def _selftest_enabled() -> bool:
+    """Whether the operator has manually enabled the bounded `noop-sleep`
+    self-test gate (Stage 4 review finding). A sentinel file, not an
+    environment variable: `SshTransport` opens a fresh forced-command SSH
+    session for every `call_worker()` call, so an env var set in one
+    interactive session (the runbook's old mechanism) is never visible to
+    the `start` call's own session, let alone the detached spooled
+    process that call spawns. A file under `~/.aoteru/` is visible to
+    every one of those, is created and removed by hand by the operator
+    (never by any routing code path), and only ever gates `noop-sleep` —
+    never `codex-write`, which has its own, unrelated authority checks."""
+    return _WORKER_SELFTEST_SENTINEL_PATH.is_file()
 
 
 class WorkerError(RuntimeError):
@@ -425,7 +440,7 @@ def _verb_start(payload: dict) -> dict:
         return _existing_start_result(spool)
     kind = payload.get("kind")
     if kind == "noop-sleep":
-        if os.getenv("AOTERU_WORKER_SELFTEST") != "1":
+        if not _selftest_enabled():
             raise WorkerError("bad_request", "noop-sleep is available only in worker self-test mode")
         _timeout(payload, 1.0)
     elif kind == "codex-write":
@@ -597,7 +612,7 @@ def _run_spooled(execution_id: str) -> int:
 
     kind = request.get("kind")
     try:
-        if kind == "noop-sleep" and os.getenv("AOTERU_WORKER_SELFTEST") == "1":
+        if kind == "noop-sleep" and _selftest_enabled():
             on_started(os.getpid())
             time.sleep(_timeout(request, 1.0))
             result = {"ok": True, "output": "noop-sleep complete", "provider": "selftest"}
