@@ -218,8 +218,10 @@ def call_worker(host_id: str, verb: str, payload: dict, *, deadline_s: float) ->
 
 _HEALTH_TTL_S = 30.0
 _INVENTORY_TTL_S = 60.0
+_REPO_PROBE_TTL_S = 30.0
 _health_cache: dict[str, tuple[float, dict]] = {}
 _inventory_cache: dict[tuple, tuple[float, dict]] = {}
+_repo_probe_cache: dict[tuple, tuple[float, dict]] = {}
 
 
 def clear_caches() -> None:
@@ -228,6 +230,7 @@ def clear_caches() -> None:
     §D: 'Nothing about health or inventory is persisted in a new table')."""
     _health_cache.clear()
     _inventory_cache.clear()
+    _repo_probe_cache.clear()
 
 
 def worker_health(host_id: str, *, deadline_s: float = 20.0) -> dict:
@@ -252,4 +255,21 @@ def worker_inventory(host_id: str, models_of_interest: Optional[list[str]] = Non
     )
     result = response["result"]
     _inventory_cache[key] = (now, result)
+    return result
+
+
+def worker_repo_probe(host_id: str, repo_id: str, *, deadline_s: float = 15.0) -> dict:
+    """Worker-attested truth about whether `repo_id` resolves on
+    `host_id` — used by `estate_router.eligible_hosts()` to add repo
+    locality to host selection (Stage 5 review finding: a host was never
+    excluded merely for lacking the repo). Never derived from the
+    control-plane's own checkout or from config alone."""
+    key = (host_id, repo_id)
+    now = time.monotonic()
+    cached = _repo_probe_cache.get(key)
+    if cached is not None and now - cached[0] < _REPO_PROBE_TTL_S:
+        return cached[1]
+    response = call_worker(host_id, "repo.probe", {"repo_id": repo_id}, deadline_s=deadline_s)
+    result = response["result"]
+    _repo_probe_cache[key] = (now, result)
     return result

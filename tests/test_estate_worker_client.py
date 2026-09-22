@@ -309,6 +309,36 @@ def test_worker_inventory_cache_is_keyed_by_models_of_interest(fixture_config, m
     assert calls == [["model-a"], ["model-b"]]
 
 
+def test_worker_repo_probe_caches_within_ttl_and_clear_caches_busts_it(fixture_config, monkeypatch):
+    """Stage 5 review finding: `eligible_hosts()` needs worker-attested
+    repo-locality evidence -- `worker_repo_probe` is the client-side seam
+    for it, same TTL-cache shape as `worker_health`/`worker_inventory`."""
+    calls = []
+
+    def fake_call_worker(host_id, verb, payload, *, deadline_s):
+        calls.append((host_id, verb, payload["repo_id"]))
+        return {"result": {"resolved": True, "path": "/repo", "head_sha": "abc", "branch": "main", "clean": True}}
+
+    monkeypatch.setattr(client, "call_worker", fake_call_worker)
+
+    first = client.worker_repo_probe("test-lab", "test-repo")
+    second = client.worker_repo_probe("test-lab", "test-repo")
+    assert first == second == {"resolved": True, "path": "/repo", "head_sha": "abc", "branch": "main", "clean": True}
+    assert calls == [("test-lab", "repo.probe", "test-repo")]
+
+    other_repo = client.worker_repo_probe("test-lab", "other-repo")
+    assert other_repo["resolved"] is True
+    assert calls == [("test-lab", "repo.probe", "test-repo"), ("test-lab", "repo.probe", "other-repo")]
+
+    client.clear_caches()
+    client.worker_repo_probe("test-lab", "test-repo")
+    assert calls == [
+        ("test-lab", "repo.probe", "test-repo"),
+        ("test-lab", "repo.probe", "other-repo"),
+        ("test-lab", "repo.probe", "test-repo"),
+    ]
+
+
 @contextmanager
 def _fake_ollama_server():
     class Handler(BaseHTTPRequestHandler):
