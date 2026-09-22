@@ -111,33 +111,42 @@ class _FakeWintypes(types.SimpleNamespace):
 
 def _install_fake_ctypes(monkeypatch, *, get_process_times_ok=True, creation_ticks=1000,
                           exit_code=259, open_process_ok=True):
+    """Builds a fake kernel32 whose Win32 functions are plain function
+    objects set as *instance* attributes, not class methods -- a bound
+    method does not support arbitrary attribute assignment, and
+    `estate_worker_procs._win_configure_kernel32()` sets `.argtypes`/
+    `.restype` on each one, exactly as it does on the real (ctypes
+    function-pointer) kernel32."""
     import ctypes as real_ctypes
 
     calls = {"GetProcessTimes": [], "OpenProcess": [], "GetExitCodeProcess": [], "CloseHandle": []}
 
-    class FakeKernel32:
-        def OpenProcess(self, access, inherit, pid):
-            calls["OpenProcess"].append((access, inherit, pid))
-            return 4242 if open_process_ok else 0
+    def open_process(access, inherit, pid):
+        calls["OpenProcess"].append((access, inherit, pid))
+        return 4242 if open_process_ok else 0
 
-        def GetProcessTimes(self, handle, creation, exit_time, kernel_time, user_time):
-            calls["GetProcessTimes"].append(handle)
-            if not get_process_times_ok:
-                return 0
-            creation._obj.dwLowDateTime = creation_ticks & 0xFFFFFFFF
-            creation._obj.dwHighDateTime = (creation_ticks >> 32) & 0xFFFFFFFF
-            return 1
+    def get_process_times(handle, creation, exit_time, kernel_time, user_time):
+        calls["GetProcessTimes"].append(handle)
+        if not get_process_times_ok:
+            return 0
+        creation._obj.dwLowDateTime = creation_ticks & 0xFFFFFFFF
+        creation._obj.dwHighDateTime = (creation_ticks >> 32) & 0xFFFFFFFF
+        return 1
 
-        def GetExitCodeProcess(self, handle, exit_code_ref):
-            calls["GetExitCodeProcess"].append(handle)
-            exit_code_ref._obj.value = exit_code
-            return 1
+    def get_exit_code_process(handle, exit_code_ref):
+        calls["GetExitCodeProcess"].append(handle)
+        exit_code_ref._obj.value = exit_code
+        return 1
 
-        def CloseHandle(self, handle):
-            calls["CloseHandle"].append(handle)
-            return 1
+    def close_handle(handle):
+        calls["CloseHandle"].append(handle)
+        return 1
 
-    fake_windll = types.SimpleNamespace(kernel32=FakeKernel32())
+    fake_kernel32 = types.SimpleNamespace(
+        OpenProcess=open_process, GetProcessTimes=get_process_times,
+        GetExitCodeProcess=get_exit_code_process, CloseHandle=close_handle,
+    )
+    fake_windll = types.SimpleNamespace(kernel32=fake_kernel32)
     monkeypatch.setattr(real_ctypes, "windll", fake_windll, raising=False)
     return calls
 
@@ -201,6 +210,34 @@ def test_windows_is_alive_false_when_open_process_fails(monkeypatch):
     _patch_windows(monkeypatch)
     _install_fake_ctypes(monkeypatch, open_process_ok=False)
     assert procs.is_alive({"pid": 777, "create_time": 1000}) is False
+
+
+def test_win_configure_kernel32_declares_pointer_safe_handle_types(monkeypatch):
+    """Stage 4 review finding: an undeclared Win32 call defaults to 32-bit
+    `c_int` args/return in ctypes, which can silently truncate a
+    pointer-sized HANDLE on Win64. `_win_configure_kernel32` must
+    explicitly type every function this module calls."""
+    import ctypes
+    from ctypes import wintypes
+
+    class _Dummy:
+        pass
+
+    kernel32 = types.SimpleNamespace(
+        OpenProcess=_Dummy(), GetProcessTimes=_Dummy(),
+        GetExitCodeProcess=_Dummy(), CloseHandle=_Dummy(),
+    )
+    procs._win_configure_kernel32(kernel32)
+
+    assert kernel32.OpenProcess.restype is wintypes.HANDLE
+    assert kernel32.OpenProcess.argtypes == [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    assert kernel32.GetProcessTimes.argtypes[0] is wintypes.HANDLE
+    assert kernel32.GetProcessTimes.restype is wintypes.BOOL
+    assert kernel32.GetExitCodeProcess.argtypes[0] is wintypes.HANDLE
+    assert kernel32.GetExitCodeProcess.argtypes[1] == ctypes.POINTER(wintypes.DWORD)
+    assert kernel32.GetExitCodeProcess.restype is wintypes.BOOL
+    assert kernel32.CloseHandle.argtypes == [wintypes.HANDLE]
+    assert kernel32.CloseHandle.restype is wintypes.BOOL
 
 
 def test_windows_kill_tree_uses_taskkill_with_tree_and_force(monkeypatch):

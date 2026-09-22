@@ -173,7 +173,34 @@ def _kill_process_tree(root_pid: int, process_group_id: int, *, reap_timeout: fl
     }
 
 
-def _win_creation_time(handle: int) -> Optional[int]:
+def _win_configure_kernel32(kernel32) -> None:
+    """Declare explicit ctypes argtypes/restype for every Win32 call this
+    module makes (Stage 4 review finding). Left undeclared, ctypes
+    assumes 32-bit `c_int` for both arguments and return value; a HANDLE
+    is pointer-sized (64-bit on Win64), so an undeclared `OpenProcess`
+    return value or `GetProcessTimes`/`GetExitCodeProcess`/`CloseHandle`
+    handle argument can be silently truncated instead of raising -- the
+    kind of defect that only shows up as a rare, unreproducible handle
+    mismatch in the field. Idempotent: safe to call on every access,
+    real ctypes function pointers cache the assigned types."""
+    from ctypes import wintypes
+    import ctypes
+
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.GetProcessTimes.argtypes = [
+        wintypes.HANDLE,
+        ctypes.POINTER(wintypes.FILETIME), ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME), ctypes.POINTER(wintypes.FILETIME),
+    ]
+    kernel32.GetProcessTimes.restype = wintypes.BOOL
+    kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+
+
+def _win_creation_time(handle) -> Optional[int]:
     """Read a Windows process's creation time (100ns ticks since 1601,
     the same units GetProcessTimes always returns) from an already-open
     handle -- the pid-reuse-safety anchor `is_alive`/`kill_tree` compare
@@ -183,6 +210,7 @@ def _win_creation_time(handle: int) -> Optional[int]:
     from ctypes import wintypes
 
     kernel32 = ctypes.windll.kernel32
+    _win_configure_kernel32(kernel32)
     creation, exit_time, kernel_time, user_time = (wintypes.FILETIME() for _ in range(4))
     ok = kernel32.GetProcessTimes(
         handle, ctypes.byref(creation), ctypes.byref(exit_time),
@@ -197,6 +225,7 @@ def _win_open_process(pid: int):
     import ctypes
 
     kernel32 = ctypes.windll.kernel32
+    _win_configure_kernel32(kernel32)
     handle = kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
     return handle or None
 
@@ -259,25 +288,45 @@ def is_alive(handle: dict) -> bool:
         return False
     if os.name == "nt":
         import ctypes
+        from ctypes import wintypes
 
         win_handle = _win_open_process(pid)
         if win_handle is None:
             return False
+        kernel32 = ctypes.windll.kernel32
+        _win_configure_kernel32(kernel32)
         try:
             if _win_creation_time(win_handle) != create_time:
                 return False
-            exit_code = ctypes.c_ulong()
-            kernel32 = ctypes.windll.kernel32
+            exit_code = wintypes.DWORD()
             if not kernel32.GetExitCodeProcess(win_handle, ctypes.byref(exit_code)):
                 return False
             return exit_code.value == _STILL_ACTIVE
         finally:
-            ctypes.windll.kernel32.CloseHandle(win_handle)
+            kernel32.CloseHandle(win_handle)
     return _proc_is_live_nonzombie(pid, expected_starttime=create_time)
 
 
 def kill_tree(handle: dict) -> dict:
-    """Kill a detached process tree without ever targeting a reused PID."""
+    """Kill a detached process tree without ever targeting a reused PID
+    for the *liveness check* above `taskkill` -- `is_alive()` compares
+    Win32 `GetProcessTimes` creation time (or /proc/<pid>/stat starttime
+    on Linux) against the handle's recorded `create_time` before this
+    function ever signals anything.
+
+    Residual, accepted race on Windows (truthful guarantee, not an
+    absolute one): `taskkill /PID <pid> /T /F` is the only tool-provided
+    way to kill a whole process tree by pid without this module
+    reimplementing Win32 process-tree enumeration and termination itself
+    (out of scope -- "do not expand this into a new Windows process
+    framework"), and `taskkill` takes a bare pid with no creation-time
+    argument. So there is an unavoidable, narrow window between the
+    `is_alive()` check above and `taskkill` actually signalling the
+    process where that pid could in theory have already been reused by
+    an unrelated process. Linux's `_kill_process_tree` below does not
+    have this gap -- it signals via `os.kill`/`os.killpg` directly and
+    re-verifies every pid's starttime both before signalling and after,
+    with no external tool in between."""
     try:
         pid = int(handle["pid"])
     except (KeyError, TypeError, ValueError):
