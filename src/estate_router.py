@@ -218,6 +218,24 @@ def eligible_hosts(repo_id: Optional[str] = None) -> list[dict]:
             "reason": reason,
         }
         if reachable and repo_id:
+            from src.estate_worker_client import WorkerTransportError, worker_repo_probe
+            # A host that is healthy and model-capable is still not a
+            # repo-aware candidate unless the repo actually resolves
+            # *there* -- a config binding or the control-plane's own
+            # checkout having the repo is not evidence that this
+            # particular worker host does (Stage 5 review finding: repo
+            # locality was missing from host selection entirely).
+            try:
+                probe = worker_repo_probe(host["id"], repo_id)
+            except WorkerTransportError as exc:
+                entry["eligible"] = False
+                entry["reason"] = f"repo {repo_id!r} probe failed on {host['id']!r}: {exc.code}: {exc}"
+            else:
+                if not probe.get("resolved"):
+                    entry["eligible"] = False
+                    entry["reason"] = f"repo {repo_id!r} does not resolve on {host['id']!r}"
+
+        if entry["eligible"] and reachable and repo_id:
             from core.database import ParkLease, get_db_session, park_lease_is_stale
             with get_db_session() as db:
                 conflicting = db.query(ParkLease).filter(
@@ -529,8 +547,6 @@ def _select_host(eligible: list[dict], capabilities: list[str]) -> tuple[dict, l
     # the response/telemetry come from the first eligible host, matching
     # the single-host messaging this replaced (still real evidence, just
     # not necessarily every candidate's).
-    fallback_resolutions = [resolve_alias(alias, eligible[0]["host_id"]) for alias in capabilities]
-
     from src.estate_worker_client import WorkerTransportError, worker_health
     for host in eligible:
         if "codex" not in (host.get("qualified_executors") or []):
@@ -540,8 +556,21 @@ def _select_host(eligible: list[dict], capabilities: list[str]) -> tuple[dict, l
         except WorkerTransportError:
             continue
         if (health.get("codex") or {}).get("available"):
-            return host, fallback_resolutions, "none"
+            # capability_resolutions must describe *this* host, not
+            # whichever host happened to be eligible[0] -- a route whose
+            # route.host is this host must never carry alias/capability
+            # evidence evaluated against a different one (Stage 5 review
+            # finding).
+            resolutions = [resolve_alias(alias, host["host_id"]) for alias in capabilities]
+            return host, resolutions, "none"
 
+    # No host resolved every alias locally and no codex-qualified host is
+    # healthy either -- capability_resolutions for the response/telemetry
+    # come from the first eligible host, matching the single-host
+    # messaging this replaced (still real evidence, just not necessarily
+    # every candidate's, and consistent with the eligible[0] this function
+    # is about to return).
+    fallback_resolutions = [resolve_alias(alias, eligible[0]["host_id"]) for alias in capabilities]
     return eligible[0], fallback_resolutions, "none"
 
 
@@ -1733,6 +1762,27 @@ def run_task(task: dict) -> dict:
                 # actually grounds a repo-aware task now that host
                 # selection can name a host other than this backend.
                 result = _dispatch_read_only(route["route"]["host"], "codex", task, timeout=180.0)
+                if (result.get("placement") or {}).get("executed_host") is None:
+                    # Same truthful-failure requirement as the local
+                    # branch below: a transport/protocol/pre-execution
+                    # worker failure with no attested execution host must
+                    # never be reported as executed (Stage 3 review
+                    # finding). The implementation-mode (codex-write)
+                    # branch above has its own terminal/durable result
+                    # shapes and is not affected by this guard.
+                    _update_decision_outcome(
+                        route["decision_id"], status="blocked", deterministic_gate="fail",
+                        escalation_reason="worker_failed", verification_outcome="fail",
+                    )
+                    return {
+                        **route, "ok": False, "executed": False,
+                        "execution": result,
+                        "execution_error": result.get("error"),
+                        "deterministic_gate": "fail",
+                        "escalation_reason": "worker_failed",
+                        "verification_outcome": "fail",
+                        "placement": result.get("placement"),
+                    }
             gate = "pass" if result.get("ok") and (result.get("output") or "").strip() else "fail"
             if not implementation_mode:
                 _update_decision_outcome(
@@ -1796,6 +1846,26 @@ def run_task(task: dict) -> dict:
         }
 
     result = _dispatch_read_only(route["route"]["host"], "local", task, concrete_model=concrete_model, timeout=60.0)
+    attested_host = (result.get("placement") or {}).get("executed_host")
+    if attested_host is None:
+        # Transport/protocol/pre-execution worker failure: no host ever
+        # attested it actually ran this task, so `executed` must be
+        # false, not a hollow true covering for a dispatch that never
+        # happened (Stage 3 review finding).
+        _update_decision_outcome(
+            route["decision_id"], status="blocked", deterministic_gate="fail",
+            escalation_reason="worker_failed", verification_outcome="fail",
+        )
+        return {
+            **route, "ok": False, "executed": False,
+            "execution": result,
+            "execution_error": result.get("error"),
+            "deterministic_gate": "fail",
+            "escalation_reason": "worker_failed",
+            "verification_outcome": "fail",
+            "placement": result.get("placement"),
+        }
+
     gate = "pass" if result.get("ok") and (result.get("output") or "").strip() else "fail"
     _update_decision_outcome(
         route["decision_id"],
@@ -1805,7 +1875,7 @@ def run_task(task: dict) -> dict:
         escalation_reason=None if gate == "pass" else "worker_failed",
         actual_route="local",
         verification_outcome=gate,
-        executed_host_id=(result.get("placement") or {}).get("executed_host"),
+        executed_host_id=attested_host,
     )
     return {
         **route, "executed": True, "execution": result,

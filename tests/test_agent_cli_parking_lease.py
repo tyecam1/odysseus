@@ -171,6 +171,10 @@ def test_eligible_hosts_ignores_stale_conflicting_lease(monkeypatch, tmp_path):
         estate_worker_client, "worker_health",
         lambda host_id, *, deadline_s=20.0: {"ollama": {"reachable": True}, "codex": {"available": True}},
     )
+    monkeypatch.setattr(
+        estate_worker_client, "worker_repo_probe",
+        lambda host_id, repo_id, *, deadline_s=15.0: {"resolved": True},
+    )
 
     stale_heartbeat = utcnow_naive() - timedelta(seconds=PARK_LEASE_STALE_SECONDS + 60)
     with get_db_session() as db:

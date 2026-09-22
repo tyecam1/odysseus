@@ -75,8 +75,14 @@ def fixture_config(tmp_path, monkeypatch):
             "context": {name: {"length": 8192, "known": True} for name in names},
         }
 
+    def _fake_worker_repo_probe(host_id, repo_id, *, deadline_s=15.0):
+        # Default: any repo resolves on any host. Tests exercising repo
+        # locality (Stage 5 review finding) override this per host.
+        return {"resolved": True, "path": f"/fake/{host_id}/{repo_id}", "head_sha": "fake", "branch": "main", "clean": True}
+
     monkeypatch.setattr(estate_worker_client, "worker_health", _fake_worker_health)
     monkeypatch.setattr(estate_worker_client, "worker_inventory", _fake_worker_inventory)
+    monkeypatch.setattr(estate_worker_client, "worker_repo_probe", _fake_worker_repo_probe)
     return config_dir
 
 
@@ -116,6 +122,144 @@ def test_eligible_hosts_home_fails_truthfully_not_a_tailnet_member(fixture_confi
     hosts = {h["host_id"]: h for h in estate_router.eligible_hosts()}
     assert hosts["test-home"]["eligible"] is False
     assert "not a tailnet member" in hosts["test-home"]["reason"]
+
+
+def _make_home_reachable(fixture_config) -> None:
+    """Test-only helper: test-home starts out unreachable (not a tailnet
+    member) in `fixture_config` -- repo-locality tests need both hosts
+    reachable so the repo check itself is what's under test."""
+    estate = yaml.safe_load((fixture_config / "estate.yaml").read_text())
+    for host in estate["hosts"]:
+        if host["id"] == "test-home":
+            host["tailscale"] = True
+    (fixture_config / "estate.yaml").write_text(yaml.safe_dump(estate))
+
+
+def test_eligible_hosts_excludes_host_missing_the_requested_repo(fixture_config, monkeypatch):
+    """Stage 5 review finding: repo locality was missing entirely from
+    host selection -- a host with no evidence the repo resolves there
+    must not be treated as eligible for a repo-scoped task."""
+    _make_home_reachable(fixture_config)
+    import src.estate_worker_client as estate_worker_client
+
+    def fake_repo_probe(host_id, repo_id, *, deadline_s=15.0):
+        return {"resolved": host_id == "test-lab"}
+    monkeypatch.setattr(estate_worker_client, "worker_repo_probe", fake_repo_probe)
+
+    hosts = {h["host_id"]: h for h in estate_router.eligible_hosts("test-repo")}
+    assert hosts["test-lab"]["eligible"] is True
+    assert hosts["test-home"]["eligible"] is False
+    assert "does not resolve" in hosts["test-home"]["reason"]
+
+
+def test_eligible_hosts_repo_probe_failure_is_ineligible_not_a_crash(fixture_config, monkeypatch):
+    _make_home_reachable(fixture_config)
+    import src.estate_worker_client as estate_worker_client
+    from src.estate_worker_client import WorkerTransportError
+
+    def fake_repo_probe(host_id, repo_id, *, deadline_s=15.0):
+        if host_id == "test-home":
+            raise WorkerTransportError("worker_unreachable", "connection refused")
+        return {"resolved": True}
+    monkeypatch.setattr(estate_worker_client, "worker_repo_probe", fake_repo_probe)
+
+    hosts = {h["host_id"]: h for h in estate_router.eligible_hosts("test-repo")}
+    assert hosts["test-lab"]["eligible"] is True
+    assert hosts["test-home"]["eligible"] is False
+    assert "probe failed" in hosts["test-home"]["reason"]
+
+
+def test_resolve_route_auto_skips_host_missing_repo(fixture_config, monkeypatch):
+    """'auto routing skips a healthy/model-capable host that lacks the
+    requested repo and selects another qualified host that has it.'"""
+    _make_home_reachable(fixture_config)
+    monkeypatch.setattr(estate_router, "_record_decision", lambda *a, **k: "fake-decision-id")
+    import src.estate_worker_client as estate_worker_client
+
+    def fake_repo_probe(host_id, repo_id, *, deadline_s=15.0):
+        return {"resolved": host_id == "test-lab"}
+    monkeypatch.setattr(estate_worker_client, "worker_repo_probe", fake_repo_probe)
+
+    route = estate_router.resolve_route({
+        "task_class": "coding", "repo": "test-repo",
+        "requirements": {"capabilities": ["local-fast"]},
+    })
+    assert route["ok"] is True
+    assert route["route"]["host"] == "test-lab"
+
+
+def test_resolve_route_explicit_requested_host_missing_repo_fails_before_dispatch(fixture_config, monkeypatch):
+    """'explicit requested_host with the repo absent fails before
+    execution' -- never silently substituted."""
+    _make_home_reachable(fixture_config)
+    monkeypatch.setattr(estate_router, "_record_decision", lambda *a, **k: "fake-decision-id")
+    import src.estate_worker_client as estate_worker_client
+
+    def fake_repo_probe(host_id, repo_id, *, deadline_s=15.0):
+        return {"resolved": host_id == "test-lab"}
+    monkeypatch.setattr(estate_worker_client, "worker_repo_probe", fake_repo_probe)
+
+    route = estate_router.resolve_route({
+        "task_class": "coding", "repo": "test-repo",
+        "placement": {"requested_host": "test-home"},
+        "requirements": {"capabilities": ["local-fast"]},
+    })
+    assert route["ok"] is False
+    assert "test-home" in route["error"]
+
+
+def test_resolve_route_no_candidate_has_repo_is_truthfully_blocked(fixture_config, monkeypatch):
+    """'no candidate with repo -> truthful blocked route.'"""
+    _make_home_reachable(fixture_config)
+    monkeypatch.setattr(estate_router, "_record_decision", lambda *a, **k: "fake-decision-id")
+    import src.estate_worker_client as estate_worker_client
+    monkeypatch.setattr(
+        estate_worker_client, "worker_repo_probe",
+        lambda host_id, repo_id, **k: {"resolved": False},
+    )
+
+    route = estate_router.resolve_route({
+        "task_class": "coding", "repo": "test-repo",
+        "requirements": {"capabilities": ["local-fast"]},
+    })
+    assert route["ok"] is False
+    assert route["error"] == "no eligible host"
+
+
+def test_select_host_codex_escalation_evidence_matches_selected_host(fixture_config, monkeypatch):
+    """Stage 5 review finding: when `_select_host` falls through to a
+    codex-qualified host for escalation, the returned
+    `capability_resolutions` must describe *that* host -- not
+    `eligible[0]`, which a route selecting a different host must never
+    carry as its alias/capability evidence."""
+    import src.estate_worker_client as estate_worker_client
+
+    def fake_worker_health(host_id, *, deadline_s=20.0):
+        return {
+            "ollama": {"reachable": True, "base_url": "x", "error": None},
+            "codex": {"available": host_id == "test-home"},
+            "gpu_yield": {"active": False, "reason": "idle"},
+            "in_flight": [],
+        }
+    monkeypatch.setattr(estate_worker_client, "worker_health", fake_worker_health)
+
+    def fake_resolve_alias(alias, host_id=None):
+        # Unresolved everywhere (forces the codex fallback path), but
+        # the reason names the host it was actually checked against.
+        return {
+            "alias": alias, "resolved": False, "concrete_model": "test-model-fast",
+            "reason": f"unavailable on {host_id}",
+        }
+    monkeypatch.setattr(estate_router, "resolve_alias", fake_resolve_alias)
+
+    eligible = [
+        {"host_id": "test-lab", "role": "lab", "qualified_executors": ["local", "codex"]},
+        {"host_id": "test-home", "role": "home", "qualified_executors": ["local", "codex"]},
+    ]
+    host, resolutions, executor = estate_router._select_host(eligible, ["local-fast"])
+    assert host["host_id"] == "test-home"
+    assert executor == "none"
+    assert resolutions[0]["reason"] == "unavailable on test-home"
 
 
 def test_home_identity_verified_but_worker_disabled_is_ineligible_with_worker_reason(fixture_config):
@@ -463,7 +607,10 @@ def test_run_task_passes_multimodal_objective_through_unmodified(fixture_config,
 def test_run_task_marks_empty_output_as_failed_gate(fixture_config, monkeypatch):
     monkeypatch.setattr(estate_router, "_record_decision", lambda *a, **k: "fake-decision-id")
     monkeypatch.setattr(estate_router, "_ollama_model_live", lambda model, timeout=3.0: (True, "live"))
-    monkeypatch.setattr(estate_router, "execute_local", lambda model, objective, **k: {"ok": True, "output": "", "latency_ms": 5})
+
+    def fake_dispatch(host_id, executor, task, **k):
+        return {"ok": True, "output": "", "latency_ms": 5, "placement": _fake_placement(host_id)}
+    monkeypatch.setattr(estate_router, "_dispatch_read_only", fake_dispatch)
     recorded = {}
     monkeypatch.setattr(estate_router, "_update_decision_outcome", lambda decision_id, **k: recorded.update(k))
 
@@ -471,6 +618,11 @@ def test_run_task_marks_empty_output_as_failed_gate(fixture_config, monkeypatch)
         "task_class": "coding", "objective": "say pong",
         "requirements": {"capabilities": ["local-fast"]},
     })
+    # An attested worker did run (placement.executed_host is set) — the
+    # attempt happened, it just produced nothing usable, distinct from
+    # the dispatch never reaching an attested host at all (the next two
+    # tests below).
+    assert result["executed"] is True
     assert result["deterministic_gate"] == "fail"
     assert recorded["status"] == "failed"
     assert recorded["escalation_reason"] == "worker_failed"
@@ -481,14 +633,22 @@ def test_run_task_records_worker_disappearance_as_failed_not_a_crash(fixture_con
     model that resolved as live at routing time but errors out entirely
     by execution time (e.g. unloaded, host restarted, Ollama itself
     down) must be recorded as a truthful failed RoutingDecision, not
-    raise or silently report success. Distinct from the existing
-    empty-output test above: here execute_local itself reports ok=False,
-    the actual disappearance shape, not a hollow success."""
+    raise or silently report success. Distinct from the empty-output test
+    above only in *why* the attested worker's own attempt failed
+    (execute_local itself reporting ok=False inside the worker, the
+    actual disappearance shape) — the worker still attested it actually
+    ran the task, so `executed` stays True; only the deterministic gate
+    fails. `_dispatch_read_only` is the seam this crosses now (Stage 3),
+    not `execute_local` directly, which only ever runs worker-side."""
     monkeypatch.setattr(estate_router, "_record_decision", lambda *a, **k: "fake-decision-id")
     monkeypatch.setattr(estate_router, "_ollama_model_live", lambda model, timeout=3.0: (True, "live"))
-    monkeypatch.setattr(estate_router, "execute_local", lambda model, objective, **k: {
-        "ok": False, "error": "502: Upstream ... 404: model not found", "retries": 0, "latency_ms": 42,
-    })
+
+    def fake_dispatch(host_id, executor, task, **k):
+        return {
+            "ok": False, "error": "502: Upstream ... 404: model not found", "retries": 0,
+            "latency_ms": 42, "placement": _fake_placement(host_id),
+        }
+    monkeypatch.setattr(estate_router, "_dispatch_read_only", fake_dispatch)
     recorded = {}
     monkeypatch.setattr(estate_router, "_update_decision_outcome", lambda decision_id, **k: recorded.update(k))
 
@@ -500,6 +660,67 @@ def test_run_task_records_worker_disappearance_as_failed_not_a_crash(fixture_con
     assert result["deterministic_gate"] == "fail"
     assert result["execution"]["ok"] is False
     assert recorded["status"] == "failed"
+    assert recorded["escalation_reason"] == "worker_failed"
+    assert recorded["executed_host_id"] == "test-lab"
+
+
+def test_run_task_local_dispatch_failure_is_not_executed(fixture_config, monkeypatch):
+    """Stage 3 review finding: a transport/protocol/pre-execution worker
+    failure — no host ever attested it ran anything — must report
+    `executed: False`, `placement.executed_host: None`, and truthful
+    failure telemetry. There is no in-process or alternate-host fallback:
+    a failed dispatch is reported as a failed dispatch."""
+    monkeypatch.setattr(estate_router, "_record_decision", lambda *a, **k: "fake-decision-id")
+    monkeypatch.setattr(estate_router, "_ollama_model_live", lambda model, timeout=3.0: (True, "live"))
+
+    def fake_dispatch(host_id, executor, task, **k):
+        return {
+            "ok": False, "error": "worker unreachable: worker_unreachable: connection refused",
+            "error_code": "worker_unreachable",
+            "placement": {"routed_host": host_id, "executed_host": None, "attested": False, "transport": "local"},
+        }
+    monkeypatch.setattr(estate_router, "_dispatch_read_only", fake_dispatch)
+    recorded = {}
+    monkeypatch.setattr(estate_router, "_update_decision_outcome", lambda decision_id, **k: recorded.update(k))
+
+    result = estate_router.run_task({
+        "task_class": "coding", "objective": "say pong",
+        "requirements": {"capabilities": ["local-fast"]},
+    })
+    assert result["ok"] is False
+    assert result["executed"] is False
+    assert result["placement"]["executed_host"] is None
+    assert result["execution_error"]
+    assert recorded["status"] == "blocked"
+    assert recorded["escalation_reason"] == "worker_failed"
+
+
+def test_run_task_codex_read_only_dispatch_failure_is_not_executed(fixture_config, monkeypatch):
+    """Same truthful-failure requirement as the local case above, for the
+    advisory (read-only) Codex escalation path."""
+    monkeypatch.setattr(estate_router, "_record_decision", lambda *a, **k: "fake-decision-id")
+
+    def fake_dispatch(host_id, executor, task, **k):
+        assert executor == "codex"
+        return {
+            "ok": False, "error": "worker unreachable: worker_unreachable: connection refused",
+            "error_code": "worker_unreachable",
+            "placement": {"routed_host": host_id, "executed_host": None, "attested": False, "transport": "ssh"},
+        }
+    monkeypatch.setattr(estate_router, "_dispatch_read_only", fake_dispatch)
+    recorded = {}
+    monkeypatch.setattr(estate_router, "_update_decision_outcome", lambda decision_id, **k: recorded.update(k))
+
+    result = estate_router.run_task({
+        "task_class": "coding", "objective": "fix the bug",
+        "requirements": {"capabilities": ["code-strong"]},
+        "routing": {"allow_paid_escalation": True},
+    })
+    assert result["ok"] is False
+    assert result["executed"] is False
+    assert result["placement"]["executed_host"] is None
+    assert result["execution_error"]
+    assert recorded["status"] == "blocked"
     assert recorded["escalation_reason"] == "worker_failed"
 
 
@@ -618,8 +839,10 @@ def test_run_task_uses_configured_provider_name_not_hardcoded_codex(fixture_conf
         "capabilities": [{"alias": "code-strong", "binding": None, "paid_provider": "codex"}],
     }))
     monkeypatch.setattr(estate_router, "_record_decision", lambda *a, **k: "fake-decision-id")
-    monkeypatch.setattr(estate_router, "execute_codex",
-                         lambda objective, **k: {"ok": True, "provider": "codex", "output": "done", "latency_ms": 99})
+
+    def fake_dispatch(host_id, executor, task, **k):
+        return {"ok": True, "provider": "codex", "output": "done", "latency_ms": 99, "placement": _fake_placement(host_id)}
+    monkeypatch.setattr(estate_router, "_dispatch_read_only", fake_dispatch)
     monkeypatch.setattr(estate_router, "_update_decision_outcome", lambda decision_id, **k: None)
 
     result = estate_router.run_task({
@@ -1360,10 +1583,10 @@ def test_codex_write_authority_denies_invalid_or_mismatched_worktree(fixture_con
 def test_scenario_b_repetitive_compute_dispatches_to_remote_local_executor(fixture_config, monkeypatch):
     monkeypatch.setattr(estate_router, "_record_decision", lambda *a, **k: "remote-decision")
     monkeypatch.setattr(estate_router, "_ollama_model_live", lambda model, timeout=3.0: (True, "live"))
-    monkeypatch.setattr(
-        estate_router, "execute_local",
-        lambda model, objective, **kwargs: {"ok": True, "output": "scan complete", "latency_ms": 4},
-    )
+
+    def fake_dispatch(host_id, executor, task, **kwargs):
+        return {"ok": True, "output": "scan complete", "latency_ms": 4, "placement": _fake_placement(host_id)}
+    monkeypatch.setattr(estate_router, "_dispatch_read_only", fake_dispatch)
     outcome = {}
     monkeypatch.setattr(estate_router, "_update_decision_outcome", lambda decision_id, **kwargs: outcome.update(kwargs))
 
