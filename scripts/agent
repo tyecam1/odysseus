@@ -520,11 +520,11 @@ def cmd_explain(args):
     eligibility logic here — a second copy would drift, exactly what
     docs/aoteru-model-host-routing-contract.md's single-routing-authority
     rule forbids."""
-    from src.estate_router import eligible_hosts, resolve_alias, RoutingConfigError
+    from src.estate_router import current_host_id, eligible_hosts, resolve_alias, RoutingConfigError
     from src.routing_evaluator import load_and_aggregate
 
     try:
-        resolution = resolve_alias(args.alias)
+        resolution = resolve_alias(args.alias, current_host_id())
     except RoutingConfigError as e:
         fail(str(e))  # exits; nothing below runs
 

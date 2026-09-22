@@ -166,6 +166,11 @@ def test_eligible_hosts_ignores_stale_conflicting_lease(monkeypatch, tmp_path):
     (config_dir / "models.yaml").write_text(yaml.safe_dump({"capabilities": []}))
     monkeypatch.setattr(estate_router, "_CONFIG_DIR", config_dir)
     monkeypatch.setattr(socket, "gethostname", lambda: "THIS-HOST")
+    import src.estate_worker_client as estate_worker_client
+    monkeypatch.setattr(
+        estate_worker_client, "worker_health",
+        lambda host_id, *, deadline_s=20.0: {"ollama": {"reachable": True}, "codex": {"available": True}},
+    )
 
     stale_heartbeat = utcnow_naive() - timedelta(seconds=PARK_LEASE_STALE_SECONDS + 60)
     with get_db_session() as db:

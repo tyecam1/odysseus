@@ -189,13 +189,23 @@ def cmd_status(args: argparse.Namespace) -> int:
         considered = hosts["body"].get("hosts") or []
         eligible = [h for h in considered if h.get("eligible")]
         ineligible = [h for h in considered if not h.get("eligible")]
+        def _tag(h):
+            # Read defensively: `identity_verified`/`worker_enabled`/
+            # `healthy` are Stage 1/5 additions to this payload; an older
+            # backend simply omits them rather than erroring, so this
+            # must not assume they're present.
+            bits = [
+                f"{key}={h[key]}" for key in ("identity_verified", "worker_enabled", "healthy") if key in h
+            ]
+            return f" [{', '.join(bits)}]" if bits else ""
+
         print(f"eligible hosts: {len(eligible)}")
         for h in eligible:
-            print(f"  - {h.get('host_id')} ({h.get('role')})")
+            print(f"  - {h.get('host_id')} ({h.get('role')}){_tag(h)}")
         if ineligible:
             print(f"considered but not eligible: {len(ineligible)}")
             for h in ineligible:
-                print(f"  - {h.get('host_id')} ({h.get('role')}): {h.get('reason')}")
+                print(f"  - {h.get('host_id')} ({h.get('role')}){_tag(h)}: {h.get('reason')}")
     elif hosts["status"] in (401, 403):
         print("eligible hosts: (no/insufficient token — set one with `aoteru config set --token ...` "
               "scoped estate:read or estate:execute for full status)")

@@ -91,7 +91,23 @@ def delegation_preflight(units: Iterable[dict]) -> dict:
     """
     unit_list = [dict(unit) for unit in units]
     hosts = estate_router.eligible_hosts()
-    codex_live, codex_detail = estate_router._codex_available()
+    # Stage 5: codex availability is worker-attested, not this backend's
+    # own local check — a routed host other than this one could be the
+    # actual codex_eligible candidate. Uses the first eligible host, same
+    # single-host-today assumption `resolve_route`/`_select_host` make;
+    # a truly per-unit host isn't known yet at this point (routing hasn't
+    # run per unit), so this mirrors the old single global check's scope.
+    from src.estate_worker_client import WorkerTransportError, worker_health
+    preflight_host_id = hosts[0]["host_id"] if hosts else None
+    if preflight_host_id is None:
+        codex_live, codex_detail = False, "no eligible host"
+    else:
+        try:
+            codex_health = worker_health(preflight_host_id).get("codex") or {}
+            codex_live = bool(codex_health.get("available"))
+            codex_detail = codex_health.get("detail")
+        except WorkerTransportError as exc:
+            codex_live, codex_detail = False, f"worker unreachable: {exc.code}: {exc}"
     alias_resolutions: dict[str, dict] = {}
     recommendations = []
 

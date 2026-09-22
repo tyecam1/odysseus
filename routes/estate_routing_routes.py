@@ -235,9 +235,9 @@ def setup_estate_routing_routes() -> APIRouter:
         return {"hosts": _route_call(eligible_hosts, repo)}
 
     @router.get("/route/alias/{alias}")
-    async def route_alias(request: Request, alias: str):
+    async def route_alias(request: Request, alias: str, host: Optional[str] = None):
         _scope_owner(request, {"estate:read", "estate:execute"})
-        return _route_call(resolve_alias, alias)
+        return _route_call(resolve_alias, alias, host)
 
     @router.get("/decision/{decision_id}")
     async def get_decision(request: Request, decision_id: str):

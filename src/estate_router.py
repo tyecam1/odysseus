@@ -96,7 +96,16 @@ def host_reachable(host: dict, live_hostname: str) -> tuple[bool, str]:
 
     Identity confirmation and worker qualification are independent hard
     gates checked before live reachability. Legacy `verified` is accepted as
-    identity evidence only; it never enables a worker."""
+    identity evidence only; it never enables a worker.
+
+    Stage 5: this is now only the *static* half of reachability — no TCP
+    probe. Live liveness comes from `eligible_hosts()` actually calling
+    `estate_worker_client.worker_health()`, which proves a real attested
+    worker answered, not just that port 22 accepted a connection (a signal
+    that never told this module anything about the worker itself, only
+    that sshd was up). Kept as a plain function (not folded into
+    `eligible_hosts`) because `scripts/agent` imports it directly for its
+    own static-gate display."""
     state = host_static_state(host)
     if not state["identity_verified"]:
         return False, f"{host['id']} identity not verified"
@@ -106,18 +115,7 @@ def host_reachable(host: dict, live_hostname: str) -> tuple[bool, str]:
         return True, "this host"
     if not host.get("tailscale"):
         return False, f"{host['id']!r} is not a tailnet member"
-    dns = host.get("tailscale_dns")
-    if not dns:
-        return False, f"{host['id']!r} has no tailscale_dns recorded in config/estate.yaml"
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(4)
-    try:
-        s.connect((dns, 22))
-        return True, "SSH port reachable over the tailnet"
-    except OSError as e:
-        return False, f"unreachable: {e}"
-    finally:
-        s.close()
+    return True, "tailnet member; live health checked separately"
 
 
 _HOST_LOCAL_ROOT_VAR_RE = re.compile(r"\$\{(\w+)\}")
@@ -182,7 +180,14 @@ def eligible_hosts(repo_id: Optional[str] = None) -> list[dict]:
     laptop/interface is the human control surface, not a normal execution
     worker"). If `repo_id` is given, a host also becomes ineligible when a
     *different* host already holds an active ParkLease for that repo —
-    routing never widens write authority (invariant 10)."""
+    routing never widens write authority (invariant 10).
+
+    Stage 5: a host that passes the static gates still isn't eligible
+    unless a real worker actually answers `health` right now — the TCP-22
+    probe `host_reachable` used to do told this module nothing about the
+    worker itself, only that sshd was up. `worker_health` is TTL-cached
+    (`estate_worker_client`), so calling this repeatedly in one request
+    doesn't re-dispatch a subprocess/SSH round trip every time."""
     estate = _load_yaml("estate")
     live_hostname = socket.gethostname()
     out = []
@@ -191,13 +196,24 @@ def eligible_hosts(repo_id: Optional[str] = None) -> list[dict]:
             continue
         state = host_static_state(host)
         reachable, reason = host_reachable(host, live_hostname)
+        healthy = None
+        if reachable:
+            from src.estate_worker_client import WorkerTransportError, worker_health
+            try:
+                worker_health(host["id"])
+                healthy = True
+            except WorkerTransportError as exc:
+                healthy = False
+                reachable = False
+                reason = f"worker unreachable: {exc.code}: {exc}"
         entry = {
             "host_id": host["id"],
             "role": host.get("role"),
             "identity_verified": state["identity_verified"],
             "worker_enabled": state["worker_enabled"],
+            "qualified_executors": state["qualified_executors"],
             "reachable": reachable,
-            "healthy": None,
+            "healthy": healthy,
             "eligible": reachable,
             "reason": reason,
         }
@@ -343,21 +359,26 @@ def experiment_priority_active() -> tuple[bool, str]:
     return False, "no reservation; no significant non-ollama GPU load"
 
 
-def resolve_alias(alias: str) -> dict:
+def resolve_alias(alias: str, host_id: Optional[str] = None) -> dict:
     """WHAT half: resolve a capability alias to a concrete model from
     config/models.yaml's evidence-backed bindings. Never a hardcoded brand
     in this function — an unbound alias fails truthfully rather than
-    guessing a model. A bound alias is additionally checked live before
-    being reported resolved — a config binding alone is not proof the
-    model is actually available right now (see `_ollama_model_live`).
+    guessing a model.
+
+    `host_id=None` keeps the pre-Stage-5 legacy behaviour (liveness
+    checked against this backend's own Ollama via `_ollama_model_live`) —
+    used only by callers not yet migrated to per-host resolution
+    (Stage 9 removes this mode once none remain). `host_id` given: a bound
+    alias is checked live against *that host's* worker inventory instead —
+    a config binding is not proof the model is actually loadable on the
+    host a route actually selected, and lab's own Ollama liveness says
+    nothing true about a different host (D5 in the implementation plan).
 
     P12.4: an alias tagged `gpu_priority: yield_to_experiment` in
-    config/models.yaml fails truthfully (not silently) while
-    `experiment_priority_active()` says an experiment is reserved/active
-    — heavy background inference must not contend with a live robotics
-    experiment for the one shared RTX 3080. Aliases without that tag
-    (`local-fast`, `code-fast`) are unaffected; idle-state routing is
-    unaffected either way."""
+    config/models.yaml fails truthfully (not silently) while an
+    experiment is reserved/active on the checked host — heavy background
+    inference must not contend with a live robotics experiment for a
+    shared GPU. Aliases without that tag are unaffected either way."""
     models = _load_yaml("models")
     entry = next((c for c in models.get("capabilities", []) if c["alias"] == alias), None)
     if entry is None:
@@ -368,19 +389,51 @@ def resolve_alias(alias: str) -> dict:
             "alias": alias, "resolved": False,
             "reason": "no evidence-backed binding yet — see config/models.yaml",
         }
-    if entry.get("gpu_priority") == "yield_to_experiment":
-        active, reason = experiment_priority_active()
-        if active:
+
+    if host_id is None:
+        if entry.get("gpu_priority") == "yield_to_experiment":
+            active, reason = experiment_priority_active()
+            if active:
+                return {
+                    "alias": alias, "resolved": False, "concrete_model": binding,
+                    "reason": f"withheld — experiment priority active ({reason})",
+                }
+        live, live_reason = _ollama_model_live(binding)
+        if not live:
             return {
                 "alias": alias, "resolved": False, "concrete_model": binding,
-                "reason": f"withheld — experiment priority active ({reason})",
+                "reason": f"bound but not currently live: {live_reason}",
             }
-    live, live_reason = _ollama_model_live(binding)
-    if not live:
+        return {"alias": alias, "resolved": True, "concrete_model": binding, "evidence": entry.get("evidence")}
+
+    from src.estate_worker_client import WorkerTransportError, worker_health, worker_inventory
+    try:
+        inventory = worker_inventory(host_id, [binding])
+    except WorkerTransportError as exc:
         return {
             "alias": alias, "resolved": False, "concrete_model": binding,
-            "reason": f"bound but not currently live: {live_reason}",
+            "reason": f"worker unreachable: {exc.code}: {exc}",
         }
+    live_models = {m.get("name") for m in inventory.get("models") or []}
+    if binding not in live_models:
+        return {
+            "alias": alias, "resolved": False, "concrete_model": binding,
+            "reason": f"bound but not currently live on {host_id!r}: not listed by that host's Ollama",
+        }
+    if entry.get("gpu_priority") == "yield_to_experiment":
+        try:
+            health = worker_health(host_id)
+        except WorkerTransportError as exc:
+            return {
+                "alias": alias, "resolved": False, "concrete_model": binding,
+                "reason": f"worker unreachable: {exc.code}: {exc}",
+            }
+        gpu_yield = health.get("gpu_yield") or {}
+        if gpu_yield.get("active"):
+            return {
+                "alias": alias, "resolved": False, "concrete_model": binding,
+                "reason": f"withheld — experiment priority active ({gpu_yield.get('reason')})",
+            }
     return {"alias": alias, "resolved": True, "concrete_model": binding, "evidence": entry.get("evidence")}
 
 
@@ -433,6 +486,63 @@ _UNVERIFIABLE_BUDGET_FIELDS = (
     "max_worker_calls", "max_paid_calls", "max_frontier_calls",
     "max_context_tokens", "latency_priority",
 )
+
+
+def _select_host(eligible: list[dict], capabilities: list[str]) -> tuple[dict, list[dict], str]:
+    """Stage 5's host+model selection (plan §E, Stage 5, replacing the old
+    `host = eligible[0]`). `eligible` is already in `config/estate.yaml`
+    order (`eligible_hosts()` preserves file order), so "first host that
+    qualifies" here is a real, auditable priority, not an accident of
+    dict iteration.
+
+    No capabilities requested: the first eligible host, `deterministic`
+    (nothing executes, so no per-host alias resolution is meaningful).
+
+    Otherwise, in order:
+    1. the first host with `local` in its qualified executors where every
+       requested alias actually resolves *on that host* (model present,
+       gpu_yield clear) — real per-host truth, not lab's own Ollama used
+       as a proxy for every host (D5);
+    2. the first host with `codex` qualified and a live, worker-attested
+       `health.codex.available` — a paid-escalation candidate, decided by
+       the caller opting in later, not automatic;
+    3. failing both, the first eligible host with `needs_escalation` — the
+       paid lane then fails `executor_unavailable` truthfully rather than
+       this function inventing a placement.
+
+    Returns `(host, capability_resolutions, executor)`. `executor` is one
+    of `deterministic` / `local` / `none` — `resolve_route` decides the
+    final recorded status (a `local` candidate can still be downgraded to
+    `needs_escalation` by a quality-floor/context failure `resolve_alias`
+    itself can't see)."""
+    if not capabilities:
+        return eligible[0], [], "deterministic"
+
+    for host in eligible:
+        if "local" not in (host.get("qualified_executors") or []):
+            continue
+        resolutions = [resolve_alias(alias, host["host_id"]) for alias in capabilities]
+        if all(r.get("resolved") for r in resolutions):
+            return host, resolutions, "local"
+
+    # No host resolved every alias locally — capability_resolutions for
+    # the response/telemetry come from the first eligible host, matching
+    # the single-host messaging this replaced (still real evidence, just
+    # not necessarily every candidate's).
+    fallback_resolutions = [resolve_alias(alias, eligible[0]["host_id"]) for alias in capabilities]
+
+    from src.estate_worker_client import WorkerTransportError, worker_health
+    for host in eligible:
+        if "codex" not in (host.get("qualified_executors") or []):
+            continue
+        try:
+            health = worker_health(host["host_id"])
+        except WorkerTransportError:
+            continue
+        if (health.get("codex") or {}).get("available"):
+            return host, fallback_resolutions, "none"
+
+    return eligible[0], fallback_resolutions, "none"
 
 
 def resolve_route(task: dict, *, record_decision: bool = True) -> dict:
@@ -514,14 +624,8 @@ def resolve_route(task: dict, *, record_decision: bool = True) -> dict:
             "decision_id": decision_id,
         }
 
-    # Lab-first: exactly one worker role is ever reachable, so there is
-    # nothing to score among yet. This still goes through eligible_hosts()
-    # rather than a hardcoded "lab" — a future multi-host scoring pass
-    # extends the selection here, it doesn't redesign the function.
-    host = eligible[0]
-
     capabilities = (task.get("requirements") or {}).get("capabilities") or []
-    capability_resolutions = [resolve_alias(a) for a in capabilities]
+    host, capability_resolutions, candidate_executor = _select_host(eligible, capabilities)
     alias = capabilities[0] if capabilities else None
     alias_result = capability_resolutions[0] if capability_resolutions else {
         "resolved": False, "reason": "no capability requested",
@@ -547,12 +651,18 @@ def resolve_route(task: dict, *, record_decision: bool = True) -> dict:
     context_error = None
     context_note = None
     if context_tokens and alias and alias_result.get("resolved"):
-        from src.model_context import get_context_length_known
-        window, known = get_context_length_known(_OLLAMA_BASE, alias_result["concrete_model"])
+        from src.estate_worker_client import WorkerTransportError, worker_inventory
+        concrete_model = alias_result["concrete_model"]
+        try:
+            inventory = worker_inventory(host["host_id"], [concrete_model])
+            ctx = (inventory.get("context") or {}).get(concrete_model) or {}
+            window, known = ctx.get("length", 0), bool(ctx.get("known"))
+        except WorkerTransportError:
+            window, known = 0, False
         if known and context_tokens > window:
             context_error = (
                 f"requirements.context_tokens={context_tokens} exceeds "
-                f"{alias_result['concrete_model']!r}'s known context window of {window}"
+                f"{concrete_model!r}'s known context window of {window} on {host['host_id']!r}"
             )
         elif not known:
             context_note = f"requested context_tokens={context_tokens} could not be verified (unknown context window)"
@@ -561,7 +671,7 @@ def resolve_route(task: dict, *, record_decision: bool = True) -> dict:
         executor, status = "deterministic", "complete"
     elif quality_floor_error or context_error:
         executor, status = "none", "needs_escalation"
-    elif all_resolved:
+    elif candidate_executor == "local" and all_resolved:
         executor, status = "local", "complete"
     else:
         executor, status = "none", "needs_escalation"
@@ -1666,6 +1776,24 @@ def run_task(task: dict) -> dict:
     objective = task.get("objective")
     if not objective:
         return {**route, "executed": False, "execution_error": "no objective provided to execute"}
+
+    host_entry = next(
+        (h for h in (route.get("hosts_checked") or []) if h.get("host_id") == route["route"]["host"]), None,
+    )
+    if "local" not in ((host_entry or {}).get("qualified_executors") or []):
+        # Defence in depth: _select_host already only returns "local" for a
+        # host with "local" in its qualified_executors, so this only fires
+        # if config changed between resolve_route() and here, or a caller
+        # reached this point through some other path.
+        _update_decision_outcome(
+            route["decision_id"], status="blocked", deterministic_gate="fail",
+            escalation_reason="worker_failed", verification_outcome="fail",
+        )
+        return {
+            **route, "ok": False, "executed": False,
+            "execution_error": f"executor 'local' not qualified on {route['route']['host']!r}",
+            "escalation_reason": "worker_failed",
+        }
 
     result = _dispatch_read_only(route["route"]["host"], "local", task, concrete_model=concrete_model, timeout=60.0)
     gate = "pass" if result.get("ok") and (result.get("output") or "").strip() else "fail"

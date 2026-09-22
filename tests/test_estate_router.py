@@ -51,6 +51,32 @@ def fixture_config(tmp_path, monkeypatch):
 
     monkeypatch.setattr(estate_router, "_CONFIG_DIR", config_dir)
     monkeypatch.setattr(socket, "gethostname", lambda: "THIS-HOST")
+
+    # Stage 5: eligible_hosts()/resolve_alias(host_id=...)/_select_host()
+    # all now call through to a real worker via estate_worker_client — a
+    # real LocalTransport would subprocess against the *actual* checkout's
+    # config/estate.yaml, not this fixture's, and always fail identity
+    # checks. Fake a healthy worker for any host by default; tests that
+    # care about a specific health/inventory shape override these.
+    import src.estate_worker_client as estate_worker_client
+
+    def _fake_worker_health(host_id, *, deadline_s=20.0):
+        return {
+            "ollama": {"reachable": True, "base_url": "http://127.0.0.1:11434", "error": None},
+            "codex": {"available": True, "detail": "/usr/bin/codex"},
+            "gpu_yield": {"active": False, "reason": "idle"},
+            "in_flight": [],
+        }
+
+    def _fake_worker_inventory(host_id, models_of_interest=None, *, deadline_s=30.0):
+        names = list(models_of_interest or [])
+        return {
+            "models": [{"name": name, "digest": "fake"} for name in names],
+            "context": {name: {"length": 8192, "known": True} for name in names},
+        }
+
+    monkeypatch.setattr(estate_worker_client, "worker_health", _fake_worker_health)
+    monkeypatch.setattr(estate_worker_client, "worker_inventory", _fake_worker_inventory)
     return config_dir
 
 
@@ -321,10 +347,13 @@ def test_resolve_route_quality_floor_never_fabricated(fixture_config, monkeypatc
 
 def test_resolve_route_context_tokens_exceeding_known_window_fails_truthfully(fixture_config, monkeypatch):
     monkeypatch.setattr(estate_router, "_record_decision", lambda *a, **k: "fake-decision-id")
-    monkeypatch.setattr(estate_router, "_ollama_model_live", lambda model, timeout=3.0: (True, "live"))
+    import src.estate_worker_client as estate_worker_client
     monkeypatch.setattr(
-        "src.model_context.get_context_length_known",
-        lambda url, model: (8192, True),
+        estate_worker_client, "worker_inventory",
+        lambda host_id, models=None, *, deadline_s=30.0: {
+            "models": [{"name": "test-model-fast"}],
+            "context": {"test-model-fast": {"length": 8192, "known": True}},
+        },
     )
     route = estate_router.resolve_route({
         "task_class": "coding",
@@ -336,10 +365,13 @@ def test_resolve_route_context_tokens_exceeding_known_window_fails_truthfully(fi
 
 def test_resolve_route_context_tokens_unknown_window_reported_not_assumed(fixture_config, monkeypatch):
     monkeypatch.setattr(estate_router, "_record_decision", lambda *a, **k: "fake-decision-id")
-    monkeypatch.setattr(estate_router, "_ollama_model_live", lambda model, timeout=3.0: (True, "live"))
+    import src.estate_worker_client as estate_worker_client
     monkeypatch.setattr(
-        "src.model_context.get_context_length_known",
-        lambda url, model: (0, False),
+        estate_worker_client, "worker_inventory",
+        lambda host_id, models=None, *, deadline_s=30.0: {
+            "models": [{"name": "test-model-fast"}],
+            "context": {"test-model-fast": {"length": 0, "known": False}},
+        },
     )
     route = estate_router.resolve_route({
         "task_class": "coding",

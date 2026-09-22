@@ -24,9 +24,21 @@ def _route(*, ok=True, executor="local", hosts=None):
     }
 
 
+def _patch_codex_health(monkeypatch, available: bool, detail: str) -> None:
+    """Stage 5: delegation_preflight checks codex liveness via a worker-
+    attested `health` call, not `estate_router._codex_available()` (that
+    would be a truth claim about this backend host, not necessarily the
+    host a route would actually select)."""
+    import src.estate_worker_client as estate_worker_client
+    monkeypatch.setattr(
+        estate_worker_client, "worker_health",
+        lambda host_id, *, deadline_s=20.0: {"codex": {"available": available, "detail": detail}},
+    )
+
+
 def test_scenario_a_substantial_code_recommends_live_codex(monkeypatch):
     monkeypatch.setattr(preflight.estate_router, "eligible_hosts", lambda repo_id=None: _hosts())
-    monkeypatch.setattr(preflight.estate_router, "_codex_available", lambda: (True, "/bin/codex"))
+    _patch_codex_health(monkeypatch, True, "/bin/codex")
     monkeypatch.setattr(preflight.estate_router, "current_host_id", lambda: "test-lab")
     monkeypatch.setattr(
         preflight.estate_router,
@@ -60,7 +72,7 @@ def test_scenario_a_substantial_code_recommends_live_codex(monkeypatch):
 
 def test_scenario_b_repetitive_compute_recommends_remote_worker(monkeypatch):
     monkeypatch.setattr(preflight.estate_router, "eligible_hosts", lambda repo_id=None: _hosts())
-    monkeypatch.setattr(preflight.estate_router, "_codex_available", lambda: (False, "not needed"))
+    _patch_codex_health(monkeypatch, False, "not needed")
     monkeypatch.setattr(preflight.estate_router, "resolve_route", lambda task, record_decision=False: _route())
 
     result = preflight.delegation_preflight([{
@@ -76,7 +88,7 @@ def test_scenario_b_repetitive_compute_recommends_remote_worker(monkeypatch):
 
 def test_scenario_c_controller_retention_requires_valid_reason(monkeypatch):
     monkeypatch.setattr(preflight.estate_router, "eligible_hosts", lambda repo_id=None: _hosts())
-    monkeypatch.setattr(preflight.estate_router, "_codex_available", lambda: (True, "/bin/codex"))
+    _patch_codex_health(monkeypatch, True, "/bin/codex")
     monkeypatch.setattr(preflight.estate_router, "current_host_id", lambda: "test-lab")
     recorded = {}
     monkeypatch.setattr(
@@ -102,7 +114,7 @@ def test_scenario_c_controller_retention_requires_valid_reason(monkeypatch):
 
 def test_known_delegable_unit_cannot_be_silently_retained(monkeypatch):
     monkeypatch.setattr(preflight.estate_router, "eligible_hosts", lambda repo_id=None: _hosts())
-    monkeypatch.setattr(preflight.estate_router, "_codex_available", lambda: (True, "/bin/codex"))
+    _patch_codex_health(monkeypatch, True, "/bin/codex")
 
     result = preflight.delegation_preflight([{
         "task_class": "code_refactor", "requested_route": "controller_retained",
@@ -116,7 +128,7 @@ def test_known_delegable_unit_cannot_be_silently_retained(monkeypatch):
 
 def test_scenario_d_codex_unavailable_rejects_with_live_evidence(monkeypatch):
     monkeypatch.setattr(preflight.estate_router, "eligible_hosts", lambda repo_id=None: _hosts())
-    monkeypatch.setattr(preflight.estate_router, "_codex_available", lambda: (False, "no auth on this host"))
+    _patch_codex_health(monkeypatch, False, "no auth on this host")
     monkeypatch.setattr(preflight.estate_router, "_resolve_paid_provider", lambda alias: {"provider": "codex"})
     monkeypatch.setattr(
         preflight.estate_router, "resolve_route",
@@ -134,7 +146,7 @@ def test_scenario_d_codex_unavailable_rejects_with_live_evidence(monkeypatch):
 
 def test_codex_write_preflight_rejects_missing_existing_lease(monkeypatch):
     monkeypatch.setattr(preflight.estate_router, "eligible_hosts", lambda repo_id=None: _hosts())
-    monkeypatch.setattr(preflight.estate_router, "_codex_available", lambda: (True, "/bin/codex"))
+    _patch_codex_health(monkeypatch, True, "/bin/codex")
     monkeypatch.setattr(preflight.estate_router, "current_host_id", lambda: "test-lab")
     monkeypatch.setattr(
         preflight.estate_router,
@@ -164,7 +176,7 @@ def test_codex_write_preflight_rejects_missing_existing_lease(monkeypatch):
 
 def test_codex_write_preflight_uses_authority_result_when_ready(monkeypatch):
     monkeypatch.setattr(preflight.estate_router, "eligible_hosts", lambda repo_id=None: _hosts())
-    monkeypatch.setattr(preflight.estate_router, "_codex_available", lambda: (True, "/bin/codex"))
+    _patch_codex_health(monkeypatch, True, "/bin/codex")
     monkeypatch.setattr(preflight.estate_router, "current_host_id", lambda: "test-lab")
     monkeypatch.setattr(preflight.estate_router, "active_lease_for_repo", lambda repo_id, host_id: (_ for _ in ()).throw(AssertionError("preflight must not reimplement write authority via active_lease_for_repo")))
     calls = []
@@ -205,7 +217,7 @@ def test_codex_write_preflight_uses_authority_result_when_ready(monkeypatch):
 ])
 def test_codex_write_preflight_surfaces_authority_denial_reason(monkeypatch, authority_error):
     monkeypatch.setattr(preflight.estate_router, "eligible_hosts", lambda repo_id=None: _hosts())
-    monkeypatch.setattr(preflight.estate_router, "_codex_available", lambda: (True, "/bin/codex"))
+    _patch_codex_health(monkeypatch, True, "/bin/codex")
     monkeypatch.setattr(preflight.estate_router, "current_host_id", lambda: "test-lab")
     monkeypatch.setattr(preflight.estate_router, "active_lease_for_repo", lambda repo_id, host_id: (_ for _ in ()).throw(AssertionError("preflight must not use active_lease_for_repo directly")))
     monkeypatch.setattr(
@@ -239,7 +251,7 @@ def test_codex_write_preflight_surfaces_authority_denial_reason(monkeypatch, aut
 
 def test_read_only_code_review_with_repo_does_not_require_write_lease(monkeypatch):
     monkeypatch.setattr(preflight.estate_router, "eligible_hosts", lambda repo_id=None: _hosts())
-    monkeypatch.setattr(preflight.estate_router, "_codex_available", lambda: (True, "/bin/codex"))
+    _patch_codex_health(monkeypatch, True, "/bin/codex")
     monkeypatch.setattr(preflight.estate_router, "_resolve_paid_provider", lambda alias: {"provider": "codex"})
     monkeypatch.setattr(
         preflight.estate_router, "resolve_route",
@@ -261,7 +273,7 @@ def test_read_only_code_review_with_repo_does_not_require_write_lease(monkeypatc
 def test_scenario_d_worker_unavailable_rejects_with_host_evidence(monkeypatch):
     unavailable = _hosts(eligible=False)
     monkeypatch.setattr(preflight.estate_router, "eligible_hosts", lambda repo_id=None: unavailable)
-    monkeypatch.setattr(preflight.estate_router, "_codex_available", lambda: (True, "/bin/codex"))
+    _patch_codex_health(monkeypatch, True, "/bin/codex")
     monkeypatch.setattr(
         preflight.estate_router, "resolve_route",
         lambda task, record_decision=False: _route(ok=False, executor="none", hosts=unavailable),
