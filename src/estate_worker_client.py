@@ -14,8 +14,10 @@ by convention, which is the defect this stage closes."""
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Optional
@@ -67,16 +69,79 @@ class LocalTransport:
 
 
 class SshTransport:
-    """Full implementation lands in Stage 4 (§C.1 of the plan). Constructed
-    here so `transport_for_host` has somewhere to route an `ssh`-pinned
-    host without a second host-eligibility branch, but every call fails
-    truthfully until Stage 4."""
+    """§C.1 of the plan: a pinned-host-key, forced-command SSH transport.
+    No remote command argument is ever sent -- the home
+    `authorized_keys` entry pins the actual command
+    (`python -m src.estate_worker --root <checkout>`), so this transport
+    only has to get the JSON request onto stdin and the JSON response
+    off stdout. `StrictHostKeyChecking=no` is forbidden and this
+    deliberately does not reuse `routes/shell_routes.py:_ssh_base_argv`,
+    which allows it."""
 
     def __init__(self, host_cfg: dict):
         self.host_cfg = host_cfg
 
     def send(self, request: dict, *, deadline_s: float) -> dict:
-        raise WorkerTransportError("worker_unreachable", "ssh transport lands in stage 4")
+        host_id = self.host_cfg.get("id")
+        ssh_cfg = (self.host_cfg.get("worker") or {}).get("ssh") or {}
+        host_public_key = ssh_cfg.get("host_public_key")
+        target = ssh_cfg.get("target")
+        if not host_public_key:
+            raise WorkerTransportError(
+                "host_key_unpinned", f"{host_id!r} has no worker.ssh.host_public_key pinned",
+            )
+        if not target:
+            raise WorkerTransportError("worker_unreachable", f"{host_id!r} has no worker.ssh.target configured")
+        key_path = Path.home() / ".aoteru" / "worker_ssh_key"
+        if not key_path.exists():
+            raise WorkerTransportError("worker_unreachable", f"no local SSH key at {key_path}")
+
+        host_part = target.rsplit("@", 1)[-1].split(":", 1)[0]
+        known_hosts = tempfile.NamedTemporaryFile(
+            mode="w", prefix="aoteru-worker-known-hosts-", delete=False, encoding="utf-8",
+        )
+        try:
+            known_hosts.write(f"{host_part} {host_public_key}\n")
+            known_hosts.close()
+            argv = [
+                "ssh",
+                "-o", "BatchMode=yes",
+                "-o", "StrictHostKeyChecking=yes",
+                "-o", f"UserKnownHostsFile={known_hosts.name}",
+                "-o", "ConnectTimeout=6",
+                "-o", "ServerAliveInterval=15",
+                "-o", "ServerAliveCountMax=2",
+                "-i", str(key_path),
+                target,
+            ]
+            try:
+                completed = subprocess.run(
+                    argv,
+                    input=json.dumps(request),
+                    capture_output=True,
+                    text=True,
+                    timeout=deadline_s + 15,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise WorkerTransportError("worker_unreachable", f"ssh worker timed out: {exc}") from exc
+            except OSError as exc:
+                raise WorkerTransportError("worker_unreachable", f"ssh failed to start: {exc}") from exc
+        finally:
+            try:
+                os.unlink(known_hosts.name)
+            except OSError:
+                pass
+
+        if completed.returncode != 0:
+            detail = completed.stderr.strip() or f"ssh exited {completed.returncode}"
+            raise WorkerTransportError("worker_protocol_error", detail)
+        try:
+            response = json.loads(completed.stdout)
+        except json.JSONDecodeError as exc:
+            raise WorkerTransportError("worker_protocol_error", f"ssh worker returned invalid JSON: {exc}") from exc
+        if not isinstance(response, dict):
+            raise WorkerTransportError("worker_protocol_error", "ssh worker response was not a JSON object")
+        return response
 
 
 def _host_config(host_id: str) -> dict:

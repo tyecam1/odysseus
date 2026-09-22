@@ -30,6 +30,7 @@ _SPOOL_ROOT = Path.home() / ".aoteru" / "worker-spool"
 _SPOOL_TTL_SECONDS = 7 * 24 * 60 * 60
 _TERMINAL_STATES = frozenset({"succeeded", "failed", "timed_out"})
 _EXECUTION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_WORKER_CAPABILITIES_PATH = Path.home() / ".aoteru" / "worker_capabilities.json"
 
 
 class WorkerError(RuntimeError):
@@ -61,6 +62,20 @@ def _json_write(path: Path, value: dict) -> None:
             temporary.unlink()
         except FileNotFoundError:
             pass
+
+
+def _detached_spawn_verified() -> bool:
+    """Whether this worker's process layer has actually proven it can
+    outlive its launching session, gating `codex-write` eligibility
+    (Stage 4). Linux's `spawn_detached` (`start_new_session=True`) has
+    no session-scoped job object to be refused by, so it's proven by
+    construction. Windows's breakaway flags can be silently refused by
+    the sshd job (docs/aoteru-home-worker-setup.md step 7), so there the
+    flag file is the only evidence -- written once, manually, by that
+    live survival check, never by any code path that routes work."""
+    if os.name != "nt":
+        return True
+    return bool(_json_read(_WORKER_CAPABILITIES_PATH).get("detached_spawn_verified"))
 
 
 def _spool_path(execution_id: str) -> Path:
@@ -295,7 +310,7 @@ def _verb_inventory(payload: dict) -> dict:
             "deterministic": True,
             "local": reachable,
             "codex": codex_available,
-            "codex-write": codex_available and os.name != "nt",
+            "codex-write": codex_available and _detached_spawn_verified(),
         },
         "repos": repos,
         "hardware": _hardware(),
@@ -436,11 +451,14 @@ def _verb_start(payload: dict) -> dict:
     try:
         _json_write(spool / "request.json", payload)
         root = str(Path(get_app_root()).resolve())
-        handle = estate_worker_procs.spawn_detached(
-            [sys.executable, "-m", "src.estate_worker", "--run-spooled", execution_id],
-            root,
-            str(spool / "worker.log"),
-        )
+        try:
+            handle = estate_worker_procs.spawn_detached(
+                [sys.executable, "-m", "src.estate_worker", "--run-spooled", execution_id],
+                root,
+                str(spool / "worker.log"),
+            )
+        except estate_worker_procs.ProcessLayerError as exc:
+            raise WorkerError(exc.code, str(exc)) from exc
         handle = {**handle, "spool_id": execution_id}
         _json_write(spool / "state.json", {
             "state": "accepted",

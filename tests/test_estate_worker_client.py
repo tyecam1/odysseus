@@ -51,6 +51,14 @@ def fixture_config(tmp_path, monkeypatch):
                 "identity_verified": True,
                 "worker": {"enabled": True},
             },
+            {
+                "id": "test-ssh-ready", "hostname": "SSH-HOST", "role": "home",
+                "identity_verified": True,
+                "worker": {
+                    "enabled": True, "transport": "ssh",
+                    "ssh": {"target": "user@ssh-host", "host_public_key": "ssh-ed25519 AAAAFAKE"},
+                },
+            },
         ],
     }))
     monkeypatch.setattr(estate_router, "_CONFIG_DIR", config_dir)
@@ -127,11 +135,80 @@ def test_transport_for_host_raises_for_unregistered_host(fixture_config):
     assert excinfo.value.code == "placement_mismatch"
 
 
-def test_ssh_transport_fails_truthfully_before_stage_4(fixture_config):
+def test_ssh_transport_refuses_unpinned_host_key(fixture_config):
     transport = client.transport_for_host("test-home")
     with pytest.raises(client.WorkerTransportError) as excinfo:
         transport.send({"nonce": "x"}, deadline_s=10)
+    assert excinfo.value.code == "host_key_unpinned"
+
+
+class _FakeCompleted:
+    def __init__(self, returncode=0, stdout="", stderr=""):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+def _fake_ssh_key(tmp_path, monkeypatch):
+    key_dir = tmp_path / ".aoteru"
+    key_dir.mkdir()
+    key_path = key_dir / "worker_ssh_key"
+    key_path.write_text("fake-private-key")
+    monkeypatch.setattr(client.Path, "home", lambda: tmp_path)
+    return key_path
+
+
+def test_ssh_transport_builds_pinned_argv_with_no_remote_command(fixture_config, monkeypatch, tmp_path):
+    key_path = _fake_ssh_key(tmp_path, monkeypatch)
+    captured = {}
+
+    def fake_run(argv, **kwargs):
+        captured["argv"] = argv
+        request = json.loads(kwargs["input"])
+        return _FakeCompleted(0, json.dumps(_ok_response(request)))
+
+    monkeypatch.setattr(client.subprocess, "run", fake_run)
+
+    response = client.call_worker("test-ssh-ready", "health", {}, deadline_s=10)
+    assert response["ok"] is True
+
+    argv = captured["argv"]
+    assert argv[0] == "ssh"
+    assert "BatchMode=yes" in argv
+    assert "StrictHostKeyChecking=yes" in argv
+    assert not any("StrictHostKeyChecking=no" in a for a in argv)
+    assert any(a.startswith("UserKnownHostsFile=") for a in argv)
+    assert "-i" in argv and str(key_path) in argv
+    # The target is the last argv entry -- no remote command argument
+    # follows it; the forced command on the far end is authoritative.
+    assert argv[-1] == "user@ssh-host"
+
+
+def test_ssh_transport_times_out_as_worker_unreachable(fixture_config, monkeypatch, tmp_path):
+    import subprocess as real_subprocess
+    _fake_ssh_key(tmp_path, monkeypatch)
+
+    def fake_run(argv, **kwargs):
+        raise real_subprocess.TimeoutExpired(cmd=argv, timeout=kwargs.get("timeout"))
+
+    monkeypatch.setattr(client.subprocess, "run", fake_run)
+
+    with pytest.raises(client.WorkerTransportError) as excinfo:
+        client.call_worker("test-ssh-ready", "health", {}, deadline_s=10)
     assert excinfo.value.code == "worker_unreachable"
+
+
+def test_ssh_transport_nonzero_exit_is_worker_protocol_error(fixture_config, monkeypatch, tmp_path):
+    _fake_ssh_key(tmp_path, monkeypatch)
+
+    def fake_run(argv, **kwargs):
+        return _FakeCompleted(255, "", "ssh: connection refused")
+
+    monkeypatch.setattr(client.subprocess, "run", fake_run)
+
+    with pytest.raises(client.WorkerTransportError) as excinfo:
+        client.call_worker("test-ssh-ready", "health", {}, deadline_s=10)
+    assert excinfo.value.code == "worker_protocol_error"
 
 
 def test_call_worker_happy_path_returns_response(fixture_config, monkeypatch):

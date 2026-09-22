@@ -3,11 +3,29 @@ from __future__ import annotations
 
 import os
 import subprocess
+import time
 from pathlib import Path
 from typing import Optional
 
 
-_WINDOWS_STAGE4_ERROR = "windows process layer lands in stage 4"
+class ProcessLayerError(RuntimeError):
+    """Raised for a process-layer failure that needs a specific worker
+    error code (currently only `executor_unavailable`, for a detached
+    spawn refused by the host) rather than the generic `execution_failed`
+    a bare exception maps to in `estate_worker.handle()`."""
+
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
+
+
+# Win32 constants (avoids a ctypes.wintypes/win32con dependency for the
+# handful of values this module needs).
+_CREATE_NEW_PROCESS_GROUP = 0x00000200
+_DETACHED_PROCESS = 0x00000008
+_CREATE_BREAKAWAY_FROM_JOB = 0x01000000
+_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+_STILL_ACTIVE = 259
 
 
 def _proc_stat_fields(pid: int) -> Optional[tuple[str, int, int]]:
@@ -155,10 +173,64 @@ def _kill_process_tree(root_pid: int, process_group_id: int, *, reap_timeout: fl
     }
 
 
+def _win_creation_time(handle: int) -> Optional[int]:
+    """Read a Windows process's creation time (100ns ticks since 1601,
+    the same units GetProcessTimes always returns) from an already-open
+    handle -- the pid-reuse-safety anchor `is_alive`/`kill_tree` compare
+    against, same role `/proc/<pid>/stat`'s starttime field plays on
+    Linux."""
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.windll.kernel32
+    creation, exit_time, kernel_time, user_time = (wintypes.FILETIME() for _ in range(4))
+    ok = kernel32.GetProcessTimes(
+        handle, ctypes.byref(creation), ctypes.byref(exit_time),
+        ctypes.byref(kernel_time), ctypes.byref(user_time),
+    )
+    if not ok:
+        return None
+    return (creation.dwHighDateTime << 32) | creation.dwLowDateTime
+
+
+def _win_open_process(pid: int):
+    import ctypes
+
+    kernel32 = ctypes.windll.kernel32
+    handle = kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    return handle or None
+
+
 def spawn_detached(argv: list[str], cwd: str, log_path: str) -> dict[str, int]:
-    """Start one detached Linux process and return its PID identity."""
+    """Start one detached process (Windows or Linux) and return its PID
+    identity."""
     if os.name == "nt":
-        raise NotImplementedError(_WINDOWS_STAGE4_ERROR)
+        path = Path(log_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("ab") as log_file:
+            try:
+                proc = subprocess.Popen(
+                    argv,
+                    cwd=cwd,
+                    stdin=subprocess.DEVNULL,
+                    stdout=log_file,
+                    stderr=subprocess.STDOUT,
+                    creationflags=(
+                        _CREATE_NEW_PROCESS_GROUP | _DETACHED_PROCESS | _CREATE_BREAKAWAY_FROM_JOB
+                    ),
+                    close_fds=True,
+                )
+            except OSError as exc:
+                raise ProcessLayerError(
+                    "executor_unavailable",
+                    f"detached spawn not permitted in this session: {exc}",
+                ) from exc
+        create_time = _win_creation_time(int(proc._handle))
+        if create_time is None:
+            raise ProcessLayerError(
+                "executor_unavailable", f"could not read creation time for spawned pid {proc.pid}",
+            )
+        return {"pid": proc.pid, "create_time": create_time}
     path = Path(log_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("ab") as log_file:
@@ -177,25 +249,47 @@ def spawn_detached(argv: list[str], cwd: str, log_path: str) -> dict[str, int]:
 
 
 def is_alive(handle: dict) -> bool:
-    """Return true only while the same, non-zombie process is present."""
-    if os.name == "nt":
-        raise NotImplementedError(_WINDOWS_STAGE4_ERROR)
+    """Return true only while the same, non-zombie/non-exited process is
+    present, matched by creation time so a reused pid is never mistaken
+    for the original."""
     try:
         pid = int(handle["pid"])
         create_time = int(handle["create_time"])
     except (KeyError, TypeError, ValueError):
         return False
+    if os.name == "nt":
+        import ctypes
+
+        win_handle = _win_open_process(pid)
+        if win_handle is None:
+            return False
+        try:
+            if _win_creation_time(win_handle) != create_time:
+                return False
+            exit_code = ctypes.c_ulong()
+            kernel32 = ctypes.windll.kernel32
+            if not kernel32.GetExitCodeProcess(win_handle, ctypes.byref(exit_code)):
+                return False
+            return exit_code.value == _STILL_ACTIVE
+        finally:
+            ctypes.windll.kernel32.CloseHandle(win_handle)
     return _proc_is_live_nonzombie(pid, expected_starttime=create_time)
 
 
 def kill_tree(handle: dict) -> dict:
     """Kill a detached process tree without ever targeting a reused PID."""
-    if os.name == "nt":
-        raise NotImplementedError(_WINDOWS_STAGE4_ERROR)
     try:
         pid = int(handle["pid"])
     except (KeyError, TypeError, ValueError):
         return {"ok": False, "attempted_pids": [], "still_alive_pids": []}
     if not is_alive(handle):
         return {"ok": True, "attempted_pids": [], "still_alive_pids": []}
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True)
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            if not is_alive(handle):
+                return {"ok": True, "attempted_pids": [pid], "still_alive_pids": []}
+            time.sleep(0.2)
+        return {"ok": False, "attempted_pids": [pid], "still_alive_pids": [pid]}
     return _kill_process_tree(pid, pid)
