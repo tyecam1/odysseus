@@ -229,6 +229,10 @@ def test_call_worker_raises_worker_reported_error(fixture_config, monkeypatch):
     with pytest.raises(client.WorkerTransportError) as excinfo:
         client.call_worker("test-lab", "execute", {}, deadline_s=10)
     assert excinfo.value.code == "executor_unavailable"
+    # A normal (non-placement) worker-reported error need not carry an
+    # attested host -- observed_host_id stays None, same as before this
+    # attribute existed.
+    assert excinfo.value.observed_host_id is None
 
 
 def test_call_worker_raises_worker_protocol_error_on_malformed_response(fixture_config, monkeypatch):
@@ -247,6 +251,7 @@ def test_attestation_host_mismatch_is_placement_mismatch(fixture_config, monkeyp
     with pytest.raises(client.WorkerTransportError) as excinfo:
         client.call_worker("test-lab", "health", {}, deadline_s=10)
     assert excinfo.value.code == "placement_mismatch"
+    assert excinfo.value.observed_host_id == "some-other-host"
 
 
 def test_nonce_mismatch_is_rejected_by_envelope_validation(fixture_config, monkeypatch):
@@ -272,6 +277,11 @@ def test_pinned_fingerprint_mismatch_is_placement_mismatch(fixture_config, monke
     with pytest.raises(client.WorkerTransportError) as excinfo:
         client.call_worker("test-home", "health", {}, deadline_s=10)
     assert excinfo.value.code == "placement_mismatch"
+    # The attested host_id itself matched -- only the fingerprint didn't
+    # -- so the observed host retained for diagnosis is still test-home,
+    # not None: enough attestation context to tell "wrong hardware
+    # answering as test-home" apart from "nothing answered at all".
+    assert excinfo.value.observed_host_id == "test-home"
 
 
 def test_worker_health_caches_within_ttl_and_clear_caches_busts_it(fixture_config, monkeypatch):

@@ -188,6 +188,42 @@ def test_resolve_route_auto_skips_host_missing_repo(fixture_config, monkeypatch)
     assert route["route"]["host"] == "test-lab"
 
 
+def test_resolve_route_auto_skips_higher_priority_host_missing_repo(fixture_config, monkeypatch):
+    """Adversarial version of the test above (pre-Stage-6 review finding):
+    in `fixture_config`'s estate order, lab is both first *and* the host
+    with the repo, so that test alone can't distinguish "repo locality
+    actually filtered the ineligible host" from "lab just happened to be
+    first anyway." Here the *first* candidate in estate order
+    (test-home) is healthy and model-capable but lacks the repo, and the
+    *second* (test-lab) has it -- auto routing must still select
+    test-lab, proving eligibility filtering (not host-list order alone)
+    is what drives the selection."""
+    estate = yaml.safe_load((fixture_config / "estate.yaml").read_text())
+    hosts_by_id = {h["id"]: h for h in estate["hosts"]}
+    hosts_by_id["test-home"]["tailscale"] = True
+    estate["hosts"] = [
+        hosts_by_id["test-home"], hosts_by_id["test-lab"], hosts_by_id["test-interface"],
+    ]
+    (fixture_config / "estate.yaml").write_text(yaml.safe_dump(estate))
+    monkeypatch.setattr(estate_router, "_record_decision", lambda *a, **k: "fake-decision-id")
+    import src.estate_worker_client as estate_worker_client
+
+    def fake_repo_probe(host_id, repo_id, *, deadline_s=15.0):
+        return {"resolved": host_id == "test-lab"}
+    monkeypatch.setattr(estate_worker_client, "worker_repo_probe", fake_repo_probe)
+
+    hosts = {h["host_id"]: h for h in estate_router.eligible_hosts("test-repo")}
+    assert list(hosts) == ["test-home", "test-lab"]  # confirms home really is checked first
+    assert hosts["test-home"]["eligible"] is False
+
+    route = estate_router.resolve_route({
+        "task_class": "coding", "repo": "test-repo",
+        "requirements": {"capabilities": ["local-fast"]},
+    })
+    assert route["ok"] is True
+    assert route["route"]["host"] == "test-lab"
+
+
 def test_resolve_route_explicit_requested_host_missing_repo_fails_before_dispatch(fixture_config, monkeypatch):
     """'explicit requested_host with the repo absent fails before
     execution' -- never silently substituted."""
@@ -669,7 +705,11 @@ def test_run_task_local_dispatch_failure_is_not_executed(fixture_config, monkeyp
     failure — no host ever attested it ran anything — must report
     `executed: False`, `placement.executed_host: None`, and truthful
     failure telemetry. There is no in-process or alternate-host fallback:
-    a failed dispatch is reported as a failed dispatch."""
+    a failed dispatch is reported as a failed dispatch. `status` is
+    `failed`, not `blocked` — routing itself succeeded, dispatch is what
+    failed (pre-Stage-6 review finding; `blocked` stays reserved for
+    pre-execution admission/authority refusals that never reach
+    dispatch)."""
     monkeypatch.setattr(estate_router, "_record_decision", lambda *a, **k: "fake-decision-id")
     monkeypatch.setattr(estate_router, "_ollama_model_live", lambda model, timeout=3.0: (True, "live"))
 
@@ -691,7 +731,7 @@ def test_run_task_local_dispatch_failure_is_not_executed(fixture_config, monkeyp
     assert result["executed"] is False
     assert result["placement"]["executed_host"] is None
     assert result["execution_error"]
-    assert recorded["status"] == "blocked"
+    assert recorded["status"] == "failed"
     assert recorded["escalation_reason"] == "worker_failed"
 
 
@@ -720,8 +760,95 @@ def test_run_task_codex_read_only_dispatch_failure_is_not_executed(fixture_confi
     assert result["executed"] is False
     assert result["placement"]["executed_host"] is None
     assert result["execution_error"]
-    assert recorded["status"] == "blocked"
+    assert recorded["status"] == "failed"
     assert recorded["escalation_reason"] == "worker_failed"
+
+
+def test_run_task_local_placement_mismatch_preserves_observed_host_in_telemetry(fixture_config, monkeypatch):
+    """Pre-Stage-6 review finding: a placement mismatch must fail closed
+    (never executed) while still telling routing telemetry *which* host
+    actually attested wrongly, via
+    `actual_route = "placement_mismatch:<observed-host>"`."""
+    monkeypatch.setattr(estate_router, "_record_decision", lambda *a, **k: "fake-decision-id")
+    monkeypatch.setattr(estate_router, "_ollama_model_live", lambda model, timeout=3.0: (True, "live"))
+
+    def fake_dispatch(host_id, executor, task, **k):
+        return {
+            "ok": False, "error": "attested host 'test-home' does not match routed host 'test-lab'",
+            "error_code": "placement_mismatch",
+            "placement": {
+                "routed_host": host_id, "executed_host": None, "attested": False,
+                "transport": "local", "observed_host": "test-home",
+            },
+        }
+    monkeypatch.setattr(estate_router, "_dispatch_read_only", fake_dispatch)
+    recorded = {}
+    monkeypatch.setattr(estate_router, "_update_decision_outcome", lambda decision_id, **k: recorded.update(k))
+
+    result = estate_router.run_task({
+        "task_class": "coding", "objective": "say pong",
+        "requirements": {"capabilities": ["local-fast"]},
+    })
+    assert result["ok"] is False
+    assert result["executed"] is False
+    assert result["placement"]["executed_host"] is None
+    assert result["placement"]["observed_host"] == "test-home"
+    assert recorded["status"] == "failed"
+    assert recorded["escalation_reason"] == "worker_failed"
+    assert recorded["actual_route"] == "placement_mismatch:test-home"
+
+
+def test_run_task_codex_read_only_placement_mismatch_preserves_observed_host_in_telemetry(fixture_config, monkeypatch):
+    monkeypatch.setattr(estate_router, "_record_decision", lambda *a, **k: "fake-decision-id")
+
+    def fake_dispatch(host_id, executor, task, **k):
+        assert executor == "codex"
+        return {
+            "ok": False, "error": "attested host 'test-home' does not match routed host 'test-lab'",
+            "error_code": "placement_mismatch",
+            "placement": {
+                "routed_host": host_id, "executed_host": None, "attested": False,
+                "transport": "ssh", "observed_host": "test-home",
+            },
+        }
+    monkeypatch.setattr(estate_router, "_dispatch_read_only", fake_dispatch)
+    recorded = {}
+    monkeypatch.setattr(estate_router, "_update_decision_outcome", lambda decision_id, **k: recorded.update(k))
+
+    result = estate_router.run_task({
+        "task_class": "coding", "objective": "fix the bug",
+        "requirements": {"capabilities": ["code-strong"]},
+        "routing": {"allow_paid_escalation": True},
+    })
+    assert result["ok"] is False
+    assert result["executed"] is False
+    assert result["placement"]["executed_host"] is None
+    assert result["placement"]["observed_host"] == "test-home"
+    assert recorded["status"] == "failed"
+    assert recorded["actual_route"] == "placement_mismatch:test-home"
+
+
+def test_run_task_worker_unreachable_leaves_actual_route_unset(fixture_config, monkeypatch):
+    """A plain transport failure (no attested host observed at all) must
+    not fabricate a `placement_mismatch:*` actual_route -- that string is
+    reserved for a genuine observed-but-wrong attestation."""
+    monkeypatch.setattr(estate_router, "_record_decision", lambda *a, **k: "fake-decision-id")
+    monkeypatch.setattr(estate_router, "_ollama_model_live", lambda model, timeout=3.0: (True, "live"))
+
+    def fake_dispatch(host_id, executor, task, **k):
+        return {
+            "ok": False, "error": "local worker timed out", "error_code": "worker_unreachable",
+            "placement": {"routed_host": host_id, "executed_host": None, "attested": False, "transport": "local"},
+        }
+    monkeypatch.setattr(estate_router, "_dispatch_read_only", fake_dispatch)
+    recorded = {}
+    monkeypatch.setattr(estate_router, "_update_decision_outcome", lambda decision_id, **k: recorded.update(k))
+
+    estate_router.run_task({
+        "task_class": "coding", "objective": "say pong",
+        "requirements": {"capabilities": ["local-fast"]},
+    })
+    assert "actual_route" not in recorded or recorded["actual_route"] is None
 
 
 def test_run_task_does_not_execute_deterministic_route(fixture_config, monkeypatch):

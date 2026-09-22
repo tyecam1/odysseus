@@ -31,11 +31,22 @@ class WorkerTransportError(Exception):
     is always one of the client-side error codes in
     `estate_worker_protocol.ERROR_CODES` (`worker_protocol_error`,
     `worker_unreachable`, `placement_mismatch`) or a worker-reported error
-    code echoed straight through."""
+    code echoed straight through.
 
-    def __init__(self, code: str, message: Optional[str] = None):
+    `.observed_host_id` (pre-Stage-6 review finding) carries the actual
+    `attestation.host_id` a `placement_mismatch` was raised against, when
+    one was observed -- otherwise `str(exc)` is the only place that
+    identity lived, and a caller building routing telemetry (`actual_route
+    = "placement_mismatch:<observed-host>"`) had no structured field to
+    read it from. Not a widening of the worker protocol: this is a
+    client-side exception attribute, never sent or received on the wire.
+    A plain transport failure (no attestation observed at all) leaves it
+    `None`, same as before this attribute existed."""
+
+    def __init__(self, code: str, message: Optional[str] = None, *, observed_host_id: Optional[str] = None):
         super().__init__(message or code)
         self.code = code
+        self.observed_host_id = observed_host_id
 
 
 class LocalTransport:
@@ -177,21 +188,33 @@ def transport_for_host(host_id: str):
 
 def verify_attestation(response: dict, request: dict, host_cfg: dict) -> None:
     """Raise `placement_mismatch` unless the worker's attestation proves it
-    is actually the host we routed to, replying to this exact request."""
+    is actually the host we routed to, replying to this exact request.
+
+    Every raise here carries `observed_host_id` = the attested
+    `host_id` actually reported (pre-Stage-6 review finding) -- the
+    identity a caller needs to diagnose *which* host answered wrongly,
+    without this function ever treating that host as having executed
+    anything."""
     attestation = response.get("attestation") or {}
+    observed_host_id = attestation.get("host_id")
     expected_host = request.get("expected_host_id")
-    if attestation.get("host_id") != expected_host:
+    if observed_host_id != expected_host:
         raise WorkerTransportError(
             "placement_mismatch",
-            f"attested host {attestation.get('host_id')!r} does not match routed host {expected_host!r}",
+            f"attested host {observed_host_id!r} does not match routed host {expected_host!r}",
+            observed_host_id=observed_host_id,
         )
     if attestation.get("nonce") != request.get("nonce"):
-        raise WorkerTransportError("placement_mismatch", "attestation nonce does not match request")
+        raise WorkerTransportError(
+            "placement_mismatch", "attestation nonce does not match request",
+            observed_host_id=observed_host_id,
+        )
     pinned_fingerprint = (host_cfg.get("worker") or {}).get("machine_fingerprint")
     if pinned_fingerprint and attestation.get("machine_fingerprint") != pinned_fingerprint:
         raise WorkerTransportError(
             "placement_mismatch",
             f"attested machine_fingerprint does not match the fingerprint pinned for {expected_host!r}",
+            observed_host_id=observed_host_id,
         )
 
 

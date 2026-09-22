@@ -1578,11 +1578,20 @@ def _dispatch_read_only(host_id: str, executor: str, task: dict, *, concrete_mod
     failure shape in this module. There is no retry on another host and
     no in-process fallback — the whole point of this seam is that a
     worker failure is reported as a worker failure, not silently absorbed
-    by executing here instead."""
+    by executing here instead.
+
+    `placement.observed_host` (pre-Stage-6 review finding) carries the
+    attested host id a `placement_mismatch` failure actually observed,
+    when one was observed, distinct from `placement.executed_host` (which
+    a mismatch always leaves `None` -- an observed-but-wrong host must
+    never be treated as having executed anything)."""
     from src.estate_worker_client import WorkerTransportError, call_worker
 
     objective = task.get("objective")
-    placement = {"routed_host": host_id, "executed_host": None, "attested": False, "transport": None}
+    placement = {
+        "routed_host": host_id, "executed_host": None, "attested": False, "transport": None,
+        "observed_host": None,
+    }
     try:
         host_cfg = _load_yaml("estate")
         host_entry = next((h for h in host_cfg.get("hosts", []) if h.get("id") == host_id), None)
@@ -1615,6 +1624,7 @@ def _dispatch_read_only(host_id: str, executor: str, task: dict, *, concrete_mod
     try:
         response = call_worker(host_id, "execute", payload, deadline_s=payload["timeout_s"] + 15)
     except WorkerTransportError as exc:
+        placement["observed_host"] = exc.observed_host_id
         return {"ok": False, "error": str(exc), "error_code": exc.code, "placement": placement}
 
     result = dict(response["result"])
@@ -1623,6 +1633,22 @@ def _dispatch_read_only(host_id: str, executor: str, task: dict, *, concrete_mod
     placement["attested"] = attested_host == host_id
     result["placement"] = placement
     return result
+
+
+def _dispatch_failure_actual_route(result: dict) -> Optional[str]:
+    """`actual_route` telemetry for a failed `_dispatch_read_only()`
+    result (pre-Stage-6 review finding). A placement mismatch — the
+    worker attested as a different (or differently-fingerprinted) host
+    than routed — carries that observed host id, so telemetry can
+    distinguish "no worker answered at all" from "the wrong worker
+    answered"; every other dispatch failure leaves this `None`, same as
+    before this function existed."""
+    if result.get("error_code") != "placement_mismatch":
+        return None
+    observed_host = (result.get("placement") or {}).get("observed_host")
+    if not observed_host:
+        return None
+    return f"placement_mismatch:{observed_host}"
 
 
 def run_task(task: dict) -> dict:
@@ -1769,10 +1795,18 @@ def run_task(task: dict) -> dict:
                     # never be reported as executed (Stage 3 review
                     # finding). The implementation-mode (codex-write)
                     # branch above has its own terminal/durable result
-                    # shapes and is not affected by this guard.
+                    # shapes and is not affected by this guard. This is a
+                    # post-route dispatch failure, not a pre-execution
+                    # admission/authority refusal, so the recorded status
+                    # is `failed` (routing succeeded; dispatch did not),
+                    # matching the write-lease/qualification checks
+                    # elsewhere in this function that correctly stay
+                    # `blocked` because they never reach dispatch at all.
+                    actual_route = _dispatch_failure_actual_route(result)
                     _update_decision_outcome(
-                        route["decision_id"], status="blocked", deterministic_gate="fail",
+                        route["decision_id"], status="failed", deterministic_gate="fail",
                         escalation_reason="worker_failed", verification_outcome="fail",
+                        actual_route=actual_route,
                     )
                     return {
                         **route, "ok": False, "executed": False,
@@ -1851,10 +1885,16 @@ def run_task(task: dict) -> dict:
         # Transport/protocol/pre-execution worker failure: no host ever
         # attested it actually ran this task, so `executed` must be
         # false, not a hollow true covering for a dispatch that never
-        # happened (Stage 3 review finding).
+        # happened (Stage 3 review finding). Routing itself succeeded --
+        # this is a post-route dispatch failure -- so the recorded
+        # status is `failed`, not `blocked` (which stays reserved for
+        # pre-execution admission/authority refusals that never reach
+        # dispatch, e.g. the qualified_executors check above).
+        actual_route = _dispatch_failure_actual_route(result)
         _update_decision_outcome(
-            route["decision_id"], status="blocked", deterministic_gate="fail",
+            route["decision_id"], status="failed", deterministic_gate="fail",
             escalation_reason="worker_failed", verification_outcome="fail",
+            actual_route=actual_route,
         )
         return {
             **route, "ok": False, "executed": False,
