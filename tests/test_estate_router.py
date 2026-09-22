@@ -24,9 +24,20 @@ def fixture_config(tmp_path, monkeypatch):
 
     (config_dir / "estate.yaml").write_text(yaml.safe_dump({
         "hosts": [
-            {"id": "test-lab", "hostname": "THIS-HOST", "role": "lab", "tailscale": True},
-            {"id": "test-home", "hostname": "OTHER-HOST", "role": "home", "tailscale": False},
-            {"id": "test-interface", "hostname": "INTERFACE-HOST", "role": "interface", "tailscale": True},
+            {
+                "id": "test-lab", "hostname": "THIS-HOST", "role": "lab", "tailscale": True,
+                "identity_verified": True,
+                "worker": {"enabled": True, "transport": "local", "qualified_executors": ["local"]},
+            },
+            {
+                "id": "test-home", "hostname": "OTHER-HOST", "role": "home", "tailscale": False,
+                "identity_verified": True,
+                "worker": {"enabled": True, "transport": "ssh", "qualified_executors": ["local"]},
+            },
+            {
+                "id": "test-interface", "hostname": "INTERFACE-HOST", "role": "interface", "tailscale": True,
+                "identity_verified": True,
+            },
         ],
     }))
     (config_dir / "models.yaml").write_text(yaml.safe_dump({
@@ -81,30 +92,68 @@ def test_eligible_hosts_home_fails_truthfully_not_a_tailnet_member(fixture_confi
     assert "not a tailnet member" in hosts["test-home"]["reason"]
 
 
-def test_eligible_hosts_explicit_verified_false_blocks_even_if_reachable(fixture_config):
-    """Finding: 'a newly reachable but unverified home host must never
-    become eligible automatically' — verified: false must gate ahead of
-    (not merely alongside) live reachability."""
+def test_home_identity_verified_but_worker_disabled_is_ineligible_with_worker_reason(fixture_config):
     estate = yaml.safe_load((fixture_config / "estate.yaml").read_text())
     for host in estate["hosts"]:
         if host["id"] == "test-home":
-            host["tailscale"] = True
-            host["tailscale_dns"] = "test-home.example.ts.net"
-            host["verified"] = False
+            host["worker"]["enabled"] = False
     (fixture_config / "estate.yaml").write_text(yaml.safe_dump(estate))
 
     hosts = {h["host_id"]: h for h in estate_router.eligible_hosts()}
     assert hosts["test-home"]["eligible"] is False
-    assert "not verified" in hosts["test-home"]["reason"]
-
-
-def test_host_reachable_missing_verified_key_defaults_true(fixture_config):
-    """Existing hosts (lab/interface) that never opted into `verified`
-    must not regress to ineligible."""
-    reachable, reason = estate_router.host_reachable(
-        {"id": "test-lab", "hostname": "THIS-HOST"}, "THIS-HOST",
+    assert hosts["test-home"]["identity_verified"] is True
+    assert hosts["test-home"]["worker_enabled"] is False
+    assert hosts["test-home"]["reason"] == (
+        "test-home identity verified; worker not enabled (worker qualification pending)"
     )
-    assert reachable is True
+
+
+def test_legacy_verified_false_still_blocks(fixture_config):
+    reachable, reason = estate_router.host_reachable(
+        {
+            "id": "legacy-home", "hostname": "THIS-HOST", "verified": False,
+            "worker": {"enabled": True},
+        },
+        "THIS-HOST",
+    )
+    assert reachable is False
+    assert reason == "legacy-home identity not verified"
+
+
+def test_missing_identity_keys_fail_closed(fixture_config):
+    reachable, reason = estate_router.host_reachable(
+        {"id": "unknown-host", "hostname": "THIS-HOST", "worker": {"enabled": True}},
+        "THIS-HOST",
+    )
+    assert reachable is False
+    assert reason == "unknown-host identity not verified"
+
+
+def test_identity_verified_never_implies_worker_enabled(fixture_config):
+    host = {"id": "identity-only", "hostname": "THIS-HOST", "identity_verified": True}
+    assert estate_router.host_static_state(host)["worker_enabled"] is False
+    reachable, reason = estate_router.host_reachable(host, "THIS-HOST")
+    assert reachable is False
+    assert reason == (
+        "identity-only identity verified; worker not enabled (worker qualification pending)"
+    )
+
+
+def test_shipped_estate_config_home_worker_disabled():
+    estate_path = Path(__file__).parents[1] / "config" / "estate.yaml"
+    estate = yaml.safe_load(estate_path.read_text())
+    home = next(host for host in estate["hosts"] if host["id"] == "desktop-in7o23d")
+    assert home["worker"]["enabled"] is False
+    assert "verified" not in home
+
+
+def test_shipped_estate_config_lab_worker_local():
+    estate_path = Path(__file__).parents[1] / "config" / "estate.yaml"
+    estate = yaml.safe_load(estate_path.read_text())
+    lab = next(host for host in estate["hosts"] if host["id"] == "hz2-workstation")
+    assert lab["identity_verified"] is True
+    assert lab["worker"]["enabled"] is True
+    assert lab["worker"]["transport"] == "local"
 
 
 def test_resolve_alias_bound_and_live(fixture_config, monkeypatch):

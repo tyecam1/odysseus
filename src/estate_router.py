@@ -61,22 +61,39 @@ def _load_yaml(name: str) -> dict:
         raise RoutingConfigError(f"config/{name}.yaml is malformed: {e}") from e
 
 
+def host_static_state(host: dict) -> dict:
+    """Return the governed, non-live worker state for one host.
+
+    `verified` is a compatibility input through Stage 8 only. It represents
+    identity, never worker enablement, and a host with neither identity key
+    fails closed.
+    """
+    worker = host.get("worker") or {}
+    identity_verified = host.get("identity_verified")
+    if identity_verified is None and "identity_verified" not in host:
+        identity_verified = host.get("verified", False)
+    return {
+        "identity_verified": bool(identity_verified),
+        "worker_enabled": bool(worker.get("enabled")),
+        "transport": worker.get("transport"),
+        "qualified_executors": worker.get("qualified_executors") or [],
+    }
+
+
 def host_reachable(host: dict, live_hostname: str) -> tuple[bool, str]:
     """Shared with `scripts/agent`, which imports this function directly
     rather than maintaining its own copy — a second, slightly-different
     reachability rule would itself be the kind of duplicate authority the
     routing contract forbids.
 
-    Explicit `verified: false` (config/estate.yaml) is a hard gate checked
-    before reachability, not after: a host that merely answers on the
-    tailnet is not the same claim as a host whose identity has actually
-    been confirmed (finding: "a newly reachable but unverified home host
-    must never become eligible automatically"). A host with no `verified`
-    key at all defaults to verified — this is the existing lab/interface
-    convention, not a new category; only hosts that explicitly opt out
-    (currently just the home host) are affected."""
-    if host.get("verified", True) is False:
-        return False, f"{host['id']!r} is not verified (config/estate.yaml verified: false) — reachability alone is not sufficient"
+    Identity confirmation and worker qualification are independent hard
+    gates checked before live reachability. Legacy `verified` is accepted as
+    identity evidence only; it never enables a worker."""
+    state = host_static_state(host)
+    if not state["identity_verified"]:
+        return False, f"{host['id']} identity not verified"
+    if not state["worker_enabled"]:
+        return False, f"{host['id']} identity verified; worker not enabled (worker qualification pending)"
     if host.get("hostname") == live_hostname:
         return True, "this host"
     if not host.get("tailscale"):
@@ -164,8 +181,18 @@ def eligible_hosts(repo_id: Optional[str] = None) -> list[dict]:
     for host in estate.get("hosts", []):
         if host.get("role") not in ("lab", "home"):
             continue
+        state = host_static_state(host)
         reachable, reason = host_reachable(host, live_hostname)
-        entry = {"host_id": host["id"], "role": host.get("role"), "eligible": reachable, "reason": reason}
+        entry = {
+            "host_id": host["id"],
+            "role": host.get("role"),
+            "identity_verified": state["identity_verified"],
+            "worker_enabled": state["worker_enabled"],
+            "reachable": reachable,
+            "healthy": None,
+            "eligible": reachable,
+            "reason": reason,
+        }
         if reachable and repo_id:
             from core.database import ParkLease, get_db_session, park_lease_is_stale
             with get_db_session() as db:
