@@ -169,7 +169,7 @@ WORKER (lab: same checkout via subprocess; home: separate checkout via SSH)
   - `-o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=<generated> -o ConnectTimeout=6 -o ServerAliveInterval=15 -o ServerAliveCountMax=2 -i <key> <target>`
   - `<generated>` is a temp known_hosts file built from `worker.ssh.host_public_key` in `config/estate.yaml`.
   - `<key>` is the host-local `~/.aoteru/worker_ssh_key` on the backend host, never committed.
-  - No remote command argument is sent. The home `authorized_keys` entry pins it with `command="<python> -m src.estate_worker --root <checkout>",no-pty,no-port-forwarding,no-agent-forwarding,no-X11-forwarding`.
+  - No remote command argument is sent. The home `authorized_keys` entry pins it with `command="cmd.exe /c cd /d <checkout> && <checkout>\venv\Scripts\python.exe -m src.estate_worker --root <checkout>",no-pty,no-port-forwarding,no-agent-forwarding,no-X11-forwarding` — the explicit `cd` is required because `python -m src.estate_worker` has to import the module before `--root` (parsed inside `main()`) ever runs, and an OpenSSH forced command does not guarantee the session starts in the checkout; see `docs/aoteru-home-worker-setup.md` step 4.
   - Missing `host_public_key` → `WorkerTransportError("host_key_unpinned")`. `StrictHostKeyChecking=no` is forbidden; do not reuse `routes/shell_routes.py:_ssh_base_argv`.
   - Timeout is `deadline_s + 15` (read-only codex: 180 + 15 = 195 s, below the 210 s `/api/estate/run` watchdog).
 - There is no new listener, port, firewall rule or scheduled task on any host.
@@ -239,7 +239,7 @@ Rules:
 - The spool lives at `~/.aoteru/worker-spool/<execution_id>/` and holds `request.json`, `state.json` and `result.json`. It is transient evidence for the control plane, **not** a lifecycle authority. The worker garbage-collects terminal spools older than 7 days on any call.
 - The worker **never** imports `core.database`, never reads or writes ParkLease or EstateExecution, and never decides routing. A test asserts `"core.database" not in sys.modules` after each verb.
 - The worker never pulls, deletes or changes Ollama models. It never touches household data roots, the `Odysseus-Misumi` task, or port 420.
-- `start` also accepts `kind: "noop-sleep"` (sleep `timeout_s`, then write a fixed result), but **only** when the worker process environment has `AOTERU_WORKER_SELFTEST=1`. Otherwise it returns `bad_request`. It exists for the Stage 4 survival check and integration test I4, and the control plane never sends it.
+- `start` also accepts `kind: "noop-sleep"` (sleep `timeout_s`, then write a fixed result), but **only** when the home-local sentinel file `~/.aoteru/worker_selftest_enabled` exists (read by `estate_worker._selftest_enabled()`). Otherwise it returns `bad_request`. A sentinel file, not an environment variable, because every `call_worker()` call opens its own fresh forced-command SSH session and never inherits environment set in some other session — see `docs/aoteru-home-worker-setup.md` step 7. It exists for the Stage 4 survival check and integration test I4, and the control plane never sends it.
 - `effort` is **not** part of `aoteru-worker/1`. It is added only when the effort branch is integrated after this plan (non-goal).
 
 ---
@@ -422,7 +422,7 @@ Files:
   4. On lab, generate `~/.aoteru/worker_ssh_key` (ed25519, `agent` user) and authorise its public key on home with the forced-command options in §C.1. If the home account is an administrator, use `C:\ProgramData\ssh\administrators_authorized_keys`.
   5. Record home's SSH host **public key** (its fingerprint must equal the pinned `SHA256:rmuPA4DUnFnR8UPXBHrksljQbT86l2aZZAztNZ1TIeU`) into `worker.ssh.host_public_key`, and fill in `worker.ssh.target` and `worker.ssh.command` (documentation only; the forced command is authoritative) by governed commit.
   6. Run the read-only health check from lab: `venv/bin/python -c "from src.estate_worker_client import call_worker; print(call_worker('desktop-in7o23d','health',{},deadline_s=20))"`.
-  7. Run the detached-spawn survival check: `start` a no-op spooled runner (`kind: "noop-sleep"`, test-only, 60 s, available only when `AOTERU_WORKER_SELFTEST=1` is set in the worker's environment by the operator's own session), close the SSH session, then `status` after 30 s. Record `process_alive: true` → write `detached_spawn_verified`.
+  7. Run the detached-spawn survival check: on home, create the sentinel file `~/.aoteru/worker_selftest_enabled` by hand, then from lab `start` a no-op spooled runner (`kind: "noop-sleep"`, test-only, 60 s), then `status` after 30 s. Record `process_alive: true` → write `detached_spawn_verified`, then delete the sentinel file.
 - `scripts/windows/odysseus-host.ps1`: **not touched.**
 
 Invariants:
@@ -636,7 +636,7 @@ The fake transport is `FakeWorker(host_id, models, executors, repos, fail=None)`
 | I1 | `LocalTransport` → real `python -m src.estate_worker` → `health`, `inventory` against a stub Ollama HTTP server on an ephemeral `127.0.0.1` port (worker Ollama base overridable by env `AOTERU_WORKER_OLLAMA_BASE`, test-only; default `127.0.0.1:11434`) |
 | I2 | `/api/estate/run` (TestClient) lab placement end to end through LocalTransport with the stub Ollama; response `placement.attested: true` |
 | I3 | `SshTransport` argv + stdin contract with `ssh` replaced by a shim script on PATH that execs the local worker (proves the stdin/forced-command shape without a network) |
-| I4 | durable write lane through LocalTransport with `_execute_codex_with_sandbox` replaced in the **worker** by a sleep-then-write stub (via `AOTERU_WORKER_SELFTEST=1` + `kind: "noop-sleep"`), a real detached spawn, real spool, real monitor thread → `succeeded`; `aoteru execution <id> --wait` (client against TestClient) observes it |
+| I4 | durable write lane through LocalTransport with `_execute_codex_with_sandbox` replaced in the **worker** by a sleep-then-write stub (via the `~/.aoteru/worker_selftest_enabled` sentinel file + `kind: "noop-sleep"`), a real detached spawn, real spool, real monitor thread → `succeeded`; `aoteru execution <id> --wait` (client against TestClient) observes it |
 | I5 | kill the detached runner mid-run → worker `status` reports `failed`/`unknown` → row terminal; no redispatch |
 | I6 | Sept 3 sequence: dispatch E, duplicate while running → same E, observe via status only to terminal, new dispatch → new E with `dispatch: new` |
 | I7 | remote-host park via `?host=` with FakeWorker `worktree.prepare` → ParkLease row `host_id=desktop-in7o23d`; heartbeat/release with `?host=` |

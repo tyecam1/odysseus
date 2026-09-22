@@ -15,6 +15,19 @@ lease, flips `worker.enabled`, or writes the survival-check evidence file
 for you. Each numbered step below is something you, the operator, run by
 hand.
 
+Every `~/`-relative path this runbook writes to on home
+(`~/.aoteru/config.local.json`, step 3; the `worker_selftest_enabled`
+sentinel, step 7; and `worker_capabilities.json`, also step 7) and the
+forced-command worker process itself (step 4) must belong to and resolve
+under the **same Windows account** configured in
+`worker.ssh.target` (`<user>@...` in `config/estate.yaml`). Windows
+resolves `~`/`%USERPROFILE%` per-account, not per-machine, so writing any
+of these files as a different account — e.g. an elevated administrator
+session that isn't actually the target account, or `SYSTEM` if sshd ever
+invokes the forced command under a different identity than expected —
+leaves the worker process reading an empty or wrong `.aoteru` directory,
+silently failing checks this runbook says should pass.
+
 This does **not** touch the existing household deployment on home
 (`odysseus-releases\...`, port 420, `misumi_agent.py` on 4500, the STT
 server on 4600, the `Odysseus-Misumi` scheduled task, or
@@ -81,6 +94,20 @@ not depend on ambient session state.
 If the home account is an administrator, this goes in
 `C:\ProgramData\ssh\administrators_authorized_keys` (OpenSSH on Windows
 ignores the per-user `authorized_keys` file for administrator accounts).
+That file also needs its own ACL or Windows OpenSSH's `sshd` refuses to
+read it at all (a `LogLevel VERBOSE` sshd log shows `Bad owner or
+permissions`, not a clear error at the client). From an elevated
+PowerShell on home, after creating/editing the file:
+
+```
+icacls "C:\ProgramData\ssh\administrators_authorized_keys" /inheritance:r
+icacls "C:\ProgramData\ssh\administrators_authorized_keys" /grant "SYSTEM:F"
+icacls "C:\ProgramData\ssh\administrators_authorized_keys" /grant "BUILTIN\Administrators:F"
+```
+
+Only `SYSTEM` and `Administrators` may have any access to this file —
+adding the target account itself (if it is not already in
+`Administrators`) breaks the ACL check the same way a too-open ACL does.
 
 `worker.ssh.command` in `config/estate.yaml` documents this forced command
 for operators reading the config — it is never sent as an argument by
