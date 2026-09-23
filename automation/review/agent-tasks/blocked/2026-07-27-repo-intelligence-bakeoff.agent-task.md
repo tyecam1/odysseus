@@ -26,7 +26,9 @@ verification_route: V2_HUMAN_VERIFIED
 risk_level: medium
 approval_required: true
 source_traceability_required: true
-repo: tyecam1/obsidian-PhD
+repo: tyecam1/odysseus
+migrated_from_repo: tyecam1/obsidian-PhD
+migration_note: "Ownership migrated to Odysseus. Treat references to obsidian-PhD automation paths as historical inputs until capability-path convergence is complete."
 branch: codex/repo-intelligence-bakeoff-20260727
 allowed_paths:
   - automation/review/platform-evaluations/**

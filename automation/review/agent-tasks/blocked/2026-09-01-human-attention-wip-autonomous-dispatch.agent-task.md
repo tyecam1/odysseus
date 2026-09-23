@@ -3,7 +3,8 @@ artifact_type: agent-task
 task_schema: agent-task/v2
 task_id: 2026-09-01-human-attention-wip-autonomous-dispatch
 title: "Build and enforce the work-item development operating contract"
-status: ready
+status: blocked
+blocked_by: capability-path-convergence
 priority: high
 task_type: orchestration
 created_by: chatgpt
@@ -26,7 +27,9 @@ verification_route: V1_LLM_VERIFIED
 risk_level: medium
 approval_required: false
 source_traceability_required: true
-repo: tyecam1/obsidian-PhD
+repo: tyecam1/odysseus
+migrated_from_repo: tyecam1/obsidian-PhD
+migration_note: "Ownership migrated to Odysseus. Treat references to obsidian-PhD automation paths as historical inputs until capability-path convergence is complete."
 branch: chatgpt/work-item-development-operating-contract-20260910
 allowed_paths:
   - Scripts/automation/**

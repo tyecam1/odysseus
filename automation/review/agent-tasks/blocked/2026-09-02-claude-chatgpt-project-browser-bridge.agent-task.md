@@ -3,7 +3,8 @@ artifact_type: agent-task
 task_schema: agent-task/v2
 task_id: 2026-09-02-claude-chatgpt-project-browser-bridge
 title: "Build a governed Claude skill for querying ChatGPT Projects through the web UI"
-status: ready
+status: blocked
+blocked_by: capability-path-convergence
 priority: high
 task_type: skill-engineering
 created_by: chatgpt
@@ -26,7 +27,9 @@ verification_route: V2_HUMAN_VERIFIED
 risk_level: medium
 approval_required: true
 source_traceability_required: true
-repo: tyecam1/obsidian-PhD
+repo: tyecam1/odysseus
+migrated_from_repo: tyecam1/obsidian-PhD
+migration_note: "Ownership migrated to Odysseus. Treat references to obsidian-PhD automation paths as historical inputs until capability-path convergence is complete."
 branch: codex/claude-chatgpt-project-browser-bridge-20260902
 allowed_paths:
   - .agents/skills/**

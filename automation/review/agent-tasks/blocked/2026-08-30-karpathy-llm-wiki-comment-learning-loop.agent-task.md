@@ -3,7 +3,8 @@ artifact_type: agent-task
 task_schema: agent-task/v2
 task_id: 2026-08-30-karpathy-llm-wiki-comment-learning-loop
 title: "Design a governed recurring Karpathy LLM Wiki comment learning loop for agentic improvement"
-status: ready
+status: blocked
+blocked_by: capability-path-convergence
 priority: high
 task_type: architecture-evaluation
 created_by: gpt-5.6-sol
@@ -26,7 +27,9 @@ verification_route: V2_HUMAN_VERIFIED
 risk_level: medium
 approval_required: true
 source_traceability_required: true
-repo: tyecam1/obsidian-PhD
+repo: tyecam1/odysseus
+migrated_from_repo: tyecam1/obsidian-PhD
+migration_note: "Ownership migrated to Odysseus. Treat references to obsidian-PhD automation paths as historical inputs until capability-path convergence is complete."
 branch: ""
 allowed_paths:
   - automation/review/agent-tasks/**
