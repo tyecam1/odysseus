@@ -131,3 +131,41 @@ Operator actions before deploying Stage 6 to `odysseus-aoteru-lab.service`:
 3. `~/.aoteru/worker-spool/.no-hooks/` was created on lab by test runs. It is harmless.
 
 Next: Stage 7 (host-specific capability qualification).
+
+## Checkpoint 2 — Stage 7: host-specific capability qualification (ACCEPTED)
+
+Range `e7d4ddb..8978b17` on `feat/multihost-stage1-3-20260922`. Final adjudication: **gpt-6-sol ACCEPT, no findings** (round 7, over the whole range).
+
+| Commit | Content |
+|---|---|
+| 886608d | `qualified_hosts: {host: {evidence, binding?}}` in `config/models.yaml`; `resolve_alias(alias, host)` checks qualification first, then the per-host binding override, inventory and `gpu_yield`; canary `--worker-host` (attested `call_worker`, records the host, never writes config); §8 of the home setup doc |
+| 71f412d | round 1: a host entry needs its own non-empty evidence; the paid fallback checks its routed host's executor qualification; `/route/alias` defaults to `current_host_id` and fails closed; preflight probes each unit's routed host; a vision-only worker canary exits nonzero |
+| e292758 | round 2: a per-host binding qualifies a null-default alias; preflight `ok` needs executor qualification on the routed host; `agent explain` fails closed on an unregistered host |
+| 9dc2490 | round 3: a "not qualified on" reason comes before the unbound check; the preflight summary names its probe host |
+| d642f38, 5344f1f, 8978b17 | rounds 4–6: `agent status` resolves each capability on this host through `resolve_alias` (`resolved_on_this_host`, `reason`, `concrete_model`) and degrades on any router import failure; the regression test raises a plain `ImportError` and fails against the pre-fix guard |
+
+Shipped config: every live alias is qualified on `hz2-workstation` only, with its LM4 evidence. `embedding` and `reranker` are structural-binding-only, and `code-strong` stays null. Lab routing is unchanged, and the Stage 7 config test pins home (`desktop-in7o23d`) as unqualified. Nothing auto-promotes.
+
+Tests: `701 passed`, rc=0. That covers the §E suite, `tests/test_estate_worker*.py`, `tests/test_estate_stage6_*.py`, `tests/test_estate_stage7.py`, `tests/test_delegation_preflight.py` and every `tests/test_agent*.py`. The baseline was 566 plus the agent tests, and no test regressed. No paid inference was used.
+
+Sol adjudication: 7 rounds. r1 REJECT (3 material, 2 minor) → r2 REJECT (1 material, 2 minor) → r3–r6 ACCEPT_WITH_FINDINGS (minors only) → r7 ACCEPT. Every finding was accepted and fixed, none was rejected, and Sol modified no files.
+
+## Stop — Stage 8 is operator-gated (PR #575 stop condition)
+
+Checked on 2026-09-23: `tailscale status` shows home `desktop-in7o23d` **offline, last seen 2 days ago**. Stage 8 needs a live host and operator approval. Stage 9 comes after Stage 8 in plan §I.1, and its `verified`-fallback removal assumes Stages 1–8 are done. The loop therefore stops here.
+
+Operator actions needed, per plan §I.3 and Stage 8:
+
+- B1: bring home online.
+- B2: install the lab→home SSH key with its forced command.
+- B3: capture and pin home's host key (governed commit).
+- B4: set up the home checkout, venv and `config.local.json` roots.
+- Complete Stage 4 runbook steps 1–7.
+- B5/B6: install and authenticate Codex on home and check detached-spawn survival. These are optional and needed only for home `codex`/`codex-write`.
+- B7: make the household (Misumi) contention decision.
+- B8: approve the governed Stage 8 config commit.
+- B13: provide Windows `decide_once` durability evidence before any home write lane.
+
+After that, run the Stage 7 canary on home: `scripts/run_lm4_production_canary.py --worker-host desktop-in7o23d --aliases local-fast`.
+
+Deferred, not done: the repository-boundary convergence in `docs/aoteru-repository-ownership-trajectory.md`. It is an explicit operator checkpoint at the backend completion boundary. The transitional task trail in `obsidian-PhD` was preserved and nothing was migrated.
