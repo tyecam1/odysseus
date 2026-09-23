@@ -1072,7 +1072,7 @@ def test_u46_first_start_paused_after_claim_before_spawn(cfg, units, verified, m
     first.start()
     assert paused.wait(5)
     second = _result("start", _codex_payload(cfg))
-    assert second == {**second, "accepted": True, "state": "starting", "reused": True}
+    assert second == {**second, "accepted": False, "state": "starting", "reused": True}
     assert "execution_failed" not in json.dumps(second)
     go.set()
     first.join(5)
@@ -1107,3 +1107,35 @@ def test_u70a_loser_returns_after_its_own_fsync_while_winner_is_paused(cfg, monk
     assert seen["r"] == (False, {"n": 1}) and order == ["loser"]   # loser fsynced itself, first
     resume.set()
     winner.join(5)
+
+
+def test_u67_populated_grandchild_state_keeps_prepare_preparing_and_writer_alive(cfg, units, monkeypatch):
+    """U67: 'runner dead + grandchild alive -> tree_quiescent False -> prepare
+    stays preparing (not prepare_interrupted), status.process_alive true,
+    recovery refused' (the populated-cgroup fact itself is proven on a real
+    unit by test_u67_real_unit_setsid_grandchild_keeps_the_cgroup_populated;
+    recovery refusal on quiescent false: test_u42c/test_u74 control tests)."""
+    monkeypatch.setattr(estate_worker, "_DEFAULT_PREPARE_WAIT_S", 0.1)
+    _result("worktree.prepare", _prepare_payload())
+    record = estate_worker._PREPARE_ROOT / "LP"
+    estate_worker.decide_once(record / "run.json", {"decision": "execute",
+                                                     **units.handle("aoteru-prepare-LP.service", pid=999999)})
+    units.set_populated("aoteru-prepare-LP.service", True)          # runner pid dead, grandchild alive
+    assert _result("worktree.prepare_status", {"lease_id": "LP"})["state"] == "preparing"
+    units.write_spool("E1", run_unit="aoteru-run-E1.service", state={"state": "running"})
+    status = _result("status", {"execution_id": "E1"})
+    assert status["process_alive"] is True and status["quiescent"] is False
+    closing = _result("status", {"execution_id": "E1", "close": True})
+    assert closing["quiescent"] is False                          # what recovery precondition 4 reads
+
+
+def test_u76_populated_push_unit_never_blocks_spool_release(cfg, units):
+    """U76: 'A populated push unit never blocks recovery or spool.release'."""
+    spool = units.write_spool("E1", run_unit="aoteru-run-E1.service", state={"state": "succeeded"}, populated=False)
+    estate_worker.decide_once(spool / "push" / "attempt-1.json", {"request": {}})
+    estate_worker.decide_once(spool / "push" / "attempt-1.run.json",
+                              {"decision": "execute", **units.handle("aoteru-push-E1-1.service")})
+    units.set_populated("aoteru-push-E1-1.service", True)
+    closing = _result("status", {"execution_id": "E1", "close": True})
+    assert closing["quiescent"] is True                           # recovery precondition 4 satisfied
+    assert _result("spool.release", {"execution_id": "E1", "resolution": "recovered"})["released"] is True

@@ -255,8 +255,12 @@ def test_i11a_dropped_prepare_response_resolves_via_fence_then_fresh_park(estate
         assert s.query(ParkLease).filter(ParkLease.id == info.value.lease_id).one().status == "preparing"
     resolved = park_lease_ops.resolve_preparing_reservation(info.value.lease_id)
     assert resolved["released"] is True and resolved["state"] == "prepared"
+    prepared_path = Path(os.environ["HOME"]).parent / "ai" / "aoteru-worktrees" / "odysseus" / "acceptance-dropped"
     fresh = park_lease_ops.park_with_worktree("odysseus", _HOST, "acceptance/dropped")
     assert fresh["status"] == "active" and fresh["lease_id"] != info.value.lease_id
+    # I11(a): 'fresh park succeeds and reuses the clean worktree'
+    record = Path(os.environ["HOME"]) / ".aoteru" / "worker-prepare" / info.value.lease_id / "result.json"
+    assert Path(fresh["worktree_path"]) == Path(json.loads(record.read_text())["path"])
 
 
 def test_i11b_released_execution_tombstones_and_replay_never_spawns(estate, monkeypatch):
@@ -338,3 +342,43 @@ def test_i6b_delayed_starting_claim_answers_starting_to_a_same_id_retry(estate):
         time.sleep(0.5)
     assert status["state"] == "succeeded"
     assert json.loads((spool / "run.json").read_text())["decision"] == "execute"
+
+
+
+def test_i10_recovery_through_the_laptop_client_end_to_end(estate, monkeypatch, capsys):
+    """I10: kill -> interrupted -> ordinary release refused -> dirty file ->
+    `aoteru recover ...` refused worktree_not_clean -> file removed ->
+    `aoteru recover` succeeds -> fresh park new lease_id -> new dispatch admitted."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    import companion.laptop_client.aoteru as laptop
+    import routes.estate_routing_routes as routes_mod
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    app = FastAPI()
+    app.include_router(routes_mod.setup_estate_routing_routes())
+    http = TestClient(app)
+    monkeypatch.setattr(laptop, "_load_config", lambda: {"url": "http://test", "token": "t"})
+    monkeypatch.setattr(laptop, "_request", lambda cfg, method, path, body=None, timeout=30.0: (
+        lambda r: {"status": r.status_code, "body": r.json()})(http.request(method, path, json=body)))
+    monkeypatch.setenv("IT_SLEEP_S", "60")
+    parked = park_lease_ops.park_with_worktree("odysseus", _HOST, "acceptance/rec")
+    worktree = Path(parked["worktree_path"])
+    e1 = _dispatch()["execution_id"]
+    running = _wait_row(e1, lambda v: v["lifecycle_state"] == "running")
+    subprocess.run(["systemctl", "--user", "kill", "--signal=KILL", running["worker_handle"]["unit"]],
+                   check=True, capture_output=True)
+    _wait_row(e1, lambda v: v["lifecycle_state"] == "interrupted")
+    assert laptop.main(["release", "odysseus", "--host", _HOST]) == 1
+    capsys.readouterr()
+    recover = ["recover", "odysseus", "--execution", e1, "--lease", parked["lease_id"], "--host", _HOST,
+               "--branch", "acceptance/rec", "--worktree", str(worktree)]
+    (worktree / "stray.txt").write_text("dirty")
+    assert laptop.main(recover) == 1
+    assert "worktree_not_clean" in capsys.readouterr().out
+    (worktree / "stray.txt").unlink()
+    assert laptop.main(recover) == 0
+    assert json.loads(capsys.readouterr().out)["recovered"] is True
+    fresh = park_lease_ops.park_with_worktree("odysseus", _HOST, "acceptance/rec")
+    assert fresh["lease_id"] != parked["lease_id"]
+    monkeypatch.setenv("IT_SLEEP_S", "1")
+    assert _dispatch()["dispatch"] == "new"

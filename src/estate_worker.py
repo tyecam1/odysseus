@@ -890,6 +890,10 @@ def _latest_finalize_result(spool: Path) -> dict | None:
 def _start_answer(spool: Path, *, reused: bool) -> dict:
     view = _execution_view(spool)
     accepted = view["state"] not in ("unknown", "fenced", "tombstone", "start_failed")
+    if reused and view["state"] == "starting":
+        # §G U46 / S6.6: a same-id start that finds an in-progress claim is
+        # a pending, non-terminal answer: accepted false, never execution_failed.
+        accepted = False
     answer = {"accepted": accepted, "state": view["state"], "handle": view["handle"],
               "reused": reused, "spawned": view["spawned"]}
     if view.get("error"):

@@ -391,7 +391,8 @@ def _dispatch_start(execution_id: str) -> None:
         _fence_and_apply(execution_id, row.host_id)
 
 
-def _resolve_not_started(execution_id: str, reason: str, *, sole_attempt: Optional[int] = None) -> bool:
+def _resolve_not_started(execution_id: str, reason: str, *, sole_attempt: Optional[int] = None,
+                         release_now: bool = True) -> bool:
     """Write failed + not_started. With `sole_attempt`, this is a refusal
     being taken as proof: allowed only when, inside the serialized
     transaction, the row still records exactly that one start attempt and
@@ -415,7 +416,10 @@ def _resolve_not_started(execution_id: str, reason: str, *, sole_attempt: Option
         current.error = reason
         current.finished_at = _now()
     _record_outcome(row, "failed", row.host_id)
-    _release_spool(execution_id, "not_started")
+    if release_now:
+        _release_spool(execution_id, "not_started")
+    # else: spool_released_at stays NULL and the background sweep retries
+    # the acknowledgement (gate round 2 finding 1: GET never blocks on it).
     return True
 
 
@@ -429,7 +433,8 @@ def _apply_view(execution_id: str, view: dict, *, start_answer: bool = False, fe
     state = view.get("state")
     now = _now()
     if state in ("start_failed", "fenced"):
-        _resolve_not_started(execution_id, view.get("error") or f"worker reports {state}: writer never ran")
+        _resolve_not_started(execution_id, view.get("error") or f"worker reports {state}: writer never ran",
+                             release_now=not observe_only)
         return
     if state in ("tombstone",) or view.get("released"):
         _transition(execution_id, ("accepted", "running", "lost"), last_observed_at=now,
