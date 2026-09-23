@@ -226,3 +226,44 @@ def test_helper_fails_closed_when_lock_is_busy(file_db, monkeypatch):
     finally:
         blocker.execute("ROLLBACK")
         blocker.close()
+
+
+def test_u53_interrupted_migration_rolls_back_and_retries_the_backfill(pre_stage6_db, monkeypatch):
+    """Adjudication 6a/6b finding 2: column addition and backfill are one
+    transaction, so an interruption after ALTER leaves nothing half-done."""
+    _seed(pre_stage6_db,
+          leases=[("L-old", "odysseus", "released")],
+          executions=[("E-a", "L-old", "succeeded"), ("E-b", "L-old", "failed")])
+    real = cdb._recreate_partial_unique_index
+
+    def _crash(*args, **kwargs):
+        raise sqlite3.OperationalError("simulated interruption")
+    monkeypatch.setattr(cdb, "_recreate_partial_unique_index", _crash)
+    cdb._migrate_add_estate_execution_worker_columns()
+    conn = sqlite3.connect(pre_stage6_db)
+    columns = [row[1] for row in conn.execute("PRAGMA table_info(estate_executions)").fetchall()]
+    conn.close()
+    assert "worktree_resolution" not in columns
+    monkeypatch.setattr(cdb, "_recreate_partial_unique_index", real)
+    cdb._migrate_add_estate_execution_worker_columns()
+    assert _resolutions(pre_stage6_db) == {"E-a": "legacy_closed", "E-b": "legacy_closed"}
+    assert "worktree_resolution = 'unresolved'" in _index_sql(
+        pre_stage6_db, "ix_estate_executions_active_lease_unique")
+
+
+def test_helper_restores_the_pooled_connection_busy_timeout(tmp_path, monkeypatch):
+    """Adjudication 6a/6b finding 4: a pooled connection's busy_timeout is
+    restored after the serialized transaction."""
+    from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.pool import QueuePool
+    engine = create_engine(f"sqlite:///{tmp_path / 'pool.db'}", poolclass=QueuePool, pool_size=1,
+                           max_overflow=0, connect_args={"check_same_thread": False})
+    cdb.Base.metadata.create_all(engine, tables=[ParkLease.__table__])
+    monkeypatch.setattr(cdb, "SessionLocal", sessionmaker(bind=engine))
+    with engine.connect() as conn:
+        conn.exec_driver_sql("PRAGMA busy_timeout = 1234")
+    with cdb.lease_serialized_transaction(lease_id="L1"):
+        pass
+    with engine.connect() as conn:
+        assert conn.exec_driver_sql("PRAGMA busy_timeout").scalar() == 1234
+    engine.dispose()

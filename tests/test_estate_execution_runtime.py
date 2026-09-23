@@ -731,3 +731,19 @@ def test_finalize_refuses_when_nothing_dirty(runtime_db, monkeypatch, tmp_path):
     )
     assert outcome["finalized"] is False
     assert "no changes" in outcome["reason"]
+
+
+
+def test_legacy_lane_keeps_row_unresolved_when_cleanup_left_survivors(runtime_db, monkeypatch, tmp_path):
+    """Adjudication 6a/6b finding 1: the legacy lane closes its row as
+    legacy_closed only when the process tree is known gone."""
+    _fresh_authority(tmp_path, monkeypatch)
+    monkeypatch.setattr(estate_router, "_execute_codex_with_sandbox", lambda *a, **k: {
+        "ok": False, "error": "codex exec timed out after 1s", "cleanup_incomplete": True,
+        "cleanup_still_alive_pids": [4242],
+    })
+    result = estate_router.execute_codex_write_durable("x", repo_id="r", host_id="test-lab", wait_timeout=5)
+    with get_db_session() as db:
+        row = db.query(EstateExecution).filter(EstateExecution.id == result["execution_id"]).one()
+        assert row.lifecycle_state == "timed_out"
+        assert row.worktree_resolution == "unresolved"

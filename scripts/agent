@@ -256,6 +256,12 @@ def cmd_release(args):
     except ops.NoActiveLease as e:
         fail(str(e))
         return
+    except ops.LeaseHasUnresolvedExecution as e:
+        # S6.2: refused, never forced; report the blocker and next action.
+        emit({"ok": False, "error": "lease_has_unresolved_execution", "message": str(e),
+              "lease_id": e.lease_id, "execution_id": e.execution_id,
+              "lifecycle_state": e.lifecycle_state, "next_action": e.next_action}, args)
+        sys.exit(1)
 
     emit({"ok": True, **result}, args)
 

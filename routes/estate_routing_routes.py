@@ -35,6 +35,7 @@ from src.park_lease_ops import (
     WorktreeVerificationError,
     active_leases_summary,
     heartbeat_repo,
+    LeaseHasUnresolvedExecution,
     park_repo_by_id,
     release_repo,
 )
@@ -339,5 +340,11 @@ def setup_estate_routing_routes() -> APIRouter:
             return {"ok": True, **release_repo(repo_id, host_id=host_id)}
         except NoActiveLease as e:
             raise HTTPException(409, str(e)) from e
+        except LeaseHasUnresolvedExecution as e:
+            raise HTTPException(409, {
+                "error": "lease_has_unresolved_execution", "message": str(e),
+                "lease_id": e.lease_id, "execution_id": e.execution_id,
+                "lifecycle_state": e.lifecycle_state, "next_action": e.next_action,
+            }) from e
 
     return router

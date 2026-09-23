@@ -2403,9 +2403,16 @@ def _migrate_add_estate_execution_worker_columns():
         return
     conn = None
     try:
-        conn = sqlite3.connect(db_path)
+        # Explicit transaction around column addition + backfill + index
+        # recreation: Python's sqlite3 would otherwise auto-commit each
+        # DDL statement, and an interruption after ALTER but before the
+        # backfill would make the retry skip the backfill (Stage 6a/6b
+        # adjudication finding 2). SQLite DDL is transactional.
+        conn = sqlite3.connect(db_path, isolation_level=None)
+        conn.execute("BEGIN IMMEDIATE")
         columns = [row[1] for row in conn.execute("PRAGMA table_info(estate_executions)").fetchall()]
         if not columns:
+            conn.execute("ROLLBACK")
             return
         adding_resolution = "worktree_resolution" not in columns
         for name, ddl in _ESTATE_EXECUTION_WORKER_COLUMNS:
@@ -2436,8 +2443,10 @@ def _migrate_add_estate_execution_worker_columns():
                 "WHERE status IN ('active', 'preparing') GROUP BY repo_id HAVING count(*) > 1"
             ),
         )
-        conn.commit()
+        conn.execute("COMMIT")
     except Exception as e:
+        if conn is not None and conn.in_transaction:
+            conn.execute("ROLLBACK")
         logging.getLogger(__name__).warning(f"estate_executions worker migration failed: {e}")
     finally:
         if conn:
@@ -2488,6 +2497,7 @@ def lease_serialized_transaction(lease_id: Optional[str] = None, repo_id: Option
     bind = SessionLocal.kw.get("bind") or engine
     if bind.dialect.name == "sqlite":
         conn = bind.connect().execution_options(isolation_level="AUTOCOMMIT")
+        previous_timeout = conn.exec_driver_sql("PRAGMA busy_timeout").scalar()
         try:
             conn.exec_driver_sql(f"PRAGMA busy_timeout = {int(LEASE_SERIALIZATION_BUSY_TIMEOUT_S * 1000)}")
             try:
@@ -2509,7 +2519,12 @@ def lease_serialized_transaction(lease_id: Optional[str] = None, repo_id: Option
             finally:
                 session.close()
         finally:
-            conn.close()
+            # Restore the pooled connection's own timeout so no unrelated
+            # later user inherits ours (adjudication finding 4).
+            try:
+                conn.exec_driver_sql(f"PRAGMA busy_timeout = {int(previous_timeout or 0)}")
+            finally:
+                conn.close()
         return
 
     session = SessionLocal()
