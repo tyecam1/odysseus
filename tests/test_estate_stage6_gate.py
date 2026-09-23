@@ -76,10 +76,18 @@ def _eligibility(monkeypatch):
 @pytest.mark.parametrize("answer", [{"state": "prepare_failed", "error": "x", "quiescent": True},
                                     {"state": "fenced", "quiescent": True},
                                     {"state": "prepared", "path": "/w", "branch": "feat/y", "head_sha": HEAD,
-                                     "clean": False, "quiescent": True}])
+                                     "clean": False, "quiescent": True},
+                                    {"state": "prepared", "path": "/w", "branch": "other", "head_sha": HEAD,
+                                     "clean": True, "quiescent": True},             # branch mismatch
+                                    "pre_claim_refusal"])
 def test_u51_after_each_known_failure_eligible_hosts_shows_no_conflict(db, worker, monkeypatch, answer):
-    """U51: 'eligible_hosts shows no conflict.'"""
-    worker.prepare_answer = answer
+    """U51: 'eligible_hosts shows no conflict.' -- after every positively
+    known failure: prepare_failed, fenced, not clean, branch mismatch,
+    pre-claim refusal."""
+    if answer == "pre_claim_refusal":
+        worker.fail["worktree.prepare"] = ["bad_request"]
+    else:
+        worker.prepare_answer = answer
     with pytest.raises((park_lease_ops.WorktreeVerificationError, park_lease_ops.RepoNotClean)):
         park_lease_ops.park_with_worktree("odysseus", HOME, "feat/y")
     assert _eligibility(monkeypatch)[LAB]["eligible"] is True
