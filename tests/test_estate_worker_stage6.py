@@ -1270,3 +1270,31 @@ def test_gate8_same_path_verification_waits_for_a_transient_unit(cfg, units, mon
     threading.Timer(0.6, lambda: setattr(units, "verify_live", False)).start()
     response = _call("worktree.verify", {"repo_id": "test-repo", "worktree_path": "/reused", "branch": "b"})
     assert response["ok"] is True                         # waited, then verified; not refused
+
+
+def test_gate9_verify_bounds_are_consistent_by_construction():
+    """Gate round 9: a same-path verification waits longer than a late verify
+    unit's whole bounded lifetime (run limit + stop-and-proof), and every
+    control-plane verify call's deadline covers that wait plus the run."""
+    from src import estate_write_lane
+    lifetime = estate_worker.VERIFY_UNIT_TIMEOUT_S + estate_worker.VERIFY_KILL_PROOF_S
+    assert estate_worker._VERIFY_UNIT_WAIT_S > lifetime
+    assert estate_worker.VERIFY_CALL_DEADLINE_S >= estate_worker._VERIFY_UNIT_WAIT_S + estate_worker.VERIFY_UNIT_TIMEOUT_S
+    assert estate_write_lane._VERIFY_DEADLINE_S == estate_worker.VERIFY_CALL_DEADLINE_S
+    import inspect
+    source = inspect.getsource(estate_write_lane)
+    assert source.count('"worktree.verify"') == source.count("deadline_s=_VERIFY_DEADLINE_S")
+    worker_source = inspect.getsource(estate_worker._worktree_verification)
+    assert "timeout=VERIFY_UNIT_TIMEOUT_S" in worker_source
+
+
+def test_gate9_late_unit_within_its_lifetime_never_refuses_a_same_path_verification(cfg, units, monkeypatch):
+    """Scaled schedule: the late unit lives for most of the wait bound (as a
+    10 s run + 15 s stop would under the 35 s bound); the new verification
+    waits it out and succeeds."""
+    monkeypatch.setattr(estate_worker, "_VERIFY_UNIT_WAIT_S", 3.5)
+    monkeypatch.setattr(estate_worker, "_worktree_verification_local", lambda *a: {
+        "ok": True, "path": a[1], "reason": None, "head_sha": "h", "clean": True})
+    units.verify_live = True
+    threading.Timer(2.5, lambda: setattr(units, "verify_live", False)).start()
+    assert _call("worktree.verify", {"repo_id": "test-repo", "worktree_path": "/reused", "branch": "b"})["ok"] is True

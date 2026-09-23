@@ -55,6 +55,9 @@ PRE_CLAIM_REFUSAL_CODES = frozenset({
 _SETTLED_FOR_RECOVERY = ("succeeded", "failed", "timed_out", "interrupted")
 _TERMINAL = ("succeeded", "failed", "timed_out")
 NEXT_ACTION_WAIT = "wait"
+# Matches estate_worker.VERIFY_CALL_DEADLINE_S (a same-path verification may
+# first wait out a late verify unit's whole bounded lifetime).
+_VERIFY_DEADLINE_S = 60.0
 
 # Test hook (U29): called inside the admission transaction right after the
 # in-transaction authority validation, before the row insert.
@@ -240,7 +243,8 @@ def execute_write_via_worker(objective: str, *, repo_id: str, host_id: str,
                 "error_code": refusal.code, "error": str(refusal), **refusal.extra}
 
     verify, exc = _worker(host_id, "worktree.verify",                                  # step 2
-                          {"repo_id": repo_id, "worktree_path": worktree_path, "branch": branch}, deadline_s=30)
+                          {"repo_id": repo_id, "worktree_path": worktree_path, "branch": branch},
+                          deadline_s=_VERIFY_DEADLINE_S)
     if exc is not None or not verify.get("ok"):
         return {"ok": False, "provider": "codex-write", "authority_denied": True, "error_code": "authority_denied",
                 "error": f"worktree verification failed on {host_id!r}: "
@@ -772,7 +776,7 @@ def finalize_execution(*, execution_id: str, repo_id: str, host_id: str, commit_
                 "evidence": result, "next_action": "recover"}
     verify, exc = _worker(host_id, "worktree.verify",
                           {"repo_id": repo_id, "worktree_path": row.worktree_path, "branch": row.branch},
-                          deadline_s=30)
+                          deadline_s=_VERIFY_DEADLINE_S)
     if exc is not None or not verify.get("ok") or verify.get("clean") is not True \
             or verify.get("head_sha") != result.get("commit_sha"):
         return {"finalized": False, "reason": "post-finalize verification did not report the clean, recorded "
@@ -835,7 +839,8 @@ def recover_execution_lease(execution_id: str, *, lease_id: str, host_id: str, r
         return {"recovered": False, "code": "writer_quiescence_unproven",
                 "reason": f"worker reports {status.get('state')!r}, quiescent={status.get('quiescent')!r}"}
     verify, exc = _worker(host_id, "worktree.verify",                                    # 5 (after closure)
-                          {"repo_id": repo_id, "worktree_path": worktree_path, "branch": branch}, deadline_s=30)
+                          {"repo_id": repo_id, "worktree_path": worktree_path, "branch": branch},
+                          deadline_s=_VERIFY_DEADLINE_S)
     if exc is not None:
         return {"recovered": False, "code": "worker_unreachable", "reason": str(exc)}
     if not verify.get("ok") or verify.get("clean") is not True:

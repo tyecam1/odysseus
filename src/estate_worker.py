@@ -469,7 +469,7 @@ def _worktree_verification(repo_id: Any, worktree_path: Any, branch: Any) -> dic
         payload = json.dumps({"repo_id": repo_id, "worktree_path": worktree_path, "branch": branch})
         completed = estate_worker_procs.run_in_unit(
             _runner_argv("--run-verify"), str(Path(get_app_root()).resolve()),
-            f"aoteru-verify-{scope}-{uuid.uuid4().hex}", timeout=90, input_text=payload,
+            f"aoteru-verify-{scope}-{uuid.uuid4().hex}", timeout=VERIFY_UNIT_TIMEOUT_S, input_text=payload,
         )
         try:
             answer = json.loads(completed.stdout.strip().splitlines()[-1])
@@ -484,7 +484,17 @@ def _worktree_verification(repo_id: Any, worktree_path: Any, branch: Any) -> dic
 
 
 _IN_VERIFY_UNIT = {"value": False}
-_VERIFY_UNIT_WAIT_S = 30.0
+# Bounds are consistent by construction (gate round 9): a verify unit runs
+# at most VERIFY_UNIT_TIMEOUT_S, then run_in_unit stops it and proves its
+# cgroup quiescent within VERIFY_KILL_PROOF_S. A same-path verification
+# waits longer than that whole lifetime, so a healthy late read can only
+# delay -- never refuse -- a later admission; only a unit that cannot be
+# proven stopped still fails closed. Control-plane verify calls allow
+# VERIFY_CALL_DEADLINE_S, which covers the wait plus the verification.
+VERIFY_UNIT_TIMEOUT_S = 10.0
+VERIFY_KILL_PROOF_S = 15.0
+_VERIFY_UNIT_WAIT_S = 35.0
+VERIFY_CALL_DEADLINE_S = 60.0
 
 
 def _verify_scope(worktree_path: str) -> str:
