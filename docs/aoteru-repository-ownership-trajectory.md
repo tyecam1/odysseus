@@ -2,64 +2,53 @@
 
 ## Purpose
 
-Odysseus is being built while `obsidian-PhD` is still the established working repository for agentic orchestration. That is a **transitional implementation state**, not the intended long-term ownership boundary.
+Odysseus is the shared backend/runtime for both the PhD and personal knowledge estates. During its construction, `obsidian-PhD` also served as the established agent workspace, so backend-oriented task records and capability prototypes accumulated there. Their historical location is not their long-term authority.
 
-Do not prematurely move or delete working infrastructure while the backend is still converging. Preserve the existing task trail as provenance, then perform a deliberate ownership/migration pass once the backend is operationally complete.
+The task-queue ownership migration began on 2026-09-23. Backend/shared task records may therefore move before all referenced implementation/output artefacts are migrated. Capability/file convergence remains a separate, evidence-backed pass.
 
 ## Target steady state
 
-The intended topology is:
+- **Odysseus**: shared backend/runtime and cross-repository agentic capability. It owns routing, execution, workers, leases, lifecycle, provider/model routing, generic orchestration, shared task-engine primitives, reusable agent skills/runtime, cross-repository observability and other backend-wide capability.
+- **obsidian-PhD**: canonical **PhD knowledgebase** with its own task queue. It owns PhD research knowledge, evidence, literature/Zotero, research methods, writing, supervision, university work, PhD-specific workflow and PhD-vault-specific operational provenance.
+- **Aoteru personal knowledgebase**: canonical **personal knowledgebase**, separate from the PhD vault, with its own task queue. It **relies on the Odysseus backend** rather than duplicating shared execution/orchestration capability.
+- **Misumi/personal-domain repository**: owns only capability/content whose semantics are genuinely Misumi/personal-domain specific. Shared Aoteru execution infrastructure remains in Odysseus.
 
-- **Odysseus**: shared backend/runtime and cross-repository agentic capabilities. It manages routing, execution, workers, leases, lifecycle, common orchestration primitives and other capabilities that are genuinely backend-wide.
-- **obsidian-PhD**: the canonical **PhD knowledgebase**. It owns PhD research knowledge, evidence, research workflows, PhD-specific policies and its own agentic task queue.
-- **Aoteru personal knowledgebase**: the canonical **personal knowledgebase**, separate from the PhD vault, with its own agentic task queue.
-- The same Odysseus backend manages both knowledgebases with minimal friction while respecting each repository's independent content authority and task queue.
+The same Odysseus backend manages the separate domain queues with minimum friction while preserving each repository's independent content authority.
 
-The canonical repository/path for the Aoteru personal knowledgebase may be resolved downstream. Do not assume that the Odysseus backend repository itself is the personal knowledgebase merely because the lab checkout is named `odysseus-aoteru`.
+The canonical repository/path for the Aoteru personal knowledgebase may be resolved downstream. Do not infer that the Odysseus backend repository itself is the personal knowledgebase merely because a checkout is named `odysseus-aoteru`.
 
-## Current transitional state
+## Placement rule
 
-During backend construction, `obsidian-PhD` has legitimately accumulated two kinds of material:
+Classify by **authority and reuse**, not by historical location, filename or which backend executes the task.
 
-1. PhD-domain knowledge and research workflow artefacts that belong there permanently.
-2. Backend-oriented agentic infrastructure, orchestration tasks and reusable capabilities that were developed there because it was the functioning agent workspace before Odysseus was ready.
+- A task whose primary subject is PhD research/domain work remains in `obsidian-PhD`, even if Odysseus executes it.
+- A task whose primary subject is a PhD-vault-specific operation may remain in `obsidian-PhD` as domain provenance, even when a reusable implementation is later extracted into Odysseus.
+- A task whose primary subject is shared routing/execution/orchestration/runtime capability belongs in Odysseus.
+- Aoteru/personal tasks remain in the personal queue; only Misumi-specific capabilities belong in the Misumi/personal capability repository.
+- Repo-specific task queues remain separate even when the queue engine/runtime is shared.
+- Cross-repo policy should live at the lowest shared authority that can enforce it without taking ownership of domain content.
 
-The current Odysseus implementation task trail in `obsidian-PhD`—including the staged implementation operating task introduced by PR #575—is therefore valid **transitional provenance**. Its current location must not be interpreted as the desired final ownership of those capabilities.
+Prefer one shared implementation where semantics are genuinely common. Prefer domain separation where combining components would couple PhD and personal knowledge unnecessarily.
 
-Do not migrate, duplicate or delete that trail during the active multihost/backend implementation unless required for correctness.
+## 2026-09-23 task-queue migration
 
-## Downstream convergence
+The first convergence pass moves backend/shared **agent-task records** out of `obsidian-PhD` into the Odysseus queue. The paired migration manifest is `automation/review/agent-task-migration-20260923.md`.
 
-Once the Odysseus backend reaches its implementation/acceptance boundary, run an explicit repository-boundary convergence pass.
+This pass deliberately does not blindly relocate every script, config file, report or historical output referenced by those tasks. Those artefacts are migrated only when their capability authority is established and the replacement path is proven.
 
-That pass must:
+Historical mixed-queue audit reports may remain in `obsidian-PhD` because they describe the state of that repository at the time.
 
-1. inventory agentic functions, queue machinery, review/adjudication workflows, routing helpers, reusable automation and backend policy currently living in `obsidian-PhD`;
-2. classify each item by authority and reuse rather than by historical location;
-3. ingest/migrate genuinely backend-wide capability into Odysseus;
-4. leave PhD-specific knowledge, methods, evidence, workflow and task semantics in `obsidian-PhD`;
-5. establish/confirm the Aoteru personal knowledgebase and its independent task queue;
-6. make both domain queues usable through the same Odysseus backend without merging their content authority;
-7. remove or supersede duplicate backend machinery only after the migrated path is proven;
-8. then document the final boundary inside `obsidian-PhD` as well.
+## Downstream capability convergence
 
-Historical task records may remain as provenance even after their executable/backend role is superseded.
+After the active multihost/backend stages reach their implementation/acceptance boundary, run an explicit capability/file convergence pass:
 
-## Placement rule for agents
+1. inventory reusable agentic functions, queue machinery, review/adjudication workflows, routing helpers, automation and backend policy still living in domain repos;
+2. classify each item by authority and reuse;
+3. migrate genuinely backend-wide capability into Odysseus;
+4. retain PhD-specific knowledge/workflow/provenance in `obsidian-PhD`;
+5. confirm the Aoteru personal knowledgebase and its independent queue;
+6. keep only Misumi/personal-domain-specific capability in the corresponding personal repository;
+7. prove migrated paths before deleting/superseding duplicates;
+8. document the final boundary in each affected domain repository.
 
-Do not use a simplistic file-extension or directory rule. Determine final ownership from function:
-
-- **Domain content or domain-specific workflow** stays with the domain repository that owns it.
-- **Generic execution/orchestration/runtime capability used across repositories** belongs in Odysseus.
-- **Repo-specific task queues** remain separate even when the queue engine/runtime is shared.
-- **Cross-repo policy** should live at the lowest shared authority that can enforce it without taking ownership of domain content.
-- Prefer one shared implementation over duplicated machinery where the semantics are genuinely common.
-- Prefer separation where combining components would couple PhD and personal knowledge unnecessarily.
-
-Optimize for minimum future operational overhead, clear authority and low-friction use—not for preserving today's accidental file locations.
-
-## Current implementation implication
-
-The active multihost implementation should continue from its existing task trail and branch. Do not stop Stage 6–9 work to perform the downstream repository migration.
-
-When the backend reaches the completion boundary, surface this convergence as an explicit next work package/operator checkpoint rather than silently migrating files during another stage.
+Optimize for minimum future operational overhead, clear authority and low-friction use.
