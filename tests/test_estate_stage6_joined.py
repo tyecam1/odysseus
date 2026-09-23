@@ -47,6 +47,7 @@ class Joined:
         self.fail_before: dict[str, int] = {}       # verb -> how many requests to fail before handling
         self.before_hooks: list = []
         self.in_worker = False
+        self.homes: dict[str, str] = {}             # host -> HOME for that host's worker (per-host inventory)
         self.monkeypatch = monkeypatch
         monkeypatch.setattr(client, "call_worker", self.call)
 
@@ -60,13 +61,18 @@ class Joined:
             raise self.client.WorkerTransportError("worker_unreachable", f"test: {key} never reached the worker")
         request = build_request(verb, host_id, payload, deadline_s)
         previous = socket.gethostname
+        previous_home = os.environ.get("HOME")
         self.monkeypatch.setattr(socket, "gethostname", lambda: _HOSTNAMES[host_id])
+        if host_id in self.homes:
+            os.environ["HOME"] = self.homes[host_id]
         self.in_worker = True
         try:
             response = estate_worker.handle(request)
         finally:
             self.in_worker = False
             self.monkeypatch.setattr(socket, "gethostname", previous)
+            if previous_home is not None:
+                os.environ["HOME"] = previous_home
         assert validate_response(response, request) == (True, None)
         if self.drop_response.get(key):
             self.drop_response[key] -= 1
@@ -293,69 +299,126 @@ def test_joined_u76_populated_push_unit_blocks_neither_recovery_nor_release(esta
     assert (spool / "released.json").exists()                     # spool.release acknowledged too
 
 
-def test_joined_u27_home_resolves_the_repo_cwd_from_its_own_inventory(estate, monkeypatch):
+def test_joined_u27_home_resolves_the_repo_cwd_from_its_own_inventory(estate, monkeypatch, tmp_path):
     """U27: 'codex-readonly on home fake gets repo_id and resolves cwd on
-    home (fake asserts that path came from home inventory, not lab)'."""
+    home (fake asserts that path came from home inventory, not lab)'. Lab
+    and home have DIFFERENT host-local inventories (their own HOME /
+    ~/.aoteru/config.local.json AI_ROOT); the cwd must be home's."""
     joined = estate["joined"]
-    real_resolve = estate_router.resolve_repo_path
-    home_path = str(estate["main"])
-
-    def _resolve(repo_id):
-        return real_resolve(repo_id) if joined.in_worker else "/LAB/ONLY/PATH"
-    monkeypatch.setattr(estate_router, "resolve_repo_path", _resolve)
+    roots = {}
+    for host in (LAB, HOME):
+        home_dir = tmp_path / f"home-{host}"
+        (home_dir / ".aoteru").mkdir(parents=True)
+        ai_root = tmp_path / f"ai-{host}"
+        (ai_root / "odysseus-aoteru").mkdir(parents=True)
+        (home_dir / ".aoteru" / "config.local.json").write_text(json.dumps({"AI_ROOT": str(ai_root)}))
+        roots[host] = (home_dir, ai_root / "odysseus-aoteru")
+    (estate_router._CONFIG_DIR / "repositories.yaml").write_text(yaml.safe_dump({"repos": [
+        {"id": "odysseus", "path": "${AI_ROOT}/odysseus-aoteru"}]}))
+    monkeypatch.setenv("HOME", str(roots[LAB][0]))                     # the control plane's own host
+    joined.homes = {LAB: str(roots[LAB][0]), HOME: str(roots[HOME][0])}
+    assert estate_router.resolve_repo_path("odysseus") == str(roots[LAB][1])   # lab inventory
     seen = {}
     monkeypatch.setattr(estate_router, "execute_codex",
                         lambda objective, timeout, cwd: seen.update(cwd=cwd) or {"ok": True, "output": "read"})
     result = estate_router._dispatch_read_only(HOME, "codex", {"objective": "inspect", "repo": "odysseus"}, timeout=30)
     assert result["ok"] is True and result["placement"]["executed_host"] == HOME
-    assert seen["cwd"] == home_path and seen["cwd"] != "/LAB/ONLY/PATH"
+    assert seen["cwd"] == str(roots[HOME][1]) != str(roots[LAB][1])
     assert joined.calls[-1][2]["repo_id"] == "odysseus" and "cwd" not in joined.calls[-1][2]
 
 
-@pytest.mark.parametrize("host", [LAB, HOME])
-@pytest.mark.parametrize("mode", ["ok", "execution_failed", "worker_unreachable", "placement_mismatch"])
-def test_joined_u25_persisted_decisions_route_host_and_executed_host(estate, monkeypatch, host, mode):
-    """U25: 'RoutingDecision.host_id == route.host and executed_host_id ∈
-    {route.host, null}; never another host except under placement_mismatch'
-    -- read back from the persisted routing_decisions rows."""
+_U25_SCENARIOS = {
+    # id: (requested_host, capability, repo, per-host models, per-host repo resolves, failure injection)
+    "U1": ("lab", "local-fast", None, {LAB: ["m-fast"], HOME: ["m-fast"]}, None, None),
+    "U2": ("home", "local-fast", None, {LAB: ["m-fast"], HOME: ["m-fast"]}, None, None),
+    "U3": (None, "local-fast", None, {LAB: ["m-fast"], HOME: ["m-fast"]}, None, None),
+    "U4": (None, "home-only", None, {LAB: ["m-fast"], HOME: ["m-fast", "m-home"]}, None, None),
+    "U5": ("home", "local-fast", None, {LAB: ["m-fast"], HOME: ["m-fast"]}, None, "home_health_unreachable"),
+    "U6": ("home", "local-fast", None, {LAB: ["m-fast"], HOME: ["m-fast"]}, None, "home_health_after_expiry"),
+    # U7 at Stage 6: "model only on lab" -- per-host qualified_hosts
+    # enforcement is Stage 7; here the home inventory lacks the model.
+    "U7": ("home", "code-lab", None, {LAB: ["m-code"], HOME: ["m-fast"]}, None, None),
+    "U8": ("home", "local-fast", None, {LAB: ["m-fast"], HOME: []}, None, None),
+    # U9 uses a repo with no standing lease (the fixture parks `odysseus` on home).
+    "U9": (None, "local-fast", "scratch-repo", {LAB: ["m-fast"], HOME: ["m-fast"]}, {LAB: True, HOME: False}, None),
+    "U10": ("home", "local-fast", None, {LAB: ["m-fast"], HOME: ["m-fast"]}, None, "execution_failed"),
+    "U11": ("home", "local-fast", None, {LAB: ["m-fast"], HOME: ["m-fast"]}, None, "placement_mismatch"),
+}
+_U25_EXPECTED_HOST = {"U1": LAB, "U2": HOME, "U3": LAB, "U4": HOME, "U5": None, "U6": None, "U7": None,
+                      "U8": None, "U9": LAB, "U10": HOME, "U11": HOME}
+
+
+@pytest.mark.parametrize("scenario", sorted(_U25_SCENARIOS, key=lambda k: int(k[1:])))
+def test_joined_u25_persisted_decisions_across_u1_to_u11(estate, monkeypatch, scenario):
+    """U25: 'for U1–U11, RoutingDecision.host_id == route.host and
+    executed_host_id ∈ {route.host, null}; never another host except under
+    placement_mismatch' -- each U1–U11 routing scenario, real routing, real
+    worker verbs per host, decisions read back from routing_decisions."""
+    requested, capability, repo, models, repo_resolves, failure = _U25_SCENARIOS[scenario]
     joined = estate["joined"]
-    monkeypatch.setattr(estate_worker, "_ollama_inventory", lambda: (True, [{"name": "m-fast", "digest": "d"}], None))
+    (estate_router._CONFIG_DIR / "models.yaml").write_text(yaml.safe_dump({
+        "paid_providers": [{"name": "codex", "concrete_model_label": "codex-cli"}],
+        "default_paid_provider": "codex",
+        "capabilities": [
+            {"alias": "local-fast", "binding": "m-fast", "qualified_hosts": {LAB: {"evidence": "t"}, HOME: {"evidence": "t"}}},
+            {"alias": "home-only", "binding": "m-home", "qualified_hosts": {LAB: {"evidence": "t"}, HOME: {"evidence": "t"}}},
+            {"alias": "code-lab", "binding": "m-code", "qualified_hosts": {LAB: {"evidence": "t"}}},
+        ],
+    }))
+    host_of = {name: host for host, name in _HOSTNAMES.items()}
+    monkeypatch.setattr(estate_worker, "_ollama_inventory", lambda: (
+        True, [{"name": m, "digest": "d"} for m in models[host_of[socket.gethostname()]]], None))
     monkeypatch.setattr(estate_worker.estate_router, "_codex_available", lambda: (True, "x"))
     monkeypatch.setattr(estate_worker.estate_router, "experiment_priority_active", lambda: (False, "idle"))
-    monkeypatch.setattr(estate_worker, "_probe_repo", lambda repo: {"resolved": True, "path": "/p",
-                                                                   "head_sha": "h", "branch": "b", "clean": True})
+    monkeypatch.setattr(estate_worker, "_probe_repo", lambda repo_id: {
+        "resolved": (repo_resolves or {}).get(host_of[socket.gethostname()], True),
+        "path": "/p", "head_sha": "h", "branch": "b", "clean": True})
     import scripts.home_reentry_inventory as home_inventory
     import src.model_context as model_context
     monkeypatch.setattr(home_inventory, "_hardware", lambda: {})
     monkeypatch.setattr(model_context, "get_context_length_known", lambda base, model: (8192, True))
     from src import estate_worker_client
     estate_worker_client.clear_caches()
-    if mode == "execution_failed":
+    if failure == "execution_failed":
         monkeypatch.setattr(estate_worker.estate_router, "execute_local",
                             lambda model, objective, timeout: (_ for _ in ()).throw(RuntimeError("boom")))
     else:
         monkeypatch.setattr(estate_worker.estate_router, "execute_local",
                             lambda model, objective, timeout: {"ok": True, "output": "hi", "latency_ms": 1})
-    if mode in ("worker_unreachable", "placement_mismatch"):
+    if failure == "home_health_after_expiry":
+        estate_worker_client.worker_health(HOME)                     # cached healthy ...
+        estate_worker_client.clear_caches()                          # ... TTL expires ...
+    if failure in ("home_health_unreachable", "home_health_after_expiry", "placement_mismatch"):
         def _hook(h, verb, payload):
-            if verb == "execute":
-                if mode == "placement_mismatch":
-                    raise joined.client.WorkerTransportError("placement_mismatch", "x", observed_host_id="intruder")
-                raise joined.client.WorkerTransportError("worker_unreachable", "x")
+            if failure == "placement_mismatch" and verb == "execute":
+                raise joined.client.WorkerTransportError("placement_mismatch", "x", observed_host_id="intruder")
+            if failure != "placement_mismatch" and h == HOME and verb == "health":
+                raise joined.client.WorkerTransportError("worker_unreachable", "home down")
         joined.before_hooks.append(_hook)
-    result = estate_router.run_task({"objective": "hi", "requirements": {"capabilities": ["local-fast"]},
-                                     "placement": {"requested_host": "lab" if host == LAB else "home"}})
-    assert "route" in result, result
-    assert result["route"]["host"] == host
+    task = {"objective": "hi", "requirements": {"capabilities": [capability]}}
+    if requested:
+        task["placement"] = {"requested_host": requested}
+    if repo:
+        task["repo"] = repo
+    result = estate_router.run_task(task)
+    expected = _U25_EXPECTED_HOST[scenario]
+    executes = [(h, v) for h, v, _p in joined.calls if v == "execute"]
+    if expected is None:
+        assert executes == [], scenario                            # nothing executed anywhere
+        assert result.get("executed") is not True
+    else:
+        assert result["route"]["host"] == expected, (scenario, result.get("reason"))
+        assert executes and {h for h, _v in executes} == {expected}
     with get_db_session() as s:
-        row = s.query(RoutingDecision).filter(RoutingDecision.id == result["decision_id"]).one()
-        assert row.host_id == host
-        assert row.executed_host_id in (host, None)
-        if mode == "placement_mismatch":
-            assert row.executed_host_id is None and row.actual_route == "placement_mismatch:intruder"
-        if mode == "ok":
-            assert row.executed_host_id == host
-
+        rows = s.query(RoutingDecision).all()
+        for row in rows:
+            assert row.executed_host_id in (row.host_id, None), scenario
+            if expected is not None and row.id == result.get("decision_id"):
+                assert row.host_id == expected
+                if failure == "placement_mismatch":
+                    assert row.executed_host_id is None and row.actual_route == "placement_mismatch:intruder"
+                elif failure is None:
+                    assert row.executed_host_id == expected
 
 
 @pytest.mark.skipif(os.name == "nt" or not estate_worker_procs.runner_units_supported()[0],
@@ -372,18 +435,24 @@ def test_joined_u67_real_setsid_grandchild_refuses_recovery_until_the_unit_is_go
     unit = f"aoteru-probe-{uuid.uuid4().hex}"
     marker = estate["tmp"] / "cg.txt"
     script = estate["tmp"] / "runner.sh"
-    script.write_text(f"#!/bin/sh\ncat /proc/self/cgroup > {marker}\nsetsid sleep 60 </dev/null >/dev/null 2>&1 &\nsleep 60\n")
+    # The runner exits at once; its setsid'd grandchild lives on in the
+    # unit's cgroup (KillMode=process leaves it): runner DEAD, grandchild ALIVE.
+    script.write_text(f"#!/bin/sh\ncat /proc/self/cgroup > {marker}\nsetsid sleep 60 </dev/null >/dev/null 2>&1 &\nexit 0\n")
     script.chmod(0o755)
     # launch the REAL unit (bypass the fixture's fake launcher for this one call)
     import subprocess as _sp
     env = {**os.environ, "XDG_RUNTIME_DIR": os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")}
-    _sp.run(["systemd-run", "--user", f"--unit={unit}", "--collect", "--quiet", "--", str(script)],
-            check=True, env=env)
+    _sp.run(["systemd-run", "--user", f"--unit={unit}", "--collect", "--quiet", "-p", "KillMode=process",
+             "--", str(script)], check=True, env=env)
     deadline = time.monotonic() + 10
     while not marker.exists() and time.monotonic() < deadline:
         time.sleep(0.1)
     cgroup = marker.read_text().strip().split("::", 1)[1]
     handle = {"pid": 1, "create_time": 1, "cgroup": cgroup, "unit": f"{unit}.service"}
+    time.sleep(0.5)
+    members = (Path("/sys/fs/cgroup") / cgroup.lstrip("/") / "cgroup.procs").read_text().split()
+    comms = [Path(f"/proc/{pid}/comm").read_text().strip() for pid in members]
+    assert comms == ["sleep"], comms                  # the runner (sh) is dead; only the grandchild lives
     try:
         # The admitted execution's runner decided `execute` in that unit.
         spool = estate_worker._SPOOL_ROOT / execution_id
@@ -411,3 +480,56 @@ def test_joined_u67_real_setsid_grandchild_refuses_recovery_until_the_unit_is_go
         time.sleep(0.1)
     recovered = lane.recover_execution_lease(execution_id, **IDS, worktree_path=str(estate["wt"].resolve()))
     assert recovered["recovered"] is True
+
+
+
+def test_joined_u75_closure_waits_on_a_committing_attempt_and_records_post_commit_head(estate, monkeypatch):
+    """U75: 'a finalize attempt committing while closure waits leads recovery
+    to record the post-commit HEAD (with finalize_commit: true once
+    commit.json exists), never the pre-commit HEAD'. The attempt runs in its
+    own thread and is paused INSIDE its git commit while recovery closes."""
+    execution_id = _admit(estate)
+    _run_writer(estate, execution_id, monkeypatch=monkeypatch)
+    units = estate["units"]
+    at_commit, release_commit = threading.Event(), threading.Event()
+    real_git = estate_worker._git
+
+    def _git_pausing_at_commit(path, args, **kwargs):
+        if args and args[0] == "commit":
+            at_commit.set()
+            release_commit.wait(10)
+        return real_git(path, args, **kwargs)
+    monkeypatch.setattr(estate_worker, "_git", _git_pausing_at_commit)
+    attempt_threads = []
+
+    def _spawn_async(argv, cwd, log_path, unit):
+        units.spawned.append({"argv": argv, "unit": unit})
+        units.set_populated(f"{unit}.service", True)
+        index = argv.index("--run-finalize")
+        units.current_cgroup = units.cgroup(f"{unit}.service")
+
+        def _attempt():
+            estate_worker._run_attempt("finalize", argv[index + 1], argv[index + 2])
+            units.set_populated(f"{unit}.service", None)
+        thread = threading.Thread(target=_attempt)
+        attempt_threads.append(thread)
+        thread.start()
+        at_commit.wait(10)            # runner decided `execute` and reached its git commit
+        return {"unit": f"{unit}.service"}
+    monkeypatch.setattr(estate_worker_procs, "spawn_runner_unit", _spawn_async)
+    first = lane.finalize_execution(execution_id=execution_id, repo_id="odysseus", host_id=HOME,
+                                    commit_message="apply")
+    assert first["finalized"] is False                    # attempt still committing
+    pre = estate["head"]
+    ids = {**IDS, "worktree_path": str(estate["wt"].resolve())}
+    waiting = lane.recover_execution_lease(execution_id, **ids)
+    assert waiting["recovered"] is False and waiting["code"] == "writer_quiescence_unproven"
+    assert _row(execution_id).worktree_resolution == "unresolved"      # pre-commit HEAD never recorded
+    release_commit.set()
+    for thread in attempt_threads:
+        thread.join(20)
+    post = _git(estate["wt"], "rev-parse", "HEAD")
+    assert post != pre
+    recovered = lane.recover_execution_lease(execution_id, **ids)
+    assert recovered["recovered"] is True
+    assert recovered["recovery"]["head_sha"] == post and recovered["recovery"]["finalize_commit"] is True

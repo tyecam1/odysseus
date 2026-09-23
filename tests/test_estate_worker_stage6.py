@@ -1139,3 +1139,16 @@ def test_u76_populated_push_unit_never_blocks_spool_release(cfg, units):
     closing = _result("status", {"execution_id": "E1", "close": True})
     assert closing["quiescent"] is True                           # recovery precondition 4 satisfied
     assert _result("spool.release", {"execution_id": "E1", "resolution": "recovered"})["released"] is True
+
+
+
+def test_gate4_late_finalize_after_closure_runs_no_git_at_all(cfg, repo, inline_attempts, monkeypatch):
+    """U75: '... and runs no git command' -- not even worktree verification."""
+    inline_attempts.write_spool("E1", run_unit="aoteru-run-E1.service", state={"state": "succeeded"},
+                                populated=False)
+    _result("status", {"execution_id": "E1", "close": True})
+    touched = []
+    monkeypatch.setattr(estate_worker, "_worktree_verification", lambda *a: touched.append(a) or pytest.fail("git"))
+    monkeypatch.setattr(estate_worker, "_run_git", lambda *a, **k: touched.append(a) or pytest.fail("git"))
+    assert _result("worktree.finalize", _finalize_request(repo))["outcome"] == "execution_closed"
+    assert touched == []

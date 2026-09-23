@@ -1251,16 +1251,19 @@ def _verb_worktree_finalize(payload: dict) -> dict:
     claim = read_decision(files["claim"])
     if claim is None or claim.get("kind") != "start":
         raise WorkerError("not_found", f"execution {execution_id!r} has no start claim on this worker")
-    verified = _worktree_verification(payload["repo_id"], payload["worktree_path"], payload["branch"])
-    if not verified["ok"]:
-        raise WorkerError("authority_denied", verified["reason"])
     _require_write_prerequisites()
     number = _record_attempt(spool, "finalize", payload)
     run_path = spool / "finalize" / f"attempt-{number}.run.json"
-    # Attempt side of the Dekker pair (S6.12): recorded, THEN read closure.
+    # Attempt side of the Dekker pair (S6.12): recorded, THEN read closure --
+    # and only then touch the worktree at all (gate round 4: a late finalize
+    # after closure runs NO git command, not even verification).
     if read_decision(files["closed"]) is not None:
         _abort_run(run_path, "attempt", "execution_closed")
         return {"outcome": "execution_closed", "attempt": number}
+    verified = _worktree_verification(payload["repo_id"], payload["worktree_path"], payload["branch"])
+    if not verified["ok"]:
+        _abort_run(run_path, "attempt", f"verification refused: {verified['reason']}")
+        raise WorkerError("authority_denied", verified["reason"])
     try:
         _launch_runner("--run-finalize", [execution_id, str(number)],
                        unit=f"aoteru-finalize-{execution_id}-{number}",
