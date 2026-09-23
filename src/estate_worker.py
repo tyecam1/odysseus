@@ -1260,10 +1260,10 @@ def _verb_worktree_finalize(payload: dict) -> dict:
     if read_decision(files["closed"]) is not None:
         _abort_run(run_path, "attempt", "execution_closed")
         return {"outcome": "execution_closed", "attempt": number}
-    verified = _worktree_verification(payload["repo_id"], payload["worktree_path"], payload["branch"])
-    if not verified["ok"]:
-        _abort_run(run_path, "attempt", f"verification refused: {verified['reason']}")
-        raise WorkerError("authority_denied", verified["reason"])
+    # No worktree git here at all (gate round 5): verification runs inside
+    # the attempt runner AFTER it wins its run.json `execute` decision --
+    # the same decision a closer's fence takes -- so an attempt fenced
+    # between this closure read and its launch can never touch the tree.
     try:
         _launch_runner("--run-finalize", [execution_id, str(number)],
                        unit=f"aoteru-finalize-{execution_id}-{number}",
@@ -1371,12 +1371,25 @@ def _run_attempt(kind: str, execution_id: str, number: str) -> int:
         return 1
     won, _decided = decide_once(run_path, {"decision": "execute", **handle, "at": _utcnow()})
     if not won:
-        return 0
+        return 0          # fenced (closure) or superseded: never touches the worktree
     _disable_git_side_processes(spool)
+    previous_in_unit = _IN_VERIFY_UNIT["value"]
+    _IN_VERIFY_UNIT["value"] = True    # this runner's own unit already tracks every git child
     request = attempt.get("request") or {}
     try:
+        return _run_attempt_body(kind, execution_id, spool, directory, number, request)
+    finally:
+        _IN_VERIFY_UNIT["value"] = previous_in_unit
+
+
+def _run_attempt_body(kind, execution_id, spool, directory, number, request) -> int:
+    try:
         if kind == "finalize":
-            result = _finalize_logic(execution_id, spool, request)
+            verified = _worktree_verification(request["repo_id"], request["worktree_path"], request["branch"])
+            if not verified["ok"]:
+                result = {"outcome": "authority_denied", "reason": verified["reason"]}
+            else:
+                result = _finalize_logic(execution_id, spool, request)
         else:
             result = _push_logic(request)
     except Exception as exc:

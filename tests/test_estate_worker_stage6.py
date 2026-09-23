@@ -1152,3 +1152,35 @@ def test_gate4_late_finalize_after_closure_runs_no_git_at_all(cfg, repo, inline_
     monkeypatch.setattr(estate_worker, "_run_git", lambda *a, **k: touched.append(a) or pytest.fail("git"))
     assert _result("worktree.finalize", _finalize_request(repo))["outcome"] == "execution_closed"
     assert touched == []
+
+
+
+def test_gate5_attempt_fenced_between_closure_read_and_launch_never_touches_git(cfg, repo, inline_attempts,
+                                                                               monkeypatch):
+    """U75: 'Randomised thread interleavings on a real temp dir never
+    produce both a git call and a successful recovery' -- the gate-round-5
+    interleaving: the attempt records itself and reads no closure, then a
+    closer closes and fences it before its runner decides; afterwards no
+    worktree git runs and the closure proves quiescence."""
+    inline_attempts.write_spool("E1", run_unit="aoteru-run-E1.service", state={"state": "succeeded"},
+                                populated=False)
+    (repo["wt"] / "new.txt").write_text("x")
+    real_launch = estate_worker._launch_runner
+    closure = {}
+
+    def _closer_wins_first(flag, args, **kwargs):
+        closure["view"] = _result("status", {"execution_id": "E1", "close": True})   # closes + fences attempt 1
+        return real_launch(flag, args, **kwargs)
+    monkeypatch.setattr(estate_worker, "_launch_runner", _closer_wins_first)
+    touched = []
+    real_verify, real_git = estate_worker._worktree_verification_local, estate_worker._run_git
+    monkeypatch.setattr(estate_worker, "_worktree_verification_local",
+                        lambda *a: touched.append(("verify", a)) or real_verify(*a))
+    monkeypatch.setattr(estate_worker, "_run_git",
+                        lambda path, args, **k: touched.append(("git", args)) or real_git(path, args, **k))
+    answer = _result("worktree.finalize", _finalize_request(repo))
+    assert closure["view"]["quiescent"] is True                   # recovery could proceed ...
+    assert answer["outcome"] != "finalized" and touched == []     # ... and no git ever ran
+    assert _git(repo["wt"], "rev-parse", "HEAD") == repo["head"]
+    run = estate_worker.read_decision(_spool("E1") / "finalize" / "attempt-1.run.json")
+    assert run["decision"] == "abort" and run["by"] == "fence"
