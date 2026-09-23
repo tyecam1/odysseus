@@ -110,7 +110,7 @@ marked explicitly.
 2. **Is capability host-specific enough?** No (D5). Minimum fix: per-alias `qualified_hosts` in `config/models.yaml`, plus per-host `qualified_executors` in `config/estate.yaml`, plus live per-host inventory from the worker. An alias is routable on host H only if all three agree. No scheduler.
 3. **Is `verified` overloaded?** Yes (D6). Split it into `identity_verified` (static, config), live `healthy` (runtime, worker health probe) and `worker.enabled` + `worker.qualified_executors` (config, governed, evidence-backed), plus per-alias host qualification. Home becomes `identity_verified: true, worker.enabled: false`. `verified: true` is never set on home.
 4. **Home service role?** Preserve the household service untouched. The home worker is a **separate checkout of this repo, invoked on demand over SSH**. It has no listener, no scheduled task, no database, and no routing, lease or lifecycle authority. `svc:odysseus-home.endpoint` stays `null`.
-5. **Lifecycle integration?** EstateExecution stays the only lifecycle store. Remote write execution is observed through the worker's `status` verb and written into EstateExecution by the control plane. Stage 6 adds the bounded `wait` and the client `execution` command from the Sept 3 task, plus a `lost` state so worker loss is bounded rather than ambiguous (§I.2 sets the sequencing).
+5. **Lifecycle integration?** EstateExecution stays the only lifecycle store. Remote write execution is observed through the worker's `status` verb and written into EstateExecution by the control plane. Stage 6 adds the bounded `wait` and the client `execution` command from the Sept 3 task, plus two distinct non-running states so worker loss is bounded rather than ambiguous: `interrupted` (worker reached, runner positively confirmed dead) and `lost` (outcome cannot currently be determined — unreachable, not a synonym for dead) (§I.2 sets the sequencing).
 
 ---
 
@@ -474,26 +474,37 @@ Dependencies: Stage 4. The SSH path is exercised by fakes in unit tests; home is
 Files:
 - `core/database.py`:
   - add `EstateExecution` columns `worker_handle_json` (Text), `worker_attestation_json` (Text) and `last_observed_at` (DateTime);
-  - add `lost` to the lifecycle docstring;
+  - add `lost` and `interrupted` to the lifecycle docstring, with the distinction stated explicitly (pre-Stage-6 contract-correction review finding): `lost` means the outcome **cannot currently be determined** (the worker is unreachable, or has not been observed within the bounded window) — it is never a synonym for "the process is dead." `interrupted` means the worker **was reached** and truthfully reported the stored `accepted`/`running` row's runner is no longer alive (`process_alive: false`) — a positively observed, not inferred, outcome;
+  - `worker_handle_json` is set to a non-null durable dispatch-state placeholder **at row creation**, before `start` is even called (see step 4 below) — a legacy pre-Stage-6 row is the only case where this column is genuinely `NULL`; a new Stage-6 row is never `NULL`, even if it crashes or loses its `start` response before a confirmed handle exists (pre-Stage-6 review finding: `worker_handle_json IS NULL` stopped being a safe "legacy row" test the moment Stage 6 creates the durable row before `start`);
   - add migration `_migrate_add_estate_execution_worker_columns()` (same pattern as `_migrate_add_routing_delegation_columns`), called from `init_db()` after `create_all`.
 - `src/estate_router.py`:
   - `_lease_authority(repo_id, host_id) -> dict`: the DB-only half of `_codex_write_authority` (active non-stale lease held by `host_id`, `allowed_write_scope == "repo"`, `branch`, `worktree_path`).
   - `execute_write_via_worker(objective, *, repo_id, host_id, decision_id, wait_timeout=30.0, timeout=1800.0) -> dict`:
     1. `_lease_authority`.
     2. `call_worker(host_id, "worktree.verify", ...)`. Failure → `authority_denied`, no row.
-    3. `_in_flight_execution_for_lease`. Include `lost` rows: a `lost` row → `{ok: False, error_code: "lease_has_unresolved_lost_execution", execution_id}`; an accepted/running row → reuse, `dispatch: "reused_in_flight"`.
-    4. `_create_estate_execution` (accepted).
-    5. `call_worker(host_id, "start", ...)`. Transport failure → row `failed`, `error: worker_unreachable`, because nothing started. That is provable: `start` is idempotent and the spool check is part of the next reconcile.
-    6. Update the row to `running` with `worker_handle_json`, `worker_attestation_json`, `worker_pid` and `started_at`.
-    7. Start the monitor thread `_observe_worker_execution(execution_id, host_id, timeout)`: poll `status` every 5 s. On terminal, write the terminal row and `_update_decision_outcome(executed_host_id=host_id, ...)`. While unreachable, keep polling. With no successful observation for `timeout + 120 s` → `lost`.
+    3. `_in_flight_execution_for_lease`. Include `lost` rows: a `lost` row → `{ok: False, error_code: "lease_has_unresolved_lost_execution", execution_id}`; an accepted/running row (including one whose `start` is still being resolved per step 5) → reuse, `dispatch: "reused_in_flight"`. This is what keeps admission single-flight under one lease while a `start` is uncertain — no second row, no second store.
+    4. `_create_estate_execution` (accepted), with `worker_handle_json` set to a non-null dispatch-state placeholder (e.g. `{"dispatch_state": "pending_start"}`), **not** `NULL` — the row is durably marked as a real, in-flight Stage-6 execution from the moment it exists, before `start` is even attempted. A backend crash right after this write leaves a row that reconciliation can recognise as "ours, dispatch unresolved," never as legacy.
+    5. `call_worker(host_id, "start", ...)`. **A transport/protocol failure or lost response here is not proof nothing started** (pre-Stage-6 review finding: the prior text claimed this was provable — it is not). The worker may have already created the spool and spawned the detached writer before the response was lost; `start`'s own idempotency per `execution_id` (same `execution_id` in a retried `start` → existing handle, `reused: true`, never a second spawn) exists specifically so this can be resolved safely. On an uncertain `start`:
+       - the row is **not** marked `failed`; it stays `accepted` with the placeholder from step 4 still in place;
+       - **no second execution is admitted under the same lease** while this one is unresolved (already covered by step 3's `_in_flight_execution_for_lease` reuse);
+       - resolve the uncertainty by retrying `call_worker(host_id, "start", ...)` with the **same `execution_id`** (idempotent — returns the existing handle, `reused: true`, if it already started) and/or `call_worker(host_id, "status", {execution_id})`;
+       - only positive evidence that no execution exists and cannot have started (e.g. a retried `start` itself completing cleanly with no prior spool, or a `status` call the worker answers with a definitive "unknown execution_id" *and* a subsequent clean `start` succeeds) may transition the row to a terminal non-running state (`failed`) — silence or unreachability alone never does;
+       - dispatch (this `start` call) and observation (`status` polling in step 7) stay separate calls; resolving an uncertain `start` reuses the same two verbs, never a new one.
+    6. Once `start` is confirmed (directly, or by resolving step 5's uncertainty), update the row to `running`, replacing the step-4 placeholder with the real `worker_handle_json`, plus `worker_attestation_json`, `worker_pid` and `started_at`.
+    7. Start the monitor thread `_observe_worker_execution(execution_id, host_id, timeout)`: poll `status` every 5 s.
+       - Worker reachable, stored state `accepted`/`running`, `status` reports `process_alive: false` → this is **not** unknown: the host answered and the runner is truthfully known dead. Write the row `interrupted` promptly (do not wait for the `lost` timeout below) and record `_update_decision_outcome(executed_host_id=host_id, ...)`.
+       - Worker reachable and terminal (`succeeded`/`failed`/`timed_out`) → write the terminal row and `_update_decision_outcome(executed_host_id=host_id, ...)` as before.
+       - Worker unreachable, or otherwise not currently observable → keep polling; do not guess. With no successful observation for `timeout + 120 s` → `lost` (outcome undetermined, not "process dead").
+       - No redispatch occurs merely because a row became `lost` or `interrupted` — those are observations, not admission decisions; a new admission still goes through step 3's single-flight check.
     8. Bounded join (`wait_timeout`), same response contract as today plus `dispatch` and `next_action`.
   - `_PAID_PROVIDER_WRITE_FUNCTION_NAMES = {"codex": "execute_write_via_worker"}`.
   - `run_task()` implementation mode: replace the `route.host != current_host_id()` refusal (`:1609-1613`) with: the active lease for `repo` must be held by `route.host` (via `_lease_authority`), else `write_lease_missing`.
   - `reconcile_stale_estate_executions(db, EstateExecution)`:
-    - rows with `worker_handle_json` and `last_observed_at` older than 15 s → one bounded `status` call (`deadline_s=10`), then transition accordingly;
+    - rows with a **confirmed** `worker_handle_json` (post step 6) and `last_observed_at` older than 15 s → one bounded `status` call (`deadline_s=10`), then transition per step 7's rules above (`interrupted` on a reachable dead runner, terminal on a reachable terminal report, otherwise keep polling);
+    - rows still carrying the step-4 **placeholder** (dispatch unresolved — crashed or lost `start` response before confirmation) → resolve exactly as step 5 describes (retry `start` with the same `execution_id` and/or `status`), never treated as legacy and never redispatched under a fresh `execution_id`;
     - rows past `timeout + 120 s` with no successful observation → `lost`;
-    - `lost` rows → try `status`, and map spool-absent to `interrupted`;
-    - rows **without** a worker handle (legacy, pre-Stage-6) → the existing `os.kill` path **only if** `row.host_id == current_host_id()`, else `lost`.
+    - `lost` rows → try `status` when the worker becomes reachable again, and reconcile to the truthful spool/process state this reveals (`interrupted` if the runner is confirmed dead, a terminal state if the spool already has one, or back to `running` if it is genuinely still alive) — `lost` was never itself the true state, only the bound on how long "undetermined" was tolerated. No redispatch follows from this reconciliation alone;
+    - rows with `worker_handle_json == NULL` (true legacy, created before Stage 6 existed — the placeholder above did not exist yet for these) → the existing `os.kill` path **only if** `row.host_id == current_host_id()`, else `lost`.
   - `get_estate_execution(execution_id, wait_s=0)`: loop up to `min(wait_s, 60)`. Re-read every 2 s and return early on any state not in (`accepted`, `running`).
   - `finalize_execution(...)`: keep all DB/lease/worktree drift checks. Replace the local git block (`:1434-1476`) with `call_worker(execution.host_id, "worktree.finalize", ...)`. The branch-drift check moves into the worker verb and the result is echoed.
 - `routes/estate_routing_routes.py`:
@@ -512,12 +523,13 @@ Invariants:
 - EstateExecution stays the only lifecycle store.
 - The spool is never read as authority except through `status` inside the control plane.
 - Dispatch and observation are separate commands.
-- Admission under one lease stays single-flight, including `lost`.
+- Admission under one lease stays single-flight, including `lost` and an unresolved `start` (pre-Stage-6 review finding: an uncertain `start` response reuses the same single-flight check as `lost`, never opening a second admission window).
+- The control plane proves ParkLease authority (`_lease_authority`) before issuing any remote `worktree.verify`, `start`, or `worktree.finalize` call. The worker remains DB-free and never decides lease validity, routing, or lifecycle authority — the lease payload sent to the worker is evidence/instruction from the already-authenticated control plane, not an independent worker-side lease authority.
 
-Tests are listed in the §G matrix, items U13–U22 and I4–I7.
+Tests are listed in the §G matrix, items U13–U24 and I4–I7.
 
 Sept 3 reconciliation rule: before starting Stage 6, `git log origin/dev` for a Sept 3 implementation.
-- If one has merged, reuse its status/wait surface and change it only to add host-awareness (`lost`, worker observation).
+- If one has merged, reuse its status/wait surface and change it only to add host-awareness (`lost`, `interrupted`, worker observation).
 - If none has merged, implement exactly the surface above. Record in the evidence doc that Sept 3 acceptance bullets 1–4 and 6–7 are covered, and that bullets 5 and 8 (LogicalSession/Remote Control bounded outcomes) stay with the Sept 3 task.
 - Do not touch `LogicalSession` in this plan.
 
@@ -618,16 +630,18 @@ The fake transport is `FakeWorker(host_id, models, executors, repos, fail=None)`
 | U14 | write with lease held by lab, route home requested | refused `write_lease_missing` (lease holder ≠ route.host); no row |
 | U15 | write without lease | refused; no row; no `start` |
 | U16 | duplicate dispatch while non-terminal | same `execution_id`, `dispatch: reused_in_flight`, `start` called once |
-| U17 | worker `start` response lost, retried | worker returns `reused: true`; one spawn |
+| U17 | worker `start` response lost (transport/protocol failure), retried | row is **not** marked `failed` in between (still `accepted`, placeholder `worker_handle_json` from step 4 in place); retried `start` with the same `execution_id` returns `reused: true`; exactly **one** spawn on the fake worker across both calls |
 | U18 | status without redispatch | `get_estate_execution(id, wait_s=10)` observes running→succeeded via fake `status`; **zero** `/run` or `start` calls during observation |
-| U19 | worker loss mid-run | no observation for `timeout+120s` (clock monkeypatched) → `lost`; status returns promptly |
-| U20 | dispatch under lease with `lost` row | `lease_has_unresolved_lost_execution`; no new row |
-| U21 | worker returns after loss | reconcile maps `lost` → spool terminal state; admission reopens |
-| U22 | legacy row without worker handle on non-local host | `lost`, not `interrupted`; no `os.kill` |
-| U23 | truthful telemetry | for U1–U11, `RoutingDecision.host_id == route.host` and `executed_host_id ∈ {route.host, null}`; never another host except under `placement_mismatch` |
-| U24 | identity verified / worker disabled | ineligible with the worker-specific reason |
-| U25 | remote read-only repo work | `codex-readonly` on home fake gets `repo_id` and resolves cwd on home (fake asserts that path came from home inventory, not lab) |
-| U26 | worker import hygiene | `core.database` absent from `sys.modules` after each worker verb |
+| U19 | worker reachable, stored `accepted`/`running`, `status` reports `process_alive: false` | row promptly `interrupted` (not `lost` — the worker answered and the runner is positively known dead); `_update_decision_outcome(executed_host_id=host_id, ...)` recorded; no wait for the `lost` timeout |
+| U20 | worker unreachable for the full observation window | no observation for `timeout+120s` (clock monkeypatched) → `lost` (outcome undetermined — distinct from U19's positively-observed `interrupted`); `status` returns promptly once the worker is reachable again |
+| U21 | dispatch under lease with `lost` row | `lease_has_unresolved_lost_execution`; no new row |
+| U22 | worker becomes reachable again after a `lost` row | reconcile resolves `lost` to the now-observable truthful state (`interrupted` if the runner is confirmed dead, a terminal state if the spool already has one, or back to `running` if it genuinely never stopped); no redispatch follows from this reconciliation alone — a fresh admission still goes through the same single-flight check as U21 |
+| U23 | legacy row (`worker_handle_json IS NULL`, created before Stage 6 existed) on non-local host | `lost`, not `interrupted`; no `os.kill` |
+| U24 | new Stage-6 row with only the step-4 placeholder dispatch-state marker (crash, or lost `start` response, before a confirmed handle) | resolved via the same retried `start` (same `execution_id`) / `status` logic as U17 — never treated as U23's legacy case, never redispatched under a fresh `execution_id` |
+| U25 | truthful telemetry | for U1–U11, `RoutingDecision.host_id == route.host` and `executed_host_id ∈ {route.host, null}`; never another host except under `placement_mismatch` |
+| U26 | identity verified / worker disabled | ineligible with the worker-specific reason |
+| U27 | remote read-only repo work | `codex-readonly` on home fake gets `repo_id` and resolves cwd on home (fake asserts that path came from home inventory, not lab) |
+| U28 | worker import hygiene | `core.database` absent from `sys.modules` after each worker verb |
 
 ### Integration tests (real subprocesses, no paid inference, no network)
 
@@ -636,9 +650,9 @@ The fake transport is `FakeWorker(host_id, models, executors, repos, fail=None)`
 | I1 | `LocalTransport` → real `python -m src.estate_worker` → `health`, `inventory` against a stub Ollama HTTP server on an ephemeral `127.0.0.1` port (worker Ollama base overridable by env `AOTERU_WORKER_OLLAMA_BASE`, test-only; default `127.0.0.1:11434`) |
 | I2 | `/api/estate/run` (TestClient) lab placement end to end through LocalTransport with the stub Ollama; response `placement.attested: true` |
 | I3 | `SshTransport` argv + stdin contract with `ssh` replaced by a shim script on PATH that execs the local worker (proves the stdin/forced-command shape without a network) |
-| I4 | durable write lane through LocalTransport with `_execute_codex_with_sandbox` replaced in the **worker** by a sleep-then-write stub (via the `~/.aoteru/worker_selftest_enabled` sentinel file + `kind: "noop-sleep"`), a real detached spawn, real spool, real monitor thread → `succeeded`; `aoteru execution <id> --wait` (client against TestClient) observes it |
-| I5 | kill the detached runner mid-run → worker `status` reports `failed`/`unknown` → row terminal; no redispatch |
-| I6 | Sept 3 sequence: dispatch E, duplicate while running → same E, observe via status only to terminal, new dispatch → new E with `dispatch: new` |
+| I4 | durable write lane through LocalTransport with `_execute_codex_with_sandbox` replaced in the **worker** by a sleep-then-write stub (via the `~/.aoteru/worker_selftest_enabled` sentinel file + `kind: "noop-sleep"`), a real detached spawn, real spool, real monitor thread → `succeeded`; `aoteru execution <id> --wait` (client against TestClient) observes it; `worker_handle_json` is non-null throughout (the step-4 placeholder, then the real handle after `start` confirms) — never `NULL` at any point in this real subprocess run |
+| I5 | kill the detached runner mid-run, worker stays reachable → real `status` truthfully reports `process_alive: false` for the stored `accepted`/`running` row → row promptly `interrupted` (not a generic "terminal", not `lost` — the worker was reachable and positively observed the runner dead); no redispatch |
+| I6 | Sept 3 sequence: dispatch E, duplicate while running → same E (single-flight, per the Invariants section), observe via status only to terminal, new dispatch → new E with `dispatch: new`. Also covers the ambiguous-`start` case from step 5 above through a real transport: kill the transport after the worker has actually spawned but before its `start` response reaches the control plane → row is not marked `failed`; a retried `start` with the same `execution_id` observes `reused: true` and the row proceeds to `running` off the one real spawn |
 | I7 | remote-host park via `?host=` with FakeWorker `worktree.prepare` → ParkLease row `host_id=desktop-in7o23d`; heartbeat/release with `?host=` |
 
 ### Live acceptance tests
