@@ -430,7 +430,7 @@ def spawn_runner_unit(argv: list[str], cwd: str, log_path: str, unit: str) -> di
 _RUNNER_UNITS_PROBE: dict = {}
 
 
-def runner_units_supported() -> tuple[bool, str]:
+def runner_units_supported(timeout: float = 30.0) -> tuple[bool, str]:
     """Per-process probe (S6.12): a transient user unit must start and report
     its own dedicated `aoteru-probe-*.service` cgroup. Cached for the life
     of this (per-call) worker process."""
@@ -445,7 +445,7 @@ def runner_units_supported() -> tuple[bool, str]:
             completed = subprocess.run(
                 ["systemd-run", "--user", f"--unit={unit}", "--collect", "--quiet", "--wait", "--pipe",
                  "--", "cat", "/proc/self/cgroup"],
-                env=_user_manager_env(), capture_output=True, text=True, timeout=30,
+                env=_user_manager_env(), capture_output=True, text=True, timeout=max(0.5, timeout),
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             result = (False, f"systemd-run --user unavailable: {exc}")
@@ -551,7 +551,7 @@ def _app_slice() -> str:
     return f"/user.slice/user-{uid}.slice/user@{uid}.service/app.slice"
 
 
-def verify_units_quiescent(scope: Optional[str] = None) -> Optional[bool]:
+def verify_units_quiescent(scope: Optional[str] = None, timeout: float = 15.0) -> Optional[bool]:
     """True when no `aoteru-verify-*` unit is loaded in a live state (6d
     adjudication finding 1): a timed-out verification that could not be
     proven stopped keeps every later verification and closure fail-closed
@@ -562,7 +562,7 @@ def verify_units_quiescent(scope: Optional[str] = None) -> Optional[bool]:
         completed = subprocess.run(
             ["systemctl", "--user", "list-units", "--all", "--no-legend", "--plain",
              f"aoteru-verify-{scope}-*" if scope else "aoteru-verify-*"],
-            env=_user_manager_env(), capture_output=True, text=True, timeout=15,
+            env=_user_manager_env(), capture_output=True, text=True, timeout=max(0.5, timeout),
         )
     except (OSError, subprocess.TimeoutExpired):
         return None

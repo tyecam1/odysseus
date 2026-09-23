@@ -43,7 +43,7 @@ def cfg(tmp_path, monkeypatch):
     monkeypatch.setattr(estate_worker, "_worker_version", lambda: "abc123")
     # Never launch a real systemd unit from a unit test; FakeUnits opts in.
     monkeypatch.setattr(estate_worker.estate_worker_procs, "runner_units_supported",
-                        lambda: (False, "unit tests: real runner units disabled"))
+                        lambda **kw: (False, "unit tests: real runner units disabled"))
     monkeypatch.setattr(estate_worker, "_DECISION_FS_PROBED", {})
     return {"root": tmp_path, "repo": repo_path}
 
@@ -1241,7 +1241,7 @@ def test_gate7_verify_units_are_scoped_per_worktree(cfg, units, monkeypatch):
     monkeypatch.setattr(estate_worker, "_VERIFY_UNIT_WAIT_S", 0.3)
     scopes = []
     monkeypatch.setattr(estate_worker.estate_worker_procs, "verify_units_quiescent",
-                        lambda scope=None: scopes.append(scope) or scope != estate_worker._verify_scope("/busy"))
+                        lambda scope=None, **kw: scopes.append(scope) or scope != estate_worker._verify_scope("/busy"))
     monkeypatch.setattr(estate_worker, "_worktree_verification_local", lambda *a: {
         "ok": True, "path": a[1], "reason": None, "head_sha": "h", "clean": True})
     busy = _call("worktree.verify", {"repo_id": "test-repo", "worktree_path": "/busy", "branch": "b"})
@@ -1268,7 +1268,7 @@ def test_gate8_same_path_verification_waits_for_a_transient_unit(cfg, units, mon
         "ok": True, "path": a[1], "reason": None, "head_sha": "h", "clean": True})
     units.verify_live = True
     threading.Timer(0.6, lambda: setattr(units, "verify_live", False)).start()
-    response = _call("worktree.verify", {"repo_id": "test-repo", "worktree_path": "/reused", "branch": "b"})
+    response = estate_worker.handle(build_request("worktree.verify", "test-lab", {"repo_id": "test-repo", "worktree_path": "/reused", "branch": "b"}, estate_worker.VERIFY_CALL_DEADLINE_S))
     assert response["ok"] is True                         # waited, then verified; not refused
 
 
@@ -1291,7 +1291,10 @@ def test_gate9_verify_bounds_are_consistent_by_construction():
     source = inspect.getsource(estate_write_lane)
     assert source.count('"worktree.verify"') == source.count("deadline_s=_VERIFY_DEADLINE_S")
     worker_source = inspect.getsource(estate_worker._worktree_verification)
-    assert "timeout=VERIFY_UNIT_TIMEOUT_S" in worker_source
+    # every bounded subprocess on the verification path is capped by the budget
+    assert "runner_units_supported(timeout=_remaining(" in worker_source
+    assert "verify_units_quiescent(scope, timeout=_remaining(" in worker_source
+    assert "timeout=run_limit" in worker_source
 
 
 def test_gate9_late_unit_within_its_lifetime_never_refuses_a_same_path_verification(cfg, units, monkeypatch):
@@ -1303,4 +1306,24 @@ def test_gate9_late_unit_within_its_lifetime_never_refuses_a_same_path_verificat
         "ok": True, "path": a[1], "reason": None, "head_sha": "h", "clean": True})
     units.verify_live = True
     threading.Timer(2.5, lambda: setattr(units, "verify_live", False)).start()
-    assert _call("worktree.verify", {"repo_id": "test-repo", "worktree_path": "/reused", "branch": "b"})["ok"] is True
+    assert estate_worker.handle(build_request("worktree.verify", "test-lab", {"repo_id": "test-repo", "worktree_path": "/reused", "branch": "b"}, estate_worker.VERIFY_CALL_DEADLINE_S))["ok"] is True
+
+
+
+def test_gate11_whole_verification_answers_within_its_budget_under_slow_systemd(cfg, units, monkeypatch):
+    """Gate round 11 schedule, scaled: a slow unit probe and slow polls, with
+    an earlier unit still live -- the verb still answers before its own
+    deadline, with a retryable executor_unavailable (never a hang past the
+    transport limit)."""
+    procs = estate_worker.estate_worker_procs
+    monkeypatch.setattr(procs, "runner_units_supported",
+                        lambda timeout=30.0: (time.sleep(min(timeout, 1.0)), (True, "slow"))[1])
+    monkeypatch.setattr(procs, "verify_units_quiescent",
+                        lambda scope=None, timeout=15.0: (time.sleep(min(timeout, 0.8)), False)[1])
+    request = build_request("worktree.verify", "test-lab",
+                            {"repo_id": "test-repo", "worktree_path": "/reused", "branch": "b"}, 8)
+    began = time.monotonic()
+    response = estate_worker.handle(request)
+    assert time.monotonic() - began < 8 - estate_worker._BUDGET_MARGIN_S + 1.5
+    assert response["ok"] is False and response["error"]["code"] == "executor_unavailable"
+    assert "retryable" in response["error"]["message"]

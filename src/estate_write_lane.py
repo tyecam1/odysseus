@@ -245,6 +245,13 @@ def execute_write_via_worker(objective: str, *, repo_id: str, host_id: str,
     verify, exc = _worker(host_id, "worktree.verify",                                  # step 2
                           {"repo_id": repo_id, "worktree_path": worktree_path, "branch": branch},
                           deadline_s=_VERIFY_DEADLINE_S)
+    if exc is not None and exc.code in ("executor_unavailable", "worker_unreachable", "worker_protocol_error"):
+        # Verification could not complete (budget exhausted, a live earlier
+        # verification, transport): no row, no state change -- a transient,
+        # retryable availability outcome, never an authority verdict.
+        return {"ok": False, "provider": "codex-write", "authority_denied": False, "retryable": True,
+                "error_code": "worktree_verification_unavailable",
+                "error": f"worktree verification on {host_id!r} did not complete: {exc.code}: {exc}"}
     if exc is not None or not verify.get("ok"):
         return {"ok": False, "provider": "codex-write", "authority_denied": True, "error_code": "authority_denied",
                 "error": f"worktree verification failed on {host_id!r}: "

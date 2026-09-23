@@ -259,6 +259,11 @@ def handle(request: dict) -> dict:
     function_name = f"_verb_{request['verb'].replace('.', '_')}"
     verb = globals()[function_name]
     _CURRENT_DEADLINE_S["value"] = request.get("deadline_s")
+    # One monotonic budget for the whole verb (gate round 11): every bounded
+    # subprocess inside verification is capped by what remains, so the verb
+    # always answers before the transport's own limit.
+    deadline = request.get("deadline_s") if isinstance(request.get("deadline_s"), (int, float)) else None
+    _BUDGET["end"] = (time.monotonic() + float(deadline) - _BUDGET_MARGIN_S) if deadline else None
     if os.name != "nt":
         _disable_git_side_processes(_SPOOL_ROOT)
     try:
@@ -453,23 +458,31 @@ def _worktree_verification(repo_id: Any, worktree_path: Any, branch: Any) -> dic
     refused anyway)."""
     if not all(isinstance(value, str) and value for value in (repo_id, worktree_path, branch)):
         raise WorkerError("bad_request", "worktree verification requires repo_id, worktree_path and branch")
-    units_ok, _detail = estate_worker_procs.runner_units_supported()
+    if _remaining(1.0) <= 0:
+        raise _budget_exhausted("before the unit probe")
+    units_ok, _detail = estate_worker_procs.runner_units_supported(timeout=_remaining(30.0))
     if units_ok and not _IN_VERIFY_UNIT["value"]:
         scope = _verify_scope(worktree_path)
         # A late verification of the same path is a short read: wait for it
-        # (bounded) instead of refusing, so a reused path is not denied
-        # admission by a transient unit (gate round 8). Only a unit that
-        # stays live or unknown past the bound fails closed.
+        # (bounded) instead of refusing (gate round 8). The wait, each poll
+        # and the unit run are all capped by the verb's single budget, and
+        # exhaustion is a retryable, state-free answer (gate round 11).
         wait_until = time.monotonic() + _VERIFY_UNIT_WAIT_S
-        while estate_worker_procs.verify_units_quiescent(scope) is not True:
+        reserve = VERIFY_UNIT_TIMEOUT_S + VERIFY_KILL_PROOF_S
+        while estate_worker_procs.verify_units_quiescent(scope, timeout=_remaining(15.0)) is not True:
             if time.monotonic() >= wait_until:
                 raise WorkerError("executor_unavailable",
-                                  "an earlier verification of this worktree is still live or unknown; refusing")
+                                  "an earlier verification of this worktree is still live or unknown; retryable")
+            if _remaining(1e9) <= reserve:
+                raise _budget_exhausted("waiting for an earlier verification of this worktree")
             time.sleep(0.2)
+        run_limit = min(VERIFY_UNIT_TIMEOUT_S, _remaining(1e9) - VERIFY_KILL_PROOF_S)
+        if run_limit < 1.0:
+            raise _budget_exhausted("no time left to run the verification unit")
         payload = json.dumps({"repo_id": repo_id, "worktree_path": worktree_path, "branch": branch})
         completed = estate_worker_procs.run_in_unit(
             _runner_argv("--run-verify"), str(Path(get_app_root()).resolve()),
-            f"aoteru-verify-{scope}-{uuid.uuid4().hex}", timeout=VERIFY_UNIT_TIMEOUT_S, input_text=payload,
+            f"aoteru-verify-{scope}-{uuid.uuid4().hex}", timeout=run_limit, input_text=payload,
         )
         try:
             answer = json.loads(completed.stdout.strip().splitlines()[-1])
@@ -484,6 +497,18 @@ def _worktree_verification(repo_id: Any, worktree_path: Any, branch: Any) -> dic
 
 
 _IN_VERIFY_UNIT = {"value": False}
+_BUDGET = {"end": None}
+_BUDGET_MARGIN_S = 5.0
+
+
+def _remaining(cap: float) -> float:
+    """Seconds left in the verb's budget, capped at `cap`."""
+    end = _BUDGET["end"]
+    return cap if end is None else max(0.0, min(cap, end - time.monotonic()))
+
+
+def _budget_exhausted(reason: str):
+    return WorkerError("executor_unavailable", f"verification budget exhausted ({reason}); retryable")
 # Bounds are consistent by construction (gate round 9): a verify unit runs
 # at most VERIFY_UNIT_TIMEOUT_S, then run_in_unit stops it and proves its
 # cgroup quiescent within VERIFY_KILL_PROOF_S. A same-path verification

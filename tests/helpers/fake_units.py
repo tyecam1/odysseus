@@ -25,13 +25,13 @@ class FakeUnits:
         self.prepare_result = prepare_result
         monkeypatch.setattr(self.procs, "_CGROUP_ROOT", self.root)
         monkeypatch.setattr(self.procs, "runner_units_supported",
-                            lambda: (supported, "fake units" if supported else "fake: unsupported"))
+                            lambda timeout=30.0: (supported, "fake units" if supported else "fake: unsupported"))
         monkeypatch.setattr(self.procs, "spawn_runner_unit", self._spawn)
         monkeypatch.setattr(self.procs, "own_cgroup", lambda: self.current_cgroup)
         monkeypatch.setattr(self.procs, "kill_unit", self._kill)
         monkeypatch.setattr(self.procs, "run_in_unit", self._run_in_unit)
         self.verify_live = False
-        monkeypatch.setattr(self.procs, "verify_units_quiescent", lambda scope=None: not self.verify_live)
+        monkeypatch.setattr(self.procs, "verify_units_quiescent", lambda scope=None, timeout=15.0: not self.verify_live)
         self.verify_units: list[str] = []
 
     def _run_in_unit(self, argv, cwd, unit, *, timeout=60.0, input_text=None):

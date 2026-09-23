@@ -250,3 +250,15 @@ def test_gate8_execution_failed_from_prepare_keeps_the_reservation(db, worker):
     with pytest.raises(park_lease_ops.PrepareOutcomeUnresolved) as info:
         park_lease_ops.park_with_worktree("odysseus", HOME, "feat/y")
     assert _lease_status(info.value.lease_id) == "preparing"
+
+
+
+def test_gate11_admission_maps_unfinished_verification_to_a_retryable_state_free_answer(db, worker):
+    _lease()
+    worker.fail["worktree.verify"] = ["executor_unavailable"]
+    result = _dispatch()
+    assert result["ok"] is False and result["retryable"] is True
+    assert result["error_code"] == "worktree_verification_unavailable" and result["authority_denied"] is False
+    with get_db_session() as s:
+        assert s.query(EstateExecution).count() == 0
+        assert s.query(ParkLease).filter(ParkLease.id == "L1").one().status == "active"

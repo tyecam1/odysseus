@@ -36,7 +36,7 @@ def fixture_config(tmp_path, monkeypatch):
     monkeypatch.setattr(estate_worker, "_worker_version", lambda: "abc123")
     # Never launch a real systemd unit from a unit test; FakeUnits opts in.
     monkeypatch.setattr(estate_worker.estate_worker_procs, "runner_units_supported",
-                        lambda: (False, "unit tests: real runner units disabled"))
+                        lambda **kw: (False, "unit tests: real runner units disabled"))
     return {"config": config_dir, "repo": repo_path, "root": tmp_path}
 
 
