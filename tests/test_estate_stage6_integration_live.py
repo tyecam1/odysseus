@@ -157,3 +157,154 @@ def test_i8_dirty_existing_worktree_fails_closed_and_leaves_no_lease(estate):
         park_lease_ops.park_with_worktree("odysseus", _HOST, "acceptance/dirty")
     with get_db_session() as s:
         assert s.query(ParkLease).filter(ParkLease.status.in_(("active", "preparing"))).count() == 0
+
+
+def _wrap_transport(monkeypatch, drop_verbs):
+    """Drop the RESPONSE (not the request) of the first call per verb: the
+    real worker runs, the control plane sees worker_unreachable."""
+    from src import estate_worker_client as client
+    real = client.LocalTransport.send
+    dropped = set()
+
+    def _send(self, request, *, deadline_s):
+        response = real(self, request, deadline_s=deadline_s)
+        if request["verb"] in drop_verbs and request["verb"] not in dropped:
+            dropped.add(request["verb"])
+            raise client.WorkerTransportError("worker_unreachable", "test: response dropped after the worker ran")
+        return response
+
+    monkeypatch.setattr(client.LocalTransport, "send", _send)
+
+
+def test_i4_i5_laptop_observation_handle_never_null_and_interrupt(estate, monkeypatch, capsys):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    import companion.laptop_client.aoteru as laptop
+    import routes.estate_routing_routes as routes_mod
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    app = FastAPI()
+    app.include_router(routes_mod.setup_estate_routing_routes())
+    http = TestClient(app)
+    monkeypatch.setattr(laptop, "_load_config", lambda: {"url": "http://test", "token": "t"})
+    monkeypatch.setattr(laptop, "_request", lambda cfg, method, path, body=None, timeout=30.0: (
+        lambda r: {"status": r.status_code, "body": r.json()})(http.request(method, path, json=body)))
+    park_lease_ops.park_with_worktree("odysseus", _HOST, "acceptance/obs")
+    e1 = _dispatch()["execution_id"]
+    handles = []
+    deadline = time.monotonic() + 40
+    while time.monotonic() < deadline:
+        with get_db_session() as s:
+            row = s.query(EstateExecution).filter(EstateExecution.id == e1).one()
+            handles.append(row.worker_handle_json)
+            if row.lifecycle_state == "succeeded":
+                break
+        time.sleep(0.2)
+    assert handles and all(h is not None for h in handles)       # placeholder, then the real handle
+    assert laptop.main(["execution", e1, "--wait", "30"]) == 0
+    assert json.loads(capsys.readouterr().out)["lifecycle_state"] == "succeeded"
+    lane.finalize_execution(execution_id=e1, repo_id="odysseus", host_id=_HOST, commit_message="x")
+    # I5: kill the runner mid-run; the real worker reports process_alive false.
+    monkeypatch.setenv("IT_SLEEP_S", "60")
+    e2 = _dispatch()["execution_id"]
+    running = _wait_row(e2, lambda v: v["lifecycle_state"] == "running")
+    subprocess.run(["systemctl", "--user", "kill", "--signal=KILL", running["worker_handle"]["unit"]],
+                   check=True, capture_output=True)
+    _wait_row(e2, lambda v: v["lifecycle_state"] == "interrupted")
+    from src.estate_worker_client import call_worker
+    status = call_worker(_HOST, "status", {"execution_id": e2}, deadline_s=20)["result"]
+    assert status["process_alive"] is False and status["state"] == "interrupted"
+    with get_db_session() as s:
+        assert s.query(EstateExecution).count() == 2              # no redispatch
+
+
+def test_i6a_start_response_dropped_after_spawn_is_confirmed_by_same_id_retry(estate, monkeypatch):
+    park_lease_ops.park_with_worktree("odysseus", _HOST, "acceptance/drop")
+    _wrap_transport(monkeypatch, {"start"})
+    result = _dispatch()
+    execution_id = result["execution_id"]
+    with get_db_session() as s:
+        row = s.query(EstateExecution).filter(EstateExecution.id == execution_id).one()
+        assert row.lifecycle_state != "failed" and row.worktree_resolution == "unresolved"
+    done = _wait_row(execution_id, lambda v: v["lifecycle_state"] == "succeeded")
+    assert done["worker_handle"]["unit"] == f"aoteru-run-{execution_id}.service"
+    spool = Path(os.environ["HOME"]) / ".aoteru" / "worker-spool" / execution_id
+    assert json.loads((spool / "run.json").read_text())["decision"] == "execute"   # exactly one runner decision
+
+
+def test_i6b_concurrent_same_id_real_starts_spawn_once(estate):
+    import threading
+    from src.estate_worker_client import call_worker
+    execution_id = f"conc-{os.getpid()}"
+    payload = {"execution_id": execution_id, "kind": "noop-sleep", "timeout_s": 2}
+    answers = []
+    threads = [threading.Thread(target=lambda: answers.append(
+        call_worker(_HOST, "start", payload, deadline_s=30)["result"])) for _ in range(3)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(40)
+    assert sum(1 for a in answers if a["reused"] is False) == 1
+    assert all(a["state"] != "execution_failed" for a in answers)
+
+
+def test_i11a_dropped_prepare_response_resolves_via_fence_then_fresh_park(estate, monkeypatch):
+    _wrap_transport(monkeypatch, {"worktree.prepare"})
+    with pytest.raises(park_lease_ops.PrepareOutcomeUnresolved) as info:
+        park_lease_ops.park_with_worktree("odysseus", _HOST, "acceptance/dropped")
+    with get_db_session() as s:
+        assert s.query(ParkLease).filter(ParkLease.id == info.value.lease_id).one().status == "preparing"
+    resolved = park_lease_ops.resolve_preparing_reservation(info.value.lease_id)
+    assert resolved["released"] is True and resolved["state"] == "prepared"
+    fresh = park_lease_ops.park_with_worktree("odysseus", _HOST, "acceptance/dropped")
+    assert fresh["status"] == "active" and fresh["lease_id"] != info.value.lease_id
+
+
+def test_i11b_released_execution_tombstones_and_replay_never_spawns(estate, monkeypatch):
+    from src import estate_worker
+    from src.estate_worker_client import call_worker
+    park_lease_ops.park_with_worktree("odysseus", _HOST, "acceptance/tomb")
+    e1 = _dispatch()["execution_id"]
+    _wait_row(e1, lambda v: v["lifecycle_state"] == "succeeded")
+    assert lane.finalize_execution(execution_id=e1, repo_id="odysseus", host_id=_HOST,
+                                   commit_message="x")["finalized"] is True
+    spool_root = Path(os.environ["HOME"]) / ".aoteru" / "worker-spool"
+    assert (spool_root / e1 / "released.json").exists()
+    monkeypatch.setattr(estate_worker, "_SPOOL_ROOT", spool_root)
+    monkeypatch.setattr(estate_worker, "SPOOL_COMPACT_AFTER_RELEASE_SECONDS", -1)
+    # The dispatched kind here is the self-test noop-sleep, which compacts on
+    # the self-test rule (terminal + TTL), so advance that clock as well.
+    monkeypatch.setattr(estate_worker, "_SPOOL_TTL_SECONDS", -1)
+    estate_worker._gc_spools()                                   # clock-advanced compaction
+    assert json.loads((spool_root / e1 / "state.json").read_text())["state"] == "tombstone"
+    replay = call_worker(_HOST, "start", {"execution_id": e1, "kind": "noop-sleep", "timeout_s": 1},
+                         deadline_s=30)["result"]
+    assert replay["reused"] is True and replay["state"] == "tombstone" and replay["accepted"] is False
+
+
+def test_i11c_rejected_push_then_aoteru_push_retry(estate, monkeypatch, capsys):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    import companion.laptop_client.aoteru as laptop
+    import routes.estate_routing_routes as routes_mod
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    app = FastAPI()
+    app.include_router(routes_mod.setup_estate_routing_routes())
+    http = TestClient(app)
+    monkeypatch.setattr(laptop, "_load_config", lambda: {"url": "http://test", "token": "t"})
+    monkeypatch.setattr(laptop, "_request", lambda cfg, method, path, body=None, timeout=30.0: (
+        lambda r: {"status": r.status_code, "body": r.json()})(http.request(method, path, json=body)))
+    parked = park_lease_ops.park_with_worktree("odysseus", _HOST, "acceptance/push")
+    worktree = Path(parked["worktree_path"])
+    e1 = _dispatch()["execution_id"]
+    _wait_row(e1, lambda v: v["lifecycle_state"] == "succeeded")
+    (worktree / "ACCEPTANCE.txt").write_text("written by the (self-test) writer\n")
+    hook = estate["origin"] / "hooks" / "pre-receive"
+    hook.write_text("#!/bin/sh\nexit 1\n")
+    hook.chmod(0o755)
+    finalized = lane.finalize_execution(execution_id=e1, repo_id="odysseus", host_id=_HOST, commit_message="it")
+    assert finalized["finalized"] is True and finalized["committed"] is True
+    assert finalized["push"]["state"] == "failed" and finalized["next_action"]["cli"] == f"aoteru push {e1}"
+    hook.unlink()
+    assert laptop.main(["push", e1]) == 0
+    assert json.loads(capsys.readouterr().out)["pushed"] is True
+    assert _git(estate["origin"], "rev-parse", "refs/heads/acceptance/push") == finalized["commit_sha"]

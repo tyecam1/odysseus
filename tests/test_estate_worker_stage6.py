@@ -19,6 +19,8 @@ import src.estate_worker as estate_worker
 from src.estate_worker_protocol import build_request, validate_response
 from tests.helpers.fake_units import FakeUnits
 
+_REAL_RUNNER_UNITS_SUPPORTED = estate_worker.estate_worker_procs.runner_units_supported
+
 
 @pytest.fixture
 def cfg(tmp_path, monkeypatch):
@@ -865,3 +867,192 @@ def test_6d_f1_run_in_unit_timeout_stops_the_unit_and_reports_its_proof(monkeypa
     monkeypatch.setattr(procs.time, "monotonic", iter(range(0, 10_000, 20)).__next__)
     with pytest.raises(procs.ProcessLayerError, match="NOT proven stopped"):
         procs.run_in_unit(["true"], str(tmp_path), "aoteru-verify-y", timeout=1)
+
+
+# ---------------------------------------------------------------------
+# §G coverage completion (6e adjudication finding 3), worker side
+# ---------------------------------------------------------------------
+
+def test_u57_same_lease_prepare_after_completion_returns_the_record(cfg, units, monkeypatch):
+    monkeypatch.setattr(estate_worker, "_DEFAULT_PREPARE_WAIT_S", 0.1)
+    _result("worktree.prepare", _prepare_payload())
+    record = estate_worker._PREPARE_ROOT / "LP"
+    estate_worker.decide_once(record / "run.json", {"decision": "execute", **units.handle("aoteru-prepare-LP.service")})
+    estate_worker._json_write(record / "result.json", {"state": "prepared", "path": "/w", "branch": "feat/x",
+                                                       "head_sha": "abc", "clean": True})
+    units.set_populated("aoteru-prepare-LP.service", None)
+    again = _result("worktree.prepare", _prepare_payload())
+    assert again["reused"] is True and again["state"] == "prepared" and len(units.spawned) == 1
+
+
+@pytest.mark.parametrize("state", ["succeeded", "failed", "timed_out"])
+def test_u60_every_unacknowledged_terminal_write_state_is_retained(cfg, units, state):
+    spool = units.write_spool("E1", run_unit="aoteru-run-E1.service", state={"state": state},
+                              result={"ok": state == "succeeded"}, populated=False,
+                              request={"execution_id": "E1", "kind": "codex-write"})
+    old = time.time() - 60 * 24 * 3600
+    os.utime(spool / "state.json", (old, old))
+    estate_worker._gc_spools()
+    assert (spool / "result.json").exists()
+
+
+def test_u60_unacknowledged_start_failed_write_spool_is_retained(cfg, units):
+    spool = units.write_spool("E1", request={"execution_id": "E1", "kind": "codex-write"})
+    estate_worker.decide_once(spool / "run.json", {"decision": "abort", "by": "starter"})
+    (spool / "result.json").write_text("{}")
+    estate_worker._gc_spools()
+    assert (spool / "result.json").exists()
+
+
+def test_u62_release_refused_for_a_starting_writer(cfg, units):
+    units.write_spool("E1")                                   # start claim, no run decision yet
+    response = _call("spool.release", {"execution_id": "E1", "resolution": "not_started"})
+    # close fences the unstarted writer (abort wins) -> quiescent -> release allowed,
+    # and the runner can never execute afterwards.
+    assert response["ok"] is True
+    assert estate_worker.read_decision(_spool("E1") / "run.json")["decision"] == "abort"
+
+
+def test_u69_delayed_original_start_released_after_the_fence_never_spawns(cfg, units, verified, monkeypatch):
+    real = estate_worker.decide_once
+    paused, go = threading.Event(), threading.Event()
+
+    def _slow(target, content):
+        if content.get("kind") == "start":
+            paused.set()
+            go.wait(5)
+        return real(target, content)
+
+    monkeypatch.setattr(estate_worker, "decide_once", _slow)
+    outcome = {}
+    original = threading.Thread(target=lambda: outcome.update(r=_call("start", _codex_payload(cfg))))
+    original.start()
+    assert paused.wait(5)
+    monkeypatch.setattr(estate_worker, "decide_once", real)
+    assert _result("status", {"execution_id": "E1", "fence": True})["state"] == "fenced"
+    monkeypatch.setattr(estate_worker, "decide_once", _slow)
+    go.set()
+    original.join(5)
+    assert outcome["r"]["result"]["state"] == "fenced" and units.spawned == []
+
+
+def test_u70a_ancestor_fsync_order_is_leaf_to_anchor(cfg, monkeypatch):
+    target = _spool("order") / "claim.json"
+    estate_worker.decide_once(target, {"n": 1})
+    order = []
+    real = estate_worker._fsync_dir
+    monkeypatch.setattr(estate_worker, "_fsync_dir", lambda path: (order.append(Path(path)), real(path)))
+    estate_worker.read_decision(target)
+    anchor = estate_worker._SPOOL_ROOT.parent
+    assert order == [target.parent, target.parent.parent, anchor]
+
+
+def test_u70a_paused_loser_still_fsyncs_before_returning(cfg, monkeypatch):
+    target = _spool("loser") / "claim.json"
+    estate_worker.decide_once(target, {"n": 1})
+    calls = []
+    real_chain = estate_worker._fsync_chain
+    monkeypatch.setattr(estate_worker, "_fsync_chain", lambda d: (calls.append(Path(d)), real_chain(d)))
+    won, decided = estate_worker.decide_once(target, {"n": 2})
+    assert won is False and decided == {"n": 1} and calls[-1] == target.parent
+
+
+def test_u70_decision_fs_unsupported_also_refuses_release_and_hides_codex_write(cfg, units, monkeypatch):
+    units.write_spool("E1", run_unit="aoteru-run-E1.service", state={"state": "succeeded"}, populated=False)
+    monkeypatch.setattr(estate_worker, "_decision_fs_supported", lambda root: (False, "unsupported"))
+    response = _call("spool.release", {"execution_id": "E1", "resolution": "finalized"})
+    assert response["ok"] is False and response["error"]["code"] == "executor_unavailable"
+    monkeypatch.setattr(estate_worker, "_ollama_inventory", lambda: (True, [], None))
+    monkeypatch.setattr(estate_worker.estate_router, "_codex_available", lambda: (True, "x"))
+    monkeypatch.setattr(estate_worker, "_probe_repo", lambda repo: {"resolved": False, "path": None,
+                                                                   "head_sha": None, "branch": None, "clean": False})
+    import scripts.home_reentry_inventory as home_inventory
+    monkeypatch.setattr(home_inventory, "_hardware", lambda: {})
+    assert _result("inventory", {"models_of_interest": []})["executors"]["codex-write"] is False
+
+
+def test_u68_failing_systemd_run_refuses_prepare_but_not_read_only_execute(cfg, monkeypatch):
+    procs = estate_worker.estate_worker_procs
+    monkeypatch.setattr(procs, "_RUNNER_UNITS_PROBE", {})
+    monkeypatch.setattr(procs.os, "name", "posix")
+    monkeypatch.setattr(procs.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(
+        a[0], 1, stdout="", stderr="Failed to connect to bus"))
+    monkeypatch.setattr(estate_worker.estate_worker_procs, "runner_units_supported", _REAL_RUNNER_UNITS_SUPPORTED)
+    ok, detail = procs.runner_units_supported()
+    assert ok is False and "probe failed" in detail
+    response = _call("worktree.prepare", _prepare_payload())
+    assert response["ok"] is False and response["error"]["code"] == "executor_unavailable"
+    monkeypatch.setattr(estate_worker.estate_router, "execute_local",
+                        lambda model, objective, timeout: {"ok": True, "output": "fine", "latency_ms": 1})
+    execute = _result("execute", {"kind": "local-inference", "model": "m", "objective": "x", "timeout_s": 1})
+    assert execute["ok"] is True
+
+
+def test_u71_concurrent_finalizes_of_one_execution_make_one_commit(cfg, repo):
+    spool = _spool("E1")
+    (repo["wt"] / "new.txt").write_text("x")
+    results, barrier = [], threading.Barrier(2)
+
+    def _go():
+        barrier.wait()
+        results.append(estate_worker._finalize_logic("E1", spool, _finalize_request(repo)))
+
+    threads = [threading.Thread(target=_go) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(30)
+    log = _git(repo["wt"], "log", "--format=%s", f"{repo['head']}..HEAD").splitlines()
+    assert len(log) == 1
+    finalized = [r for r in results if r["outcome"] == "finalized"]
+    assert finalized and all(r["commit_sha"] == _git(repo["wt"], "rev-parse", "HEAD") for r in finalized)
+
+
+def test_u74_finalize_and_push_attempts_launch_dedicated_units_with_runner_flags(cfg, repo, inline_attempts, monkeypatch):
+    monkeypatch.setattr(estate_worker, "_DEFAULT_GIT_UNIT_WAIT_S", 0.3)
+    inline_attempts.write_spool("E1", run_unit="aoteru-run-E1.service", state={"state": "succeeded"},
+                                populated=False)
+    (repo["wt"] / "new.txt").write_text("x")
+    done = _result("worktree.finalize", _finalize_request(repo))
+    _result("worktree.push", {"execution_id": "E1", "repo_id": "test-repo", "branch": "feat/x",
+                              "commit_sha": done["commit_sha"]})
+    launched = {u["unit"]: u["argv"] for u in inline_attempts.spawned}
+    finalize_argv = launched["aoteru-finalize-E1-1"]
+    push_argv = launched["aoteru-push-E1-1"]
+    assert finalize_argv[-3:] == ["--run-finalize", "E1", "1"] and "--root" in finalize_argv
+    assert push_argv[-3:] == ["--run-push", "E1", "1"]
+
+
+def test_u75_randomised_closure_vs_finalize_never_commits_unseen(cfg, repo, inline_attempts, monkeypatch):
+    """Across randomised interleavings of a finalize attempt and a closer:
+    whenever the closure reported quiescent, either no commit happened or
+    the closure view carries that commit's finalize result."""
+    import random
+    monkeypatch.setattr(estate_worker, "_DEFAULT_GIT_UNIT_WAIT_S", 0.5)
+    for index in range(8):
+        execution_id = f"R{index}"
+        _git(repo["wt"], "reset", "-q", "--hard", repo["head"])
+        inline_attempts.write_spool(execution_id, run_unit=f"aoteru-run-{execution_id}.service",
+                                    state={"state": "succeeded"}, populated=False)
+        (repo["wt"] / f"f{index}.txt").write_text("x")
+        seen = {}
+        request = {**_finalize_request(repo, execution_id)}
+
+        def _finalize():
+            time.sleep(random.random() * 0.05)
+            seen["finalize"] = _call("worktree.finalize", request)
+
+        def _close():
+            time.sleep(random.random() * 0.05)
+            seen["close"] = _result("status", {"execution_id": execution_id, "close": True})
+
+        threads = [threading.Thread(target=_finalize), threading.Thread(target=_close)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(30)
+        final = _result("status", {"execution_id": execution_id, "close": True})
+        head = _git(repo["wt"], "rev-parse", "HEAD")
+        if head != repo["head"]:
+            assert (final["finalize_result"] or {}).get("commit_sha") == head, index
+        _git(repo["wt"], "clean", "-q", "-fd")

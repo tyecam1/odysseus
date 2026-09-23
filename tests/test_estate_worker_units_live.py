@@ -77,3 +77,32 @@ def test_real_unit_cancel_kills_the_unit_and_becomes_quiescent(tmp_path):
     final = _wait(home, execution_id, lambda s: s["quiescent"] is True)
     assert final["state"] == "failed" and final["process_alive"] is False
     assert cancelled["still_alive_pids"] in ([], [final["handle"]["pid"]])
+
+
+def test_u67_real_unit_setsid_grandchild_keeps_the_cgroup_populated(tmp_path):
+    """U67 real form: a setsid'd grandchild (new session) stays inside the
+    runner unit's cgroup -- tree_quiescent is False while it lives, and True
+    once the unit is gone."""
+    import uuid
+    unit = f"aoteru-probe-{uuid.uuid4().hex}"
+    script = tmp_path / "runner.sh"
+    marker = tmp_path / "cgroup.txt"
+    script.write_text(f"#!/bin/sh\ncat /proc/self/cgroup > {marker}\nsetsid sleep 30 </dev/null >/dev/null 2>&1 &\nsleep 3\n")
+    script.chmod(0o755)
+    estate_worker_procs.spawn_runner_unit([str(script)], str(tmp_path), str(tmp_path / "log"), unit)
+    deadline = time.monotonic() + 10
+    while not marker.exists() and time.monotonic() < deadline:
+        time.sleep(0.1)
+    cgroup = marker.read_text().strip().split("::", 1)[1]
+    handle = {"cgroup": cgroup, "unit": f"{unit}.service"}
+    assert estate_worker_procs.cgroup_is_dedicated(cgroup, f"{unit}.service")
+    time.sleep(0.5)
+    members = (Path("/sys/fs/cgroup") / cgroup.lstrip("/") / "cgroup.procs").read_text().split()
+    sids = {Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[3] for pid in members}
+    assert len(sids) >= 2                         # the setsid'd grandchild has its own session
+    assert estate_worker_procs.tree_quiescent(handle) is False
+    estate_worker_procs.kill_unit(f"{unit}.service")
+    deadline = time.monotonic() + 10
+    while estate_worker_procs.tree_quiescent(handle) is not True and time.monotonic() < deadline:
+        time.sleep(0.1)
+    assert estate_worker_procs.tree_quiescent(handle) is True
