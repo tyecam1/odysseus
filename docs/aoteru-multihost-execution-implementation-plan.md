@@ -752,6 +752,14 @@ Governed commit (config only, approval required), which changes the two shipped-
 
 Then run §H and record everything in `docs/aoteru-multihost-execution-evidence.md` (new).
 
+## Repository-boundary trajectory
+
+The current Odysseus implementation task trail in `obsidian-PhD` is a transitional consequence of that repository being the established agent workspace while this backend is being built. It is not the target ownership boundary.
+
+Continue the multihost/backend stages without migrating that trail now. At the backend completion boundary, run the explicit convergence described in `docs/aoteru-repository-ownership-trajectory.md`: reusable backend-wide agentic/runtime capability is ingested into Odysseus, while `obsidian-PhD` remains the PhD knowledgebase and the separate Aoteru personal knowledgebase retains its own domain content and task queue. The same Odysseus backend should manage both queues with minimal friction and without taking ownership of their domain knowledge.
+
+Detailed placement of individual agentic functions/files is deliberately deferred to that convergence pass and should be decided by authority, reuse and future operational overhead rather than current file location.
+
 ### Stage 9 — Compatibility cleanup
 
 - Remove the legacy `verified` fallback in `host_static_state` and the `verified` handling in tests. Assert that no host in `config/estate.yaml` uses `verified`.
