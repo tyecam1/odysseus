@@ -455,13 +455,14 @@ def _worktree_verification(repo_id: Any, worktree_path: Any, branch: Any) -> dic
         raise WorkerError("bad_request", "worktree verification requires repo_id, worktree_path and branch")
     units_ok, _detail = estate_worker_procs.runner_units_supported()
     if units_ok and not _IN_VERIFY_UNIT["value"]:
-        if estate_worker_procs.verify_units_quiescent() is not True:
+        scope = _verify_scope(worktree_path)
+        if estate_worker_procs.verify_units_quiescent(scope) is not True:
             raise WorkerError("executor_unavailable",
-                              "an earlier verification unit is still live or unknown; refusing (fail closed)")
+                              "an earlier verification of this worktree is still live or unknown; refusing")
         payload = json.dumps({"repo_id": repo_id, "worktree_path": worktree_path, "branch": branch})
         completed = estate_worker_procs.run_in_unit(
             _runner_argv("--run-verify"), str(Path(get_app_root()).resolve()),
-            f"aoteru-verify-{uuid.uuid4().hex}", timeout=90, input_text=payload,
+            f"aoteru-verify-{scope}-{uuid.uuid4().hex}", timeout=90, input_text=payload,
         )
         try:
             answer = json.loads(completed.stdout.strip().splitlines()[-1])
@@ -476,6 +477,12 @@ def _worktree_verification(repo_id: Any, worktree_path: Any, branch: Any) -> dic
 
 
 _IN_VERIFY_UNIT = {"value": False}
+
+
+def _verify_scope(worktree_path: str) -> str:
+    """Verify units are named per worktree path (gate round 7 finding 3), so
+    a late or unproven verification only delays work on that same path."""
+    return hashlib.sha256(str(Path(worktree_path).resolve()).encode("utf-8")).hexdigest()[:16]
 
 
 def _run_verify() -> int:
@@ -810,11 +817,14 @@ def _execution_aggregate(spool: Path, *, fence_unstarted: bool) -> tuple[bool | 
                              "closed before the attempt decided")
         units.append({"unit": (run or {}).get("unit"), "kind": f"finalize-{number}",
                       "quiescent": _unit_quiescent(run)})
-    if estate_worker_procs.runner_units_supported()[0]:
-        # A verification unit that timed out unproven may still touch a
-        # worktree; the aggregate cannot be proven while one is live.
-        units.append({"unit": "aoteru-verify-*", "kind": "verify",
-                      "quiescent": estate_worker_procs.verify_units_quiescent()})
+    if estate_worker_procs.runner_units_supported()[0] and claim is not None and claim.get("kind") == "start":
+        # A verification of THIS execution's worktree that timed out unproven
+        # may still touch it; the aggregate cannot be proven while one is live.
+        worktree = ((claim.get("request") or {}).get("lease") or {}).get("worktree_path")
+        if worktree:
+            scope = _verify_scope(worktree)
+            units.append({"unit": f"aoteru-verify-{scope}-*", "kind": "verify",
+                          "quiescent": estate_worker_procs.verify_units_quiescent(scope)})
     if any(unit["quiescent"] is None for unit in units):
         aggregate = None
     else:
@@ -923,6 +933,10 @@ def _validate_start(payload: dict) -> None:
     verified = _worktree_verification(payload.get("repo_id"), lease.get("worktree_path"), lease.get("branch"))
     if not verified["ok"]:
         raise WorkerError("authority_denied", verified["reason"])
+    if verified.get("clean") is not True:
+        # Gate round 7 finding 2: changes that arrived after admission's
+        # clean check must never be mixed into this execution.
+        raise WorkerError("authority_denied", "leased worktree is not clean at start")
     expected_head = lease.get("expected_head_sha")
     if expected_head is not None:
         if verified.get("head_sha") != expected_head:
@@ -1067,6 +1081,19 @@ def _run_spooled(execution_id: str) -> int:
             result = {"ok": True, "output": "noop-sleep complete", "provider": "selftest"}
         elif kind == "codex-write":
             lease = request.get("lease") or {}
+            # Re-check AFTER winning the execute decision: the tree must still
+            # be clean at the admitted HEAD, or the writer never runs.
+            previous_in_unit = _IN_VERIFY_UNIT["value"]
+            _IN_VERIFY_UNIT["value"] = True          # inside our own tracked unit
+            try:
+                now_verified = _worktree_verification(request.get("repo_id"), lease.get("worktree_path"),
+                                                      lease.get("branch"))
+            finally:
+                _IN_VERIFY_UNIT["value"] = previous_in_unit
+            if not now_verified["ok"] or now_verified.get("clean") is not True \
+                    or (lease.get("expected_head_sha") and now_verified.get("head_sha") != lease["expected_head_sha"]):
+                raise WorkerError("authority_denied", "worktree changed between admission and runner start; "
+                                                      "writer not run")
             result = estate_router._execute_codex_with_sandbox(
                 request.get("objective", ""),
                 sandbox="workspace-write",

@@ -840,7 +840,9 @@ def test_6c_f1_closure_view_exposes_the_latest_quiescent_finalize_result(cfg, re
 
 
 def test_6d_f1_live_or_unproven_verify_unit_blocks_verification_and_aggregate(cfg, units):
-    units.write_spool("E1", run_unit="aoteru-run-E1.service", state={"state": "succeeded"}, populated=False)
+    units.write_spool("E1", run_unit="aoteru-run-E1.service", state={"state": "succeeded"}, populated=False,
+                      request={"execution_id": "E1", "kind": "codex-write",
+                               "lease": {"worktree_path": str(cfg["repo"])}})
     units.verify_live = True
     response = _call("worktree.verify", {"repo_id": "test-repo", "worktree_path": str(cfg["repo"]),
                                          "branch": "feature"})
@@ -1206,3 +1208,41 @@ def test_gate6_verification_git_is_read_only_and_never_rewrites_the_index(cfg, r
     clean, _reason = git_is_clean(str(repo["wt"]))
     assert clean is True
     assert (index.read_bytes(), index.stat().st_mtime_ns) == before
+
+
+
+def test_gate7_start_refuses_a_dirty_tree_and_the_runner_rechecks_before_codex(cfg, units, verified, monkeypatch):
+    """Gate round 7 finding 2: changes arriving after admission are never
+    mixed in -- start refuses a dirty tree pre-claim, and a runner that finds
+    the tree changed after winning `execute` never runs the writer."""
+    monkeypatch.setattr(estate_worker, "_worktree_verification", lambda *a: {
+        "ok": True, "path": str(cfg["repo"]), "reason": None, "head_sha": "abc", "clean": False})
+    refused = _call("start", _codex_payload(cfg))
+    assert refused["ok"] is False and refused["error"]["code"] == "authority_denied"
+    assert not (_spool("E1") / "claim.json").exists()
+    # Clean at start, dirty by the time the runner has decided `execute`.
+    state = {"clean": True}
+    monkeypatch.setattr(estate_worker, "_worktree_verification", lambda *a: {
+        "ok": True, "path": str(cfg["repo"]), "reason": None, "head_sha": "abc", "clean": state["clean"]})
+    _result("start", _codex_payload(cfg))
+    state["clean"] = False
+    ran = []
+    monkeypatch.setattr(estate_worker.estate_router, "_execute_codex_with_sandbox",
+                        lambda *a, **k: ran.append(1) or {"ok": True})
+    units.enter("aoteru-run-E1.service")
+    estate_worker._run_spooled("E1")
+    assert ran == []
+    assert estate_worker._json_read(_spool("E1") / "state.json")["state"] == "failed"
+    assert "not run" in estate_worker._json_read(_spool("E1") / "result.json")["error"]
+
+
+def test_gate7_verify_units_are_scoped_per_worktree(cfg, units, monkeypatch):
+    scopes = []
+    monkeypatch.setattr(estate_worker.estate_worker_procs, "verify_units_quiescent",
+                        lambda scope=None: scopes.append(scope) or scope != estate_worker._verify_scope("/busy"))
+    monkeypatch.setattr(estate_worker, "_worktree_verification_local", lambda *a: {
+        "ok": True, "path": a[1], "reason": None, "head_sha": "h", "clean": True})
+    busy = _call("worktree.verify", {"repo_id": "test-repo", "worktree_path": "/busy", "branch": "b"})
+    other = _call("worktree.verify", {"repo_id": "test-repo", "worktree_path": "/other", "branch": "b"})
+    assert busy["ok"] is False and other["ok"] is True
+    assert units.verify_units[-1].startswith(f"aoteru-verify-{estate_worker._verify_scope('/other')}-")

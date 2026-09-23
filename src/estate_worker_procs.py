@@ -545,7 +545,7 @@ def _app_slice() -> str:
     return f"/user.slice/user-{uid}.slice/user@{uid}.service/app.slice"
 
 
-def verify_units_quiescent() -> Optional[bool]:
+def verify_units_quiescent(scope: Optional[str] = None) -> Optional[bool]:
     """True when no `aoteru-verify-*` unit is loaded in a live state (6d
     adjudication finding 1): a timed-out verification that could not be
     proven stopped keeps every later verification and closure fail-closed
@@ -554,7 +554,8 @@ def verify_units_quiescent() -> Optional[bool]:
         return None
     try:
         completed = subprocess.run(
-            ["systemctl", "--user", "list-units", "--all", "--no-legend", "--plain", "aoteru-verify-*"],
+            ["systemctl", "--user", "list-units", "--all", "--no-legend", "--plain",
+             f"aoteru-verify-{scope}-*" if scope else "aoteru-verify-*"],
             env=_user_manager_env(), capture_output=True, text=True, timeout=15,
         )
     except (OSError, subprocess.TimeoutExpired):

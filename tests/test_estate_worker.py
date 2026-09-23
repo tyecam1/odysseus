@@ -143,7 +143,8 @@ def units(tmp_path, monkeypatch):
 def test_start_is_idempotent_and_spawns_once(fixture_config, monkeypatch, units):
     monkeypatch.setattr(
         estate_worker, "_worktree_verification",
-        lambda *args: {"ok": True, "path": str(fixture_config["repo"]), "reason": None, "head_sha": "abc"},
+        lambda *args: {"ok": True, "path": str(fixture_config["repo"]), "reason": None, "head_sha": "abc",
+                       "clean": True},
     )
     payload = {
         "execution_id": "execution-1", "kind": "codex-write", "objective": "change",
@@ -240,6 +241,8 @@ def test_run_spooled_delegates_to_workspace_write_codex(fixture_config, monkeypa
         return {"ok": True, "output": "done", "provider": "codex"}
 
     monkeypatch.setattr(estate_worker.estate_router, "_execute_codex_with_sandbox", fake_codex)
+    monkeypatch.setattr(estate_worker, "_worktree_verification", lambda *args: {
+        "ok": True, "path": str(fixture_config["repo"]), "reason": None, "head_sha": None, "clean": True})
     units.enter(f"aoteru-run-{execution_id}.service")
     assert estate_worker._run_spooled(execution_id) == 0
     assert calls[0][0] == "make the change"

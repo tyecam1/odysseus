@@ -533,3 +533,80 @@ def test_joined_u75_closure_waits_on_a_committing_attempt_and_records_post_commi
     recovered = lane.recover_execution_lease(execution_id, **ids)
     assert recovered["recovered"] is True
     assert recovered["recovery"]["head_sha"] == post and recovered["recovery"]["finalize_commit"] is True
+
+
+@pytest.mark.parametrize("seed", range(10))
+def test_joined_u75_randomised_stale_finalize_vs_recovery(estate, monkeypatch, seed):
+    """U75: 'Randomised thread interleavings on a real temp dir never produce
+    both a git call and a successful recovery' -- no stale-finalize git call
+    ever happens after (or concurrently with) a successful recovery, and a
+    successful recovery records exactly the final HEAD. An attempt that won
+    its run decision before the closure may still run git; the closure then
+    waits for it (aggregate not quiescent) before recovery can succeed."""
+    import random
+    rng = random.Random(seed)
+    execution_id = _admit(estate)
+    _run_writer(estate, execution_id, monkeypatch=monkeypatch)
+    events = []
+    lock = threading.Lock()
+    real_run_git = estate_worker._run_git
+
+    def _tracked_git(path, args, **kwargs):
+        if threading.current_thread().name == "stale-finalize":
+            with lock:
+                events.append(("git-start", time.monotonic()))
+            try:
+                return real_run_git(path, args, **kwargs)
+            finally:
+                with lock:
+                    events.append(("git-end", time.monotonic()))
+        return real_run_git(path, args, **kwargs)
+
+    monkeypatch.setattr(estate_worker, "_run_git", _tracked_git)
+    outcome = {}
+    ids = {**IDS, "worktree_path": str(estate["wt"].resolve())}
+
+    def _stale_finalize():
+        time.sleep(rng.random() * 0.03)
+        outcome["finalize"] = lane.finalize_execution(execution_id=execution_id, repo_id="odysseus",
+                                                      host_id=HOME, commit_message="stale")
+
+    def _recover():
+        time.sleep(rng.random() * 0.03)
+        for _ in range(40):
+            result = lane.recover_execution_lease(execution_id, **ids)
+            if result.get("recovered"):
+                with lock:
+                    events.append(("recovered", time.monotonic()))
+                break
+            if result.get("code") not in ("writer_quiescence_unproven", "execution_not_settled"):
+                break
+            time.sleep(0.05)
+        outcome["recover"] = result
+
+    threads = [threading.Thread(target=_stale_finalize, name="stale-finalize"),
+               threading.Thread(target=_recover, name="recover")]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(60)
+    recovered = (outcome.get("recover") or {}).get("recovered") is True
+    finalized = (outcome.get("finalize") or {}).get("finalized") is True
+    assert not (recovered and finalized), outcome                          # never both resolutions
+    if not recovered and not finalized:
+        # Closure won and fenced the stale finalize; the writer's uncommitted
+        # change keeps recovery fail-closed (worktree_not_clean) until the
+        # operator cleans the tree (S6.2) -- then recovery succeeds.
+        assert outcome["recover"]["code"] == "worktree_not_clean", outcome
+        _git(estate["wt"], "checkout", "--", ".")
+        _git(estate["wt"], "clean", "-q", "-fd")
+        again = lane.recover_execution_lease(execution_id, **ids)
+        assert again["recovered"] is True
+        events.append(("recovered", time.monotonic()))
+        outcome["recover"] = again
+        recovered = True
+    if recovered:
+        recovered_at = next(t for kind, t in events if kind == "recovered")
+        assert all(t < recovered_at for kind, t in events if kind.startswith("git")), (seed, events)
+        assert outcome["recover"]["recovery"]["head_sha"] == _git(estate["wt"], "rev-parse", "HEAD")
+    assert _row(execution_id).worktree_resolution in ("recovered", "finalized")

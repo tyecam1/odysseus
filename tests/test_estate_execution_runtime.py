@@ -153,149 +153,13 @@ def _patch_os_kill_for_fake_popen(monkeypatch, fake_popen):
 # Submission / lifecycle
 # ---------------------------------------------------------------------
 
-def test_submission_returns_well_before_slow_worker_finishes(runtime_db, monkeypatch, tmp_path):
-    hold_event = threading.Event()
-    fake_popen = _fake_popen_factory(hold_event)
-    monkeypatch.setattr(subprocess, "Popen", fake_popen)
-    monkeypatch.setattr(estate_router, "_codex_available", lambda: (True, "/fake/codex"))
-    _fresh_authority(tmp_path, monkeypatch)
-    _patch_os_kill_for_fake_popen(monkeypatch, fake_popen)
-
-    decision_id = "dec-1"
-    _insert_decision(decision_id)
-
-    started = time.monotonic()
-    result = estate_router.execute_codex_write_durable(
-        "implement it", repo_id="test-repo", host_id="test-lab",
-        decision_id=decision_id, wait_timeout=0.05,
-    )
-    elapsed = time.monotonic() - started
-
-    assert elapsed < 1.0
-    assert result["ok"] is True
-    assert result["lifecycle_state"] in ("accepted", "running")
-    assert "execution_id" in result
-
-    hold_event.set()
-    deadline = time.monotonic() + 2.0
-    state = None
-    while time.monotonic() < deadline:
-        state = estate_router.get_estate_execution(result["execution_id"])
-        if state and state["lifecycle_state"] == "succeeded":
-            break
-        time.sleep(0.02)
-
-    assert state is not None
-    assert state["lifecycle_state"] == "succeeded"
 
 
-def test_returned_execution_id_is_immediately_persisted(runtime_db, monkeypatch, tmp_path):
-    hold_event = threading.Event()
-    hold_event.set()
-    monkeypatch.setattr(subprocess, "Popen", _fake_popen_factory(hold_event))
-    monkeypatch.setattr(estate_router, "_codex_available", lambda: (True, "/fake/codex"))
-    _fresh_authority(tmp_path, monkeypatch)
-
-    result = estate_router.execute_codex_write_durable(
-        "implement it", repo_id="test-repo", host_id="test-lab", wait_timeout=1.0,
-    )
-    state = estate_router.get_estate_execution(result["execution_id"])
-    assert state is not None
-    assert state["execution_id"] == result["execution_id"]
-
-
-def test_poll_transitions_through_truthful_lifecycle_states(runtime_db, monkeypatch, tmp_path):
-    hold_event = threading.Event()
-    fake_popen = _fake_popen_factory(hold_event)
-    monkeypatch.setattr(subprocess, "Popen", fake_popen)
-    monkeypatch.setattr(estate_router, "_codex_available", lambda: (True, "/fake/codex"))
-    _fresh_authority(tmp_path, monkeypatch)
-
-    result_holder = {}
-
-    def _dispatch():
-        result_holder["result"] = estate_router.execute_codex_write_durable(
-            "implement it", repo_id="test-repo", host_id="test-lab", wait_timeout=5.0,
-        )
-
-    worker = threading.Thread(target=_dispatch, daemon=True)
-    worker.start()
-
-    # Wait for the row to exist and reach "running" -- accepted is the
-    # transient pre-Popen state, running is what a poll during real work
-    # should truthfully see.
-    deadline = time.monotonic() + 2.0
-    execution_id = None
-    state = None
-    while time.monotonic() < deadline:
-        if fake_popen.instances:
-            # Row is created before Popen in execute_codex_write_durable,
-            # so by the time a fake process exists the row is queryable;
-            # find it via the thread's eventual result once available,
-            # or poll all recent rows as a fallback.
-            pass
-        time.sleep(0.02)
-        if "result" in result_holder:
-            break
-        if fake_popen.instances and execution_id is None:
-            continue
-
-    hold_event.set()
-    worker.join(timeout=2.0)
-    assert not worker.is_alive()
-    execution_id = result_holder["result"]["execution_id"]
-    state = estate_router.get_estate_execution(execution_id)
-    assert state["lifecycle_state"] == "succeeded"
-    assert state["worker_pid"] == fake_popen.instances[0].pid
-    assert state["result"]["ok"] is True
-
-
-def test_final_result_retrievable_after_caller_moves_on(runtime_db, monkeypatch, tmp_path):
-    """The original HTTP request is conceptually gone by the time this
-    poll happens -- get_estate_execution has no dependency on the
-    submitting call still being in scope."""
-    hold_event = threading.Event()
-    monkeypatch.setattr(subprocess, "Popen", _fake_popen_factory(hold_event))
-    monkeypatch.setattr(estate_router, "_codex_available", lambda: (True, "/fake/codex"))
-    _fresh_authority(tmp_path, monkeypatch)
-
-    result = estate_router.execute_codex_write_durable(
-        "implement it", repo_id="test-repo", host_id="test-lab", wait_timeout=0.01,
-    )
-    execution_id = result["execution_id"]
-    del result  # simulate the original caller/response being gone
-
-    hold_event.set()
-    deadline = time.monotonic() + 2.0
-    state = None
-    while time.monotonic() < deadline:
-        state = estate_router.get_estate_execution(execution_id)
-        if state and state["lifecycle_state"] == "succeeded":
-            break
-        time.sleep(0.02)
-    assert state is not None
-    assert state["lifecycle_state"] == "succeeded"
-    assert state["result"]["output"] == "ok"
 
 
 # ---------------------------------------------------------------------
 # Isolation
 # ---------------------------------------------------------------------
-
-def test_executor_cwd_equals_verified_isolated_worktree(runtime_db, monkeypatch, tmp_path):
-    hold_event = threading.Event()
-    hold_event.set()
-    fake_popen = _fake_popen_factory(hold_event)
-    monkeypatch.setattr(subprocess, "Popen", fake_popen)
-    monkeypatch.setattr(estate_router, "_codex_available", lambda: (True, "/fake/codex"))
-    _fresh_authority(tmp_path, monkeypatch)
-
-    result = estate_router.execute_codex_write_durable(
-        "implement it", repo_id="test-repo", host_id="test-lab", wait_timeout=1.0,
-    )
-    state = estate_router.get_estate_execution(result["execution_id"])
-    assert state["worktree_path"] == str(tmp_path)
-    assert fake_popen.instances[0].argv[fake_popen.instances[0].argv.index("-C") + 1] == str(tmp_path)
 
 
 def test_authority_denial_creates_no_execution_row(runtime_db, monkeypatch, tmp_path):
@@ -314,143 +178,12 @@ def test_authority_denial_creates_no_execution_row(runtime_db, monkeypatch, tmp_
     assert "execution_id" not in result
 
 
-def test_repeated_submission_against_same_lease_reuses_existing_execution(runtime_db, monkeypatch, tmp_path):
-    """Direct regression test for the 2026-09-01 incident root cause:
-    a caller (or a retry loop) submitting a second implementation-mode
-    dispatch against a lease that already has a non-terminal execution
-    must reuse that execution, not spawn a second worker. This is what
-    was actually missing -- the incident was the same lease receiving
-    repeated dispatches while one was already in flight."""
-    hold_event = threading.Event()
-    fake_popen = _fake_popen_factory(hold_event)
-    popen_call_count = 0
-
-    def _counting_popen(argv, **kwargs):
-        nonlocal popen_call_count
-        popen_call_count += 1
-        return fake_popen(argv, **kwargs)
-
-    monkeypatch.setattr(subprocess, "Popen", _counting_popen)
-    monkeypatch.setattr(estate_router, "_codex_available", lambda: (True, "/fake/codex"))
-    _fresh_authority(tmp_path, monkeypatch, lease_id="lease-shared")
-
-    first = estate_router.execute_codex_write_durable(
-        "first dispatch", repo_id="test-repo", host_id="test-lab", wait_timeout=0.2,
-    )
-    assert first["ok"] is True
-    assert first["lifecycle_state"] in ("accepted", "running")
-
-    second = estate_router.execute_codex_write_durable(
-        "second dispatch, same lease, while first still in flight",
-        repo_id="test-repo", host_id="test-lab", wait_timeout=0.2,
-    )
-
-    hold_event.set()
-
-    # Let the first dispatch's background thread actually finish and
-    # write its terminal state before the test (and therefore the
-    # runtime_db fixture's engine.dispose()/file deletion) returns --
-    # otherwise that write races the fixture teardown.
-    deadline = time.monotonic() + 2.0
-    state = None
-    while time.monotonic() < deadline:
-        state = estate_router.get_estate_execution(first["execution_id"])
-        if state and state["lifecycle_state"] not in ("accepted", "running"):
-            break
-        time.sleep(0.02)
-
-    assert second.get("reused_existing_execution") is True
-    assert second["execution_id"] == first["execution_id"]
-    assert popen_call_count == 1, "a second worker/Codex process must not have been spawned"
-    assert state is not None and state["lifecycle_state"] == "succeeded"
-
-
-def test_new_submission_allowed_once_prior_execution_reaches_terminal_state(runtime_db, monkeypatch, tmp_path):
-    """The admission check only blocks *non-terminal* conflicts -- once
-    an execution finishes (success or failure), the lease is free again
-    and a fresh submission must be allowed to run for real, not be
-    permanently wedged behind a completed row."""
-    hold_event = threading.Event()
-    hold_event.set()
-    fake_popen = _fake_popen_factory(hold_event)
-    popen_call_count = 0
-
-    def _counting_popen(argv, **kwargs):
-        nonlocal popen_call_count
-        popen_call_count += 1
-        return fake_popen(argv, **kwargs)
-
-    monkeypatch.setattr(subprocess, "Popen", _counting_popen)
-    monkeypatch.setattr(estate_router, "_codex_available", lambda: (True, "/fake/codex"))
-    _fresh_authority(tmp_path, monkeypatch, lease_id="lease-shared-2")
-
-    first = estate_router.execute_codex_write_durable(
-        "first dispatch", repo_id="test-repo", host_id="test-lab", wait_timeout=1.0,
-    )
-    assert first.get("ok") is True
-    assert first.get("reused_existing_execution") is not True
-
-    second = estate_router.execute_codex_write_durable(
-        "second dispatch after first completed",
-        repo_id="test-repo", host_id="test-lab", wait_timeout=1.0,
-    )
-
-    assert second.get("reused_existing_execution") is not True
-    assert second["execution_id"] != first["execution_id"]
-    assert popen_call_count == 2
-
 
 
 # ---------------------------------------------------------------------
 # Process handling
 # ---------------------------------------------------------------------
 
-def test_process_group_retained_and_correct_group_killed_on_timeout(runtime_db, monkeypatch, tmp_path):
-    hold_event = threading.Event()
-    fake_popen = _fake_popen_factory(hold_event)
-    monkeypatch.setattr(subprocess, "Popen", fake_popen)
-    monkeypatch.setattr(estate_router, "_codex_available", lambda: (True, "/fake/codex"))
-    _fresh_authority(tmp_path, monkeypatch)
-
-    kill_calls = []
-
-    def _fake_killpg(pgid, sig):
-        assert sig == signal.SIGKILL
-        kill_calls.append(pgid)
-        for proc in fake_popen.instances:
-            if proc.pid == pgid:
-                proc.kill()
-                return
-        raise AssertionError(f"unknown pgid {pgid}")
-
-    monkeypatch.setattr(os, "killpg", _fake_killpg)
-
-    result = estate_router.execute_codex_write_durable(
-        "implement it", repo_id="test-repo", host_id="test-lab",
-        timeout=0.05, wait_timeout=2.0,
-    )
-
-    assert kill_calls == [fake_popen.instances[0].pid]
-    assert result["ok"] is False
-    state = estate_router.get_estate_execution(result["execution_id"])
-    assert state["lifecycle_state"] == "timed_out"
-    assert state["process_group_id"] == fake_popen.instances[0].pid
-
-
-def test_worker_failure_becomes_terminal_failed_state(runtime_db, monkeypatch, tmp_path):
-    hold_event = threading.Event()
-    hold_event.set()
-    monkeypatch.setattr(subprocess, "Popen", _fake_popen_factory(hold_event, exit_code=1, output="boom"))
-    monkeypatch.setattr(estate_router, "_codex_available", lambda: (True, "/fake/codex"))
-    _fresh_authority(tmp_path, monkeypatch)
-
-    result = estate_router.execute_codex_write_durable(
-        "implement it", repo_id="test-repo", host_id="test-lab", wait_timeout=1.0,
-    )
-    assert result["ok"] is False
-    state = estate_router.get_estate_execution(result["execution_id"])
-    assert state["lifecycle_state"] == "failed"
-    assert state["error"]
 
 
 def test_no_permanent_phantom_running_after_process_death(runtime_db, monkeypatch, tmp_path):
@@ -559,26 +292,51 @@ def test_reconciliation_never_relaunches_a_paid_executor(runtime_db, monkeypatch
 # ---------------------------------------------------------------------
 
 
+# Gate round 7 (finding 1): the legacy in-process durable lane is closed and
+# delegates to the Stage 6 worker lane. Its lane-mechanics tests were
+# replaced by the Stage 6 equivalents: submission/observation (U13, U18, I4),
+# admission reuse (U16), lifecycle (U19-U22, I5), cwd = verified worktree
+# (U13 start payload), authority denial with no row (U14/U15), unresolved
+# blocking (U21/U34/U37/U38). What remains here: the codex process-group
+# timeout cleanup the worker runner still uses, and legacy NULL-handle
+# reconciliation for rows created before Stage 6.
 
 
+def test_codex_process_group_is_killed_on_timeout(monkeypatch, tmp_path):
+    """_execute_codex_with_sandbox (used by the worker runner) kills the
+    codex process group on timeout and reports it."""
+    hold_event = threading.Event()
+    fake_popen = _fake_popen_factory(hold_event)
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(estate_router, "_codex_available", lambda: (True, "/fake/codex"))
+    kill_calls = []
+
+    def _fake_killpg(pgid, sig):
+        assert sig == signal.SIGKILL
+        kill_calls.append(pgid)
+        for proc in fake_popen.instances:
+            if proc.pid == pgid:
+                proc.kill()
+                return
+        raise AssertionError(f"unknown pgid {pgid}")
+
+    monkeypatch.setattr(os, "killpg", _fake_killpg)
+    started = []
+    result = estate_router._execute_codex_with_sandbox(
+        "implement it", sandbox="workspace-write", provider="codex", timeout=0.05, cwd=str(tmp_path),
+        on_started=started.append,
+    )
+    assert kill_calls == [fake_popen.instances[0].pid] == started
+    assert result["ok"] is False and "timed out" in result["error"]
 
 
-def test_legacy_lane_keeps_row_unresolved_when_cleanup_left_survivors(runtime_db, monkeypatch, tmp_path):
-    """Adjudication 6a/6b finding 1: the legacy lane closes its row as
-    legacy_closed only when the process tree is known gone."""
-    _fresh_authority(tmp_path, monkeypatch)
-    monkeypatch.setattr(estate_router, "_execute_codex_with_sandbox", lambda *a, **k: {
-        "ok": False, "error": "codex exec timed out after 1s", "cleanup_incomplete": True,
-        "cleanup_still_alive_pids": [4242],
-    })
-    result = estate_router.execute_codex_write_durable("x", repo_id="r", host_id="test-lab", wait_timeout=5)
-    with get_db_session() as db:
-        row = db.query(EstateExecution).filter(EstateExecution.id == result["execution_id"]).one()
-        assert row.lifecycle_state == "timed_out"
-        assert row.worktree_resolution == "unresolved"
-
-
-# The pre-Stage-6 local-git finalize tests (authority denial, commit+push,
-# not-succeeded, lease/branch drift, nothing dirty) were replaced by the
-# worker-path finalize tests in tests/test_estate_stage6_control.py:
-# finalize now runs through `worktree.finalize` on the row's host (S6.10).
+def test_legacy_durable_lane_only_delegates_to_the_worker_lane(runtime_db, monkeypatch):
+    """No in-process workspace-write remains: the legacy name forwards to
+    execute_write_via_worker (which re-validates the lease in-transaction)."""
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: pytest.fail("no in-process codex"))
+    seen = {}
+    monkeypatch.setattr(estate_router, "execute_write_via_worker",
+                        lambda objective, **kw: seen.update(objective=objective, **kw) or {"ok": False})
+    estate_router.execute_codex_write_durable("x", repo_id="r", host_id="h", decision_id="d")
+    assert seen == {"objective": "x", "repo_id": "r", "host_id": "h", "decision_id": "d",
+                    "wait_timeout": 30.0, "timeout": 1800.0}
