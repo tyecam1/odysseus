@@ -1285,7 +1285,7 @@ def _finalize_logic(execution_id: str, spool: Path, request: dict) -> dict:
         status = _git(path, ["status", "--porcelain"])
         return status.returncode == 0 and not status.stdout.strip()
 
-    for _round in range(2):
+    for _round in range(4):
         proven = read_decision(commit_record)
         head = _head()
         if proven is not None:
@@ -1305,6 +1305,11 @@ def _finalize_logic(execution_id: str, spool: Path, request: dict) -> dict:
             return {"outcome": "authority_denied", "reason": status.stderr.strip() or "git status failed"}
         dirty_paths = [line[3:] for line in status.stdout.splitlines() if line.strip()]
         if not dirty_paths:
+            if _head() != expected or read_decision(commit_record) is not None:
+                # A concurrent same-execution attempt committed between our
+                # HEAD read and the clean check: re-evaluate (adoption via
+                # commit.json), never report a stale no-change result.
+                continue
             return {"outcome": "finalized", "committed": False, "adopted": False, "commit_sha": head,
                     "parent_sha": None, "dirty_paths": [],
                     "push": {"state": "not_required", "commit_sha": head, "branch": branch}}
