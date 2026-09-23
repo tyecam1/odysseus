@@ -142,17 +142,22 @@ def validate_response(obj: Any, request: dict) -> tuple[bool, dict[str, str] | N
         return False, _error("worker_protocol_error", "attestation worker_pid must be a positive integer")
     if not isinstance(attestation.get("worker_version"), str) or not attestation["worker_version"]:
         return False, _error("worker_protocol_error", "attestation worker_version must be a non-empty string")
-    if not isinstance(attestation.get("nonce"), str) or not attestation["nonce"]:
-        # Shape only: whether this nonce actually *matches* the request's
-        # (the replay-correlation/identity question) is
+    if not isinstance(attestation.get("nonce"), str) or not _HEX_32_RE.fullmatch(attestation["nonce"]):
+        # Shape only: the canonical wire shape (32 lowercase hex
+        # characters, same `_HEX_32_RE` the request's own nonce is held
+        # to in `validate_request`) is what makes this a malformed
+        # envelope. Whether a well-formed nonce actually *matches* the
+        # request's (the replay-correlation/identity question) is
         # estate_worker_client.verify_attestation()'s job, not this
-        # envelope-shape validator's -- a mismatch there is an
-        # attestation/placement concern (`placement_mismatch`), not a
+        # envelope-shape validator's -- a well-shaped-but-wrong nonce is
+        # an attestation/placement concern (`placement_mismatch`), not a
         # malformed envelope (Stage 3 review finding: the mismatch used
-        # to be caught here first, so `call_worker()` never reached
-        # verify_attestation() for it and misclassified it as
-        # `worker_protocol_error`).
-        return False, _error("worker_protocol_error", "attestation nonce must be a non-empty string")
+        # to be caught here first via an equality check, so
+        # `call_worker()` never reached `verify_attestation()` for it and
+        # misclassified it as `worker_protocol_error`; a later pass
+        # correctly moved the equality check but over-relaxed this shape
+        # check to "any non-empty string" in the process).
+        return False, _error("worker_protocol_error", "attestation nonce must be 32 lowercase hex characters")
     if not isinstance(attestation.get("observed_at"), str) or not attestation["observed_at"]:
         return False, _error("worker_protocol_error", "attestation observed_at must be a non-empty string")
     return True, None

@@ -66,19 +66,26 @@ def test_response_validation_and_echo_checks():
     }
     assert validate_response(response, request) == (True, None)
 
-    # A well-formed but *wrong* nonce is an attestation/replay-correlation
-    # concern (estate_worker_client.verify_attestation's job -> a
+    # A well-formed (32 lowercase hex chars, same _HEX_32_RE shape the
+    # request's own nonce is held to) but *wrong* nonce is an
+    # attestation/replay-correlation concern
+    # (estate_worker_client.verify_attestation's job -> a
     # placement_mismatch), not a malformed envelope -- validate_response
-    # only checks the nonce is a non-empty string (Stage 3 contract fix:
-    # this used to be an equality check here, which meant
-    # verify_attestation never even ran for a real mismatch).
+    # only checks the shape (Stage 3 contract fix: this used to be an
+    # equality check here, which meant verify_attestation never even ran
+    # for a real mismatch; a later pass correctly moved the equality
+    # check but briefly over-relaxed this shape check to "any non-empty
+    # string" in the process -- restored to the canonical 32-hex shape
+    # here).
     wrong_nonce = copy.deepcopy(response)
     wrong_nonce["attestation"]["nonce"] = "0" * 32
     assert validate_response(wrong_nonce, request) == (True, None)
 
-    malformed_nonce = copy.deepcopy(response)
-    malformed_nonce["attestation"]["nonce"] = ""
-    assert validate_response(malformed_nonce, request)[1]["code"] == "worker_protocol_error"
+    for malformed in ("", "0" * 31, "0" * 33, "g" * 32, "A" * 32):
+        malformed_nonce = copy.deepcopy(response)
+        malformed_nonce["attestation"]["nonce"] = malformed
+        code = validate_response(malformed_nonce, request)[1]["code"]
+        assert code == "worker_protocol_error", malformed
 
 
 def test_error_response_validates_and_error_codes_are_closed():

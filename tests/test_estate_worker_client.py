@@ -257,11 +257,13 @@ def test_attestation_host_mismatch_is_placement_mismatch(fixture_config, monkeyp
 def test_nonce_mismatch_is_a_placement_mismatch_not_a_protocol_error(fixture_config, monkeypatch):
     """Stage 3 contract fix: a replayed or mismatched attestation nonce is
     an attestation/replay-correlation concern, not a malformed envelope.
-    `validate_response` only checks the nonce is a non-empty string
-    (shape); the equality check against the request's own nonce belongs
-    to `verify_attestation`, so `call_worker()` always reaches it and
-    classifies a real mismatch as `placement_mismatch` -- previously
-    `validate_response` caught this first and misclassified it as
+    `validate_response` only checks the nonce's canonical shape (32
+    lowercase hex characters, the same `_HEX_32_RE` the request's own
+    nonce is held to); the equality check against the request's own
+    nonce belongs to `verify_attestation`, so `call_worker()` always
+    reaches it and classifies a real, well-shaped mismatch as
+    `placement_mismatch` -- previously `validate_response` caught this
+    first (an equality check) and misclassified it as
     `worker_protocol_error`, which meant `call_worker()` never even
     reached `verify_attestation()` for this case."""
     fake = _FakeTransport(lambda request: _ok_response(request, nonce="0" * 32))
@@ -277,17 +279,19 @@ def test_nonce_mismatch_is_a_placement_mismatch_not_a_protocol_error(fixture_con
 
 
 def test_malformed_attestation_nonce_is_still_a_protocol_error(fixture_config, monkeypatch):
-    """The envelope-shape check survives: a non-string/empty attestation
-    nonce is a malformed response, caught by `validate_response` before
-    `verify_attestation` ever runs -- distinct from a well-formed but
+    """The envelope-shape check survives: an attestation nonce that isn't
+    32 lowercase hex characters (empty, wrong length, or non-hex) is a
+    malformed response, caught by `validate_response` before
+    `verify_attestation` ever runs -- distinct from a well-shaped but
     *wrong* nonce, which is the placement-mismatch case above."""
-    fake = _FakeTransport(lambda request: _ok_response(request, nonce=""))
-    monkeypatch.setattr(client, "transport_for_host", lambda host_id: fake)
+    for malformed in ("", "0" * 31, "g" * 32):
+        fake = _FakeTransport(lambda request, n=malformed: _ok_response(request, nonce=n))
+        monkeypatch.setattr(client, "transport_for_host", lambda host_id: fake)
 
-    with pytest.raises(client.WorkerTransportError) as excinfo:
-        client.call_worker("test-lab", "health", {}, deadline_s=10)
-    assert excinfo.value.code == "worker_protocol_error"
-    assert excinfo.value.observed_host_id is None
+        with pytest.raises(client.WorkerTransportError) as excinfo:
+            client.call_worker("test-lab", "health", {}, deadline_s=10)
+        assert excinfo.value.code == "worker_protocol_error", malformed
+        assert excinfo.value.observed_host_id is None
 
 
 def test_pinned_fingerprint_mismatch_is_placement_mismatch(fixture_config, monkeypatch):
