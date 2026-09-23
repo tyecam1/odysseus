@@ -502,8 +502,16 @@ def cmd_status(args):
             {"id": s["id"], "description": s.get("description"), "live": s.get("endpoint") is not None}
             for s in estate.get("services", [])
         ],
+        # Stage 7: `bound` is the config's default binding; routing on THIS
+        # host also needs its own qualified_hosts entry (with evidence), and
+        # may use a per-host binding override.
         "capabilities": [
-            {"alias": c["alias"], "bound": c.get("binding") is not None}
+            {"alias": c["alias"], "bound": c.get("binding") is not None,
+             "qualified_on_this_host": bool(this_host and str(
+                 ((c.get("qualified_hosts") or {}).get(this_host["id"]) or {}).get("evidence") or "").strip()),
+             "binding_on_this_host": (
+                 (((c.get("qualified_hosts") or {}).get(this_host["id"]) or {}).get("binding") or c.get("binding"))
+                 if this_host else None)}
             for c in models.get("capabilities", [])
         ],
         "memory_sources": [

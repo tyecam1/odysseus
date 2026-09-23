@@ -98,7 +98,9 @@ def delegation_preflight(units: Iterable[dict]) -> dict:
     # a truly per-unit host isn't known yet at this point (routing hasn't
     # run per unit), so this mirrors the old single global check's scope.
     from src.estate_worker_client import WorkerTransportError, worker_health
-    preflight_host_id = hosts[0]["host_id"] if hosts else None
+    # Summary probe: the first ELIGIBLE host (named in the snapshot); each
+    # codex unit is judged separately on its own routed host below.
+    preflight_host_id = next((h["host_id"] for h in hosts if h.get("eligible")), None)
     if preflight_host_id is None:
         codex_live, codex_detail = False, "no eligible host"
     else:
@@ -109,6 +111,7 @@ def delegation_preflight(units: Iterable[dict]) -> dict:
         except WorkerTransportError as exc:
             codex_live, codex_detail = False, f"worker unreachable: {exc.code}: {exc}"
     alias_resolutions: dict[str, dict] = {}
+    codex_by_host: dict[str, dict] = {}
     recommendations = []
 
     for index, unit in enumerate(unit_list):
@@ -168,14 +171,16 @@ def delegation_preflight(units: Iterable[dict]) -> dict:
             # routed host (worker-attested), not on whichever host is first.
             unit_host = (route.get("route") or {}).get("host")
             if unit_host is None:
-                codex_live, codex_detail = False, "no routed host"
+                unit_codex_live, unit_codex_detail = False, "no routed host"
             else:
                 try:
                     unit_health = worker_health(unit_host).get("codex") or {}
-                    codex_live = bool(unit_health.get("available"))
-                    codex_detail = unit_health.get("detail")
+                    unit_codex_live = bool(unit_health.get("available"))
+                    unit_codex_detail = unit_health.get("detail")
                 except WorkerTransportError as exc:
-                    codex_live, codex_detail = False, f"worker unreachable: {exc.code}: {exc}"
+                    unit_codex_live, unit_codex_detail = False, f"worker unreachable: {exc.code}: {exc}"
+                codex_by_host[unit_host] = {"available": unit_codex_live,
+                                            "reason": "live" if unit_codex_live else unit_codex_detail}
             write_authority = None
             write_ready = True
             write_required = _requires_repo_write(unit)
@@ -207,12 +212,12 @@ def delegation_preflight(units: Iterable[dict]) -> dict:
             unit_entry = next((h for h in (route.get("hosts_checked") or [])
                                if h.get("host_id") == unit_host), None) or {}
             executor_qualified = needed in (unit_entry.get("qualified_executors") or [])
-            ok = host_ready and codex_live and provider == "codex" and write_ready and executor_qualified
+            ok = host_ready and unit_codex_live and provider == "codex" and write_ready and executor_qualified
             evidence = []
             if not host_ready:
                 evidence.append(route.get("reason") or route.get("error") or "no eligible host")
-            if not codex_live:
-                evidence.append(f"codex unavailable: {codex_detail}")
+            if not unit_codex_live:
+                evidence.append(f"codex unavailable: {unit_codex_detail}")
             if provider != "codex":
                 evidence.append(f"configured paid provider for {alias!r} is {provider!r}, not codex")
             if host_ready and not executor_qualified:
@@ -258,7 +263,8 @@ def delegation_preflight(units: Iterable[dict]) -> dict:
         "ok": all(item["ok"] for item in recommendations),
         "snapshot": {
             "eligible_hosts": hosts,
-            "codex": {"available": codex_live, "reason": "live" if codex_live else codex_detail},
+            "codex": {"available": codex_live, "reason": "live" if codex_live else codex_detail,
+                      "host_id": preflight_host_id, "by_host": codex_by_host},
             "alias_resolutions": list(alias_resolutions.values()),
         },
         "units": recommendations,
