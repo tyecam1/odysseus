@@ -1079,16 +1079,15 @@ def execute_codex_write(objective: str, *, repo_id: str, host_id: str,
     worktree so direct Python callers cannot bypass `run_task`'s gate. It
     deliberately cannot acquire or broaden write authority.
     """
-    authority = _codex_write_authority(repo_id, host_id)
-    if not authority["ok"]:
-        return {
-            "ok": False, "provider": "codex-write",
-            "authority_denied": True, "error": authority["error"],
-        }
-    return _execute_codex_with_sandbox(
-        objective, sandbox="workspace-write", provider="codex-write", timeout=timeout,
-        cwd=authority["cwd"],
-    )
+    # Stage 6 (gate round 6 finding 2): the direct, untracked in-process
+    # write lane is closed. A workspace-write run must go through
+    # execute_write_via_worker -- an EstateExecution row, a decide_once run
+    # decision and a tracked runner unit. Removed entirely in Stage 9; the
+    # signature stays for callers that introspect the timeout bound.
+    return {
+        "ok": False, "provider": "codex-write", "authority_denied": True,
+        "error": "execute_codex_write is closed in Stage 6; use execute_write_via_worker",
+    }
 
 
 _STALE_EXECUTION_ACCEPT_GRACE_SECONDS = 120

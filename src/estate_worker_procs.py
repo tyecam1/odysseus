@@ -517,7 +517,7 @@ def run_in_unit(argv: list[str], cwd: str, unit: str, *, timeout: float = 60.0,
         if os.environ.get(key):
             command.append(f"--setenv={key}={os.environ[key]}")
     for key, value in os.environ.items():
-        if key.startswith(("AOTERU_", "GIT_CONFIG_")):
+        if key.startswith(("AOTERU_", "GIT_CONFIG_", "GIT_OPTIONAL_LOCKS")):
             command.append(f"--setenv={key}={value}")
     command += ["--", *argv]
     try:

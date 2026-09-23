@@ -1788,6 +1788,13 @@ def test_codex_lanes_preserve_distinct_sandbox_authority(
     monkeypatch.setattr(subprocess, "Popen", FakeProc)
     fn = getattr(estate_router, executor)
     if executor == "execute_codex_write":
+        # Stage 6: the direct in-process write lane fails closed and never
+        # launches a process (the worker lane owns workspace-write).
+        result = estate_router.execute_codex_write("do it", repo_id="test-repo", host_id="test-lab")
+        assert result["ok"] is False and result["authority_denied"] is True
+        assert "args" not in captured
+        return
+    if executor == "execute_codex_write":  # pragma: no cover - retained for Stage 9 removal
         worktree_path = tmp_path / "isolated-worktree"
         worktree_path.mkdir()
         monkeypatch.setattr(estate_router, "resolve_repo_path", lambda repo_id: str(tmp_path))

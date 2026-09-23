@@ -706,6 +706,10 @@ def _disable_git_side_processes(record: Path) -> None:
     cgroup stays the proof of quiescence."""
     pairs = [("core.hooksPath", str(_git_env_dir(record))), ("gc.auto", "0"), ("maintenance.auto", "false"),
              ("core.fsmonitor", "false")]
+    # Verification and probes are strictly read-only: no optional locks, so
+    # `git status` never refreshes/rewrites the index (gate round 6 finding
+    # 1) -- a late read can observe a worktree but never mutate it.
+    os.environ["GIT_OPTIONAL_LOCKS"] = "0"
     os.environ["GIT_CONFIG_COUNT"] = str(len(pairs))
     for index, (key, value) in enumerate(pairs):
         os.environ[f"GIT_CONFIG_KEY_{index}"] = key

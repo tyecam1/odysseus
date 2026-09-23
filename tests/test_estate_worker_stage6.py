@@ -1184,3 +1184,25 @@ def test_gate5_attempt_fenced_between_closure_read_and_launch_never_touches_git(
     assert _git(repo["wt"], "rev-parse", "HEAD") == repo["head"]
     run = estate_worker.read_decision(_spool("E1") / "finalize" / "attempt-1.run.json")
     assert run["decision"] == "abort" and run["by"] == "fence"
+
+
+
+def test_gate6_verification_git_is_read_only_and_never_rewrites_the_index(cfg, repo, monkeypatch):
+    """Gate round 6 finding 1: a (possibly late) verification may observe a
+    worktree but can never mutate it -- `git status` under the worker's
+    environment takes no optional locks and leaves the index untouched even
+    when its stat data is stale."""
+    from src.park_lease_ops import git_is_clean
+    tracked = repo["wt"] / "README"
+    index = Path(_git(repo["wt"], "rev-parse", "--git-dir")) / "index"
+    old = time.time() - 3600
+    os.utime(tracked, (old, old))                  # stale stat info -> an ordinary status would refresh
+    before = (index.read_bytes(), index.stat().st_mtime_ns)
+    for key in list(os.environ):
+        if key.startswith("GIT_"):
+            monkeypatch.delenv(key)
+    estate_worker._disable_git_side_processes(estate_worker._SPOOL_ROOT)
+    assert os.environ["GIT_OPTIONAL_LOCKS"] == "0"
+    clean, _reason = git_is_clean(str(repo["wt"]))
+    assert clean is True
+    assert (index.read_bytes(), index.stat().st_mtime_ns) == before
