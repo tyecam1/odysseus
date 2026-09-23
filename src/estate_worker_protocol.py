@@ -142,8 +142,17 @@ def validate_response(obj: Any, request: dict) -> tuple[bool, dict[str, str] | N
         return False, _error("worker_protocol_error", "attestation worker_pid must be a positive integer")
     if not isinstance(attestation.get("worker_version"), str) or not attestation["worker_version"]:
         return False, _error("worker_protocol_error", "attestation worker_version must be a non-empty string")
-    if attestation.get("nonce") != request.get("nonce"):
-        return False, _error("worker_protocol_error", "attestation nonce does not match request")
+    if not isinstance(attestation.get("nonce"), str) or not attestation["nonce"]:
+        # Shape only: whether this nonce actually *matches* the request's
+        # (the replay-correlation/identity question) is
+        # estate_worker_client.verify_attestation()'s job, not this
+        # envelope-shape validator's -- a mismatch there is an
+        # attestation/placement concern (`placement_mismatch`), not a
+        # malformed envelope (Stage 3 review finding: the mismatch used
+        # to be caught here first, so `call_worker()` never reached
+        # verify_attestation() for it and misclassified it as
+        # `worker_protocol_error`).
+        return False, _error("worker_protocol_error", "attestation nonce must be a non-empty string")
     if not isinstance(attestation.get("observed_at"), str) or not attestation["observed_at"]:
         return False, _error("worker_protocol_error", "attestation observed_at must be a non-empty string")
     return True, None

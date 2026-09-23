@@ -194,7 +194,16 @@ def verify_attestation(response: dict, request: dict, host_cfg: dict) -> None:
     `host_id` actually reported (pre-Stage-6 review finding) -- the
     identity a caller needs to diagnose *which* host answered wrongly,
     without this function ever treating that host as having executed
-    anything."""
+    anything.
+
+    The nonce check below is the real classification for a nonce
+    mismatch (Stage 3 contract fix): `estate_worker_protocol.
+    validate_response()` only checks the attestation nonce is a
+    non-empty string (envelope shape), never that it equals the
+    request's — that equality/replay-correlation question is an
+    attestation/identity concern, so `call_worker()` always reaches this
+    function for it and a mismatch is correctly `placement_mismatch`,
+    not `worker_protocol_error`."""
     attestation = response.get("attestation") or {}
     observed_host_id = attestation.get("host_id")
     expected_host = request.get("expected_host_id")

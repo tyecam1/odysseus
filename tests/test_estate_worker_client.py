@@ -254,17 +254,40 @@ def test_attestation_host_mismatch_is_placement_mismatch(fixture_config, monkeyp
     assert excinfo.value.observed_host_id == "some-other-host"
 
 
-def test_nonce_mismatch_is_rejected_by_envelope_validation(fixture_config, monkeypatch):
-    """`validate_response` itself checks the nonce echo, before
-    `verify_attestation` ever runs — a replayed or mismatched response is
-    caught as a protocol violation, not waved through to the placement
-    check."""
+def test_nonce_mismatch_is_a_placement_mismatch_not_a_protocol_error(fixture_config, monkeypatch):
+    """Stage 3 contract fix: a replayed or mismatched attestation nonce is
+    an attestation/replay-correlation concern, not a malformed envelope.
+    `validate_response` only checks the nonce is a non-empty string
+    (shape); the equality check against the request's own nonce belongs
+    to `verify_attestation`, so `call_worker()` always reaches it and
+    classifies a real mismatch as `placement_mismatch` -- previously
+    `validate_response` caught this first and misclassified it as
+    `worker_protocol_error`, which meant `call_worker()` never even
+    reached `verify_attestation()` for this case."""
     fake = _FakeTransport(lambda request: _ok_response(request, nonce="0" * 32))
     monkeypatch.setattr(client, "transport_for_host", lambda host_id: fake)
 
     with pytest.raises(client.WorkerTransportError) as excinfo:
         client.call_worker("test-lab", "health", {}, deadline_s=10)
+    assert excinfo.value.code == "placement_mismatch"
+    # The attested host_id itself matched (only the nonce didn't), so the
+    # observed host retained for diagnosis is still test-lab -- distinct
+    # from a host-identity mismatch, but still not treated as executed.
+    assert excinfo.value.observed_host_id == "test-lab"
+
+
+def test_malformed_attestation_nonce_is_still_a_protocol_error(fixture_config, monkeypatch):
+    """The envelope-shape check survives: a non-string/empty attestation
+    nonce is a malformed response, caught by `validate_response` before
+    `verify_attestation` ever runs -- distinct from a well-formed but
+    *wrong* nonce, which is the placement-mismatch case above."""
+    fake = _FakeTransport(lambda request: _ok_response(request, nonce=""))
+    monkeypatch.setattr(client, "transport_for_host", lambda host_id: fake)
+
+    with pytest.raises(client.WorkerTransportError) as excinfo:
+        client.call_worker("test-lab", "health", {}, deadline_s=10)
     assert excinfo.value.code == "worker_protocol_error"
+    assert excinfo.value.observed_host_id is None
 
 
 def test_pinned_fingerprint_mismatch_is_placement_mismatch(fixture_config, monkeypatch):

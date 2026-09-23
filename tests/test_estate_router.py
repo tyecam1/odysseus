@@ -1522,6 +1522,30 @@ def test_dispatch_read_only_without_repo_field_passes_no_repo_id(fixture_config,
     assert "repo_id" not in captured
 
 
+def test_dispatch_read_only_surfaces_nonce_mismatch_as_placement_mismatch(fixture_config, monkeypatch):
+    """Stage 3 contract fix, end to end through the real
+    `_dispatch_read_only` -> `estate_worker_client.call_worker` seam
+    (not a stubbed `_dispatch_read_only`, unlike the run_task-level
+    telemetry tests below): a nonce-mismatch `WorkerTransportError` must
+    surface as `error_code: placement_mismatch` with
+    `placement.observed_host` set and `placement.executed_host` left
+    `None` -- never treated as a successful/attested execution."""
+    import src.estate_worker_client as estate_worker_client
+
+    def fake_call_worker(host_id, verb, payload, *, deadline_s):
+        raise estate_worker_client.WorkerTransportError(
+            "placement_mismatch", "attestation nonce does not match request",
+            observed_host_id=host_id,
+        )
+    monkeypatch.setattr(estate_worker_client, "call_worker", fake_call_worker)
+
+    result = estate_router._dispatch_read_only("test-lab", "codex", {"objective": "fix the bug"})
+    assert result["ok"] is False
+    assert result["error_code"] == "placement_mismatch"
+    assert result["placement"]["executed_host"] is None
+    assert result["placement"]["observed_host"] == "test-lab"
+
+
 def test_scenario_a_implementation_mode_dispatches_codex_write_under_active_lease(
         fixture_config, monkeypatch, tmp_path):
     repo_path = tmp_path / "test-repo"
