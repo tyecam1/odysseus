@@ -281,7 +281,10 @@ def test_worktree_verify_refuses_live_checkout(fixture_config, monkeypatch):
 
 
 def test_every_worker_verb_leaves_core_database_unimported(fixture_config, monkeypatch):
-    sys.modules.pop("core.database", None)
+    # monkeypatch.delitem (not sys.modules.pop) so the real module object is
+    # restored afterwards; a bare pop let later tests lazily import a *fresh*
+    # core.database whose SessionLocal ignores their temp-DB patches.
+    monkeypatch.delitem(sys.modules, "core.database", raising=False)
     monkeypatch.setattr(estate_worker, "_ollama_inventory", lambda: (False, [], "offline"))
     monkeypatch.setattr(estate_worker.estate_router, "_codex_available", lambda: (False, "missing"))
     monkeypatch.setattr(estate_worker.estate_router, "experiment_priority_active", lambda: (False, "idle"))

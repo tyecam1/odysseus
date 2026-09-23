@@ -51,6 +51,78 @@ class WorktreeVerificationError(Exception):
     """The requested implementation worktree could not be created or verified."""
 
 
+class LeaseHasUnresolvedExecution(Exception):
+    """Ordinary release refused: an execution under this lease still has
+    `worktree_resolution = 'unresolved'` (S6.2). Carries the blocking
+    execution and the supported next action; there is no force flag."""
+
+    def __init__(self, message: str, *, lease_id: str, execution_id: str,
+                 lifecycle_state: str, next_action: str):
+        super().__init__(message)
+        self.lease_id = lease_id
+        self.execution_id = execution_id
+        self.lifecycle_state = lifecycle_state
+        self.next_action = next_action
+
+
+# How an unresolved execution's lease is unblocked, by lifecycle_state
+# (S6.1 admission table). Shared by release refusals and admission.
+UNRESOLVED_NEXT_ACTION = {
+    "accepted": "wait",
+    "running": "wait",
+    "lost": "reconcile",       # a successful worker status corrects it first
+    "succeeded": "finalize_or_recover",
+    "failed": "recover",
+    "timed_out": "recover",
+    "interrupted": "recover",
+}
+
+# S6.9: age alone never reclaims a `preparing` reservation; past this it
+# is merely old enough for `resolve_preparing_reservation` to probe.
+PARK_PREPARE_STALE_SECONDS = 300
+
+
+def _unresolved_execution(db, lease_id: str):
+    from core.database import EstateExecution
+    return db.query(EstateExecution).filter(
+        EstateExecution.lease_id == lease_id,
+        EstateExecution.worktree_resolution == "unresolved",
+    ).order_by(EstateExecution.submitted_at.desc()).first()
+
+
+def lease_authority_state(db, lease, *, now=None) -> dict:
+    """S6.4: the single canonical authority/reclaimability rule. Heartbeat
+    age (`park_lease_is_stale`) is telemetry only; a lease protected by
+    any unresolved execution is never reclaimable, whatever its age."""
+    from core.database import park_lease_is_stale, utcnow_naive
+    now = now or utcnow_naive()
+    heartbeat_stale = park_lease_is_stale(lease, now=now)
+    state = {
+        "lease_id": lease.id, "status": lease.status, "heartbeat_stale": heartbeat_stale,
+        "protected_by_execution_id": None, "authoritative": False, "reclaimable": False,
+        "reason": "",
+    }
+    if lease.status == "released":
+        state["reason"] = "released"
+        return state
+    if lease.status == "preparing":
+        # S6.9: a reservation, never write authority, never reclaimable by
+        # age -- only worker-side proof (resolve_preparing_reservation).
+        state["prepare_probe_due"] = (now - lease.heartbeat_at).total_seconds() > PARK_PREPARE_STALE_SECONDS
+        state["reason"] = "preparing reservation (not write authority)"
+        return state
+    blocker = _unresolved_execution(db, lease.id)
+    state["protected_by_execution_id"] = blocker.id if blocker is not None else None
+    state["reclaimable"] = heartbeat_stale and blocker is None
+    state["authoritative"] = not state["reclaimable"]
+    state["reason"] = (
+        "stale and unprotected" if state["reclaimable"]
+        else f"protected by unresolved execution {blocker.id}" if blocker is not None
+        else "live"
+    )
+    return state
+
+
 def git_is_clean(path: str) -> tuple[bool, str]:
     """Fail closed: anything but a clean `git status --porcelain`
     (including the command itself failing) is treated as dirty. Shared
@@ -117,35 +189,45 @@ def park_repo(
     worktree_path: str,
     branch: Optional[str] = None,
     session_id: Optional[str] = None,
+    *,
+    status: str = "active",
 ) -> dict:
-    """Acquire a ParkLease, auto-reclaiming a stale (crashed-holder) active
-    lease first. A live active lease raises ParkConflict (the DB's own
-    partial-unique-index enforces this; IntegrityError is translated so
-    callers don't need to know the storage detail)."""
-    from core.database import ParkLease, get_db_session, park_lease_is_stale, utcnow_naive
+    """Acquire a ParkLease (or, with `status="preparing"`, an S6.7
+    reservation). Stale reclaim and insert are ONE S6.5 serialized
+    transaction, and reclaim happens only when `lease_authority_state`
+    says `reclaimable` -- never from heartbeat age alone. A live or
+    protected lease, or any `preparing` reservation, raises ParkConflict;
+    the partial unique index is the backstop."""
+    from core.database import ParkLease, lease_serialized_transaction, utcnow_naive
     from sqlalchemy.exc import IntegrityError
 
     reclaimed_stale = None
-    with get_db_session() as db:
-        existing = db.query(ParkLease).filter(
-            ParkLease.repo_id == repo_id, ParkLease.status == "active",
-        ).first()
-        if existing is not None and park_lease_is_stale(existing):
-            reclaimed_stale = {
-                "lease_id": existing.id, "host_id": existing.host_id,
-                "heartbeat_at": existing.heartbeat_at.isoformat(),
-            }
-            existing.status = "released"
-            existing.released_at = utcnow_naive()
-
     lease_id = str(uuid.uuid4())
     try:
-        with get_db_session() as db:
+        with lease_serialized_transaction(repo_id=repo_id) as db:
+            existing = db.query(ParkLease).filter(
+                ParkLease.repo_id == repo_id, ParkLease.status.in_(("active", "preparing")),
+            ).first()
+            if existing is not None:
+                authority = lease_authority_state(db, existing)
+                if not authority["reclaimable"]:
+                    raise ParkConflict(
+                        f"{repo_id!r} is already parked ({existing.status} lease {existing.id} on "
+                        f"{existing.host_id!r}: {authority['reason']}) — release or recover it first"
+                    )
+                reclaimed_stale = {
+                    "lease_id": existing.id, "host_id": existing.host_id,
+                    "heartbeat_at": existing.heartbeat_at.isoformat(),
+                }
+                existing.status = "released"
+                existing.released_at = utcnow_naive()
+                db.flush()
             db.add(ParkLease(
                 id=lease_id, repo_id=repo_id, host_id=host_id,
                 worktree_path=worktree_path, branch=branch, session_id=session_id,
-                allowed_write_scope="repo", status="active",
+                allowed_write_scope="repo", status=status,
             ))
+            db.flush()
     except IntegrityError as e:
         raise ParkConflict(
             f"{repo_id!r} is already parked (active lease exists) — release it first"
@@ -154,7 +236,7 @@ def park_repo(
     return {
         "lease_id": lease_id, "repo_id": repo_id, "host_id": host_id,
         "worktree_path": worktree_path, "branch": branch, "session_id": session_id,
-        "reclaimed_stale_lease": reclaimed_stale,
+        "status": status, "reclaimed_stale_lease": reclaimed_stale,
     }
 
 
@@ -169,6 +251,14 @@ def heartbeat_repo(repo_id: str, host_id: Optional[str] = None) -> dict:
             q = q.filter(ParkLease.host_id == host_id)
         lease = q.first()
         if lease is None:
+            preparing = db.query(ParkLease).filter(
+                ParkLease.repo_id == repo_id, ParkLease.status == "preparing",
+            ).first()
+            if preparing is not None:
+                raise NoActiveLease(
+                    f"{repo_id!r} has only a preparing reservation ({preparing.id}) — "
+                    "heartbeat renews write authority, which a reservation is not (S6.3)"
+                )
             raise NoActiveLease(
                 f"no active lease for {repo_id!r}" + (f" on {host_id!r}" if host_id else "")
                 + " — heartbeat only renews an existing lease, it does not acquire one"
@@ -180,45 +270,101 @@ def heartbeat_repo(repo_id: str, host_id: Optional[str] = None) -> dict:
         }
 
 
+def renew_lease_for_execution(execution_id: str) -> bool:
+    """S6.3: control-plane-only supervision renewal of the EXACT lease an
+    execution was admitted under. One conditional UPDATE keyed on the
+    recorded lease id/repo/host; never a repo/host lookup, so it can never
+    renew a later or reassigned lease. Not exposed on HTTP/CLI/worker."""
+    import logging
+    from core.database import EstateExecution, ParkLease, get_db_session, utcnow_naive
+    with get_db_session() as db:
+        row = db.query(EstateExecution).filter(EstateExecution.id == execution_id).one_or_none()
+        if (row is None or row.lease_id is None
+                or row.lifecycle_state not in ("accepted", "running")
+                or row.worktree_resolution != "unresolved"):
+            return False
+        lease_id = row.lease_id
+        updated = db.query(ParkLease).filter(
+            ParkLease.id == row.lease_id,
+            ParkLease.status == "active",
+            ParkLease.repo_id == row.repo_id,
+            ParkLease.host_id == row.host_id,
+        ).update({ParkLease.heartbeat_at: utcnow_naive()}, synchronize_session=False)
+    if updated == 0:
+        logging.getLogger(__name__).info(
+            "renew_lease_for_execution(%s): exact lease %s no longer active; not renewed",
+            execution_id, lease_id,
+        )
+    return updated == 1
+
+
+def unpushed_executions(db, lease_id: str) -> list:
+    """S6.10: finalized/recovered executions under a lease whose recorded
+    commit is not pushed -- surfaced, never blocking."""
+    import json
+    from core.database import EstateExecution
+    out = []
+    rows = db.query(EstateExecution).filter(
+        EstateExecution.lease_id == lease_id,
+        EstateExecution.worktree_resolution.in_(("finalized", "recovered")),
+    ).all()
+    for row in rows:
+        try:
+            push = (json.loads(row.finalization_json or "{}") or {}).get("push") or {}
+        except (TypeError, ValueError):
+            push = {}
+        if push.get("state") in ("failed", "not_attempted"):
+            out.append({"execution_id": row.id, "commit_sha": push.get("commit_sha")})
+    return out
+
+
 def active_leases_summary() -> list:
     """Estate-wide active-lease view (Workstream K's `agent status` field,
     Workstream H/B's "HTTP-facing park/status surface for the mobile UI" —
     same read shared rather than re-queried per caller). Best-effort: a
     missing/unreachable DB degrades to an empty list rather than raising,
     since lease visibility is one field among many for any caller of this,
-    not the caller's reason to exist."""
+    not the caller's reason to exist. `stale` is heartbeat-age telemetry;
+    `reclaimable`/`protected_by` are the authority facts (S6.4)."""
     try:
-        from core.database import ParkLease, get_db_session, park_lease_is_stale
+        from core.database import ParkLease, get_db_session
         with get_db_session() as db:
-            active = db.query(ParkLease).filter(ParkLease.status == "active").all()
-            return [
-                {
-                    "repo_id": row.repo_id, "host_id": row.host_id,
+            rows = db.query(ParkLease).filter(ParkLease.status.in_(("active", "preparing"))).all()
+            out = []
+            for row in rows:
+                authority = lease_authority_state(db, row)
+                out.append({
+                    "lease_id": row.id, "repo_id": row.repo_id, "host_id": row.host_id,
+                    "status": row.status,
                     "heartbeat_at": row.heartbeat_at.isoformat() if row.heartbeat_at else None,
-                    "stale": park_lease_is_stale(row),
-                }
-                for row in active
-            ]
+                    "stale": authority["heartbeat_stale"],
+                    "reclaimable": authority["reclaimable"],
+                    "protected_by": authority["protected_by_execution_id"],
+                    "unpushed_executions": len(unpushed_executions(db, row.id)),
+                })
+            return out
     except Exception:
         return []
 
 
 def active_lease_for_repo(repo_id: str, host_id: str) -> Optional[dict]:
-    """Return the existing live write lease held by `host_id`, if any.
-
-    This is the read-side authority used by execution paths that need to
-    prove write access without acquiring it. Stale leases fail closed and
-    remain reclaimable only through the existing explicit park workflow.
-    """
+    """Return the write lease held by `host_id` iff it is `active` and
+    `authoritative` under `lease_authority_state` (S6.4). A stale-but-
+    protected lease IS returned (with `heartbeat_stale`/`protected_by_
+    execution_id`), because an unresolved execution still depends on it;
+    a stale unprotected lease is None and fails closed as before."""
     try:
-        from core.database import ParkLease, get_db_session, park_lease_is_stale
+        from core.database import ParkLease, get_db_session
         with get_db_session() as db:
             row = db.query(ParkLease).filter(
                 ParkLease.repo_id == repo_id,
                 ParkLease.host_id == host_id,
                 ParkLease.status == "active",
             ).first()
-            if row is None or park_lease_is_stale(row):
+            if row is None:
+                return None
+            authority = lease_authority_state(db, row)
+            if not authority["authoritative"]:
                 return None
             return {
                 "lease_id": row.id,
@@ -228,22 +374,39 @@ def active_lease_for_repo(repo_id: str, host_id: str) -> Optional[dict]:
                 "branch": row.branch,
                 "allowed_write_scope": row.allowed_write_scope,
                 "heartbeat_at": row.heartbeat_at.isoformat() if row.heartbeat_at else None,
+                "heartbeat_stale": authority["heartbeat_stale"],
+                "protected_by_execution_id": authority["protected_by_execution_id"],
             }
     except Exception:
         return None
 
 
 def release_repo(repo_id: str, host_id: Optional[str] = None) -> dict:
-    """Release the caller's active lease. Raises NoActiveLease if none matches."""
-    from core.database import ParkLease, get_db_session, utcnow_naive
+    """Release the caller's active lease (S6.2 ordinary release). Inside
+    one S6.5 serialized transaction, refused with
+    LeaseHasUnresolvedExecution while any execution under the lease is
+    `unresolved` -- no force flag; the only other exit is recovery
+    release. Raises NoActiveLease if none matches."""
+    from core.database import ParkLease, lease_serialized_transaction, utcnow_naive
 
-    with get_db_session() as db:
+    with lease_serialized_transaction(repo_id=repo_id) as db:
         q = db.query(ParkLease).filter(ParkLease.repo_id == repo_id, ParkLease.status == "active")
         if host_id:
             q = q.filter(ParkLease.host_id == host_id)
         lease = q.first()
         if lease is None:
             raise NoActiveLease(f"no active lease for {repo_id!r}" + (f" on {host_id!r}" if host_id else ""))
+        blocker = _unresolved_execution(db, lease.id)
+        if blocker is not None:
+            next_action = UNRESOLVED_NEXT_ACTION.get(blocker.lifecycle_state, "recover")
+            raise LeaseHasUnresolvedExecution(
+                f"lease {lease.id} has unresolved execution {blocker.id} "
+                f"({blocker.lifecycle_state}); next action: {next_action}",
+                lease_id=lease.id, execution_id=blocker.id,
+                lifecycle_state=blocker.lifecycle_state, next_action=next_action,
+            )
+        unpushed = unpushed_executions(db, lease.id)
         lease.status = "released"
         lease.released_at = utcnow_naive()
-        return {"lease_id": lease.id, "repo_id": lease.repo_id, "host_id": lease.host_id}
+        return {"lease_id": lease.id, "repo_id": lease.repo_id, "host_id": lease.host_id,
+                "unpushed_executions": unpushed}

@@ -236,25 +236,26 @@ def eligible_hosts(repo_id: Optional[str] = None) -> list[dict]:
                     entry["reason"] = f"repo {repo_id!r} does not resolve on {host['id']!r}"
 
         if entry["eligible"] and reachable and repo_id:
-            from core.database import ParkLease, get_db_session, park_lease_is_stale
+            from core.database import ParkLease, get_db_session
+            from src.park_lease_ops import lease_authority_state
             with get_db_session() as db:
                 conflicting = db.query(ParkLease).filter(
                     ParkLease.repo_id == repo_id,
-                    ParkLease.status == "active",
+                    ParkLease.status.in_(("active", "preparing")),
                     ParkLease.host_id != host["id"],
                 ).first()
-                # A stale lease (holder crashed/killed, heartbeat never
-                # renewed — see park_lease_is_stale) does not get to block
-                # routing forever; only a lease that is still actually
-                # alive widens no other host's write authority (invariant
-                # 10 is about live conflicts, not abandoned ones). This is
-                # a read-only check — reclaiming the row itself still only
-                # happens through `agent park`'s explicit reclaim path.
-                if conflicting is not None and park_lease_is_stale(conflicting):
+                # S6.4: only `lease_authority_state` decides whether another
+                # host's lease (or `preparing` reservation) may be ignored.
+                # Heartbeat age alone never does: a stale lease protected by
+                # an unresolved execution still blocks, and a reservation is
+                # never reclaimable by age (S6.9). Read-only; reclaiming the
+                # row still happens only through the explicit park path.
+                if conflicting is not None and lease_authority_state(db, conflicting)["reclaimable"]:
                     conflicting = None
-            if conflicting is not None:
+                conflicting_host = conflicting.host_id if conflicting is not None else None
+            if conflicting_host is not None:
                 entry["eligible"] = False
-                entry["reason"] = f"repo {repo_id!r} is parked on {conflicting.host_id!r}, not here"
+                entry["reason"] = f"repo {repo_id!r} is parked on {conflicting_host!r}, not here"
         out.append(entry)
     return out
 
