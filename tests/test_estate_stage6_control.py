@@ -51,6 +51,17 @@ def _lease(lease_id="L1", host=HOME, status="active", worktree="/w/feat", branch
                         branch=branch, status=status, heartbeat_at=heartbeat))
 
 
+def _sweep():
+    """The estate-wide reconciliation a restarted control plane runs (the
+    background sweep); GET itself observes only its own row within budget."""
+    from core.database import SessionLocal
+    db = cdb.SessionLocal()
+    try:
+        lane.reconcile_stale_estate_executions(db, EstateExecution)
+    finally:
+        db.close()
+
+
 def _row(execution_id):
     with get_db_session() as s:
         row = s.query(EstateExecution).filter(EstateExecution.id == execution_id).one()
@@ -79,7 +90,8 @@ def test_u13_write_under_home_lease_runs_verify_then_start_on_home(db, worker):
     assert {host for host, _v, _p in worker.calls} == {HOME}
     row = _row(result["execution_id"])
     assert row.host_id == HOME and row.admission_head_sha == HEAD
-    assert json.loads(row.worker_handle_json) == lane.PLACEHOLDER      # starting: not yet confirmed
+    placeholder = json.loads(row.worker_handle_json)                     # starting: not yet confirmed
+    assert placeholder["dispatch_state"] == "pending_start" and placeholder["start_attempts"] == 1
     start = worker.calls[1][2]
     assert start["lease"] == {"lease_id": "L1", "worktree_path": "/w/feat", "branch": "feat/x",
                               "expected_head_sha": HEAD}
@@ -286,7 +298,7 @@ def test_u22_lost_row_reconciles_to_truthful_state_without_redispatch(db, worker
         s.query(EstateExecution).filter(EstateExecution.id == execution_id).update({"lifecycle_state": "lost"})
     worker.set_state(execution_id, "succeeded", result={"ok": True, "output": "x"})
     starts = worker.verbs().count("start")
-    estate_router.get_estate_execution(execution_id)
+    _sweep()
     row = _row(execution_id)
     assert row.lifecycle_state == "succeeded" and row.worktree_resolution == "unresolved"
     assert worker.verbs().count("start") == starts
@@ -308,7 +320,7 @@ def test_u24_placeholder_row_resolves_by_same_id_start_not_as_legacy(db, worker)
     worker.executions.pop(execution_id)                  # start never reached the worker
     with get_db_session() as s:
         s.query(EstateExecution).filter(EstateExecution.id == execution_id).update({"last_observed_at": None})
-    estate_router.get_estate_execution(execution_id)
+    _sweep()
     starts = [p for _h, v, p in worker.calls if v == "start"]
     assert len(starts) == 2 and starts[1]["execution_id"] == execution_id
     assert _row(execution_id).lifecycle_state in ("accepted", "running")
@@ -321,7 +333,7 @@ def test_u63_placeholder_past_deadline_is_fenced_not_restarted(db, worker):
         s.query(EstateExecution).filter(EstateExecution.id == execution_id).update({
             "execution_deadline_at": utcnow_naive() - timedelta(seconds=1), "last_observed_at": None})
     starts = worker.verbs().count("start")
-    estate_router.get_estate_execution(execution_id)
+    _sweep()
     assert worker.verbs().count("start") == starts
     row = _row(execution_id)
     assert row.lifecycle_state == "failed" and row.worktree_resolution == "not_started"
@@ -701,6 +713,71 @@ def test_6d_f4_get_only_observes_its_own_row(db, worker, monkeypatch):
                               worker_handle_json=json.dumps({"pid": 1}), worktree_resolution="unresolved"))
         s.query(EstateExecution).update({"last_observed_at": None})
     calls = len(worker.calls)
-    estate_router.get_estate_execution("mine", wait_s=0)
+    worker.executions["mine"] = {"claim": "start", "state": "failed", "quiescent": True}
+    estate_router.get_estate_execution("mine", wait_s=30)
     statuses = [p["execution_id"] for _h, v, p in worker.calls[calls:] if v == "status"]
-    assert statuses == ["mine"] and other not in statuses
+    assert statuses and set(statuses) == {"mine"} and other not in statuses
+
+
+def test_6e_f2_wait_zero_makes_no_worker_call_and_returns_the_snapshot(db, worker, monkeypatch):
+    import time as _time
+    execution_id = _admitted(worker)
+    monkeypatch.setattr(lane, "_trigger_background_reconcile", lambda: None)
+    with get_db_session() as s:
+        s.query(EstateExecution).update({"last_observed_at": None})
+    calls = len(worker.calls)
+    started = _time.monotonic()
+    view = estate_router.get_estate_execution(execution_id, wait_s=0)
+    assert _time.monotonic() - started < 2 and len(worker.calls) == calls
+    assert view["execution_id"] == execution_id
+
+
+def test_6e_f1_concurrent_start_callers_never_take_a_refusal_as_proof(db, worker, monkeypatch):
+    """Caller A's start is paused in flight; caller B (e.g. a reconcile)
+    issues a second start that is refused pre-claim. B must not resolve
+    not_started: two attempts were issued."""
+    import threading as _threading
+    _lease()
+    worker.start_mode = "refuse"
+    paused, go = _threading.Event(), _threading.Event()
+    real_call = worker.call
+    first = {"seen": False}
+
+    def _call(host_id, verb, payload, *, deadline_s):
+        if verb == "start" and not first["seen"]:
+            first["seen"] = True
+            paused.set()
+            go.wait(5)
+            worker.start_mode = "normal"
+        return real_call(host_id, verb, payload, deadline_s=deadline_s)
+
+    monkeypatch.setattr(worker.client, "call_worker", _call)
+    monkeypatch.setattr(lane, "_dispatch_start", lane._dispatch_start)
+    outcome = {}
+    dispatch = _threading.Thread(target=lambda: outcome.update(a=_dispatch()))
+    dispatch.start()
+    assert paused.wait(5)
+    with get_db_session() as s:
+        execution_id = s.query(EstateExecution).one().id
+    lane._dispatch_start(execution_id)                      # caller B: refused pre-claim
+    # B's refusal was NOT taken as proof (two attempts were issued); B
+    # fenced instead, and the fence won on the worker before A's paused
+    # start arrived -- so not_started now rests on the fence, not the refusal.
+    fences = [p for _h, v, p in worker.calls if v == "status" and p.get("fence")]
+    assert fences and fences[0]["execution_id"] == execution_id
+    assert _row(execution_id).worktree_resolution == "not_started"
+    go.set()
+    dispatch.join(10)
+    assert worker.executions[execution_id].get("claim") == "fence"
+    assert "spawns" not in worker.executions[execution_id]      # A's delayed start never spawned
+    assert _row(execution_id).worktree_resolution == "not_started"
+
+
+def test_6e_f1_refusal_is_proof_only_for_the_sole_first_attempt(db, worker):
+    _lease()
+    worker.start_mode = "refuse"
+    execution_id = _dispatch()["execution_id"]
+    placeholder = json.loads(_row(execution_id).worker_handle_json)
+    assert placeholder["start_attempts"] == 1
+    assert _row(execution_id).worktree_resolution == "not_started"
+    assert not [p for _h, v, p in worker.calls if v == "status"]       # no fence needed: sole attempt

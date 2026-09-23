@@ -303,17 +303,35 @@ def _start_was_ambiguous(row) -> bool:
     return bool((_handle_of(row) or {}).get("start_ambiguous"))
 
 
+def _update_placeholder(execution_id: str, mutate) -> Optional[dict]:
+    """Serialized read-modify-write of a still-placeholder row's dispatch
+    state. Returns the new placeholder, or None when the row is no longer
+    an unresolved accepted placeholder (then no start may be issued)."""
+    from core.database import EstateExecution, lease_serialized_transaction
+    row = _load_row(execution_id)
+    if row is None:
+        return None
+    with lease_serialized_transaction(lease_id=row.lease_id) as db:
+        current = db.query(EstateExecution).filter(EstateExecution.id == execution_id).one_or_none()
+        if current is None or current.worktree_resolution != "unresolved" \
+                or current.lifecycle_state != "accepted" or not _is_placeholder(current):
+            return None
+        placeholder = mutate(dict(_handle_of(current)))
+        current.worker_handle_json = json.dumps(placeholder, sort_keys=True)
+        return placeholder
+
+
+def _claim_start_attempt(execution_id: str) -> Optional[int]:
+    """6e adjudication finding 1: every start issuance is a persisted,
+    serialized attempt number taken BEFORE the worker call."""
+    placeholder = _update_placeholder(
+        execution_id, lambda p: {**p, "start_attempts": int(p.get("start_attempts") or 0) + 1})
+    return None if placeholder is None else placeholder["start_attempts"]
+
+
 def _persist_start_ambiguity(execution_id: str) -> None:
-    """6d adjudication finding 2: ambiguity is DURABLE, so no later
-    dispatch attempt (reconcile, restart) can ever treat a refusal as proof
-    of not_started while an earlier request may still claim."""
-    from core.database import EstateExecution, get_db_session
-    marker = json.dumps({**PLACEHOLDER, "start_ambiguous": True})
-    with get_db_session() as db:
-        db.query(EstateExecution).filter(
-            EstateExecution.id == execution_id,
-            EstateExecution.worker_handle_json.in_((json.dumps(PLACEHOLDER), marker)),
-        ).update({EstateExecution.worker_handle_json: marker}, synchronize_session=False)
+    """6d adjudication finding 2: ambiguity is DURABLE."""
+    _update_placeholder(execution_id, lambda p: {**p, "start_ambiguous": True})
 
 
 def _fence_and_apply(execution_id: str, host_id: str) -> None:
@@ -325,16 +343,21 @@ def _fence_and_apply(execution_id: str, host_id: str) -> None:
 
 def _dispatch_start(execution_id: str) -> None:
     """Step 6 state machine. A lost/failed `start` is never evidence for
-    `failed`. A worker pre-claim refusal is proof of not_started ONLY for
-    the first and only start ever sent (round-0 finding 3); ambiguity is
-    persisted, and after it -- or once the persisted deadline has passed
-    -- resolution goes only through `status {fence: true}`."""
+    `failed`. Each start is a persisted, serialized attempt; a worker
+    pre-claim refusal proves not_started ONLY when the resolution
+    transaction confirms it answered the first and only start ever issued
+    for this id, with no recorded ambiguity (round-0 finding 3, 6d finding
+    2, 6e finding 1). Otherwise -- and once the persisted deadline has
+    passed -- resolution goes only through `status {fence: true}`."""
     for _attempt in range(2):
         row = _load_row(execution_id)
         if row is None or not _is_placeholder(row) or row.worktree_resolution != "unresolved":
             return
         if row.execution_deadline_at is not None and _now() >= row.execution_deadline_at:
-            _fence_and_apply(execution_id, row.host_id)          # finding 5: never start after the deadline
+            _fence_and_apply(execution_id, row.host_id)          # never start after the deadline
+            return
+        number = _claim_start_attempt(execution_id)
+        if number is None:
             return
         result, exc = _worker(row.host_id, "start", _start_payload(row), deadline_s=60)
         if exc is None:
@@ -343,31 +366,41 @@ def _dispatch_start(execution_id: str) -> None:
         if _is_ambiguous(exc):
             _persist_start_ambiguity(execution_id)
             continue
-        if not _start_was_ambiguous(row):
-            _resolve_not_started(execution_id, f"worker refused start before claim: {exc.code}: {exc}")
+        if _resolve_not_started(execution_id, f"worker refused start before claim: {exc.code}: {exc}",
+                                sole_attempt=number):
             return
         break
     row = _load_row(execution_id)
-    if row is not None and _is_placeholder(row) and _start_was_ambiguous(row):
+    if row is not None and _is_placeholder(row) and row.worktree_resolution == "unresolved":
         _fence_and_apply(execution_id, row.host_id)
 
 
-def _resolve_not_started(execution_id: str, reason: str) -> None:
+def _resolve_not_started(execution_id: str, reason: str, *, sole_attempt: Optional[int] = None) -> bool:
+    """Write failed + not_started. With `sole_attempt`, this is a refusal
+    being taken as proof: allowed only when, inside the serialized
+    transaction, the row still records exactly that one start attempt and
+    no ambiguity. Worker-proven outcomes (fenced / start_failed) pass None."""
     from core.database import EstateExecution, lease_serialized_transaction
     row = _load_row(execution_id)
     if row is None:
-        return
+        return False
     with lease_serialized_transaction(lease_id=row.lease_id) as db:
         current = db.query(EstateExecution).filter(EstateExecution.id == execution_id).one_or_none()
         if current is None or current.worktree_resolution != "unresolved" \
                 or current.lifecycle_state not in ("accepted", "lost"):
-            return
+            return False
+        if sole_attempt is not None:
+            placeholder = _handle_of(current) or {}
+            if sole_attempt != 1 or int(placeholder.get("start_attempts") or 0) != 1 \
+                    or placeholder.get("start_ambiguous"):
+                return False
         current.lifecycle_state = "failed"
         current.worktree_resolution = "not_started"
         current.error = reason
         current.finished_at = _now()
     _record_outcome(row, "failed", row.host_id)
     _release_spool(execution_id, "not_started")
+    return True
 
 
 def _apply_view(execution_id: str, view: dict, *, start_answer: bool = False, fenced: bool = False) -> None:
@@ -554,6 +587,7 @@ def _reconcile_legacy(db, EstateExecution) -> int:
 
 
 _BACKGROUND_RECONCILE = {"lock": threading.Lock(), "last": 0.0}
+_TRANSPORT_MARGIN_SECONDS = 15.0     # estate_worker_client transports allow deadline_s + 15
 BACKGROUND_RECONCILE_INTERVAL_SECONDS = 30.0
 
 
@@ -590,7 +624,9 @@ def _reconcile_one(execution_id: str, budget_s: float) -> None:
     stale_before = _now() - timedelta(seconds=OBSERVATION_STALE_SECONDS)
     if row.last_observed_at is not None and row.last_observed_at > stale_before and row.lifecycle_state != "lost":
         return
-    deadline_s = max(2.0, min(10.0, budget_s))
+    deadline_s = min(10.0, budget_s)
+    if deadline_s < 1.0:
+        return
     view, exc = _worker(row.host_id, "status", {"execution_id": execution_id}, deadline_s=deadline_s)
     if exc is None:
         _apply_view(execution_id, view)
@@ -614,7 +650,12 @@ def get_estate_execution(execution_id: str, wait_s: float = 0) -> Optional[dict]
             _reconcile_legacy(db, EstateExecution)          # DB/local only, no worker calls
         finally:
             db.close()
-        _reconcile_one(execution_id, max(0.0, deadline - time.monotonic()) or 5.0)
+        remaining = deadline - time.monotonic()
+        if remaining >= _TRANSPORT_MARGIN_SECONDS + 2:
+            # Only when the remaining budget covers the worker deadline PLUS
+            # the transport's own margin (6e finding 2); otherwise serve the
+            # DB snapshot -- monitors and the background sweep keep it fresh.
+            _reconcile_one(execution_id, remaining - _TRANSPORT_MARGIN_SECONDS)
         db = SessionLocal()
         try:
             row = db.query(EstateExecution).filter(EstateExecution.id == execution_id).one_or_none()
