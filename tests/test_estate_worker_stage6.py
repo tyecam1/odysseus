@@ -835,3 +835,33 @@ def test_6c_f1_closure_view_exposes_the_latest_quiescent_finalize_result(cfg, re
     assert closed["closed"] is True and closed["quiescent"] is True
     assert closed["finalize_result"]["outcome"] == "finalized"
     assert closed["finalize_result"]["commit_sha"] == _git(repo["wt"], "rev-parse", "HEAD")
+
+
+def test_6d_f1_live_or_unproven_verify_unit_blocks_verification_and_aggregate(cfg, units):
+    units.write_spool("E1", run_unit="aoteru-run-E1.service", state={"state": "succeeded"}, populated=False)
+    units.verify_live = True
+    response = _call("worktree.verify", {"repo_id": "test-repo", "worktree_path": str(cfg["repo"]),
+                                         "branch": "feature"})
+    assert response["ok"] is False and response["error"]["code"] == "executor_unavailable"
+    status = _result("status", {"execution_id": "E1"})
+    assert status["quiescent"] is False and status["state"] == "running"
+    units.verify_live = False
+    assert _result("status", {"execution_id": "E1"})["state"] == "succeeded"
+
+
+def test_6d_f1_run_in_unit_timeout_stops_the_unit_and_reports_its_proof(monkeypatch, tmp_path):
+    procs = estate_worker.estate_worker_procs
+    killed = []
+
+    def _timeout(*args, **kwargs):
+        raise subprocess.TimeoutExpired(args[0], 1)
+    monkeypatch.setattr(procs.subprocess, "run", _timeout)
+    monkeypatch.setattr(procs, "kill_unit", lambda unit: killed.append(unit) or {"ok": True})
+    monkeypatch.setattr(procs, "tree_quiescent", lambda handle: True)
+    with pytest.raises(procs.ProcessLayerError, match="timed out and was stopped"):
+        procs.run_in_unit(["true"], str(tmp_path), "aoteru-verify-x", timeout=1)
+    assert killed == ["aoteru-verify-x.service"]
+    monkeypatch.setattr(procs, "tree_quiescent", lambda handle: False)
+    monkeypatch.setattr(procs.time, "monotonic", iter(range(0, 10_000, 20)).__next__)
+    with pytest.raises(procs.ProcessLayerError, match="NOT proven stopped"):
+        procs.run_in_unit(["true"], str(tmp_path), "aoteru-verify-y", timeout=1)

@@ -30,6 +30,8 @@ class FakeUnits:
         monkeypatch.setattr(self.procs, "own_cgroup", lambda: self.current_cgroup)
         monkeypatch.setattr(self.procs, "kill_unit", self._kill)
         monkeypatch.setattr(self.procs, "run_in_unit", self._run_in_unit)
+        self.verify_live = False
+        monkeypatch.setattr(self.procs, "verify_units_quiescent", lambda: not self.verify_live)
         self.verify_units: list[str] = []
 
     def _run_in_unit(self, argv, cwd, unit, *, timeout=60.0, input_text=None):

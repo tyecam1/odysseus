@@ -286,32 +286,57 @@ def _start_payload(row) -> dict:
     }
 
 
+def _start_was_ambiguous(row) -> bool:
+    return bool((_handle_of(row) or {}).get("start_ambiguous"))
+
+
+def _persist_start_ambiguity(execution_id: str) -> None:
+    """6d adjudication finding 2: ambiguity is DURABLE, so no later
+    dispatch attempt (reconcile, restart) can ever treat a refusal as proof
+    of not_started while an earlier request may still claim."""
+    from core.database import EstateExecution, get_db_session
+    marker = json.dumps({**PLACEHOLDER, "start_ambiguous": True})
+    with get_db_session() as db:
+        db.query(EstateExecution).filter(
+            EstateExecution.id == execution_id,
+            EstateExecution.worker_handle_json.in_((json.dumps(PLACEHOLDER), marker)),
+        ).update({EstateExecution.worker_handle_json: marker}, synchronize_session=False)
+
+
+def _fence_and_apply(execution_id: str, host_id: str) -> None:
+    view, exc = _worker(host_id, "status", {"execution_id": execution_id, "fence": True}, deadline_s=20)
+    if exc is None:
+        _apply_view(execution_id, view, fenced=True)
+    # else: stays accepted + placeholder; only the bounded rule decides later.
+
+
 def _dispatch_start(execution_id: str) -> None:
     """Step 6 state machine. A lost/failed `start` is never evidence for
-    `failed`; a worker pre-claim refusal is proof of not_started ONLY for
-    the first and only start (round-0 finding 3) -- after any ambiguity the
-    control plane resolves through `status {fence: true}`."""
-    row = _load_row(execution_id)
-    if row is None:
-        return
-    ambiguous = False
+    `failed`. A worker pre-claim refusal is proof of not_started ONLY for
+    the first and only start ever sent (round-0 finding 3); ambiguity is
+    persisted, and after it -- or once the persisted deadline has passed
+    -- resolution goes only through `status {fence: true}`."""
     for _attempt in range(2):
+        row = _load_row(execution_id)
+        if row is None or not _is_placeholder(row) or row.worktree_resolution != "unresolved":
+            return
+        if row.execution_deadline_at is not None and _now() >= row.execution_deadline_at:
+            _fence_and_apply(execution_id, row.host_id)          # finding 5: never start after the deadline
+            return
         result, exc = _worker(row.host_id, "start", _start_payload(row), deadline_s=60)
         if exc is None:
             _apply_view(execution_id, {**result, "state": result.get("state")}, start_answer=True)
             return
         if _is_ambiguous(exc):
-            ambiguous = True
+            _persist_start_ambiguity(execution_id)
             continue
-        if not ambiguous:
+        if not _start_was_ambiguous(row):
             _resolve_not_started(execution_id, f"worker refused start before claim: {exc.code}: {exc}")
             return
         break
-    if ambiguous:
-        view, exc = _worker(row.host_id, "status", {"execution_id": execution_id, "fence": True}, deadline_s=20)
-        if exc is None:
-            _apply_view(execution_id, view)
-        # else: stays accepted + placeholder; the bounded rule decides later.
+    row = _load_row(execution_id)
+    if row is not None and _is_placeholder(row) and _start_was_ambiguous(row):
+        _fence_and_apply(execution_id, row.host_id)
 
 
 def _resolve_not_started(execution_id: str, reason: str) -> None:
@@ -332,7 +357,7 @@ def _resolve_not_started(execution_id: str, reason: str) -> None:
     _release_spool(execution_id, "not_started")
 
 
-def _apply_view(execution_id: str, view: dict, *, start_answer: bool = False) -> None:
+def _apply_view(execution_id: str, view: dict, *, start_answer: bool = False, fenced: bool = False) -> None:
     """Map one worker observation onto the row (steps 6-8). Outcome only;
     never touches worktree_resolution except via _resolve_not_started."""
     row = _load_row(execution_id)
@@ -348,16 +373,9 @@ def _apply_view(execution_id: str, view: dict, *, start_answer: bool = False) ->
                     error="spool_released_before_resolution")
         return
     if state == "unknown":
-        if start_answer:
+        if start_answer or fenced or not _is_placeholder(row):
             return
-        deadline = row.execution_deadline_at
-        if _is_placeholder(row) and (deadline is None or now < deadline):
-            _dispatch_start(execution_id)          # same id: safe by the worker's atomic claim
-        elif _is_placeholder(row):
-            fenced, exc = _worker(row.host_id, "status", {"execution_id": execution_id, "fence": True},
-                                  deadline_s=20)
-            if exc is None and fenced.get("state") in ("fenced", "start_failed"):
-                _resolve_not_started(execution_id, "fenced after the start deadline: writer never ran")
+        _dispatch_start(execution_id)   # re-issues the same id before the deadline, fences after it
         return
     if state == "starting":
         _transition(execution_id, ("accepted", "lost"), last_observed_at=now, lifecycle_state="accepted")
@@ -522,16 +540,70 @@ def _reconcile_legacy(db, EstateExecution) -> int:
     return reconciled
 
 
-def get_estate_execution(execution_id: str, wait_s: float = 0) -> Optional[dict]:
-    """GET /api/estate/run/{id}[?wait=]: bounded wait (<= 60 s), re-read
-    every 2 s, early return on any state other than accepted/running.
-    Observation only -- never dispatches."""
-    from core.database import EstateExecution, SessionLocal
-    deadline = time.monotonic() + max(0.0, min(float(wait_s or 0), 60.0))
-    while True:
+_BACKGROUND_RECONCILE = {"lock": threading.Lock(), "last": 0.0}
+BACKGROUND_RECONCILE_INTERVAL_SECONDS = 30.0
+
+
+def _trigger_background_reconcile() -> None:
+    """Estate-wide reconciliation (other rows, spool.release retries) runs
+    off the request path, single-flight and rate-limited (6d adjudication
+    finding 4), so one GET never waits on other executions' workers."""
+    state = _BACKGROUND_RECONCILE
+    now = time.monotonic()
+    if now - state["last"] < BACKGROUND_RECONCILE_INTERVAL_SECONDS or not state["lock"].acquire(blocking=False):
+        return
+    state["last"] = now
+
+    def _run():
+        from core.database import EstateExecution, SessionLocal
         db = SessionLocal()
         try:
             reconcile_stale_estate_executions(db, EstateExecution)
+        except Exception:
+            log.exception("background estate reconciliation failed")
+        finally:
+            db.close()
+            state["lock"].release()
+
+    threading.Thread(target=_run, name="estate-reconcile", daemon=True).start()
+
+
+def _reconcile_one(execution_id: str, budget_s: float) -> None:
+    """Observe ONE row, bounded by the caller's remaining budget."""
+    row = _load_row(execution_id)
+    if row is None or row.worker_handle_json is None or row.worktree_resolution != "unresolved" \
+            or row.lifecycle_state not in ("accepted", "running", "lost"):
+        return
+    stale_before = _now() - timedelta(seconds=OBSERVATION_STALE_SECONDS)
+    if row.last_observed_at is not None and row.last_observed_at > stale_before and row.lifecycle_state != "lost":
+        return
+    deadline_s = max(2.0, min(10.0, budget_s))
+    view, exc = _worker(row.host_id, "status", {"execution_id": execution_id}, deadline_s=deadline_s)
+    if exc is None:
+        _apply_view(execution_id, view)
+    else:
+        _mark_lost_if_due(execution_id)
+
+
+def get_estate_execution(execution_id: str, wait_s: float = 0) -> Optional[dict]:
+    """GET /api/estate/run/{id}[?wait=]: bounded wait (<= 60 s), re-read
+    every 2 s, early return on any state other than accepted/running.
+    Observation only -- never dispatches a new execution. Worker calls are
+    limited to THIS row and to the remaining wait budget; estate-wide
+    reconciliation is triggered in the background (finding 4)."""
+    from core.database import EstateExecution, SessionLocal
+    started = time.monotonic()
+    deadline = started + max(0.0, min(float(wait_s or 0), 60.0))
+    _trigger_background_reconcile()
+    while True:
+        db = SessionLocal()
+        try:
+            _reconcile_legacy(db, EstateExecution)          # DB/local only, no worker calls
+        finally:
+            db.close()
+        _reconcile_one(execution_id, max(0.0, deadline - time.monotonic()) or 5.0)
+        db = SessionLocal()
+        try:
             row = db.query(EstateExecution).filter(EstateExecution.id == execution_id).one_or_none()
             if row is None:
                 return None
@@ -741,18 +813,26 @@ def push_finalized_execution(execution_id: str) -> dict:
     }, deadline_s=180)
     if exc is not None:
         return {"pushed": False, "code": exc.code, "reason": str(exc)}
-    new_push = {**push, **(result.get("push") or {}), "attempts": int(push.get("attempts") or 0) + 1,
-                "last_attempt_at": _now().isoformat()}
+    new_push = {**push, **(result.get("push") or {}), "last_attempt_at": _now().isoformat()}
     if result.get("outcome") == "push_in_progress":
         return {"pushed": False, "code": "push_in_progress"}
-    with get_db_session() as db:
+    # Merge against the CURRENT row in one serialized transaction (6d
+    # adjudication finding 3): `pushed` is absorbing and attempts count
+    # from the stored value, so racing retries never regress or undercount.
+    from core.database import lease_serialized_transaction
+    with lease_serialized_transaction(lease_id=row.lease_id or execution_id) as db:
         current = db.query(EstateExecution).filter(
             EstateExecution.id == execution_id,
             EstateExecution.worktree_resolution.in_(("finalized", "recovered")),
         ).one_or_none()
         if current is not None:
-            current.finalization_json = _merge_finalization(current.finalization_json, push=new_push)
-    response = {"pushed": bool(result.get("pushed")), "push": new_push}
+            stored = (json.loads(current.finalization_json or "{}") or {}).get("push") or {}
+            merged = {**stored, **new_push, "attempts": int(stored.get("attempts") or 0) + 1}
+            if stored.get("state") == "pushed":
+                merged = {**stored, "attempts": merged["attempts"]}
+            current.finalization_json = _merge_finalization(current.finalization_json, push=merged)
+            new_push = merged
+    response = {"pushed": new_push.get("state") == "pushed", "push": new_push}
     if not response["pushed"]:
         response["next_action"] = _next_action_push(execution_id)
     return response

@@ -441,6 +441,9 @@ def _worktree_verification(repo_id: Any, worktree_path: Any, branch: Any) -> dic
         raise WorkerError("bad_request", "worktree verification requires repo_id, worktree_path and branch")
     units_ok, _detail = estate_worker_procs.runner_units_supported()
     if units_ok and not _IN_VERIFY_UNIT["value"]:
+        if estate_worker_procs.verify_units_quiescent() is not True:
+            raise WorkerError("executor_unavailable",
+                              "an earlier verification unit is still live or unknown; refusing (fail closed)")
         payload = json.dumps({"repo_id": repo_id, "worktree_path": worktree_path, "branch": branch})
         completed = estate_worker_procs.run_in_unit(
             _runner_argv("--run-verify"), str(Path(get_app_root()).resolve()),
@@ -789,6 +792,11 @@ def _execution_aggregate(spool: Path, *, fence_unstarted: bool) -> tuple[bool | 
                              "closed before the attempt decided")
         units.append({"unit": (run or {}).get("unit"), "kind": f"finalize-{number}",
                       "quiescent": _unit_quiescent(run)})
+    if estate_worker_procs.runner_units_supported()[0]:
+        # A verification unit that timed out unproven may still touch a
+        # worktree; the aggregate cannot be proven while one is live.
+        units.append({"unit": "aoteru-verify-*", "kind": "verify",
+                      "quiescent": estate_worker_procs.verify_units_quiescent()})
     if any(unit["quiescent"] is None for unit in units):
         aggregate = None
     else:

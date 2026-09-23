@@ -544,11 +544,11 @@ def test_u52_u59_successful_prepare_binds_active_lease(db, worker):
 
 
 @pytest.mark.parametrize("answer,error", [
-    ({"state": "prepare_failed", "error": "boom"}, park_lease_ops.WorktreeVerificationError),
-    ({"state": "fenced"}, park_lease_ops.WorktreeVerificationError),
-    ({"state": "prepared", "path": "/w", "branch": "feat/y", "head_sha": HEAD, "clean": False},
+    ({"state": "prepare_failed", "error": "boom", "quiescent": True}, park_lease_ops.WorktreeVerificationError),
+    ({"state": "fenced", "quiescent": True}, park_lease_ops.WorktreeVerificationError),
+    ({"state": "prepared", "path": "/w", "branch": "feat/y", "head_sha": HEAD, "clean": False, "quiescent": True},
      park_lease_ops.RepoNotClean),
-    ({"state": "prepared", "path": "/w", "branch": "other", "head_sha": HEAD, "clean": True},
+    ({"state": "prepared", "path": "/w", "branch": "other", "head_sha": HEAD, "clean": True, "quiescent": True},
      park_lease_ops.WorktreeVerificationError),
 ])
 def test_u51_positively_known_failures_release_the_reservation(db, worker, answer, error):
@@ -617,3 +617,90 @@ def test_u49_concurrent_parks_one_reservation_one_prepare(db, worker):
     assert sum(isinstance(o, dict) for o in outcomes) == 1
     assert sum(isinstance(o, park_lease_ops.ParkConflict) for o in outcomes) == 1
     assert worker.verbs().count("worktree.prepare") == 1
+
+
+
+# ---------------------------------------------------------------------
+# 6d adjudication regressions
+# ---------------------------------------------------------------------
+
+@pytest.mark.parametrize("answer", [{"state": "unknown", "quiescent": True},
+                                    {"state": "prepared", "path": "/w", "branch": "feat/y", "head_sha": HEAD,
+                                     "clean": True},             # no quiescence proof
+                                    {"state": "prepare_failed", "quiescent": None}])
+def test_6d_f6_unrecognised_or_unproven_prepare_answers_keep_the_reservation(db, worker, answer):
+    worker.prepare_answer = answer
+    with pytest.raises(park_lease_ops.PrepareOutcomeUnresolved) as info:
+        park_lease_ops.park_with_worktree("odysseus", HOME, "feat/y")
+    assert _lease_status(info.value.lease_id) == "preparing"
+
+
+def test_6d_f2_persisted_start_ambiguity_survives_a_later_dispatch_attempt(db, worker):
+    """Ambiguous start + unreachable fence, then a LATER reconcile's start
+    is refused pre-claim: the refusal must not resolve not_started."""
+    _lease()
+    worker.fail["start"] = ["worker_unreachable", "worker_unreachable"]
+    worker.fail["status"] = ["worker_unreachable"]
+    execution_id = _dispatch()["execution_id"]
+    assert json.loads(_row(execution_id).worker_handle_json).get("start_ambiguous") is True
+    worker.fail["start"] = ["authority_denied"]
+    worker.fail["status"] = ["worker_unreachable"]
+    lane._dispatch_start(execution_id)
+    row = _row(execution_id)
+    assert row.worktree_resolution == "unresolved" and row.lifecycle_state == "accepted"
+    worker.fail.clear()
+    lane._dispatch_start(execution_id)          # before the deadline: same-id start re-issued, now claims
+    row = _row(execution_id)
+    assert row.worktree_resolution == "unresolved" and worker.executions[execution_id]["spawns"] == 1
+
+
+def test_6d_f5_no_start_is_sent_once_the_persisted_deadline_passed(db, worker):
+    _lease()
+    worker.fail["start"] = ["worker_unreachable"]
+    execution_id = _dispatch()["execution_id"]
+    with get_db_session() as s:
+        s.query(EstateExecution).filter(EstateExecution.id == execution_id).update(
+            {"execution_deadline_at": utcnow_naive() - timedelta(seconds=1)})
+    starts = worker.verbs().count("start")
+    worker.executions.pop(execution_id, None)
+    lane._dispatch_start(execution_id)
+    assert worker.verbs().count("start") == starts
+    assert _row(execution_id).worktree_resolution == "not_started"
+
+
+def test_6d_f3_racing_push_retries_never_regress_pushed(db, worker):
+    execution_id = _succeeded(worker)
+    worker.head = "b" * 40
+    worker.finalize_outcome = {**worker.finalize_outcome, "push": {"state": "failed", "commit_sha": "b" * 40}}
+    lane.finalize_execution(execution_id=execution_id, repo_id="odysseus", host_id=HOME, commit_message="x")
+    worker.push_answer = {"pushed": True, "push": {"state": "pushed"}}
+    assert lane.push_finalized_execution(execution_id)["pushed"] is True
+    # a stale concurrent retry that read `failed` earlier and now reports failure
+    with get_db_session() as s:
+        row = s.query(EstateExecution).filter(EstateExecution.id == execution_id).one()
+        stale = json.loads(row.finalization_json)
+    stale["push"]["state"] = "failed"
+    worker.push_answer = {"pushed": False, "push": {"state": "failed", "error": "late"}}
+    import unittest.mock as mock
+    with mock.patch.object(lane, "_load_row", wraps=lane._load_row) as loader:
+        original = lane._load_row(execution_id)
+        original.finalization_json = json.dumps(stale)
+        loader.return_value = original
+        loader.side_effect = None
+        lane.push_finalized_execution(execution_id)
+    push = json.loads(_row(execution_id).finalization_json)["push"]
+    assert push["state"] == "pushed" and push["attempts"] >= 3
+
+
+def test_6d_f4_get_only_observes_its_own_row(db, worker, monkeypatch):
+    other = _admitted(worker)
+    monkeypatch.setattr(lane, "_trigger_background_reconcile", lambda: None)
+    with get_db_session() as s:
+        s.add(EstateExecution(id="mine", objective="o", executor="codex-write", provider="codex",
+                              host_id=HOME, repo_id="other-repo", lease_id="LX", lifecycle_state="running",
+                              worker_handle_json=json.dumps({"pid": 1}), worktree_resolution="unresolved"))
+        s.query(EstateExecution).update({"last_observed_at": None})
+    calls = len(worker.calls)
+    estate_router.get_estate_execution("mine", wait_s=0)
+    statuses = [p["execution_id"] for _h, v, p in worker.calls[calls:] if v == "status"]
+    assert statuses == ["mine"] and other not in statuses

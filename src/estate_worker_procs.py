@@ -523,5 +523,46 @@ def run_in_unit(argv: list[str], cwd: str, unit: str, *, timeout: float = 60.0,
     try:
         return subprocess.run(command, env=_user_manager_env(), capture_output=True, text=True,
                               timeout=timeout, input=input_text)
-    except (OSError, subprocess.TimeoutExpired) as exc:
+    except subprocess.TimeoutExpired as exc:
+        # The client timing out proves nothing about the unit (6d
+        # adjudication finding 1): stop it and prove its cgroup quiescent
+        # before reporting; otherwise the unit stays visible to
+        # verify_units_quiescent() and every later check fails closed.
+        kill_unit(f"{unit}.service")
+        handle = {"cgroup": f"{_app_slice()}/{unit}.service", "unit": f"{unit}.service"}
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline and tree_quiescent(handle) is not True:
+            time.sleep(0.2)
+        state = "stopped" if tree_quiescent(handle) is True else "NOT proven stopped"
+        raise ProcessLayerError("executor_unavailable",
+                                f"verification unit {unit} timed out and was {state}") from exc
+    except OSError as exc:
         raise ProcessLayerError("executor_unavailable", f"systemd-run --wait failed for {unit}: {exc}") from exc
+
+
+def _app_slice() -> str:
+    uid = os.getuid() if hasattr(os, "getuid") else 0
+    return f"/user.slice/user-{uid}.slice/user@{uid}.service/app.slice"
+
+
+def verify_units_quiescent() -> Optional[bool]:
+    """True when no `aoteru-verify-*` unit is loaded in a live state (6d
+    adjudication finding 1): a timed-out verification that could not be
+    proven stopped keeps every later verification and closure fail-closed
+    until it is gone. None when systemd cannot be asked."""
+    if os.name == "nt":
+        return None
+    try:
+        completed = subprocess.run(
+            ["systemctl", "--user", "list-units", "--all", "--no-legend", "--plain", "aoteru-verify-*"],
+            env=_user_manager_env(), capture_output=True, text=True, timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if completed.returncode != 0:
+        return None
+    for line in completed.stdout.splitlines():
+        fields = line.split()
+        if len(fields) >= 4 and fields[0].startswith("aoteru-verify-") and fields[2] not in ("inactive", "failed"):
+            return False
+    return True

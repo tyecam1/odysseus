@@ -486,9 +486,12 @@ def park_with_worktree(repo_id: str, host_id: str, branch: str, *, session_id: O
         _release_reservation(lease_id)            # worker pre-claim refusal: positively nothing mutated
         raise WorktreeVerificationError(f"refusing to park {repo_id!r} on {branch!r}: {exc.code}: {exc}") from exc
     state = result.get("state")
-    if state == "preparing":
+    if state not in ("prepared", "prepare_failed", "fenced", "prepare_interrupted") \
+            or result.get("quiescent") is not True:
+        # `preparing`, or any unrecognised/unproven state: ambiguous (6d
+        # adjudication finding 6) -- the reservation stays protected.
         raise PrepareOutcomeUnresolved(
-            f"prepare for {repo_id!r} on {host_id!r} is still running or not proven finished",
+            f"prepare for {repo_id!r} on {host_id!r} is {state!r}, not a proven terminal outcome",
             lease_id=lease_id, host_id=host_id,
         )
     if state != "prepared":
