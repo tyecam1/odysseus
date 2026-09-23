@@ -45,3 +45,12 @@ def test_status_capabilities_unregistered_host_fails_closed(monkeypatch):
     assert rows == [{"alias": "local-fast", "bound": True, "qualified_on_this_host": False,
                      "binding_on_this_host": None, "resolved_on_this_host": False,
                      "reason": "this host is not registered in config/estate.yaml"}]
+
+
+def test_status_capabilities_router_import_failure_degrades(monkeypatch):
+    module = _load()
+    monkeypatch.setitem(sys.modules, "src.estate_router", None)  # import raises ImportError
+    rows = module._capabilities_on_this_host({"capabilities": [{"alias": "local-fast", "binding": "q"}]},
+                                             {"id": "hz2-workstation"})
+    assert rows[0]["resolved_on_this_host"] is None
+    assert rows[0]["reason"].startswith("router unavailable:")

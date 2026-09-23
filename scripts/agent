@@ -489,7 +489,7 @@ def _capabilities_on_this_host(models, this_host):
     host_id = this_host["id"] if this_host else None
     try:
         from src.estate_router import resolve_alias
-    except ModuleNotFoundError as exc:
+    except Exception as exc:  # any router import failure degrades, never aborts status
         resolve_alias, import_error = None, str(exc)
     out = []
     for c in models.get("capabilities", []):
