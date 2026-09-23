@@ -349,6 +349,12 @@ def kill_tree(handle: dict) -> dict:
 # ---------------------------------------------------------------------
 
 _CGROUP_ROOT = Path("/sys/fs/cgroup")
+# Bounded unit cleanup (gate round 10): `systemctl --user kill` may take at
+# most KILL_UNIT_TIMEOUT_S, and run_in_unit then proves the cgroup quiescent
+# within UNIT_STOP_PROOF_S. A timed-out verify unit therefore lives at most
+# its run limit + KILL_UNIT_TIMEOUT_S + UNIT_STOP_PROOF_S.
+KILL_UNIT_TIMEOUT_S = 5.0
+UNIT_STOP_PROOF_S = 15.0
 # Environment a runner unit inherits. A transient user service starts from
 # the user manager's environment, not the caller's, so only these are
 # forwarded explicitly (plus every AOTERU_* variable).
@@ -489,7 +495,7 @@ def kill_unit(unit: Optional[str]) -> dict:
     try:
         completed = subprocess.run(
             ["systemctl", "--user", "kill", "--signal=KILL", unit],
-            env=_user_manager_env(), capture_output=True, text=True, timeout=15,
+            env=_user_manager_env(), capture_output=True, text=True, timeout=KILL_UNIT_TIMEOUT_S,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         return {"ok": False, "detail": str(exc)}
@@ -530,7 +536,7 @@ def run_in_unit(argv: list[str], cwd: str, unit: str, *, timeout: float = 60.0,
         # verify_units_quiescent() and every later check fails closed.
         kill_unit(f"{unit}.service")
         handle = {"cgroup": f"{_app_slice()}/{unit}.service", "unit": f"{unit}.service"}
-        deadline = time.monotonic() + 15
+        deadline = time.monotonic() + UNIT_STOP_PROOF_S
         while time.monotonic() < deadline and tree_quiescent(handle) is not True:
             time.sleep(0.2)
         state = "stopped" if tree_quiescent(handle) is True else "NOT proven stopped"

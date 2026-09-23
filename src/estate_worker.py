@@ -492,8 +492,8 @@ _IN_VERIFY_UNIT = {"value": False}
 # proven stopped still fails closed. Control-plane verify calls allow
 # VERIFY_CALL_DEADLINE_S, which covers the wait plus the verification.
 VERIFY_UNIT_TIMEOUT_S = 10.0
-VERIFY_KILL_PROOF_S = 15.0
-_VERIFY_UNIT_WAIT_S = 35.0
+VERIFY_KILL_PROOF_S = estate_worker_procs.KILL_UNIT_TIMEOUT_S + estate_worker_procs.UNIT_STOP_PROOF_S
+_VERIFY_UNIT_WAIT_S = 35.0          # > 10 + 5 + 15 = 30 s worst-case late-unit lifetime
 VERIFY_CALL_DEADLINE_S = 60.0
 
 

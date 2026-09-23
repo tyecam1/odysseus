@@ -1277,7 +1277,13 @@ def test_gate9_verify_bounds_are_consistent_by_construction():
     unit's whole bounded lifetime (run limit + stop-and-proof), and every
     control-plane verify call's deadline covers that wait plus the run."""
     from src import estate_write_lane
-    lifetime = estate_worker.VERIFY_UNIT_TIMEOUT_S + estate_worker.VERIFY_KILL_PROOF_S
+    procs = estate_worker.estate_worker_procs
+    # Worst case: run limit + the kill call's own timeout + the stop proof.
+    lifetime = estate_worker.VERIFY_UNIT_TIMEOUT_S + procs.KILL_UNIT_TIMEOUT_S + procs.UNIT_STOP_PROOF_S
+    assert estate_worker.VERIFY_KILL_PROOF_S == procs.KILL_UNIT_TIMEOUT_S + procs.UNIT_STOP_PROOF_S
+    kill_source = __import__("inspect").getsource(procs.kill_unit)
+    assert "timeout=KILL_UNIT_TIMEOUT_S" in kill_source
+    assert "UNIT_STOP_PROOF_S" in __import__("inspect").getsource(procs.run_in_unit)
     assert estate_worker._VERIFY_UNIT_WAIT_S > lifetime
     assert estate_worker.VERIFY_CALL_DEADLINE_S >= estate_worker._VERIFY_UNIT_WAIT_S + estate_worker.VERIFY_UNIT_TIMEOUT_S
     assert estate_write_lane._VERIFY_DEADLINE_S == estate_worker.VERIFY_CALL_DEADLINE_S
