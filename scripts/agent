@@ -480,6 +480,40 @@ def _recent_routing_decisions_summary(limit: int = 10) -> list:
         return []
 
 
+def _capabilities_on_this_host(models, this_host):
+    """Stage 5/7 diagnostic: each alias's config facts PLUS its actual
+    resolution on THIS host via the canonical resolve_alias(alias, host) --
+    qualification, per-host binding, live inventory and GPU-yield included.
+    `bound` stays the config's default-binding fact. Degrades truthfully
+    (resolved None + reason) when the router cannot be imported or errors."""
+    host_id = this_host["id"] if this_host else None
+    try:
+        from src.estate_router import resolve_alias
+    except ModuleNotFoundError as exc:
+        resolve_alias, import_error = None, str(exc)
+    out = []
+    for c in models.get("capabilities", []):
+        host_entry = ((c.get("qualified_hosts") or {}).get(host_id) or {}) if host_id else {}
+        row = {
+            "alias": c["alias"], "bound": c.get("binding") is not None,
+            "qualified_on_this_host": bool(str(host_entry.get("evidence") or "").strip()),
+            "binding_on_this_host": (host_entry.get("binding") or c.get("binding")) if host_id else None,
+        }
+        if host_id is None:
+            row.update(resolved_on_this_host=False, reason="this host is not registered in config/estate.yaml")
+        elif resolve_alias is None:
+            row.update(resolved_on_this_host=None, reason=f"router unavailable: {import_error}")
+        else:
+            try:
+                resolution = resolve_alias(c["alias"], host_id)
+                row.update(resolved_on_this_host=bool(resolution.get("resolved")),
+                           reason=resolution.get("reason"), concrete_model=resolution.get("concrete_model"))
+            except Exception as exc:
+                row.update(resolved_on_this_host=None, reason=f"resolution failed: {exc}")
+        out.append(row)
+    return out
+
+
 def cmd_status(args):
     host_local = _load_host_local()
     live = _live_host_inventory()
@@ -502,18 +536,7 @@ def cmd_status(args):
             {"id": s["id"], "description": s.get("description"), "live": s.get("endpoint") is not None}
             for s in estate.get("services", [])
         ],
-        # Stage 7: `bound` is the config's default binding; routing on THIS
-        # host also needs its own qualified_hosts entry (with evidence), and
-        # may use a per-host binding override.
-        "capabilities": [
-            {"alias": c["alias"], "bound": c.get("binding") is not None,
-             "qualified_on_this_host": bool(this_host and str(
-                 ((c.get("qualified_hosts") or {}).get(this_host["id"]) or {}).get("evidence") or "").strip()),
-             "binding_on_this_host": (
-                 (((c.get("qualified_hosts") or {}).get(this_host["id"]) or {}).get("binding") or c.get("binding"))
-                 if this_host else None)}
-            for c in models.get("capabilities", [])
-        ],
+        "capabilities": _capabilities_on_this_host(models, this_host),
         "memory_sources": [
             {"id": s["id"], "status": s.get("status")} for s in memory_sources.get("sources", [])
         ],
