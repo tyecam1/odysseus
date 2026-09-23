@@ -11,7 +11,8 @@ file rather than a second launcher/config system.
     agent status                       # live host + registry resolution, JSON
     agent where                        # current repo's registry identity + lease
     agent sync                         # regenerate the disposable bay + workspace bootstrap
-    agent park <repo_id> [--host ID]   # acquire a write lease (fails closed on dirty/conflict; reclaims a stale lease)
+    agent park <repo_id> [--host ID]   # acquire a write lease on THIS host (fails closed on dirty/conflict; reclaims only a reclaimable lease)
+                                       # a lease on ANOTHER host: POST /api/estate/park/<repo>?host=<id>&branch=<b> (aoteru park --host)
     agent release <repo_id> [--host ID]
     agent heartbeat <repo_id> [--host ID]   # renew an active lease's heartbeat_at (run periodically during work)
     agent claude <auto|lab|home> "<task>" [--repo ID]   # resolve + dispatch, fails truthfully if unreachable

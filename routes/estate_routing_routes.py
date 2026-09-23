@@ -30,6 +30,9 @@ from src.estate_router import (
 from src.park_lease_ops import (
     NoActiveLease,
     ParkConflict,
+    PrepareOutcomeUnresolved,
+    park_with_worktree,
+    resolve_preparing_reservation,
     RepoNotClean,
     RepoNotResolvable,
     WorktreeVerificationError,
@@ -199,6 +202,19 @@ class DelegationPreflightEnvelope(BaseModel):
     units: List[DelegationPreflightUnit] = Field(min_length=1)
 
 
+class RecoverBody(BaseModel):
+    execution_id: str
+    lease_id: str
+    host_id: str
+    branch: str
+    worktree_path: str
+
+
+class ResolvePrepareBody(BaseModel):
+    lease_id: str
+    host_id: str
+
+
 def setup_estate_routing_routes() -> APIRouter:
     router = APIRouter(prefix="/api/estate", tags=["estate-routing"])
 
@@ -254,7 +270,7 @@ def setup_estate_routing_routes() -> APIRouter:
         return row
 
     @router.get("/run/{execution_id}")
-    async def get_run_execution(request: Request, execution_id: str):
+    async def get_run_execution(request: Request, execution_id: str, wait: int = 0):
         """Poll route for a durable implementation-mode execution
         accepted by POST /api/estate/run -- the other half of the
         structural fix for the >45s problem: a client that received
@@ -262,10 +278,27 @@ def setup_estate_routing_routes() -> APIRouter:
         for the authoritative persisted terminal state instead of
         blocking the original HTTP request past any timeout."""
         _scope_owner(request, {"estate:read", "estate:execute"})
-        row = _route_call(get_estate_execution, execution_id)
+        # Stage 6: bounded wait (0..60 s) -- observation only, never a
+        # dispatch -- run off the event loop.
+        if wait < 0 or wait > 60:
+            raise HTTPException(422, "wait must be between 0 and 60 seconds")
+        row = await asyncio.to_thread(_route_call, get_estate_execution, execution_id, wait)
         if row is None:
             raise HTTPException(404, f"no execution found with id {execution_id!r}")
         return row
+
+    @router.post("/run/{execution_id}/push")
+    async def push_run_execution(request: Request, execution_id: str):
+        """S6.10 governed push retry: exact commit, the row's own host only,
+        never forced, no lease needed."""
+        _scope_owner(request, {"estate:execute"})
+        from src.estate_router import push_finalized_execution
+        result = await asyncio.to_thread(push_finalized_execution, execution_id)
+        if not result.get("pushed") and result.get("code") in ("not_found",):
+            raise HTTPException(404, result)
+        if not result.get("pushed") and result.get("code") == "not_eligible":
+            raise HTTPException(409, result)
+        return {"ok": bool(result.get("pushed")), **result}
 
     @router.get("/sessions")
     async def list_sessions(request: Request):
@@ -290,33 +323,79 @@ def setup_estate_routing_routes() -> APIRouter:
         return {"active_park_leases": active_leases_summary()}
 
     @router.post("/park/{repo_id}")
-    async def park_acquire(request: Request, repo_id: str, branch: Optional[str] = None):
-        """Safe remote lease acquisition (docs/aoteru-final-convergence-
-        activation.agent-task.md item D: "remote park is still a real
-        controller gap"). The caller supplies only a repo_id — never a
-        path — src.park_lease_ops.park_repo_by_id resolves the real
-        worktree via src.estate_router.resolve_repo_path (registered
-        repos only) and fails closed (409) on an unresolved/dirty
-        worktree before ever acquiring a lease. Reuses the exact same
-        stale-reclaim/live-conflict semantics as `agent park` and the
-        heartbeat/release routes below — no second lease authority."""
+    async def park_acquire(request: Request, repo_id: str, branch: Optional[str] = None,
+                           host: Optional[str] = None):
+        """Safe lease acquisition. The caller supplies only a repo_id (and
+        optionally a branch and a host) -- never a path.
+
+        Stage 6 (S6.7/S6.9): a branch park reserves a `preparing` lease
+        first and prepares the worktree through the target host's worker
+        under that reservation (LocalTransport on this host). `?host=` for
+        another host requires it to be eligible with codex-write
+        qualified, and a branch. Positively known prepare failures return
+        409 with no lease; an ambiguous prepare returns 409
+        `prepare_outcome_unresolved` and keeps the reservation until
+        `resolve-prepare` proves the prepare cannot still run."""
         _scope_owner(request, {"estate:execute"})
-        host_id = current_host_id()
-        if host_id is None:
+        this_host = current_host_id()
+        if this_host is None:
             raise HTTPException(503, "this host is not registered in config/estate.yaml — cannot acquire a lease as an unknown host")
+        target = host or this_host
         try:
-            return {"ok": True, **park_repo_by_id(repo_id, host_id, branch=branch)}
+            if target == this_host:
+                result = await asyncio.to_thread(park_repo_by_id, repo_id, this_host, branch=branch)
+            else:
+                if not branch:
+                    raise HTTPException(422, "a remote-host park requires ?branch= (a leased worktree on that host)")
+                from src.estate_router import eligible_hosts
+                entry = next((h for h in await asyncio.to_thread(eligible_hosts) if h["host_id"] == target), None)
+                if entry is None or not entry.get("eligible") \
+                        or "codex-write" not in (entry.get("qualified_executors") or []):
+                    raise HTTPException(409, f"host {target!r} is not eligible with codex-write qualified: "
+                                             f"{(entry or {}).get('reason', 'unknown host')}")
+                result = await asyncio.to_thread(park_with_worktree, repo_id, target, branch)
+            return {"ok": True, **result}
         except RepoNotResolvable as e:
             raise HTTPException(404, str(e)) from e
         except RepoNotClean as e:
             raise HTTPException(409, str(e)) from e
         except WorktreeVerificationError as e:
             raise HTTPException(409, str(e)) from e
+        except PrepareOutcomeUnresolved as e:
+            raise HTTPException(409, {"error": "prepare_outcome_unresolved", "message": str(e),
+                                      "lease_id": e.lease_id, "host_id": e.host_id,
+                                      "next_action": e.next_action}) from e
         except ParkConflict as e:
             raise HTTPException(409, str(e)) from e
 
+    @router.post("/park/{repo_id}/resolve-prepare")
+    async def park_resolve_prepare(request: Request, repo_id: str, body: ResolvePrepareBody):
+        """S6.9: resolve an ambiguous `preparing` reservation by its exact
+        lease id (fence probe on the worker; release only on proof)."""
+        _scope_owner(request, {"estate:execute"})
+        from core.database import ParkLease, get_db_session
+        with get_db_session() as db:
+            row = db.query(ParkLease).filter(ParkLease.id == body.lease_id).one_or_none()
+            matches = row is not None and row.repo_id == repo_id and row.host_id == body.host_id
+        if not matches:
+            raise HTTPException(404, "no reservation with that lease_id/host_id for this repo")
+        return {"ok": True, **await asyncio.to_thread(resolve_preparing_reservation, body.lease_id)}
+
+    @router.post("/park/{repo_id}/recover")
+    async def park_recover(request: Request, repo_id: str, body: RecoverBody):
+        """S6.2 recovery release: every identifier required, none inferred."""
+        _scope_owner(request, {"estate:execute"})
+        from src.estate_router import recover_execution_lease
+        result = await asyncio.to_thread(
+            recover_execution_lease, body.execution_id, lease_id=body.lease_id, host_id=body.host_id,
+            repo_id=repo_id, branch=body.branch, worktree_path=body.worktree_path,
+        )
+        if not result.get("recovered"):
+            raise HTTPException(409, result)
+        return {"ok": True, **result}
+
     @router.post("/park/{repo_id}/heartbeat")
-    async def park_heartbeat(request: Request, repo_id: str):
+    async def park_heartbeat(request: Request, repo_id: str, host: Optional[str] = None):
         """HTTP surface for `agent heartbeat` (Workstream B next_action:
         "a park/release/heartbeat HTTP surface so the client can cover
         those scripts/agent subcommands too"). Scoped to the host this
@@ -324,18 +403,18 @@ def setup_estate_routing_routes() -> APIRouter:
         laptop thin client) renews the lease this host holds, it cannot
         renew a lease on a host it isn't."""
         _scope_owner(request, {"estate:execute"})
-        host_id = current_host_id()
+        host_id = host or current_host_id()        # DB-only; ?host= targets that host's lease
         try:
             return {"ok": True, **heartbeat_repo(repo_id, host_id=host_id)}
         except NoActiveLease as e:
             raise HTTPException(409, str(e)) from e
 
     @router.post("/park/{repo_id}/release")
-    async def park_release(request: Request, repo_id: str):
+    async def park_release(request: Request, repo_id: str, host: Optional[str] = None):
         """HTTP surface for `agent release` — see park_heartbeat above for
         why `park` itself isn't exposed yet."""
         _scope_owner(request, {"estate:execute"})
-        host_id = current_host_id()
+        host_id = host or current_host_id()        # DB-only; subject to S6.2 refusal
         try:
             return {"ok": True, **release_repo(repo_id, host_id=host_id)}
         except NoActiveLease as e:

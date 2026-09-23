@@ -260,6 +260,22 @@ def cmd_park_status(args: argparse.Namespace) -> int:
     return 0 if result["status"] == 200 else 1
 
 
+def _with_query(path: str, **params) -> str:
+    import urllib.parse
+    present = {key: value for key, value in params.items() if value}
+    return path + ("?" + urllib.parse.urlencode(present) if present else "")
+
+
+def _print_next_action(body) -> None:
+    """Stage 6: when an execution_id comes back, say how to OBSERVE it
+    (stderr, so stdout stays machine-readable JSON). Never re-run
+    ask/lab/home to poll -- that dispatches again."""
+    if isinstance(body, dict) and body.get("execution_id") and body.get("next_action"):
+        action = body["next_action"]
+        cli = action.get("cli") if isinstance(action, dict) else action
+        print(f"next: {cli}", file=sys.stderr)
+
+
 def cmd_park(args: argparse.Namespace) -> int:
     """Acquire a ParkLease on the backend host over HTTP
     (POST /api/estate/park/{repo_id}) — the laptop-side equivalent of
@@ -267,11 +283,8 @@ def cmd_park(args: argparse.Namespace) -> int:
     real registered path and checks it's git-clean server-side (no path
     this client supplies is ever trusted)."""
     cfg = _load_config()
-    path = f"/api/estate/park/{args.repo_id}"
-    if args.branch:
-        import urllib.parse
-        path += "?" + urllib.parse.urlencode({"branch": args.branch})
-    result = _request(cfg, "POST", path)
+    path = _with_query(f"/api/estate/park/{args.repo_id}", branch=args.branch, host=args.host)
+    result = _request(cfg, "POST", path, timeout=180)
     if result["status"] in (401, 403):
         print(f"denied: {result['body']} — token needs the estate:execute scope for `park`")
         return 1
@@ -295,7 +308,7 @@ def cmd_heartbeat(args: argparse.Namespace) -> int:
     host itself already holds; it cannot renew a lease on a host it
     isn't (see routes/estate_routing_routes.py's park_heartbeat)."""
     cfg = _load_config()
-    result = _request(cfg, "POST", f"/api/estate/park/{args.repo_id}/heartbeat")
+    result = _request(cfg, "POST", _with_query(f"/api/estate/park/{args.repo_id}/heartbeat", host=args.host))
     if result["status"] in (401, 403):
         print(f"denied: {result['body']} — token needs the estate:execute scope for `heartbeat`")
         return 1
@@ -311,12 +324,12 @@ def cmd_release(args: argparse.Namespace) -> int:
     (POST /api/estate/park/{repo_id}/release) — the laptop-side
     equivalent of `agent release`."""
     cfg = _load_config()
-    result = _request(cfg, "POST", f"/api/estate/park/{args.repo_id}/release")
+    result = _request(cfg, "POST", _with_query(f"/api/estate/park/{args.repo_id}/release", host=args.host))
     if result["status"] in (401, 403):
         print(f"denied: {result['body']} — token needs the estate:execute scope for `release`")
         return 1
     if result["status"] == 409:
-        print(f"no active lease to release: {result['body']}")
+        print(f"cannot release: {json.dumps(result['body'])}")
         return 1
     print(json.dumps(result["body"], indent=2))
     return 0 if result["status"] == 200 else 1
@@ -339,6 +352,7 @@ def cmd_ask(args: argparse.Namespace) -> int:
         print(f"denied: {result['body']} — token needs the estate:execute scope for `ask`")
         return 1
     print(json.dumps(result["body"], indent=2))
+    _print_next_action(result["body"])
     return 0 if result["status"] == 200 and result["body"].get("ok", True) else 1
 
 
@@ -373,6 +387,7 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
         print(f"denied: {result['body']} — token needs the estate:execute scope for `{args.command}`")
         return 1
     print(json.dumps(result["body"], indent=2))
+    _print_next_action(result["body"])
     return 0 if result["status"] == 200 and result["body"].get("ok", True) else 1
 
 
@@ -427,10 +442,65 @@ def _estate_routing_skill_md() -> str:
         "Read the JSON the command prints. On `\"ok\": false` or a "
         "nonzero exit, report the exact error — do not retry silently and "
         "do not fabricate a successful outcome.\n\n"
+        "Never re-run ask/lab/home to observe an execution; use "
+        "`aoteru execution <id> --wait 60` (GET only — it cannot start another run).\n\n"
         "Once inside a resolved repo/worktree, that repo's own "
         "CLAUDE.md/AGENTS.md and rules take precedence over this skill's "
         "own convenience.\n"
     )
+
+
+def cmd_execution(args: argparse.Namespace) -> int:
+    """Observe a durable execution (GET /api/estate/run/{id}?wait=N). GET
+    only: this never POSTs /run, so it can never start another
+    execution (Stage 6; Sept 3 lifecycle task bullets 1-4)."""
+    cfg = _load_config()
+    if args.wait < 0 or args.wait > 60:
+        print("--wait must be between 0 and 60 seconds")
+        return 2
+    result = _request(cfg, "GET", _with_query(f"/api/estate/run/{args.execution_id}",
+                                              wait=str(args.wait) if args.wait else None),
+                      timeout=args.wait + 30)
+    if result["status"] in (401, 403):
+        print(f"denied: {result['body']} — token needs estate:read or estate:execute scope")
+        return 1
+    if result["status"] == 404:
+        print(f"not found: {result['body']}")
+        return 1
+    body = result["body"]
+    print(json.dumps(body, indent=2))
+    if isinstance(body, dict):
+        print(f"state: {body.get('lifecycle_state')} host: {body.get('host_id')} "
+              f"executed: {body.get('executed')} worktree: {body.get('worktree_resolution')}", file=sys.stderr)
+    return 0 if result["status"] == 200 else 1
+
+
+def cmd_recover(args: argparse.Namespace) -> int:
+    """S6.2 recovery release. Every identifier is required; none inferred."""
+    cfg = _load_config()
+    body = {"execution_id": args.execution, "lease_id": args.lease, "host_id": args.host,
+            "branch": args.branch, "worktree_path": args.worktree}
+    result = _request(cfg, "POST", f"/api/estate/park/{args.repo_id}/recover", body, timeout=120)
+    print(json.dumps(result["body"], indent=2))
+    return 0 if result["status"] == 200 else 1
+
+
+def cmd_push(args: argparse.Namespace) -> int:
+    """S6.10 governed push retry of a finalized/recovered execution's
+    exact commit, on the execution's own host."""
+    cfg = _load_config()
+    result = _request(cfg, "POST", f"/api/estate/run/{args.execution_id}/push", timeout=240)
+    print(json.dumps(result["body"], indent=2))
+    return 0 if result["status"] == 200 and result["body"].get("pushed") else 1
+
+
+def cmd_resolve_prepare(args: argparse.Namespace) -> int:
+    """S6.9: resolve an ambiguous `preparing` reservation by lease id."""
+    cfg = _load_config()
+    result = _request(cfg, "POST", f"/api/estate/park/{args.repo_id}/resolve-prepare",
+                      {"lease_id": args.lease, "host_id": args.host}, timeout=90)
+    print(json.dumps(result["body"], indent=2))
+    return 0 if result["status"] == 200 and result["body"].get("resolved") else 1
 
 
 def cmd_sync(args: argparse.Namespace) -> int:
@@ -488,12 +558,32 @@ def build_parser() -> argparse.ArgumentParser:
     p_park = sub.add_parser("park", help="acquire a lease on the backend host for a registered repo")
     p_park.add_argument("repo_id")
     p_park.add_argument("--branch", default=None)
+    p_park.add_argument("--host", default=None, help="park on another eligible host (requires --branch)")
 
-    p_heartbeat = sub.add_parser("heartbeat", help="renew the backend host's active lease for a repo")
+    p_heartbeat = sub.add_parser("heartbeat", help="renew an active lease for a repo")
     p_heartbeat.add_argument("repo_id")
+    p_heartbeat.add_argument("--host", default=None)
 
-    p_release = sub.add_parser("release", help="release the backend host's active lease for a repo")
+    p_release = sub.add_parser("release", help="release an active lease for a repo (refused while unresolved)")
     p_release.add_argument("repo_id")
+    p_release.add_argument("--host", default=None)
+
+    p_execution = sub.add_parser("execution", help="observe a durable execution (GET only; never dispatches)")
+    p_execution.add_argument("execution_id")
+    p_execution.add_argument("--wait", type=int, default=0, help="bounded wait, 0..60 seconds")
+
+    p_recover = sub.add_parser("recover", help="recovery release of an unresolved execution's lease (S6.2)")
+    p_recover.add_argument("repo_id")
+    for flag in ("--execution", "--lease", "--host", "--branch", "--worktree"):
+        p_recover.add_argument(flag, required=True)
+
+    p_push = sub.add_parser("push", help="retry the governed exact-commit push of an execution (S6.10)")
+    p_push.add_argument("execution_id")
+
+    p_resolve = sub.add_parser("resolve-prepare", help="resolve an ambiguous preparing reservation (S6.9)")
+    p_resolve.add_argument("repo_id")
+    p_resolve.add_argument("--lease", required=True)
+    p_resolve.add_argument("--host", required=True)
 
     p_ask = sub.add_parser("ask", help="route and execute an objective")
     p_ask.add_argument(
@@ -558,6 +648,10 @@ def main(argv: list[str] | None = None) -> int:
         "park": cmd_park,
         "heartbeat": cmd_heartbeat,
         "release": cmd_release,
+        "execution": cmd_execution,
+        "recover": cmd_recover,
+        "push": cmd_push,
+        "resolve-prepare": cmd_resolve_prepare,
         "auto": cmd_dispatch,
         "lab": cmd_dispatch,
         "home": cmd_dispatch,
