@@ -37,6 +37,20 @@ _WORKER_CAPABILITIES_PATH = Path.home() / ".aoteru" / "worker_capabilities.json"
 _WORKER_SELFTEST_SENTINEL_PATH = Path.home() / ".aoteru" / "worker_selftest_enabled"
 
 
+def _selftest_spawn_delay(payload: dict) -> None:
+    """Plan §G I6(b): a self-test-only delay between the start claim and the
+    spawn, read from the operator's sentinel file (JSON `{"spawn_delay_s":
+    N}`) and honoured only for the `noop-sleep` kind while the sentinel
+    exists. Never affects codex-write."""
+    if payload.get("kind") != "noop-sleep" or not _selftest_enabled():
+        return
+    try:
+        delay = float(json.loads(_WORKER_SELFTEST_SENTINEL_PATH.read_text() or "{}").get("spawn_delay_s", 0))
+    except (OSError, ValueError, AttributeError):
+        return
+    time.sleep(max(0.0, min(delay, 30.0)))
+
+
 def _selftest_enabled() -> bool:
     """Whether the operator has manually enabled the bounded `noop-sleep`
     self-test gate (Stage 4 review finding). A sentinel file, not an
@@ -925,6 +939,7 @@ def _verb_start(payload: dict) -> dict:
         _maybe_abort_stale_start(spool, decided)
         return _start_answer(spool, reused=True)
     unit = f"aoteru-run-{execution_id}"
+    _selftest_spawn_delay(payload)
     try:
         spawn = _launch_runner("--run-spooled", [execution_id], unit=unit, log_path=files["log"])
     except estate_worker_procs.ProcessLayerError as exc:
@@ -976,6 +991,12 @@ def _verb_spool_release(payload: dict) -> dict:
     if existing is not None:
         return {"released": True, "state": _execution_view(spool)["state"], "already_released": True}
     _require_write_prerequisites()
+    # §G U62: a `starting` writer (claimed, no run decision) is refused
+    # BEFORE any closure -- release is an acknowledgement of a resolution
+    # the control plane already proved, never a way to fence a live start.
+    current = read_decision(files["claim"])
+    if current is not None and current.get("kind") == "start" and read_decision(files["run"]) is None:
+        raise WorkerError("authority_denied", "refusing to acknowledge resolution of a starting writer")
     closure = _verb_status({"execution_id": execution_id, "close": True})
     if closure["state"] == "starting" or closure["quiescent"] is not True:
         raise WorkerError("authority_denied",

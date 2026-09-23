@@ -907,10 +907,9 @@ def test_u60_unacknowledged_start_failed_write_spool_is_retained(cfg, units):
 def test_u62_release_refused_for_a_starting_writer(cfg, units):
     units.write_spool("E1")                                   # start claim, no run decision yet
     response = _call("spool.release", {"execution_id": "E1", "resolution": "not_started"})
-    # close fences the unstarted writer (abort wins) -> quiescent -> release allowed,
-    # and the runner can never execute afterwards.
-    assert response["ok"] is True
-    assert estate_worker.read_decision(_spool("E1") / "run.json")["decision"] == "abort"
+    assert response["ok"] is False and response["error"]["code"] == "authority_denied"
+    assert not (_spool("E1") / "run.json").exists()           # refused BEFORE any closure/fence
+    assert not (_spool("E1") / "closed.json").exists()
 
 
 def test_u69_delayed_original_start_released_after_the_fence_never_spawns(cfg, units, verified, monkeypatch):
@@ -1056,3 +1055,55 @@ def test_u75_randomised_closure_vs_finalize_never_commits_unseen(cfg, repo, inli
         if head != repo["head"]:
             assert (final["finalize_result"] or {}).get("commit_sha") == head, index
         _git(repo["wt"], "clean", "-q", "-fd")
+
+
+
+def test_u46_first_start_paused_after_claim_before_spawn(cfg, units, verified, monkeypatch):
+    real_spawn = units._spawn
+    paused, go = threading.Event(), threading.Event()
+
+    def _paused_spawn(*args, **kwargs):
+        paused.set()
+        go.wait(5)
+        return real_spawn(*args, **kwargs)
+    monkeypatch.setattr(estate_worker.estate_worker_procs, "spawn_runner_unit", _paused_spawn)
+    outcome = {}
+    first = threading.Thread(target=lambda: outcome.update(a=_result("start", _codex_payload(cfg))))
+    first.start()
+    assert paused.wait(5)
+    second = _result("start", _codex_payload(cfg))
+    assert second == {**second, "accepted": True, "state": "starting", "reused": True}
+    assert "execution_failed" not in json.dumps(second)
+    go.set()
+    first.join(5)
+    assert len(units.spawned) == 1
+    estate_worker.decide_once(_spool("E1") / "run.json",
+                              {"decision": "execute", **units.handle("aoteru-run-E1.service")})
+    assert _result("status", {"execution_id": "E1"})["state"] == "running"
+
+
+def test_u70a_loser_returns_after_its_own_fsync_while_winner_is_paused(cfg, monkeypatch):
+    target = _spool("pw") / "claim.json"
+    real_chain = estate_worker._fsync_chain
+    paused, resume = threading.Event(), threading.Event()
+    order = []
+
+    def _chain(directory):
+        if threading.current_thread().name == "winner":
+            paused.set()
+            resume.wait(5)
+        order.append(threading.current_thread().name)
+        real_chain(directory)
+
+    monkeypatch.setattr(estate_worker, "_fsync_chain", _chain)
+    winner = threading.Thread(target=estate_worker.decide_once, args=(target, {"n": 1}), name="winner")
+    winner.start()
+    assert paused.wait(5)                       # winner linked, paused BEFORE its fsync
+    seen = {}
+    loser = threading.Thread(target=lambda: seen.update(r=estate_worker.decide_once(target, {"n": 2})),
+                             name="loser")
+    loser.start()
+    loser.join(5)
+    assert seen["r"] == (False, {"n": 1}) and order == ["loser"]   # loser fsynced itself, first
+    resume.set()
+    winner.join(5)

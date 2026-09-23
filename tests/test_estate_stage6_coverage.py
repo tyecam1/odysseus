@@ -221,9 +221,10 @@ def test_u38_started_failed_rows_block_with_clean_or_dirty_worktree(db, worker, 
     worker.clean = not dirty
     result = _dispatch()
     assert result["ok"] is False and "start" not in worker.verbs()
-    # Step 2 (verify clean) precedes step 4 (blocking row), so a dirty tree
-    # is refused as worktree_not_clean; a clean one as unresolved worktree.
-    assert result["error_code"] == ("worktree_not_clean" if dirty else "lease_has_unresolved_worktree")
+    # §G U38: the unresolved row decides, clean or dirty -- a clean tree
+    # never reopens admission; only S6.2 recovery does. No worker call.
+    assert result["error_code"] == "lease_has_unresolved_worktree"
+    assert worker.calls == []
 
 
 def test_u65_admission_under_the_lease_while_push_failed(db, worker):
@@ -512,3 +513,49 @@ def test_u25_routing_decision_host_equals_route_host_and_executed_host_is_route_
     result = estate_router.run_task({"objective": "hi", "requirements": {"capabilities": ["local-fast"]}})
     assert result["route"]["host"] == host
     assert recorded.get("executed_host_id") in (host, None)
+
+
+
+def test_gate_f1_get_observation_never_issues_a_start_and_stays_in_budget(db, worker, monkeypatch):
+    execution_id = _admitted(worker)
+    worker.executions.pop(execution_id)                      # worker reports `unknown`
+    _set(execution_id, last_observed_at=None)
+    slow = {"called": 0}
+    real_start = worker._start
+
+    def _slow_start(payload):
+        slow["called"] += 1
+        time.sleep(5)
+        return real_start(payload)
+    monkeypatch.setattr(worker, "_start", _slow_start)
+    starts = worker.verbs().count("start")
+    began = time.monotonic()
+    estate_router.get_estate_execution(execution_id, wait_s=18)
+    assert worker.verbs().count("start") == starts and slow["called"] == 0
+    assert time.monotonic() - began < 19
+
+
+def test_u46_control_plane_keeps_pending_start_while_the_claim_is_starting(db, worker):
+    execution_id = _admitted(worker)
+    worker.set_state(execution_id, "starting", quiescent=None)
+    for _ in range(3):
+        lane._apply_view(execution_id, worker._view(execution_id))
+        assert _row(execution_id).lifecycle_state == "accepted"
+    worker.set_state(execution_id, "running", quiescent=False)
+    lane._apply_view(execution_id, worker._view(execution_id))
+    assert _row(execution_id).lifecycle_state == "running"
+    assert worker.executions[execution_id].get("spawns", 1) == 1
+
+
+def test_u71_control_plane_restart_between_worker_commit_and_resolution(db, worker):
+    """The worker committed (finalize_result recorded) but the control plane
+    'restarted' before the resolution write: a fresh finalize_execution
+    call (no process state carried over) closes and records finalized."""
+    execution_id = _admitted(worker)
+    _observe(worker, execution_id, "succeeded", result={"ok": True, "output": "x"})
+    worker.head = "b" * 40
+    worker.executions[execution_id]["finalize_result"] = dict(worker.finalize_outcome)
+    worker.executions[execution_id]["closed"] = True          # the first attempt had already closed
+    result = lane.finalize_execution(execution_id=execution_id, repo_id="odysseus", host_id=HOME,
+                                     commit_message="x")
+    assert result["finalized"] is True and _row(execution_id).worktree_resolution == "finalized"

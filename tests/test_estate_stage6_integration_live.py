@@ -308,3 +308,33 @@ def test_i11c_rejected_push_then_aoteru_push_retry(estate, monkeypatch, capsys):
     assert laptop.main(["push", e1]) == 0
     assert json.loads(capsys.readouterr().out)["pushed"] is True
     assert _git(estate["origin"], "rev-parse", "refs/heads/acceptance/push") == finalized["commit_sha"]
+
+
+
+def test_i6b_delayed_starting_claim_answers_starting_to_a_same_id_retry(estate):
+    """I6(b): the self-test spawn delay (sentinel JSON) holds the first start
+    in `starting`; a same-id start over the real transport answers
+    `starting`, never execution_failed; exactly one runner executes."""
+    import threading
+    from src.estate_worker_client import call_worker
+    (estate["home"] / ".aoteru" / "worker_selftest_enabled").write_text(json.dumps({"spawn_delay_s": 4}))
+    execution_id = f"delay-{os.getpid()}"
+    payload = {"execution_id": execution_id, "kind": "noop-sleep", "timeout_s": 1}
+    first = {}
+    thread = threading.Thread(target=lambda: first.update(r=call_worker(_HOST, "start", payload, deadline_s=30)))
+    thread.start()
+    spool = Path(os.environ["HOME"]) / ".aoteru" / "worker-spool" / execution_id
+    deadline = time.monotonic() + 15
+    while not (spool / "claim.json").exists() and time.monotonic() < deadline:
+        time.sleep(0.1)
+    second = call_worker(_HOST, "start", payload, deadline_s=30)["result"]
+    assert second["state"] == "starting" and second["reused"] is True
+    thread.join(40)
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline:
+        status = call_worker(_HOST, "status", {"execution_id": execution_id}, deadline_s=20)["result"]
+        if status["state"] == "succeeded":
+            break
+        time.sleep(0.5)
+    assert status["state"] == "succeeded"
+    assert json.loads((spool / "run.json").read_text())["decision"] == "execute"

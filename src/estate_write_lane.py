@@ -215,6 +215,22 @@ def execute_write_via_worker(objective: str, *, repo_id: str, host_id: str,
                 "error": authority["error"], "error_code": authority["code"]}
     lease_id, branch, worktree_path = authority["lease_id"], authority["branch"], authority["worktree_path"]
 
+    # Preliminary S6.1 table check (gate finding 3 / §G U38): an unresolved
+    # row under this lease decides the answer -- reuse or its table refusal
+    # -- whatever the worktree's state, without a worker call. Re-checked
+    # inside the admission transaction below; this read is never authority.
+    from core.database import get_db_session
+    try:
+        with get_db_session() as db:
+            blocker = park_lease_ops._unresolved_execution(db, lease_id)
+            if blocker is not None:
+                reuse = _admission_outcome(blocker)
+                return {"ok": True, "provider": "codex-write", **reuse,
+                        "next_action": _next_action_observe(reuse["execution_id"])}
+    except _Refusal as refusal:
+        return {"ok": False, "provider": "codex-write", "authority_denied": False,
+                "error_code": refusal.code, "error": str(refusal), **refusal.extra}
+
     verify, exc = _worker(host_id, "worktree.verify",                                  # step 2
                           {"repo_id": repo_id, "worktree_path": worktree_path, "branch": branch}, deadline_s=30)
     if exc is not None or not verify.get("ok"):
@@ -403,7 +419,8 @@ def _resolve_not_started(execution_id: str, reason: str, *, sole_attempt: Option
     return True
 
 
-def _apply_view(execution_id: str, view: dict, *, start_answer: bool = False, fenced: bool = False) -> None:
+def _apply_view(execution_id: str, view: dict, *, start_answer: bool = False, fenced: bool = False,
+                observe_only: bool = False) -> None:
     """Map one worker observation onto the row (steps 6-8). Outcome only;
     never touches worktree_resolution except via _resolve_not_started."""
     row = _load_row(execution_id)
@@ -419,7 +436,9 @@ def _apply_view(execution_id: str, view: dict, *, start_answer: bool = False, fe
                     error="spool_released_before_resolution")
         return
     if state == "unknown":
-        if start_answer or fenced or not _is_placeholder(row):
+        if start_answer or fenced or observe_only or not _is_placeholder(row):
+            # observe_only: a GET observation never issues a start (gate
+            # finding 1); same-id recovery belongs to the background sweep.
             return
         _dispatch_start(execution_id)   # re-issues the same id before the deadline, fences after it
         return
@@ -629,7 +648,7 @@ def _reconcile_one(execution_id: str, budget_s: float) -> None:
         return
     view, exc = _worker(row.host_id, "status", {"execution_id": execution_id}, deadline_s=deadline_s)
     if exc is None:
-        _apply_view(execution_id, view)
+        _apply_view(execution_id, view, observe_only=True)
     else:
         _mark_lost_if_due(execution_id)
 
