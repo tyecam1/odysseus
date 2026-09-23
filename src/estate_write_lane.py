@@ -44,6 +44,14 @@ LOST_GRACE_SECONDS = 120            # execution_deadline_at + this, unobserved -
 MONITOR_INTERVAL_SECONDS = 5.0
 OBSERVATION_STALE_SECONDS = 15      # reconcile re-observes rows older than this
 _CLIENT_SIDE_CODES = frozenset({"worker_unreachable", "worker_protocol_error", "placement_mismatch"})
+# Worker error codes that can ONLY arise before a start/prepare claim
+# (validation, identity, prerequisites, pre-claim authority checks). Any
+# other worker-side code -- notably the generic `execution_failed` -- is
+# not proof of anything and is handled as ambiguous (gate round 8).
+PRE_CLAIM_REFUSAL_CODES = frozenset({
+    "bad_request", "unsupported_protocol", "unknown_verb", "identity_unregistered", "identity_mismatch",
+    "executor_unavailable", "authority_denied",
+})
 _SETTLED_FOR_RECOVERY = ("succeeded", "failed", "timed_out", "interrupted")
 _TERMINAL = ("succeeded", "failed", "timed_out")
 NEXT_ACTION_WAIT = "wait"
@@ -77,7 +85,7 @@ def _worker(host_id: str, verb: str, payload: dict, *, deadline_s: float):
 
 
 def _is_ambiguous(exc) -> bool:
-    return exc is not None and getattr(exc, "code", None) in _CLIENT_SIDE_CODES
+    return exc is not None and getattr(exc, "code", None) not in PRE_CLAIM_REFUSAL_CODES
 
 
 # ---------------------------------------------------------------------

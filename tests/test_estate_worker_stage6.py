@@ -839,7 +839,8 @@ def test_6c_f1_closure_view_exposes_the_latest_quiescent_finalize_result(cfg, re
     assert closed["finalize_result"]["commit_sha"] == _git(repo["wt"], "rev-parse", "HEAD")
 
 
-def test_6d_f1_live_or_unproven_verify_unit_blocks_verification_and_aggregate(cfg, units):
+def test_6d_f1_live_or_unproven_verify_unit_blocks_verification_and_aggregate(cfg, units, monkeypatch):
+    monkeypatch.setattr(estate_worker, "_VERIFY_UNIT_WAIT_S", 0.3)
     units.write_spool("E1", run_unit="aoteru-run-E1.service", state={"state": "succeeded"}, populated=False,
                       request={"execution_id": "E1", "kind": "codex-write",
                                "lease": {"worktree_path": str(cfg["repo"])}})
@@ -1237,6 +1238,7 @@ def test_gate7_start_refuses_a_dirty_tree_and_the_runner_rechecks_before_codex(c
 
 
 def test_gate7_verify_units_are_scoped_per_worktree(cfg, units, monkeypatch):
+    monkeypatch.setattr(estate_worker, "_VERIFY_UNIT_WAIT_S", 0.3)
     scopes = []
     monkeypatch.setattr(estate_worker.estate_worker_procs, "verify_units_quiescent",
                         lambda scope=None: scopes.append(scope) or scope != estate_worker._verify_scope("/busy"))
@@ -1246,3 +1248,25 @@ def test_gate7_verify_units_are_scoped_per_worktree(cfg, units, monkeypatch):
     other = _call("worktree.verify", {"repo_id": "test-repo", "worktree_path": "/other", "branch": "b"})
     assert busy["ok"] is False and other["ok"] is True
     assert units.verify_units[-1].startswith(f"aoteru-verify-{estate_worker._verify_scope('/other')}-")
+
+
+def test_gate8_post_claim_failures_never_surface_as_worker_errors(cfg, units, verified, monkeypatch):
+    real_write = estate_worker._json_write
+
+    def _broken(path, value):
+        if Path(path).name == "spawn.json":
+            raise OSError("disk full")
+        return real_write(path, value)
+    monkeypatch.setattr(estate_worker, "_json_write", _broken)
+    response = _call("start", _codex_payload(cfg))
+    assert response["ok"] is True                         # answered from the decision files
+    assert (_spool("E1") / "claim.json").exists() and len(units.spawned) == 1
+
+
+def test_gate8_same_path_verification_waits_for_a_transient_unit(cfg, units, monkeypatch):
+    monkeypatch.setattr(estate_worker, "_worktree_verification_local", lambda *a: {
+        "ok": True, "path": a[1], "reason": None, "head_sha": "h", "clean": True})
+    units.verify_live = True
+    threading.Timer(0.6, lambda: setattr(units, "verify_live", False)).start()
+    response = _call("worktree.verify", {"repo_id": "test-repo", "worktree_path": "/reused", "branch": "b"})
+    assert response["ok"] is True                         # waited, then verified; not refused

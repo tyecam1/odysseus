@@ -233,3 +233,20 @@ def test_u75_commit_during_closure_is_recorded_as_the_post_commit_head(db, worke
     result = lane.recover_execution_lease(execution_id, lease_id="L1", host_id=HOME, repo_id="odysseus",
                                           branch="feat/x", worktree_path="/w/feat")
     assert result["recovery"]["head_sha"] == "c" * 40 and result["recovery"]["finalize_commit"] is True
+
+
+def test_gate8_execution_failed_from_start_is_never_taken_as_not_started(db, worker):
+    _lease()
+    worker.fail["start"] = ["execution_failed", "execution_failed"]
+    worker.fail["status"] = ["worker_unreachable"]
+    execution_id = _dispatch()["execution_id"]
+    row = _row(execution_id)
+    assert row.worktree_resolution == "unresolved" and row.lifecycle_state == "accepted"
+    assert json.loads(row.worker_handle_json).get("start_ambiguous") is True
+
+
+def test_gate8_execution_failed_from_prepare_keeps_the_reservation(db, worker):
+    worker.fail["worktree.prepare"] = ["execution_failed"]
+    with pytest.raises(park_lease_ops.PrepareOutcomeUnresolved) as info:
+        park_lease_ops.park_with_worktree("odysseus", HOME, "feat/y")
+    assert _lease_status(info.value.lease_id) == "preparing"

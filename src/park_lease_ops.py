@@ -478,7 +478,8 @@ def park_with_worktree(repo_id: str, host_id: str, branch: str, *, session_id: O
         "lease": {"lease_id": lease_id, "host_id": host_id},
     }, deadline_s=120)
     if exc is not None:
-        if exc.code in _PREPARE_CLIENT_SIDE:
+        from src.estate_write_lane import PRE_CLAIM_REFUSAL_CODES
+        if exc.code not in PRE_CLAIM_REFUSAL_CODES:        # incl. execution_failed: not proof (gate round 8)
             raise PrepareOutcomeUnresolved(
                 f"prepare outcome for {repo_id!r} on {host_id!r} is unresolved ({exc.code}: {exc})",
                 lease_id=lease_id, host_id=host_id,

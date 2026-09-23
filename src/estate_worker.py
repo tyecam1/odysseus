@@ -456,9 +456,16 @@ def _worktree_verification(repo_id: Any, worktree_path: Any, branch: Any) -> dic
     units_ok, _detail = estate_worker_procs.runner_units_supported()
     if units_ok and not _IN_VERIFY_UNIT["value"]:
         scope = _verify_scope(worktree_path)
-        if estate_worker_procs.verify_units_quiescent(scope) is not True:
-            raise WorkerError("executor_unavailable",
-                              "an earlier verification of this worktree is still live or unknown; refusing")
+        # A late verification of the same path is a short read: wait for it
+        # (bounded) instead of refusing, so a reused path is not denied
+        # admission by a transient unit (gate round 8). Only a unit that
+        # stays live or unknown past the bound fails closed.
+        wait_until = time.monotonic() + _VERIFY_UNIT_WAIT_S
+        while estate_worker_procs.verify_units_quiescent(scope) is not True:
+            if time.monotonic() >= wait_until:
+                raise WorkerError("executor_unavailable",
+                                  "an earlier verification of this worktree is still live or unknown; refusing")
+            time.sleep(0.2)
         payload = json.dumps({"repo_id": repo_id, "worktree_path": worktree_path, "branch": branch})
         completed = estate_worker_procs.run_in_unit(
             _runner_argv("--run-verify"), str(Path(get_app_root()).resolve()),
@@ -477,6 +484,7 @@ def _worktree_verification(repo_id: Any, worktree_path: Any, branch: Any) -> dic
 
 
 _IN_VERIFY_UNIT = {"value": False}
+_VERIFY_UNIT_WAIT_S = 30.0
 
 
 def _verify_scope(worktree_path: str) -> str:
@@ -960,18 +968,30 @@ def _verb_start(payload: dict) -> dict:
     if not won:
         _maybe_abort_stale_start(spool, decided)
         return _start_answer(spool, reused=True)
-    unit = f"aoteru-run-{execution_id}"
-    _selftest_spawn_delay(payload)
+    # Gate round 8: nothing after the claim may surface as an error -- a
+    # worker error must only ever mean "refused before the claim". Every
+    # post-claim failure is answered from the decision files instead.
     try:
-        spawn = _launch_runner("--run-spooled", [execution_id], unit=unit, log_path=files["log"])
-    except estate_worker_procs.ProcessLayerError as exc:
-        _abort_run(files["run"], "starter", f"{exc.code}: {exc}")
-        _json_write(files["result"], {"ok": False, "error": str(exc)})
+        unit = f"aoteru-run-{execution_id}"
+        _selftest_spawn_delay(payload)
+        try:
+            spawn = _launch_runner("--run-spooled", [execution_id], unit=unit, log_path=files["log"])
+        except estate_worker_procs.ProcessLayerError as exc:
+            _abort_run(files["run"], "starter", f"{exc.code}: {exc}")
+            _json_write(files["result"], {"ok": False, "error": str(exc)})
+            return _start_answer(spool, reused=False)
+        # spawn.json, never state.json: state.json belongs to the runner alone,
+        # so a fast runner's terminal write can never be clobbered (6c finding 3).
+        try:
+            _json_write(spool / "spawn.json", {"spawn": spawn, "at": _utcnow()})
+        except OSError:
+            pass
+    except Exception:
+        pass
+    try:
         return _start_answer(spool, reused=False)
-    # spawn.json, never state.json: state.json belongs to the runner alone,
-    # so a fast runner's terminal write can never be clobbered (6c finding 3).
-    _json_write(spool / "spawn.json", {"spawn": spawn, "at": _utcnow()})
-    return _start_answer(spool, reused=False)
+    except Exception:
+        return {"accepted": False, "state": "starting", "handle": None, "reused": False, "spawned": None}
 
 
 def _verb_status(payload: dict) -> dict:
@@ -1175,11 +1195,16 @@ def _verb_worktree_prepare(payload: dict) -> dict:
                                unit=f"aoteru-prepare-{lease['lease_id']}", log_path=files["log"])
             except estate_worker_procs.ProcessLayerError as exc:
                 _abort_run(files["run"], "starter", f"{exc.code}: {exc}")
-    deadline = time.monotonic() + _wait_s(_DEFAULT_PREPARE_WAIT_S)
-    view = _prepare_view(record)
-    while view["state"] == "preparing" and time.monotonic() < deadline:
-        time.sleep(0.2)
+            except Exception:
+                pass                      # post-claim: answered from the record below, never an error
+    try:
+        deadline = time.monotonic() + _wait_s(_DEFAULT_PREPARE_WAIT_S)
         view = _prepare_view(record)
+        while view["state"] == "preparing" and time.monotonic() < deadline:
+            time.sleep(0.2)
+            view = _prepare_view(record)
+    except Exception:
+        view = {"state": "preparing", "quiescent": None, "record": None}
     return {**view, "reused": reused}
 
 
