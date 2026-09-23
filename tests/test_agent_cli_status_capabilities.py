@@ -49,7 +49,15 @@ def test_status_capabilities_unregistered_host_fails_closed(monkeypatch):
 
 def test_status_capabilities_router_import_failure_degrades(monkeypatch):
     module = _load()
-    monkeypatch.setitem(sys.modules, "src.estate_router", None)  # import raises ImportError
+    import builtins
+    real_import = builtins.__import__
+
+    def failing_import(name, *args, **kwargs):
+        if name == "src.estate_router":
+            raise ImportError("cannot import name 'resolve_alias'")  # plain ImportError, not ModuleNotFoundError
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", failing_import)
     rows = module._capabilities_on_this_host({"capabilities": [{"alias": "local-fast", "binding": "q"}]},
                                              {"id": "hz2-workstation"})
     assert rows[0]["resolved_on_this_host"] is None
