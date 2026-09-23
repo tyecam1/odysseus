@@ -39,6 +39,9 @@ def cfg(tmp_path, monkeypatch):
     monkeypatch.setattr(estate_worker, "_PREPARE_ROOT", tmp_path / "aoteru" / "prepare")
     monkeypatch.setattr(estate_worker, "machine_fingerprint", lambda: "0123456789abcdef")
     monkeypatch.setattr(estate_worker, "_worker_version", lambda: "abc123")
+    # Never launch a real systemd unit from a unit test; FakeUnits opts in.
+    monkeypatch.setattr(estate_worker.estate_worker_procs, "runner_units_supported",
+                        lambda: (False, "unit tests: real runner units disabled"))
     monkeypatch.setattr(estate_worker, "_DECISION_FS_PROBED", {})
     return {"root": tmp_path, "repo": repo_path}
 
@@ -749,3 +752,86 @@ def test_u76_push_after_closure_still_runs(cfg, repo, inline_attempts, monkeypat
                               {"decision": "execute", **inline_attempts.handle("aoteru-push-E1-9.service")})
     inline_attempts.set_populated("aoteru-push-E1-9.service", True)
     assert _result("status", {"execution_id": "E1"})["quiescent"] is True
+
+
+def test_dead_runner_without_terminal_record_is_interrupted_only_when_quiescent(cfg, units):
+    units.write_spool("E1", run_unit="aoteru-run-E1.service", state={"state": "running"})
+    assert _result("status", {"execution_id": "E1"})["state"] == "running"
+    units.set_populated("aoteru-run-E1.service", None)
+    status = _result("status", {"execution_id": "E1"})
+    assert status["state"] == "interrupted" and status["quiescent"] is True
+
+
+# ---------------------------------------------------------------------
+# 6c adjudication regressions
+# ---------------------------------------------------------------------
+
+def test_6c_f2_worktree_verification_runs_in_a_tracked_unit(cfg, units, monkeypatch):
+    monkeypatch.setattr(estate_worker.worktree_ops, "is_live_checkout_path", lambda *a: False)
+    monkeypatch.setattr(estate_worker.worktree_ops, "verify_worktree", lambda repo, path, branch: {
+        "ok": True, "path": path, "branch": branch, "head": "abc"})
+    monkeypatch.setattr(estate_worker, "git_is_clean", lambda path: (True, ""))
+    result = _result("worktree.verify", {"repo_id": "test-repo", "worktree_path": str(cfg["repo"]),
+                                         "branch": "feature"})
+    assert result["ok"] is True and result["clean"] is True and result["head_sha"] == "abc"
+    assert len(units.verify_units) == 1 and units.verify_units[0].startswith("aoteru-verify-")
+
+
+def test_6c_f2_every_worker_git_child_has_fsmonitor_and_hooks_disabled(cfg, units, monkeypatch):
+    for key in list(os.environ):
+        if key.startswith("GIT_CONFIG_"):
+            monkeypatch.delenv(key)
+    _result("health")
+    pairs = {os.environ[f"GIT_CONFIG_KEY_{i}"]: os.environ[f"GIT_CONFIG_VALUE_{i}"]
+             for i in range(int(os.environ["GIT_CONFIG_COUNT"]))}
+    assert pairs["core.fsmonitor"] == "false" and pairs["gc.auto"] == "0"
+    assert Path(pairs["core.hooksPath"]).name == ".no-hooks"
+
+
+def test_6c_f3_starter_spawn_record_never_clobbers_a_fast_runner(cfg, units, verified, monkeypatch):
+    real_spawn = units._spawn
+
+    def _fast(argv, cwd, log_path, unit):
+        answer = real_spawn(argv, cwd, log_path, unit)
+        spool = _spool("E1")
+        estate_worker.decide_once(spool / "run.json", {"decision": "execute", **units.handle(f"{unit}.service")})
+        estate_worker._json_write(spool / "state.json", {"state": "succeeded"})
+        estate_worker._json_write(spool / "result.json", {"ok": True, "output": "fast"})
+        units.set_populated(f"{unit}.service", None)
+        return answer
+
+    monkeypatch.setattr(estate_worker.estate_worker_procs, "spawn_runner_unit", _fast)
+    _result("start", _codex_payload(cfg))
+    assert _result("status", {"execution_id": "E1"})["state"] == "succeeded"
+    assert estate_worker._json_read(_spool("E1") / "state.json")["state"] == "succeeded"
+
+
+def test_6c_f4_terminal_waits_for_the_aggregate_not_only_the_writer(cfg, units):
+    spool = units.write_spool("E1", run_unit="aoteru-run-E1.service", state={"state": "succeeded"},
+                              populated=False)
+    estate_worker.decide_once(spool / "finalize" / "attempt-1.json", {"request": {}})
+    estate_worker.decide_once(spool / "finalize" / "attempt-1.run.json",
+                              {"decision": "execute", **units.handle("aoteru-finalize-E1-1.service")})
+    units.set_populated("aoteru-finalize-E1-1.service", True)
+    status = _result("status", {"execution_id": "E1"})
+    assert status["state"] == "running" and status["terminal_pending"] is True
+    units.set_populated("aoteru-finalize-E1-1.service", None)
+    assert _result("status", {"execution_id": "E1"})["state"] == "succeeded"
+
+
+@pytest.mark.parametrize("bad_id", ["x.service", "E1.scope", "a.b"])
+def test_6c_f5_ids_can_never_form_a_unit_suffix(cfg, units, verified, bad_id):
+    response = _call("start", _codex_payload(cfg, bad_id))
+    assert response["ok"] is False and response["error"]["code"] == "bad_request"
+    assert units.spawned == []
+
+
+def test_6c_f1_closure_view_exposes_the_latest_quiescent_finalize_result(cfg, repo, inline_attempts):
+    inline_attempts.write_spool("E1", run_unit="aoteru-run-E1.service", state={"state": "succeeded"},
+                                populated=False)
+    (repo["wt"] / "new.txt").write_text("x")
+    _result("worktree.finalize", _finalize_request(repo))
+    closed = _result("status", {"execution_id": "E1", "close": True})
+    assert closed["closed"] is True and closed["quiescent"] is True
+    assert closed["finalize_result"]["outcome"] == "finalized"
+    assert closed["finalize_result"]["commit_sha"] == _git(repo["wt"], "rev-parse", "HEAD")

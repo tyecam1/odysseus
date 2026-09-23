@@ -496,3 +496,32 @@ def kill_unit(unit: Optional[str]) -> dict:
     # A unit that already stopped and was collected is "not loaded": fine.
     return {"ok": completed.returncode == 0 or "not loaded" in (completed.stderr or ""),
             "detail": (completed.stderr or "").strip()}
+
+
+def run_in_unit(argv: list[str], cwd: str, unit: str, *, timeout: float = 60.0,
+                input_text: Optional[str] = None) -> subprocess.CompletedProcess:
+    """Run a short worktree-touching command synchronously in its own
+    transient user unit (6c adjudication finding 2). `--wait` returns only
+    once the unit is inactive, and `SendSIGKILL`/`TimeoutStopSec` bound the
+    stop, so every descendant (an fsmonitor daemon, a filter process) is
+    gone when this returns. Linux only; callers gate on
+    runner_units_supported()."""
+    if os.name == "nt":
+        raise ProcessLayerError("executor_unavailable", "runner units are not implemented on Windows (S6.12)")
+    command = [
+        "systemd-run", "--user", f"--unit={unit}", "--collect", "--quiet", "--wait", "--pipe",
+        f"--working-directory={cwd}", "-p", "TimeoutStopSec=5", "-p", "SendSIGKILL=yes",
+        "-p", "KillMode=control-group",
+    ]
+    for key in _RUNNER_ENV_KEYS:
+        if os.environ.get(key):
+            command.append(f"--setenv={key}={os.environ[key]}")
+    for key, value in os.environ.items():
+        if key.startswith(("AOTERU_", "GIT_CONFIG_")):
+            command.append(f"--setenv={key}={value}")
+    command += ["--", *argv]
+    try:
+        return subprocess.run(command, env=_user_manager_env(), capture_output=True, text=True,
+                              timeout=timeout, input=input_text)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ProcessLayerError("executor_unavailable", f"systemd-run --wait failed for {unit}: {exc}") from exc

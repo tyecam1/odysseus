@@ -29,6 +29,23 @@ class FakeUnits:
         monkeypatch.setattr(self.procs, "spawn_runner_unit", self._spawn)
         monkeypatch.setattr(self.procs, "own_cgroup", lambda: self.current_cgroup)
         monkeypatch.setattr(self.procs, "kill_unit", self._kill)
+        monkeypatch.setattr(self.procs, "run_in_unit", self._run_in_unit)
+        self.verify_units: list[str] = []
+
+    def _run_in_unit(self, argv, cwd, unit, *, timeout=60.0, input_text=None):
+        """Synchronous tracked unit: run the verification body in-process
+        (inheriting the test's monkeypatches) and report it as collected."""
+        import json
+        import subprocess
+        assert "--run-verify" in argv and unit.startswith("aoteru-verify-")
+        self.verify_units.append(unit)
+        request = json.loads(input_text)
+        try:
+            answer = self.worker._worktree_verification_local(
+                request["repo_id"], request["worktree_path"], request["branch"])
+        except self.worker.WorkerError as exc:
+            answer = {"error": {"code": exc.code, "message": str(exc)}}
+        return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(answer) + "\n", stderr="")
 
     @staticmethod
     def cgroup(unit: str) -> str:

@@ -30,7 +30,9 @@ _SPOOL_ROOT = Path.home() / ".aoteru" / "worker-spool"
 _PREPARE_ROOT = Path.home() / ".aoteru" / "worker-prepare"
 _SPOOL_TTL_SECONDS = 7 * 24 * 60 * 60
 _TERMINAL_STATES = frozenset({"succeeded", "failed", "timed_out"})
-_EXECUTION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+# No dots (6c adjudication finding 5): an id is embedded in a systemd unit
+# name, and a suffix such as ".service" must never be formable.
+_EXECUTION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 _WORKER_CAPABILITIES_PATH = Path.home() / ".aoteru" / "worker_capabilities.json"
 _WORKER_SELFTEST_SENTINEL_PATH = Path.home() / ".aoteru" / "worker_selftest_enabled"
 
@@ -243,6 +245,8 @@ def handle(request: dict) -> dict:
     function_name = f"_verb_{request['verb'].replace('.', '_')}"
     verb = globals()[function_name]
     _CURRENT_DEADLINE_S["value"] = request.get("deadline_s")
+    if os.name != "nt":
+        _disable_git_side_processes(_SPOOL_ROOT)
     try:
         result = verb(request["payload"])
     except WorkerError as exc:
@@ -428,8 +432,52 @@ def _verb_execute(payload: dict) -> dict:
 
 
 def _worktree_verification(repo_id: Any, worktree_path: Any, branch: Any) -> dict:
+    """Worktree-touching verification. Where runner units exist (Linux), the
+    git work runs synchronously in its own transient unit so no helper it
+    may launch (fsmonitor, filters) can outlive the call (6c adjudication
+    finding 2); elsewhere it runs in-process (Windows write verbs are
+    refused anyway)."""
     if not all(isinstance(value, str) and value for value in (repo_id, worktree_path, branch)):
         raise WorkerError("bad_request", "worktree verification requires repo_id, worktree_path and branch")
+    units_ok, _detail = estate_worker_procs.runner_units_supported()
+    if units_ok and not _IN_VERIFY_UNIT["value"]:
+        payload = json.dumps({"repo_id": repo_id, "worktree_path": worktree_path, "branch": branch})
+        completed = estate_worker_procs.run_in_unit(
+            _runner_argv("--run-verify"), str(Path(get_app_root()).resolve()),
+            f"aoteru-verify-{uuid.uuid4().hex}", timeout=90, input_text=payload,
+        )
+        try:
+            answer = json.loads(completed.stdout.strip().splitlines()[-1])
+        except (IndexError, json.JSONDecodeError) as exc:
+            raise WorkerError("execution_failed",
+                              f"verification unit failed (rc={completed.returncode}): "
+                              f"{(completed.stderr or completed.stdout).strip()[-300:]}") from exc
+        if "error" in answer:
+            raise WorkerError(answer["error"]["code"], answer["error"]["message"])
+        return answer
+    return _worktree_verification_local(repo_id, worktree_path, branch)
+
+
+_IN_VERIFY_UNIT = {"value": False}
+
+
+def _run_verify() -> int:
+    """Body of an `aoteru-verify-*` unit: read the request on stdin, verify
+    in-process (git side processes disabled), print one JSON line."""
+    _IN_VERIFY_UNIT["value"] = True
+    _disable_git_side_processes(_SPOOL_ROOT)
+    try:
+        request = json.loads(sys.stdin.read())
+        answer = _worktree_verification_local(request["repo_id"], request["worktree_path"], request["branch"])
+    except WorkerError as exc:
+        answer = {"error": {"code": exc.code, "message": str(exc)}}
+    except Exception as exc:
+        answer = {"error": {"code": "execution_failed", "message": str(exc)}}
+    print(json.dumps(answer))
+    return 0
+
+
+def _worktree_verification_local(repo_id: str, worktree_path: str, branch: str) -> dict:
     if worktree_ops.is_live_checkout_path(repo_id, worktree_path):
         return {"ok": False, "path": str(Path(worktree_path).resolve()), "reason": "refusing the live checkout"}
     verified = worktree_ops.verify_worktree(repo_id, worktree_path, branch)
@@ -630,15 +678,17 @@ def _age_seconds(iso_value: Any) -> float | None:
 
 
 def _git_env_dir(record: Path) -> Path:
-    hooks = record / "no-hooks"
+    hooks = record / ".no-hooks"      # dot-prefixed: can never be an execution/lease id
     hooks.mkdir(parents=True, exist_ok=True)
     return hooks
 
 
 def _disable_git_side_processes(record: Path) -> None:
-    """Defence in depth (S6.10): no hooks, no auto-gc/maintenance for every
-    git child of this runner. The runner unit's cgroup stays the proof."""
-    pairs = [("core.hooksPath", str(_git_env_dir(record))), ("gc.auto", "0"), ("maintenance.auto", "false")]
+    """Defence in depth (S6.10): no hooks, no fsmonitor daemon, no
+    auto-gc/maintenance for every git child of this process. The unit's
+    cgroup stays the proof of quiescence."""
+    pairs = [("core.hooksPath", str(_git_env_dir(record))), ("gc.auto", "0"), ("maintenance.auto", "false"),
+             ("core.fsmonitor", "false")]
     os.environ["GIT_CONFIG_COUNT"] = str(len(pairs))
     for index, (key, value) in enumerate(pairs):
         os.environ[f"GIT_CONFIG_KEY_{index}"] = key
@@ -761,7 +811,7 @@ def _execution_view(spool: Path) -> dict:
     aggregate, units = _execution_aggregate(spool, fence_unstarted=False)
     view = {
         **base,
-        "spawned": bool((telemetry.get("spawn") or {}).get("unit")) or telemetry.get("state") not in (None, "starting"),
+        "spawned": bool(_json_read(spool / "spawn.json").get("spawn")) or bool(telemetry.get("state")),
         "started_at": telemetry.get("started_at"), "finished_at": telemetry.get("finished_at"),
         "quiescent": aggregate, "process_alive": aggregate is not True, "units": units,
     }
@@ -777,17 +827,42 @@ def _execution_view(spool: Path) -> dict:
         view["error"] = run.get("reason")
         return view
     view["handle"] = {key: run.get(key) for key in ("pid", "create_time", "cgroup", "unit")}
+    view["finalize_commit"] = read_decision(spool / "finalize" / "commit.json")
     writer_quiescent = _unit_quiescent(run)
     recorded = telemetry.get("state")
-    if recorded in _TERMINAL_STATES and writer_quiescent is True:
+    if recorded in _TERMINAL_STATES and writer_quiescent is True and aggregate is True:
         view["state"] = recorded
         result = _json_read(files["result"])
         if result:
             view["result"] = result
+    elif recorded in _TERMINAL_STATES:
+        # Terminal record, but the writer or a finalize attempt is not proven
+        # quiescent yet (6c finding 4): still running for every consumer.
+        view["state"] = "running"
+        view["terminal_pending"] = True
+    elif writer_quiescent is True:
+        # The runner decided `execute`, its whole unit is proven gone, and
+        # it never recorded a terminal state: positively observed dead
+        # (the control plane's `interrupted`), never guessed.
+        view["state"] = "interrupted"
     else:
         view["state"] = "running"
         view["terminal_pending"] = recorded in _TERMINAL_STATES
+    view["finalize_result"] = _latest_finalize_result(spool)
     return view
+
+
+def _latest_finalize_result(spool: Path) -> dict | None:
+    """The newest quiescent finalize attempt's recorded result -- what the
+    control plane reads after closure to record `finalized` idempotently
+    (6c finding 1), even when the finalize response itself was lost."""
+    for number, _attempt, run in reversed(_attempts(spool, "finalize")):
+        if run is None or run.get("decision") != "execute" or _unit_quiescent(run) is not True:
+            continue
+        result = _json_read(spool / "finalize" / f"attempt-{number}.result.json")
+        if result:
+            return {**result, "attempt": number}
+    return None
 
 
 def _start_answer(spool: Path, *, reused: bool) -> dict:
@@ -848,7 +923,9 @@ def _verb_start(payload: dict) -> dict:
         _abort_run(files["run"], "starter", f"{exc.code}: {exc}")
         _json_write(files["result"], {"ok": False, "error": str(exc)})
         return _start_answer(spool, reused=False)
-    _json_write(files["state"], {"state": "accepted", "spawn": spawn, "started_at": None, "finished_at": None})
+    # spawn.json, never state.json: state.json belongs to the runner alone,
+    # so a fast runner's terminal write can never be clobbered (6c finding 3).
+    _json_write(spool / "spawn.json", {"spawn": spawn, "at": _utcnow()})
     return _start_answer(spool, reused=False)
 
 
@@ -1314,6 +1391,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--run-prepare", metavar="LEASE_ID")
     parser.add_argument("--run-finalize", nargs=2, metavar=("EXECUTION_ID", "ATTEMPT"))
     parser.add_argument("--run-push", nargs=2, metavar=("EXECUTION_ID", "ATTEMPT"))
+    parser.add_argument("--run-verify", action="store_true")
     args = parser.parse_args(argv)
     if args.root:
         root = Path(args.root).expanduser().resolve()
@@ -1332,6 +1410,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_attempt("finalize", *args.run_finalize)
     if args.run_push:
         return _run_attempt("push", *args.run_push)
+    if args.run_verify:
+        return _run_verify()
     try:
         request = json.loads(sys.stdin.read())
     except json.JSONDecodeError as exc:
