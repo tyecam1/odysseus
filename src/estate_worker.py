@@ -11,6 +11,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -35,6 +36,22 @@ _TERMINAL_STATES = frozenset({"succeeded", "failed", "timed_out"})
 _EXECUTION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 _WORKER_CAPABILITIES_PATH = Path.home() / ".aoteru" / "worker_capabilities.json"
 _WORKER_SELFTEST_SENTINEL_PATH = Path.home() / ".aoteru" / "worker_selftest_enabled"
+
+
+class _PerCall(threading.local):
+    """Per-call worker state. Each production call is its own process, but
+    the state must not leak between concurrent in-process calls either."""
+
+    def __init__(self, **defaults):
+        self.values = dict(defaults)
+
+    def __getitem__(self, key):
+        return self.values[key]
+
+    def __setitem__(self, key, value):
+        self.values[key] = value
+
+
 
 
 def _selftest_spawn_delay(payload: dict) -> None:
@@ -480,10 +497,15 @@ def _worktree_verification(repo_id: Any, worktree_path: Any, branch: Any) -> dic
         if run_limit < 1.0:
             raise _budget_exhausted("no time left to run the verification unit")
         payload = json.dumps({"repo_id": repo_id, "worktree_path": worktree_path, "branch": branch})
-        completed = estate_worker_procs.run_in_unit(
-            _runner_argv("--run-verify"), str(Path(get_app_root()).resolve()),
-            f"aoteru-verify-{scope}-{uuid.uuid4().hex}", timeout=run_limit, input_text=payload,
-        )
+        try:
+            completed = estate_worker_procs.run_in_unit(
+                _runner_argv("--run-verify"), str(Path(get_app_root()).resolve()),
+                f"aoteru-verify-{scope}-{uuid.uuid4().hex}", timeout=run_limit, input_text=payload,
+            )
+        except estate_worker_procs.ProcessLayerError as exc:
+            # A timed-out/unlaunchable verify unit is an UNFINISHED
+            # verification (retryable), never an authority verdict (gate 12).
+            raise WorkerError("executor_unavailable", f"{exc}; retryable") from exc
         try:
             answer = json.loads(completed.stdout.strip().splitlines()[-1])
         except (IndexError, json.JSONDecodeError) as exc:
@@ -493,11 +515,32 @@ def _worktree_verification(repo_id: Any, worktree_path: Any, branch: Any) -> dic
         if "error" in answer:
             raise WorkerError(answer["error"]["code"], answer["error"]["message"])
         return answer
-    return _worktree_verification_local(repo_id, worktree_path, branch)
+    if _IN_VERIFY_UNIT["value"] or _BUDGET["end"] is None:
+        return _worktree_verification_local(repo_id, worktree_path, branch)
+    # No runner units (e.g. Windows): the in-process fallback is still held
+    # to the verb's budget (gate round 12) -- read-only git in a daemon
+    # thread, abandoned with a retryable answer if the budget runs out.
+    import threading
+    box = {}
+
+    def _run():
+        try:
+            box["answer"] = _worktree_verification_local(repo_id, worktree_path, branch)
+        except Exception as exc:     # surfaced below
+            box["error"] = exc
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+    thread.join(_remaining(1e9))
+    if thread.is_alive():
+        raise _budget_exhausted("in-process verification did not finish in time")
+    if "error" in box:
+        raise box["error"]
+    return box["answer"]
 
 
-_IN_VERIFY_UNIT = {"value": False}
-_BUDGET = {"end": None}
+_IN_VERIFY_UNIT = _PerCall(value=False)
+_BUDGET = _PerCall(end=None)
 _BUDGET_MARGIN_S = 5.0
 
 
@@ -577,7 +620,7 @@ _DEFAULT_PREPARE_WAIT_S = 90.0
 _DEFAULT_GIT_UNIT_WAIT_S = 120.0
 _WRITE_KINDS = frozenset({"codex-write"})
 _DECISION_FS_PROBED: dict = {}
-_CURRENT_DEADLINE_S = {"value": None}
+_CURRENT_DEADLINE_S = _PerCall(value=None)
 
 
 def _fsync_dir(path: Path) -> None:

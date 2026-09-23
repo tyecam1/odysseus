@@ -1327,3 +1327,29 @@ def test_gate11_whole_verification_answers_within_its_budget_under_slow_systemd(
     assert time.monotonic() - began < 8 - estate_worker._BUDGET_MARGIN_S + 1.5
     assert response["ok"] is False and response["error"]["code"] == "executor_unavailable"
     assert "retryable" in response["error"]["message"]
+
+
+
+def test_gate12_in_process_fallback_verification_is_held_to_the_budget(cfg, monkeypatch):
+    """Runner units unavailable: the fallback still answers within budget."""
+    monkeypatch.setattr(estate_worker, "_worktree_verification_local",
+                        lambda *a: (time.sleep(30), {"ok": True})[1])
+    request = build_request("worktree.verify", "test-lab",
+                            {"repo_id": "test-repo", "worktree_path": "/p", "branch": "b"}, 7)
+    began = time.monotonic()
+    response = estate_worker.handle(request)
+    assert time.monotonic() - began < 7 - estate_worker._BUDGET_MARGIN_S + 1.5
+    assert response["ok"] is False and response["error"]["code"] == "executor_unavailable"
+    assert "retryable" in response["error"]["message"]
+
+
+def test_gate12_timed_out_verify_unit_is_retryable_not_an_authority_verdict(cfg, units, monkeypatch):
+    procs = estate_worker.estate_worker_procs
+
+    def _timeout(*a, **k):
+        raise procs.ProcessLayerError("executor_unavailable", "verification unit x timed out and was stopped")
+    monkeypatch.setattr(procs, "run_in_unit", _timeout)
+    response = estate_worker.handle(build_request("worktree.verify", "test-lab",
+                                                  {"repo_id": "test-repo", "worktree_path": "/p", "branch": "b"},
+                                                  estate_worker.VERIFY_CALL_DEADLINE_S))
+    assert response["ok"] is False and response["error"]["code"] == "executor_unavailable"
