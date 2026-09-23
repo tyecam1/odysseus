@@ -201,7 +201,13 @@ def delegation_preflight(units: Iterable[dict]) -> dict:
                         )
                     ),
                 }
-            ok = host_ready and codex_live and provider == "codex" and write_ready
+            # Stage 7 round-2 finding 2: the recommended executor must be
+            # qualified on the routed host, exactly as dispatch requires.
+            needed = "codex-write" if write_required else "codex"
+            unit_entry = next((h for h in (route.get("hosts_checked") or [])
+                               if h.get("host_id") == unit_host), None) or {}
+            executor_qualified = needed in (unit_entry.get("qualified_executors") or [])
+            ok = host_ready and codex_live and provider == "codex" and write_ready and executor_qualified
             evidence = []
             if not host_ready:
                 evidence.append(route.get("reason") or route.get("error") or "no eligible host")
@@ -209,6 +215,8 @@ def delegation_preflight(units: Iterable[dict]) -> dict:
                 evidence.append(f"codex unavailable: {codex_detail}")
             if provider != "codex":
                 evidence.append(f"configured paid provider for {alias!r} is {provider!r}, not codex")
+            if host_ready and not executor_qualified:
+                evidence.append(f"executor {needed!r} not qualified on {unit_host!r}")
             if write_authority and not write_ready:
                 evidence.append(write_authority["reason"])
             why = (

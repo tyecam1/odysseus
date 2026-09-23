@@ -7,6 +7,7 @@ def _hosts(eligible=True):
     return [{
         "host_id": "test-lab", "role": "lab", "eligible": eligible,
         "reason": "this host" if eligible else "unreachable: refused",
+        "qualified_executors": ["local", "codex", "codex-write"],
     }]
 
 

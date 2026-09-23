@@ -403,6 +403,14 @@ def resolve_alias(alias: str, host_id: Optional[str] = None) -> dict:
     if entry is None:
         return {"alias": alias, "resolved": False, "reason": f"unknown alias {alias!r}"}
     binding = entry.get("binding")
+    if host_id is not None:
+        # Stage 7: the EFFECTIVE binding on this host is the per-host
+        # override if one exists, else the default -- resolved before the
+        # "unbound" check, so a host override can qualify an alias whose
+        # default binding is null (Stage 7 round-2 finding 1).
+        host_entry = (entry.get("qualified_hosts") or {}).get(host_id)
+        if isinstance(host_entry, dict) and host_entry.get("binding"):
+            binding = host_entry["binding"]
     if binding is None:
         return {
             "alias": alias, "resolved": False,

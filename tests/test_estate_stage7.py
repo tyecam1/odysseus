@@ -192,7 +192,8 @@ def test_s7_f4_preflight_judges_codex_on_each_units_routed_host(monkeypatch):
     monkeypatch.setattr(estate_router, "eligible_hosts", lambda repo_id=None: [
         {"host_id": LAB, "eligible": False}, {"host_id": HOME, "eligible": True}])
     monkeypatch.setattr(estate_router, "resolve_route", lambda task, record_decision=True: {
-        "route": {"host": HOME, "executor": "none"}, "capability_resolutions": [], "hosts_checked": []})
+        "route": {"host": HOME, "executor": "none"}, "capability_resolutions": [],
+        "hosts_checked": [{"host_id": HOME, "qualified_executors": ["codex"]}]})
     monkeypatch.setattr(client, "worker_health", lambda host_id, **kw: probed.append(host_id) or {
         "codex": {"available": host_id == HOME, "detail": host_id}})
     monkeypatch.setattr(estate_router, "_resolve_paid_provider", lambda alias: {"provider": "codex"})
@@ -209,3 +210,31 @@ def test_s7_f5_canary_rejects_unsupported_or_empty_selections(argv):
     with pytest.raises(SystemExit) as info:
         canary.main(argv)
     assert info.value.code != 0
+
+
+
+def test_s7r2_f1_host_override_qualifies_an_alias_with_a_null_default_binding(models):
+    import scripts.run_lm4_production_canary as canary
+    write, inventory = models
+    inventory[HOME].add("home-model")
+    write([{"alias": "code-strong", "binding": None,
+            "qualified_hosts": {HOME: {"evidence": "h", "binding": "home-model"}}}])
+    result = estate_router.resolve_alias("code-strong", HOME)
+    assert result["resolved"] is True and result["concrete_model"] == "home-model"
+    assert estate_router.resolve_alias("code-strong", LAB)["resolved"] is False       # still unbound on lab
+    assert canary.binding_for_host("code-strong", HOME) == "home-model"
+
+
+def test_s7r2_f2_preflight_is_not_ok_when_codex_unqualified_on_the_routed_host(monkeypatch):
+    import src.estate_worker_client as client
+    from src import delegation_preflight
+    monkeypatch.setattr(estate_router, "eligible_hosts", lambda repo_id=None: [{"host_id": HOME, "eligible": True}])
+    monkeypatch.setattr(estate_router, "resolve_route", lambda task, record_decision=True: {
+        "route": {"host": HOME, "executor": "none"}, "capability_resolutions": [],
+        "hosts_checked": [{"host_id": HOME, "qualified_executors": ["local"]}]})
+    monkeypatch.setattr(client, "worker_health", lambda host_id, **kw: {"codex": {"available": True, "detail": "x"}})
+    monkeypatch.setattr(estate_router, "_resolve_paid_provider", lambda alias: {"provider": "codex"})
+    result = delegation_preflight.delegation_preflight([{"task_class": "review", "objective": "code review of X",
+                                                         "capabilities": ["code-strong"]}])
+    unit = result["units"][0]
+    assert unit["ok"] is False and "not qualified" in unit["reason"]

@@ -531,7 +531,12 @@ def cmd_explain(args):
     from src.routing_evaluator import load_and_aggregate
 
     try:
-        resolution = resolve_alias(args.alias, current_host_id())
+        this_host = current_host_id()
+        # Stage 7: never the legacy unqualified resolver -- fail closed when
+        # this host is not registered.
+        resolution = (resolve_alias(args.alias, this_host) if this_host is not None else
+                      {"alias": args.alias, "resolved": False,
+                       "reason": "this host is not registered in config/estate.yaml"})
     except RoutingConfigError as e:
         fail(str(e))  # exits; nothing below runs
 

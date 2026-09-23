@@ -190,9 +190,9 @@ def binding_for_host(alias: str, host_id: str) -> str | None:
     evidence is produced (Stage 7)."""
     from src.estate_router import _load_yaml
     entry = next((c for c in _load_yaml("models").get("capabilities", []) if c.get("alias") == alias), None)
-    if entry is None or entry.get("binding") is None:
+    if entry is None:
         return None
-    return ((entry.get("qualified_hosts") or {}).get(host_id) or {}).get("binding") or entry["binding"]
+    return ((entry.get("qualified_hosts") or {}).get(host_id) or {}).get("binding") or entry.get("binding")
 
 
 def run_text_task_on_worker(host_id: str, alias: str, task: dict, corpus_id: str, retries: int = 0) -> dict:
