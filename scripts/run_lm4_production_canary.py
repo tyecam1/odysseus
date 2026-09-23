@@ -317,7 +317,12 @@ def main(argv: list[str] | None = None):
     plan = {alias: ids for alias, ids in CANARY_PLAN.items()
             if not args.aliases or alias in args.aliases.split(",")}
     if args.worker_host:
+        requested = set(args.aliases.split(",")) if args.aliases else set()
+        if "vision" in requested:
+            parser.error("--worker-host measures text aliases only; vision is not supported in this mode")
         plan = {alias: ids for alias, ids in plan.items() if alias != "vision"}
+    if not plan:
+        parser.error(f"no canary aliases selected (known: {', '.join(CANARY_PLAN)})")
     corpus = load_json(CORPUS_PATH)
     corpus_id = corpus["corpus_id"]
     tasks_by_id = {t["task_id"]: t for t in corpus["tasks"]}

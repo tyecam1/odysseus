@@ -164,6 +164,18 @@ def delegation_preflight(units: Iterable[dict]) -> dict:
             alias = capabilities[0] if capabilities else None
             provider = estate_router._resolve_paid_provider(alias).get("provider")
             host_ready = bool((route.get("route") or {}).get("host"))
+            # Stage 7 finding 4: Codex readiness is judged on THIS unit's
+            # routed host (worker-attested), not on whichever host is first.
+            unit_host = (route.get("route") or {}).get("host")
+            if unit_host is None:
+                codex_live, codex_detail = False, "no routed host"
+            else:
+                try:
+                    unit_health = worker_health(unit_host).get("codex") or {}
+                    codex_live = bool(unit_health.get("available"))
+                    codex_detail = unit_health.get("detail")
+                except WorkerTransportError as exc:
+                    codex_live, codex_detail = False, f"worker unreachable: {exc.code}: {exc}"
             write_authority = None
             write_ready = True
             write_required = _requires_repo_write(unit)

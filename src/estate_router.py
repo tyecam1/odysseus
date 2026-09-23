@@ -429,9 +429,12 @@ def resolve_alias(alias: str, host_id: Optional[str] = None) -> dict:
     # (or no qualified_hosts at all) is qualified nowhere -- fail closed,
     # even if the model happens to be present in that host's inventory.
     qualified = entry.get("qualified_hosts") or {}
-    if host_id not in qualified:
+    host_entry = qualified.get(host_id)
+    if not isinstance(host_entry, dict) or not str(host_entry.get("evidence") or "").strip():
+        # Stage 7: qualification IS host evidence -- a host entry without
+        # its own non-empty evidence qualifies nothing (Stage 7 finding 1).
         return {"alias": alias, "resolved": False, "reason": f"alias {alias} not qualified on {host_id}"}
-    binding = (qualified.get(host_id) or {}).get("binding") or binding
+    binding = host_entry.get("binding") or binding
 
     from src.estate_worker_client import WorkerTransportError, worker_health, worker_inventory
     try:
@@ -461,8 +464,7 @@ def resolve_alias(alias: str, host_id: Optional[str] = None) -> dict:
                 "alias": alias, "resolved": False, "concrete_model": binding,
                 "reason": f"withheld — experiment priority active ({gpu_yield.get('reason')})",
             }
-    return {"alias": alias, "resolved": True, "concrete_model": binding,
-            "evidence": (qualified.get(host_id) or {}).get("evidence") or entry.get("evidence")}
+    return {"alias": alias, "resolved": True, "concrete_model": binding, "evidence": host_entry["evidence"]}
 
 
 def _record_decision(task: dict, *, host_id, executor, model_alias, concrete_model, status) -> str:
@@ -1443,6 +1445,19 @@ def run_task(task: dict) -> dict:
             objective = task.get("objective")
             paid_objective = objective if isinstance(objective, str) else str(objective)
             executor_name = provider_name
+            paid_host = route["route"].get("host")
+            paid_entry = next((h for h in (route.get("hosts_checked") or []) if h.get("host_id") == paid_host), None) or {}
+            if not implementation_mode and "codex" not in (paid_entry.get("qualified_executors") or []):
+                # Stage 5 rule, enforced for the paid lane too (Stage 7
+                # finding 2): never dispatch an executor not qualified on
+                # route.host.
+                _update_decision_outcome(
+                    route["decision_id"], status="blocked", deterministic_gate="fail",
+                    escalation_reason="worker_failed", verification_outcome="fail",
+                )
+                return {**route, "ok": False, "executed": False,
+                        "execution_error": f"executor 'codex' not qualified on {paid_host!r}",
+                        "escalation_reason": "worker_failed"}
             if implementation_mode:
                 executor_name = f"{provider_name}-write"
                 error = None

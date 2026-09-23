@@ -27,7 +27,9 @@ def fixture_config(tmp_path, monkeypatch):
             {
                 "id": "test-lab", "hostname": "THIS-HOST", "role": "lab", "tailscale": True,
                 "identity_verified": True,
-                "worker": {"enabled": True, "transport": "local", "qualified_executors": ["local"]},
+                # Stage 7: the paid lane requires `codex` qualified on route.host
+                # (the shipped lab config qualifies it too).
+                "worker": {"enabled": True, "transport": "local", "qualified_executors": ["local", "codex"]},
             },
             {
                 "id": "test-home", "hostname": "OTHER-HOST", "role": "home", "tailscale": False,

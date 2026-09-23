@@ -254,7 +254,13 @@ def setup_estate_routing_routes() -> APIRouter:
     @router.get("/route/alias/{alias}")
     async def route_alias(request: Request, alias: str, host: Optional[str] = None):
         _scope_owner(request, {"estate:read", "estate:execute"})
-        return _route_call(resolve_alias, alias, host)
+        # Stage 7: always resolve for a concrete host (default: this one) so
+        # the per-host qualification applies; never the legacy unqualified mode.
+        target = host or current_host_id()
+        if target is None:
+            return {"alias": alias, "resolved": False,
+                    "reason": "this host is not registered in config/estate.yaml; pass ?host="}
+        return _route_call(resolve_alias, alias, target)
 
     @router.get("/decision/{decision_id}")
     async def get_decision(request: Request, decision_id: str):

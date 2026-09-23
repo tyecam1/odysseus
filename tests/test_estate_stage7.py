@@ -128,3 +128,84 @@ def test_canary_worker_host_is_not_gated_on_qualification_and_never_edits_config
     assert canary.binding_for_host("local-fast", HOME) == "qwen3:8b"     # home unqualified, still measurable
     assert canary.binding_for_host("code-strong", HOME) is None
     assert (REPO_ROOT / "config" / "models.yaml").read_text() == before
+
+
+# ---------------------------------------------------------------------
+# Stage 7 adjudication regressions (gpt-6-sol round 1)
+# ---------------------------------------------------------------------
+
+@pytest.mark.parametrize("entry", [{}, {"evidence": ""}, {"evidence": "  "}, {"binding": "x"}, None])
+def test_s7_f1_host_entry_without_its_own_evidence_qualifies_nothing(models, entry):
+    write, inventory = models
+    inventory[HOME].add("qwen3:8b")
+    write([{"alias": "local-fast", "binding": "qwen3:8b", "evidence": "global-lab-evidence",
+            "qualified_hosts": {HOME: entry}}])
+    result = estate_router.resolve_alias("local-fast", HOME)
+    assert result["resolved"] is False and "not qualified" in result["reason"]
+
+
+def test_s7_f1_resolved_evidence_is_the_hosts_own(models):
+    write, inventory = models
+    inventory[HOME].add("qwen3:8b")
+    write([{"alias": "local-fast", "binding": "qwen3:8b", "evidence": "global",
+            "qualified_hosts": {HOME: {"evidence": "home-evidence"}}}])
+    assert estate_router.resolve_alias("local-fast", HOME)["evidence"] == "home-evidence"
+
+
+def test_s7_f2_paid_dispatch_requires_codex_qualified_on_route_host(monkeypatch):
+    monkeypatch.setattr(estate_router, "_update_decision_outcome", lambda *a, **k: None)
+    monkeypatch.setattr(estate_router, "resolve_route", lambda task: {
+        "decision_id": "D", "route": {"host": HOME, "executor": "none", "model_alias": "code-strong",
+                                      "concrete_model": None},
+        "hosts_checked": [{"host_id": HOME, "qualified_executors": ["local"]}]})
+    monkeypatch.setattr(estate_router, "_dispatch_read_only",
+                        lambda *a, **k: pytest.fail("must not dispatch codex to an unqualified host"))
+    result = estate_router.run_task({"objective": "x", "requirements": {"capabilities": ["code-strong"]},
+                                     "routing": {"allow_paid_escalation": True}})
+    assert result["ok"] is False and result["executed"] is False
+    assert "not qualified" in result["execution_error"]
+
+
+def test_s7_f3_alias_endpoint_resolves_for_this_host_not_the_legacy_mode(monkeypatch):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    import routes.estate_routing_routes as mod
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    seen = []
+    monkeypatch.setattr(mod, "resolve_alias", lambda alias, host=None: seen.append(host) or {"resolved": False})
+    monkeypatch.setattr(mod, "current_host_id", lambda: LAB)
+    app = FastAPI()
+    app.include_router(mod.setup_estate_routing_routes())
+    client = TestClient(app)
+    client.get("/api/estate/route/alias/local-fast")
+    client.get("/api/estate/route/alias/local-fast", params={"host": HOME})
+    assert seen == [LAB, HOME]
+    monkeypatch.setattr(mod, "current_host_id", lambda: None)
+    body = client.get("/api/estate/route/alias/local-fast").json()
+    assert body["resolved"] is False and "not registered" in body["reason"] and len(seen) == 2
+
+
+def test_s7_f4_preflight_judges_codex_on_each_units_routed_host(monkeypatch):
+    import src.estate_worker_client as client
+    from src import delegation_preflight
+    probed = []
+    monkeypatch.setattr(estate_router, "eligible_hosts", lambda repo_id=None: [
+        {"host_id": LAB, "eligible": False}, {"host_id": HOME, "eligible": True}])
+    monkeypatch.setattr(estate_router, "resolve_route", lambda task, record_decision=True: {
+        "route": {"host": HOME, "executor": "none"}, "capability_resolutions": [], "hosts_checked": []})
+    monkeypatch.setattr(client, "worker_health", lambda host_id, **kw: probed.append(host_id) or {
+        "codex": {"available": host_id == HOME, "detail": host_id}})
+    monkeypatch.setattr(estate_router, "_resolve_paid_provider", lambda alias: {"provider": "codex"})
+    result = delegation_preflight.delegation_preflight([{"task_class": "review", "objective": "code review of X",
+                                                         "capabilities": ["code-strong"]}])
+    unit = result["recommendations"][0] if "recommendations" in result else result["units"][0]
+    assert unit["ok"] is True and HOME in probed
+
+
+@pytest.mark.parametrize("argv", [["--worker-host", HOME, "--aliases", "vision"],
+                                  ["--aliases", "no-such-alias"]])
+def test_s7_f5_canary_rejects_unsupported_or_empty_selections(argv):
+    import scripts.run_lm4_production_canary as canary
+    with pytest.raises(SystemExit) as info:
+        canary.main(argv)
+    assert info.value.code != 0
