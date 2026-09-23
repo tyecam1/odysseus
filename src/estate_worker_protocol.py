@@ -18,6 +18,10 @@ VERBS = frozenset({
     "status",
     "cancel",
     "worktree.finalize",
+    # Stage 6 (plan §6.0 S6.8/S6.9/S6.10)
+    "worktree.prepare_status",
+    "spool.release",
+    "worktree.push",
 })
 ERROR_CODES = frozenset({
     "unsupported_protocol",

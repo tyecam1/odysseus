@@ -30,7 +30,8 @@ def fixture_config(tmp_path, monkeypatch):
     }))
     monkeypatch.setattr(estate_worker.estate_router, "_CONFIG_DIR", config_dir)
     monkeypatch.setattr(socket, "gethostname", lambda: "THIS-HOST")
-    monkeypatch.setattr(estate_worker, "_SPOOL_ROOT", tmp_path / "spool")
+    monkeypatch.setattr(estate_worker, "_SPOOL_ROOT", tmp_path / "aoteru" / "spool")
+    monkeypatch.setattr(estate_worker, "_PREPARE_ROOT", tmp_path / "aoteru" / "prepare")
     monkeypatch.setattr(estate_worker, "machine_fingerprint", lambda: "0123456789abcdef")
     monkeypatch.setattr(estate_worker, "_worker_version", lambda: "abc123")
     return {"config": config_dir, "repo": repo_path, "root": tmp_path}
@@ -128,28 +129,30 @@ def test_execute_codex_readonly_delegates_with_repo_cwd(fixture_config, monkeypa
     assert result["concrete_model"] == "codex-cli"
 
 
-def test_start_is_idempotent_and_spawns_once(fixture_config, monkeypatch):
-    spawn_calls = []
+@pytest.fixture
+def units(tmp_path, monkeypatch):
+    """Stage 6 runner units against a fake cgroupfs: spawn records the unit
+    as populated; the REAL tree_quiescent reads cgroup.events files."""
+    from tests.helpers.fake_units import FakeUnits
+    return FakeUnits(tmp_path, monkeypatch, estate_worker)
+
+
+def test_start_is_idempotent_and_spawns_once(fixture_config, monkeypatch, units):
     monkeypatch.setattr(
         estate_worker, "_worktree_verification",
-        lambda *args: {"ok": True, "path": str(fixture_config["repo"]), "reason": None},
+        lambda *args: {"ok": True, "path": str(fixture_config["repo"]), "reason": None, "head_sha": "abc"},
     )
-
-    def fake_spawn(argv, cwd, log_path):
-        spawn_calls.append((argv, cwd, log_path))
-        return {"pid": 123, "create_time": 456}
-
-    monkeypatch.setattr(estate_worker.estate_worker_procs, "spawn_detached", fake_spawn)
     payload = {
         "execution_id": "execution-1", "kind": "codex-write", "objective": "change",
         "repo_id": "test-repo", "timeout_s": 30,
-        "lease": {"lease_id": "lease-1", "worktree_path": str(fixture_config["repo"]), "branch": "feature"},
+        "lease": {"lease_id": "lease-1", "worktree_path": str(fixture_config["repo"]), "branch": "feature",
+                  "expected_head_sha": "abc"},
     }
     first = _call("start", payload)["result"]
     second = _call("start", payload)["result"]
-    assert first["reused"] is False
-    assert second == {"accepted": True, "handle": first["handle"], "reused": True}
-    assert len(spawn_calls) == 1
+    assert first["reused"] is False and first["state"] == "starting"
+    assert second["reused"] is True and second["state"] == "starting"
+    assert [call["unit"] for call in units.spawned] == ["aoteru-run-execution-1"]
 
 
 def test_noop_sleep_start_refused_without_selftest_sentinel(fixture_config, monkeypatch):
@@ -167,19 +170,14 @@ def test_noop_sleep_start_refused_without_selftest_sentinel(fixture_config, monk
 
 
 def test_noop_sleep_start_accepted_when_sentinel_file_present(fixture_config, monkeypatch):
+    from tests.helpers.fake_units import FakeUnits
     monkeypatch.setattr(estate_worker, "_WORKER_SELFTEST_SENTINEL_PATH", fixture_config["root"] / "selftest-enabled")
     estate_worker._WORKER_SELFTEST_SENTINEL_PATH.touch()
 
-    spawn_calls = []
-
-    def fake_spawn(argv, cwd, log_path):
-        spawn_calls.append((argv, cwd, log_path))
-        return {"pid": 123, "create_time": 456}
-    monkeypatch.setattr(estate_worker.estate_worker_procs, "spawn_detached", fake_spawn)
-
+    units = FakeUnits(fixture_config["root"], monkeypatch, estate_worker)
     result = _call("start", {"execution_id": "selftest-2", "kind": "noop-sleep", "timeout_s": 1})["result"]
     assert result["accepted"] is True
-    assert len(spawn_calls) == 1
+    assert len(units.spawned) == 1
 
 
 def test_selftest_enabled_reads_the_sentinel_file_only(tmp_path, monkeypatch):
@@ -191,66 +189,46 @@ def test_selftest_enabled_reads_the_sentinel_file_only(tmp_path, monkeypatch):
     assert estate_worker._selftest_enabled() is False
 
 
-def _write_spool(execution_id, state, result=None):
-    spool = estate_worker._SPOOL_ROOT / execution_id
-    spool.mkdir(parents=True)
-    estate_worker._json_write(spool / "state.json", state)
-    if result is not None:
-        estate_worker._json_write(spool / "result.json", result)
-
-
-def test_status_running_terminal_and_unknown(fixture_config, monkeypatch):
-    handle = {"pid": 123, "create_time": 456, "spool_id": "running-1"}
-    monkeypatch.setattr(estate_worker.estate_worker_procs, "is_alive", lambda candidate: candidate == handle)
-    _write_spool("running-1", {
-        "state": "running", "handle": handle,
-        "started_at": "2026-09-22T12:00:00Z", "finished_at": None,
-    })
+def test_status_running_terminal_and_unknown(fixture_config, monkeypatch, units):
+    units.write_spool("running-1", run_unit="aoteru-run-running-1.service", state={"state": "running"})
     running = _call("status", {"execution_id": "running-1"})["result"]
     assert running["state"] == "running"
-    assert running["process_alive"] is True
+    assert running["process_alive"] is True and running["quiescent"] is False
 
-    _write_spool("done-1", {
-        "state": "succeeded", "handle": {**handle, "spool_id": "done-1"},
-        "started_at": "start", "finished_at": "finish",
-    }, {"ok": True, "output": "done"})
+    units.write_spool("done-1", run_unit="aoteru-run-done-1.service", state={
+        "state": "succeeded", "started_at": "start", "finished_at": "finish",
+    }, result={"ok": True, "output": "done"}, populated=False)
     terminal = _call("status", {"execution_id": "done-1"})["result"]
     assert terminal["state"] == "succeeded"
     assert terminal["result"] == {"ok": True, "output": "done"}
+    assert terminal["quiescent"] is True and terminal["process_alive"] is False
+    assert terminal["handle"]["unit"] == "aoteru-run-done-1.service"
 
     unknown = _call("status", {"execution_id": "missing-1"})["result"]
     assert unknown["state"] == "unknown"
     assert unknown["handle"] is None
+    assert not (estate_worker._SPOOL_ROOT / "missing-1" / "claim.json").exists()
 
 
-def test_cancel_uses_process_layer(fixture_config, monkeypatch):
-    handle = {"pid": 123, "create_time": 456, "spool_id": "cancel-1"}
-    _write_spool("cancel-1", {"state": "running", "handle": handle})
-    calls = []
-    monkeypatch.setattr(
-        estate_worker.estate_worker_procs, "kill_tree",
-        lambda candidate: calls.append(candidate) or {"ok": True, "still_alive_pids": []},
-    )
+def test_cancel_kills_the_whole_runner_unit(fixture_config, monkeypatch, units):
+    units.write_spool("cancel-1", run_unit="aoteru-run-cancel-1.service", state={"state": "running"})
     result = _call("cancel", {"execution_id": "cancel-1"})["result"]
+    assert units.killed == ["aoteru-run-cancel-1.service"]
     assert result == {"killed": True, "still_alive_pids": []}
-    assert calls == [handle]
+    status = _call("status", {"execution_id": "cancel-1"})["result"]
+    assert status["state"] == "failed" and status["result"]["error"] == "execution cancelled"
 
 
-def test_run_spooled_delegates_to_workspace_write_codex(fixture_config, monkeypatch):
+def test_run_spooled_delegates_to_workspace_write_codex(fixture_config, monkeypatch, units):
     execution_id = "spooled-1"
-    handle = {"pid": 123, "create_time": 456, "spool_id": execution_id}
     spool = estate_worker._SPOOL_ROOT / execution_id
-    spool.mkdir(parents=True)
-    estate_worker._json_write(spool / "request.json", {
+    estate_worker.decide_once(spool / "claim.json", {"kind": "start", "claimed_at": estate_worker._utcnow(), "request": {
         "execution_id": execution_id,
         "kind": "codex-write",
         "objective": "make the change",
         "timeout_s": 17,
         "lease": {"worktree_path": str(fixture_config["repo"]), "branch": "feature"},
-    })
-    estate_worker._json_write(spool / "state.json", {
-        "state": "accepted", "handle": handle, "started_at": None, "finished_at": None,
-    })
+    }})
     calls = []
 
     def fake_codex(objective, **kwargs):
@@ -259,6 +237,7 @@ def test_run_spooled_delegates_to_workspace_write_codex(fixture_config, monkeypa
         return {"ok": True, "output": "done", "provider": "codex"}
 
     monkeypatch.setattr(estate_worker.estate_router, "_execute_codex_with_sandbox", fake_codex)
+    units.enter(f"aoteru-run-{execution_id}.service")
     assert estate_worker._run_spooled(execution_id) == 0
     assert calls[0][0] == "make the change"
     assert calls[0][1]["sandbox"] == "workspace-write"
@@ -266,9 +245,10 @@ def test_run_spooled_delegates_to_workspace_write_codex(fixture_config, monkeypa
     assert calls[0][1]["timeout"] == 17.0
     assert calls[0][1]["cwd"] == str(fixture_config["repo"])
     assert estate_worker._json_read(spool / "result.json")["ok"] is True
+    run = estate_worker.read_decision(spool / "run.json")
+    assert run["decision"] == "execute" and run["unit"] == f"aoteru-run-{execution_id}.service"
     terminal = estate_worker._json_read(spool / "state.json")
-    assert terminal["state"] == "succeeded"
-    assert terminal["pid"] == 999
+    assert terminal["state"] == "succeeded" and terminal["writer_pid"] == 999
 
 
 def test_worktree_verify_refuses_live_checkout(fixture_config, monkeypatch):
@@ -308,22 +288,20 @@ def test_every_worker_verb_leaves_core_database_unimported(fixture_config, monke
     })
     monkeypatch.setattr(estate_worker.worktree_ops, "is_live_checkout_path", lambda *args: False)
     monkeypatch.setattr(estate_worker, "git_is_clean", lambda path: (True, ""))
-    monkeypatch.setattr(
-        estate_worker.estate_worker_procs, "spawn_detached",
-        lambda *args: {"pid": 123, "create_time": 456},
-    )
-    monkeypatch.setattr(estate_worker.estate_worker_procs, "is_alive", lambda handle: True)
-    monkeypatch.setattr(
-        estate_worker.estate_worker_procs, "kill_tree",
-        lambda handle: {"ok": True, "still_alive_pids": []},
-    )
+    from tests.helpers.fake_units import FakeUnits
+    FakeUnits(fixture_config["root"], monkeypatch, estate_worker, prepare_result={
+        "state": "prepared", "path": str(fixture_config["repo"]), "branch": "feature",
+        "head_sha": "abc", "clean": True,
+    })
 
     calls = [
         ("health", {}),
         ("inventory", {"models_of_interest": []}),
         ("repo.probe", {"repo_id": "test-repo"}),
         ("execute", {"kind": "local-inference", "model": "model-a", "objective": "x", "timeout_s": 1}),
-        ("worktree.prepare", {"repo_id": "test-repo", "branch": "feature", "base_ref": "HEAD"}),
+        ("worktree.prepare", {"repo_id": "test-repo", "branch": "feature", "base_ref": "HEAD",
+                              "lease": {"lease_id": "lease-p", "host_id": "test-lab"}}),
+        ("worktree.prepare_status", {"lease_id": "lease-p"}),
         ("worktree.verify", {"repo_id": "test-repo", "worktree_path": str(fixture_config["repo"]), "branch": "feature"}),
         ("start", {
             "execution_id": "hygiene-1", "kind": "codex-write", "objective": "x",
@@ -332,22 +310,21 @@ def test_every_worker_verb_leaves_core_database_unimported(fixture_config, monke
         }),
         ("status", {"execution_id": "hygiene-1"}),
         ("cancel", {"execution_id": "hygiene-1"}),
+        ("status", {"execution_id": "hygiene-2", "fence": True}),
+        ("spool.release", {"execution_id": "hygiene-2", "resolution": "not_started"}),
     ]
     for verb, payload in calls:
         assert _call(verb, payload)["ok"] is True
         assert "core.database" not in sys.modules, verb
 
-    monkeypatch.setattr(
-        estate_worker, "_worktree_verification",
-        lambda *args: {"ok": True, "path": str(fixture_config["repo"]), "reason": None},
-    )
-    monkeypatch.setattr(estate_worker, "_run_git", lambda path, args, **kwargs: subprocess.CompletedProcess(
-        args, 0, stdout=("feature\n" if args == ["branch", "--show-current"] else ("abc\n" if args == ["rev-parse", "HEAD"] else "")), stderr="",
-    ))
-    assert _call("worktree.finalize", {
-        "repo_id": "test-repo", "worktree_path": str(fixture_config["repo"]),
-        "branch": "feature", "commit_message": "test",
-    })["ok"] is True
+    # worktree.finalize / worktree.push run their git in runner units; the
+    # verb itself must stay DB-free even while waiting on them.
+    monkeypatch.setattr(estate_worker, "_DEFAULT_GIT_UNIT_WAIT_S", 0.2)
+    finalize = _call("worktree.finalize", {
+        "execution_id": "hygiene-1", "repo_id": "test-repo", "worktree_path": str(fixture_config["repo"]),
+        "branch": "feature", "commit_message": "test", "expected_head_sha": "abc",
+    })
+    assert finalize["ok"] is True
     assert "core.database" not in sys.modules
 
 

@@ -93,6 +93,7 @@ def test_error_response_validates_and_error_codes_are_closed():
     assert set(VERBS) == {
         "health", "inventory", "repo.probe", "execute", "worktree.prepare",
         "worktree.verify", "start", "status", "cancel", "worktree.finalize",
+        "worktree.prepare_status", "spool.release", "worktree.push",
     }
     request = build_request("health", "test-lab", {}, 10)
     response = error_response(request, "bad_request", "bad", _attestation(request))

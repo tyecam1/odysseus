@@ -342,3 +342,157 @@ def kill_tree(handle: dict) -> dict:
             time.sleep(0.2)
         return {"ok": False, "attempted_pids": [pid], "still_alive_pids": [pid]}
     return _kill_process_tree(pid, pid)
+
+
+# ---------------------------------------------------------------------
+# Stage 6 (plan §6.0 S6.12): cgroup-scoped runner units and tree quiescence
+# ---------------------------------------------------------------------
+
+_CGROUP_ROOT = Path("/sys/fs/cgroup")
+# Environment a runner unit inherits. A transient user service starts from
+# the user manager's environment, not the caller's, so only these are
+# forwarded explicitly (plus every AOTERU_* variable).
+_RUNNER_ENV_KEYS = ("HOME", "PATH", "LANG", "LC_ALL", "USER", "LOGNAME", "CODEX_HOME", "PYTHONPATH")
+
+
+def _user_manager_env() -> dict:
+    env = dict(os.environ)
+    if hasattr(os, "getuid"):
+        env.setdefault("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+    return env
+
+
+def own_cgroup() -> Optional[str]:
+    """This process's cgroup v2 path (`/proc/self/cgroup` `0::<path>`), or
+    None when unavailable (non-Linux, cgroup v1 only)."""
+    try:
+        for line in Path("/proc/self/cgroup").read_text(encoding="utf-8").splitlines():
+            if line.startswith("0::"):
+                return line[3:].strip() or None
+    except OSError:
+        return None
+    return None
+
+
+def cgroup_is_dedicated(cgroup: Optional[str], unit: Optional[str]) -> bool:
+    """True only for the runner's own dedicated `<unit>` cgroup -- never the
+    root cgroup or any shared slice (plan S6.12)."""
+    if not cgroup or not unit or not unit.startswith("aoteru-") or not unit.endswith(".service"):
+        return False
+    return cgroup.rstrip("/").endswith("/" + unit)
+
+
+def spawn_runner_unit(argv: list[str], cwd: str, log_path: str, unit: str) -> dict:
+    """Launch a worker runner as a transient systemd *user service* whose
+    cgroup contains every descendant (S6.12). Service mode, never
+    `--scope`: a scope migrates the calling process, which cgroup v2 does
+    not allow an unprivileged user to do from the backend's system-service
+    cgroup. Returns the unit name only -- the canonical runner handle is
+    what the runner itself records in its `run.json` decision.
+
+    Windows has no job-object implementation yet, so there is no runner
+    unit there; callers must gate on `runner_units_supported()` first."""
+    if os.name == "nt":
+        raise ProcessLayerError("executor_unavailable", "runner units are not implemented on Windows (S6.12)")
+    if not unit.startswith("aoteru-"):
+        raise ValueError(f"runner unit {unit!r} must be a dedicated aoteru-* unit")
+    Path(log_path).parent.mkdir(parents=True, exist_ok=True)
+    command = [
+        "systemd-run", "--user", f"--unit={unit}", "--collect", "--quiet",
+        f"--working-directory={cwd}",
+        "-p", f"StandardOutput=append:{log_path}", "-p", f"StandardError=append:{log_path}",
+    ]
+    for key in _RUNNER_ENV_KEYS:
+        if os.environ.get(key):
+            command.append(f"--setenv={key}={os.environ[key]}")
+    for key, value in os.environ.items():
+        if key.startswith("AOTERU_"):
+            command.append(f"--setenv={key}={value}")
+    command += ["--", *argv]
+    try:
+        completed = subprocess.run(command, env=_user_manager_env(), capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ProcessLayerError("executor_unavailable", f"systemd-run failed to launch {unit}: {exc}") from exc
+    if completed.returncode != 0:
+        raise ProcessLayerError(
+            "executor_unavailable",
+            f"systemd-run refused {unit}: {(completed.stderr or completed.stdout).strip()[-400:]}",
+        )
+    return {"unit": f"{unit}.service"}
+
+
+_RUNNER_UNITS_PROBE: dict = {}
+
+
+def runner_units_supported() -> tuple[bool, str]:
+    """Per-process probe (S6.12): a transient user unit must start and report
+    its own dedicated `aoteru-probe-*.service` cgroup. Cached for the life
+    of this (per-call) worker process."""
+    if "result" in _RUNNER_UNITS_PROBE:
+        return _RUNNER_UNITS_PROBE["result"]
+    if os.name == "nt":
+        result = (False, "runner units are not implemented on Windows (S6.12 job objects pending, B12)")
+    else:
+        import uuid
+        unit = f"aoteru-probe-{uuid.uuid4().hex}"
+        try:
+            completed = subprocess.run(
+                ["systemd-run", "--user", f"--unit={unit}", "--collect", "--quiet", "--wait", "--pipe",
+                 "--", "cat", "/proc/self/cgroup"],
+                env=_user_manager_env(), capture_output=True, text=True, timeout=30,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            result = (False, f"systemd-run --user unavailable: {exc}")
+        else:
+            cgroup = next((line[3:].strip() for line in completed.stdout.splitlines() if line.startswith("0::")), None)
+            if completed.returncode == 0 and cgroup_is_dedicated(cgroup, f"{unit}.service"):
+                result = (True, f"transient user units ok ({cgroup})")
+            else:
+                detail = (completed.stderr or completed.stdout).strip()[-300:]
+                result = (False, f"runner unit probe failed (rc={completed.returncode}): {detail or cgroup}")
+    _RUNNER_UNITS_PROBE["result"] = result
+    return result
+
+
+def tree_quiescent(handle: Optional[dict]) -> Optional[bool]:
+    """S6.12: True only when the runner's recorded dedicated cgroup is gone
+    or reports `populated 0` (cgroup v2 `populated` is recursive, so a
+    `setsid`'d descendant still counts). False while populated. None when
+    it cannot be proven -- no recorded/dedicated cgroup, unreadable
+    cgroupfs, or Windows. Callers treat None exactly like False."""
+    if os.name == "nt" or not isinstance(handle, dict):
+        return None
+    cgroup, unit = handle.get("cgroup"), handle.get("unit")
+    if not cgroup_is_dedicated(cgroup, unit):
+        return None
+    if not _CGROUP_ROOT.is_dir():
+        return None
+    path = _CGROUP_ROOT / cgroup.lstrip("/")
+    try:
+        events = (path / "cgroup.events").read_text(encoding="utf-8")
+    except FileNotFoundError:
+        # The unit embeds a unique id, so a missing cgroup was removed
+        # after emptying and can never be a reused one.
+        return True
+    except OSError:
+        return None
+    for line in events.splitlines():
+        if line.startswith("populated "):
+            return line.split()[1] == "0"
+    return None
+
+
+def kill_unit(unit: Optional[str]) -> dict:
+    """SIGKILL every process in a runner unit's cgroup (all descendants)."""
+    if os.name == "nt" or not unit:
+        return {"ok": False, "detail": "no runner unit"}
+    try:
+        completed = subprocess.run(
+            ["systemctl", "--user", "kill", "--signal=KILL", unit],
+            env=_user_manager_env(), capture_output=True, text=True, timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"ok": False, "detail": str(exc)}
+    # A unit that already stopped and was collected is "not loaded": fine.
+    return {"ok": completed.returncode == 0 or "not loaded" in (completed.stderr or ""),
+            "detail": (completed.stderr or "").strip()}

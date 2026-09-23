@@ -27,6 +27,7 @@ from src.runtime_paths import get_app_root
 
 _OLLAMA_BASE = os.getenv("AOTERU_WORKER_OLLAMA_BASE", "http://127.0.0.1:11434").rstrip("/")
 _SPOOL_ROOT = Path.home() / ".aoteru" / "worker-spool"
+_PREPARE_ROOT = Path.home() / ".aoteru" / "worker-prepare"
 _SPOOL_TTL_SECONDS = 7 * 24 * 60 * 60
 _TERMINAL_STATES = frozenset({"succeeded", "failed", "timed_out"})
 _EXECUTION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -100,24 +101,59 @@ def _spool_path(execution_id: str) -> Path:
 
 
 def _gc_spools() -> None:
+    """S6.8 retention. Never deletes a spool directory or any decision
+    file. Compacts (drops worker.log/result.json, tombstones state.json):
+    a write spool only 7 days after the control plane's spool.release; a
+    self-test spool 7 days after it became terminal and quiescent. Deletes
+    only stale decide_once temp files, which were never decisions."""
     try:
         entries = list(_SPOOL_ROOT.iterdir())
     except OSError:
         return
-    cutoff = time.time() - _SPOOL_TTL_SECONDS
     for entry in entries:
         if not entry.is_dir():
             continue
-        state_path = entry / "state.json"
-        state = _json_read(state_path)
-        if state.get("state") not in _TERMINAL_STATES:
-            continue
         try:
-            stale = state_path.stat().st_mtime < cutoff
+            for temp in entry.glob(".*.tmp-*"):
+                age = time.time() - temp.stat().st_mtime
+                if age > STARTING_STALE_SECONDS:
+                    temp.unlink()
+            _compact_if_due(entry)
+        except (OSError, WorkerError):
+            continue
+
+
+def _compact_if_due(spool: Path) -> None:
+    files = _spool_files(spool)
+    claim = read_decision(files["claim"])
+    if claim is None or claim.get("kind") != "start":
+        return
+    telemetry = _json_read(files["state"])
+    if telemetry.get("state") == "tombstone":
+        return
+    kind = (claim.get("request") or {}).get("kind")
+    released = read_decision(files["released"])
+    if kind in _WRITE_KINDS:
+        age = _age_seconds((released or {}).get("released_at"))
+        if released is None or age is None or age < SPOOL_COMPACT_AFTER_RELEASE_SECONDS:
+            return
+    else:
+        view = _execution_view(spool)
+        if view["state"] not in _TERMINAL_STATES | {"start_failed"} or view["quiescent"] is not True:
+            return
+        try:
+            if time.time() - files["state"].stat().st_mtime < _SPOOL_TTL_SECONDS:
+                return
         except OSError:
-            stale = False
-        if stale:
-            shutil.rmtree(entry, ignore_errors=True)
+            return
+    original = telemetry.get("state")
+    for name in ("log", "result"):
+        try:
+            files[name].unlink()
+        except FileNotFoundError:
+            pass
+    _json_write(files["state"], {"state": "tombstone", "kind": kind, "original_state": original,
+                                 "resolution": (released or {}).get("resolution"), "compacted_at": _utcnow()})
 
 
 def machine_fingerprint() -> str:
@@ -206,6 +242,7 @@ def handle(request: dict) -> dict:
 
     function_name = f"_verb_{request['verb'].replace('.', '_')}"
     verb = globals()[function_name]
+    _CURRENT_DEADLINE_S["value"] = request.get("deadline_s")
     try:
         result = verb(request["payload"])
     except WorkerError as exc:
@@ -240,8 +277,13 @@ def _in_flight_execution_ids() -> list[str]:
         return []
     result = []
     for entry in entries:
-        if entry.is_dir() and _json_read(entry / "state.json").get("state") in {"accepted", "running"}:
-            result.append(entry.name)
+        if not entry.is_dir() or not (entry / "claim.json").exists():
+            continue
+        try:
+            if _execution_view(entry)["state"] in {"starting", "running"}:
+                result.append(entry.name)
+        except WorkerError:
+            result.append(entry.name)   # unreadable -> never reported as idle
     return sorted(result)
 
 
@@ -256,6 +298,7 @@ def _verb_health(payload: dict) -> dict:
         "codex": {"available": codex_available, "detail": codex_detail},
         "gpu_yield": {"active": gpu_active, "reason": gpu_reason},
         "in_flight": _in_flight_execution_ids(),
+        "write_prerequisites": _write_prerequisites(),
         "time_utc": _utcnow(),
     }
 
@@ -325,11 +368,16 @@ def _verb_inventory(payload: dict) -> dict:
             "deterministic": True,
             "local": reachable,
             "codex": codex_available,
-            "codex-write": codex_available and _detached_spawn_verified(),
+            "codex-write": codex_available and _detached_spawn_verified() and _write_prerequisites_ok(),
         },
         "repos": repos,
         "hardware": _hardware(),
     }
+
+
+def _write_prerequisites_ok() -> bool:
+    prerequisites = _write_prerequisites()
+    return prerequisites["decision_fs"] and prerequisites["runner_units"]
 
 
 def _verb_repo_probe(payload: dict) -> dict:
@@ -379,38 +427,24 @@ def _verb_execute(payload: dict) -> dict:
     raise WorkerError("bad_request", f"unsupported execute kind {kind!r}")
 
 
-def _verb_worktree_prepare(payload: dict) -> dict:
-    repo_id = payload.get("repo_id")
-    branch = payload.get("branch")
-    base_ref = payload.get("base_ref")
-    if not all(isinstance(value, str) and value for value in (repo_id, branch, base_ref)):
-        raise WorkerError("bad_request", "worktree.prepare requires repo_id, branch and base_ref")
-    try:
-        created = worktree_ops.create_or_reuse_worktree(repo_id, branch, base_ref=base_ref)
-    except RuntimeError as exc:
-        raise WorkerError("repo_unavailable", str(exc)) from exc
-    verified = worktree_ops.verify_worktree(repo_id, created["path"], branch)
-    if not verified["ok"]:
-        raise WorkerError("authority_denied", verified["reason"])
-    clean, _reason = git_is_clean(verified["path"])
-    return {
-        "path": verified["path"],
-        "branch": verified["branch"],
-        "head_sha": verified["head"],
-        "clean": clean,
-    }
-
-
 def _worktree_verification(repo_id: Any, worktree_path: Any, branch: Any) -> dict:
     if not all(isinstance(value, str) and value for value in (repo_id, worktree_path, branch)):
         raise WorkerError("bad_request", "worktree verification requires repo_id, worktree_path and branch")
     if worktree_ops.is_live_checkout_path(repo_id, worktree_path):
         return {"ok": False, "path": str(Path(worktree_path).resolve()), "reason": "refusing the live checkout"}
     verified = worktree_ops.verify_worktree(repo_id, worktree_path, branch)
+    ok = bool(verified.get("ok"))
+    path = verified.get("path") or str(Path(worktree_path).resolve())
+    clean = False
+    if ok:
+        clean, _reason = git_is_clean(path)
     return {
-        "ok": bool(verified.get("ok")),
-        "path": verified.get("path") or str(Path(worktree_path).resolve()),
-        "reason": None if verified.get("ok") else verified.get("reason", "worktree verification failed"),
+        "ok": ok,
+        "path": path,
+        "reason": None if ok else verified.get("reason", "worktree verification failed"),
+        # S6.1/S6.2: explicit evidence, never inferred from path/branch.
+        "head_sha": verified.get("head") if ok else None,
+        "clean": bool(clean),
     }
 
 
@@ -418,99 +452,451 @@ def _verb_worktree_verify(payload: dict) -> dict:
     return _worktree_verification(payload.get("repo_id"), payload.get("worktree_path"), payload.get("branch"))
 
 
-def _existing_start_result(spool: Path) -> dict:
-    state = _json_read(spool / "state.json")
-    handle = state.get("handle")
-    if not isinstance(handle, dict):
-        for _ in range(20):
-            time.sleep(0.01)
-            state = _json_read(spool / "state.json")
-            handle = state.get("handle")
-            if isinstance(handle, dict):
-                break
-    if not isinstance(handle, dict):
-        raise WorkerError("execution_failed", "execution spool exists without a worker handle")
-    return {"accepted": True, "handle": handle, "reused": True}
+# ---------------------------------------------------------------------
+# Stage 6 decision primitive (plan §6.0 S6.11)
+# ---------------------------------------------------------------------
+
+STARTING_STALE_SECONDS = 60
+SPOOL_COMPACT_AFTER_RELEASE_SECONDS = 7 * 24 * 60 * 60
+_DEFAULT_PREPARE_WAIT_S = 90.0
+_DEFAULT_GIT_UNIT_WAIT_S = 120.0
+_WRITE_KINDS = frozenset({"codex-write"})
+_DECISION_FS_PROBED: dict = {}
+_CURRENT_DEADLINE_S = {"value": None}
 
 
-def _verb_start(payload: dict) -> dict:
-    execution_id = payload.get("execution_id")
-    spool = _spool_path(execution_id)
-    if spool.exists():
-        return _existing_start_result(spool)
+def _fsync_dir(path: Path) -> None:
+    """Durably persist a directory's entries. Windows has no directory
+    fsync through Python -- decision crash-durability there is unproven
+    (plan B13), and Windows write verbs are refused anyway (S6.12)."""
+    if os.name == "nt":
+        return
+    fd = os.open(str(path), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _anchor_for(path: Path) -> Path:
+    """The fixed durability anchor of a decision path: the parent of the
+    root (spool / prepare) it lives under."""
+    path = Path(path)
+    for root in (_SPOOL_ROOT, _PREPARE_ROOT):
+        try:
+            path.relative_to(root)
+        except ValueError:
+            continue
+        return Path(root).parent
+    raise WorkerError("execution_failed", f"decision path {path} is outside every worker root")
+
+
+def _ensure_durable_dir(directory: Path) -> None:
+    """S6.11 directory durability: from the anchor down, mkdir each
+    component and fsync its parent -- always, whether or not this caller
+    created it, since a concurrent creator may not have fsynced yet."""
+    directory = Path(directory)
+    anchor = _anchor_for(directory)
+    anchor.mkdir(parents=True, exist_ok=True)
+    _fsync_dir(anchor.parent)
+    current = anchor
+    for part in directory.relative_to(anchor).parts:
+        child = current / part
+        child.mkdir(exist_ok=True)
+        _fsync_dir(current)
+        current = child
+
+
+def _fsync_chain(directory: Path) -> None:
+    """fsync `directory` and every ancestor up to (and including) its anchor."""
+    directory = Path(directory)
+    anchor = _anchor_for(directory)
+    current = directory
+    while True:
+        _fsync_dir(current)
+        if current == anchor or current == current.parent:
+            break
+        current = current.parent
+
+
+def _load_decision(target: Path) -> dict:
+    try:
+        value = json.loads(target.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        # A linked decision is always a complete inode; unparsable means
+        # corruption, which must never be read as "absent".
+        raise WorkerError("execution_failed", f"corrupt decision file {target}: {exc}") from exc
+    if not isinstance(value, dict):
+        raise WorkerError("execution_failed", f"corrupt decision file {target}")
+    return value
+
+
+def decide_once(target: Path, content: dict) -> tuple[bool, dict]:
+    """S6.11: exactly one caller ever wins `target`. Temp file + fsync,
+    then `os.link` (fail-if-exists on POSIX and NTFS; publishes a complete
+    inode), then fsync the directory chain. Winners and losers alike
+    return only after their own fsync, so nobody acts on an undurable
+    decision. Decision files are never overwritten, renamed over or
+    deleted."""
+    target = Path(target)
+    directory = target.parent
+    _ensure_durable_dir(directory)
+    temporary = directory / f".{target.name}.tmp-{os.getpid()}-{uuid.uuid4().hex}"
+    with open(temporary, "x", encoding="utf-8") as handle:
+        json.dump(content, handle, sort_keys=True)
+        handle.flush()
+        os.fsync(handle.fileno())
+    try:
+        try:
+            os.link(temporary, target)
+            won = True
+        except FileExistsError:
+            won = False
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+    _fsync_chain(directory)
+    return won, (content if won else _load_decision(target))
+
+
+def read_decision(target: Path) -> dict | None:
+    """Observe -> fsync -> act (S6.11): a present decision is returned only
+    after this reader has itself fsynced its directory chain. An absent
+    decision is returned as None and must never be acted on directly --
+    any action on absence is itself a `decide_once`."""
+    target = Path(target)
+    if not target.exists():
+        return None
+    value = _load_decision(target)
+    _fsync_chain(target.parent)
+    return value
+
+
+def _decision_fs_supported(root: Path) -> tuple[bool, str]:
+    key = str(root)
+    if key in _DECISION_FS_PROBED:
+        return _DECISION_FS_PROBED[key]
+    probe = Path(root) / f".decision-probe-{os.getpid()}-{uuid.uuid4().hex}"
+    result = (False, "decision filesystem unsupported")
+    try:
+        _ensure_durable_dir(probe)
+        first, second, target = probe / "a", probe / "b", probe / "t"
+        first.write_text("a", encoding="utf-8")
+        second.write_text("b", encoding="utf-8")
+        os.link(first, target)
+        try:
+            os.link(second, target)
+        except FileExistsError:
+            result = (True, "hard-link decisions ok")
+        else:
+            result = (False, "decision filesystem unsupported: link overwrote an existing target")
+    except OSError as exc:
+        result = (False, f"decision filesystem unsupported: {exc}")
+    finally:
+        shutil.rmtree(probe, ignore_errors=True)  # probe scratch only, never a decision
+    _DECISION_FS_PROBED[key] = result
+    return result
+
+
+def _write_prerequisites() -> dict:
+    decision_ok, decision_detail = _decision_fs_supported(_SPOOL_ROOT)
+    prepare_ok, prepare_detail = _decision_fs_supported(_PREPARE_ROOT)
+    units_ok, units_detail = estate_worker_procs.runner_units_supported()
+    return {
+        "decision_fs": decision_ok and prepare_ok,
+        "runner_units": units_ok,
+        "detail": "; ".join((decision_detail, prepare_detail, units_detail)),
+    }
+
+
+def _require_write_prerequisites() -> None:
+    """Every write verb refuses BEFORE any claim unless both the decision
+    filesystem (S6.11) and runner units (S6.12) are proven. No fallback."""
+    prerequisites = _write_prerequisites()
+    if not (prerequisites["decision_fs"] and prerequisites["runner_units"]):
+        raise WorkerError("executor_unavailable", prerequisites["detail"])
+
+
+def _age_seconds(iso_value: Any) -> float | None:
+    if not isinstance(iso_value, str):
+        return None
+    try:
+        moment = datetime.fromisoformat(iso_value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return (datetime.now(timezone.utc) - moment).total_seconds()
+
+
+def _git_env_dir(record: Path) -> Path:
+    hooks = record / "no-hooks"
+    hooks.mkdir(parents=True, exist_ok=True)
+    return hooks
+
+
+def _disable_git_side_processes(record: Path) -> None:
+    """Defence in depth (S6.10): no hooks, no auto-gc/maintenance for every
+    git child of this runner. The runner unit's cgroup stays the proof."""
+    pairs = [("core.hooksPath", str(_git_env_dir(record))), ("gc.auto", "0"), ("maintenance.auto", "false")]
+    os.environ["GIT_CONFIG_COUNT"] = str(len(pairs))
+    for index, (key, value) in enumerate(pairs):
+        os.environ[f"GIT_CONFIG_KEY_{index}"] = key
+        os.environ[f"GIT_CONFIG_VALUE_{index}"] = value
+
+
+def _runner_argv(flag: str, *args: str) -> list[str]:
+    root = str(Path(get_app_root()).resolve())
+    return [sys.executable, "-m", "src.estate_worker", "--root", root, flag, *args]
+
+
+def _launch_runner(flag: str, args: list[str], *, unit: str, log_path: Path) -> dict:
+    return estate_worker_procs.spawn_runner_unit(
+        _runner_argv(flag, *args), str(Path(get_app_root()).resolve()), str(log_path), unit,
+    )
+
+
+def _runner_self_check(unit: str) -> tuple[dict | None, str | None]:
+    """A runner may execute only inside its own dedicated unit cgroup."""
+    cgroup = estate_worker_procs.own_cgroup()
+    if not estate_worker_procs.cgroup_is_dedicated(cgroup, unit):
+        return None, f"runner is not inside its dedicated unit {unit} (cgroup {cgroup!r})"
+    create_time = None
+    fields = estate_worker_procs._proc_stat_fields(os.getpid())
+    if fields is not None:
+        create_time = fields[2]
+    return {"pid": os.getpid(), "create_time": create_time, "cgroup": cgroup, "unit": unit}, None
+
+
+def _unit_quiescent(run_decision: dict | None) -> bool | None:
+    if not isinstance(run_decision, dict):
+        return None
+    if run_decision.get("decision") == "abort":
+        return True
+    return estate_worker_procs.tree_quiescent(run_decision)
+
+
+# ---------------------------------------------------------------------
+# Execution spool (S6.6 / S6.8 / S6.12)
+# ---------------------------------------------------------------------
+
+def _spool_files(spool: Path) -> dict:
+    return {
+        "claim": spool / "claim.json", "run": spool / "run.json", "state": spool / "state.json",
+        "result": spool / "result.json", "released": spool / "released.json",
+        "closed": spool / "closed.json", "log": spool / "worker.log",
+    }
+
+
+def _attempts(spool: Path, kind: str) -> list[tuple[int, dict, dict | None]]:
+    """Recorded attempts (finalize|push) as (n, attempt, run_decision)."""
+    directory = spool / kind
+    out = []
+    if not directory.is_dir():
+        return out
+    for entry in directory.iterdir():
+        match = re.fullmatch(r"attempt-(\d+)\.json", entry.name)
+        if not match:
+            continue
+        number = int(match.group(1))
+        attempt = read_decision(entry)
+        run = read_decision(directory / f"attempt-{number}.run.json")
+        out.append((number, attempt or {}, run))
+    return sorted(out, key=lambda item: item[0])
+
+
+def _abort_run(run_path: Path, by: str, reason: str) -> dict:
+    _won, decided = decide_once(run_path, {"decision": "abort", "by": by, "reason": reason, "at": _utcnow()})
+    return decided
+
+
+def _maybe_abort_stale_start(spool: Path, claim: dict) -> None:
+    files = _spool_files(spool)
+    if claim.get("kind") != "start" or files["run"].exists():
+        return
+    age = _age_seconds(claim.get("claimed_at"))
+    if age is not None and age > STARTING_STALE_SECONDS:
+        _abort_run(files["run"], "observer", f"starting claim older than {STARTING_STALE_SECONDS}s")
+
+
+def _execution_aggregate(spool: Path, *, fence_unstarted: bool) -> tuple[bool | None, list[dict]]:
+    """S6.12 aggregate execution quiescence over every worktree-touching
+    unit: the writer runner plus every finalize attempt (push attempts are
+    excluded; they never touch the worktree). With `fence_unstarted`, an
+    attempt/writer with no run decision is fenced (abort won) first --
+    otherwise it counts as not proven."""
+    files = _spool_files(spool)
+    units = []
+    claim = read_decision(files["claim"])
+    if claim is not None and claim.get("kind") == "start":
+        run = read_decision(files["run"])
+        if run is None and fence_unstarted:
+            run = _abort_run(files["run"], "fence", "closed before the runner decided")
+        units.append({"unit": (run or {}).get("unit"), "kind": "writer", "quiescent": _unit_quiescent(run)})
+    for number, _attempt, run in _attempts(spool, "finalize"):
+        if run is None and fence_unstarted:
+            run = _abort_run(spool / "finalize" / f"attempt-{number}.run.json", "fence",
+                             "closed before the attempt decided")
+        units.append({"unit": (run or {}).get("unit"), "kind": f"finalize-{number}",
+                      "quiescent": _unit_quiescent(run)})
+    if any(unit["quiescent"] is None for unit in units):
+        aggregate = None
+    else:
+        aggregate = all(unit["quiescent"] for unit in units)
+    return aggregate, units
+
+
+def _execution_view(spool: Path) -> dict:
+    """Derived state (S6.6): computed only from decision files plus
+    quiescence, never from an overwritable field."""
+    files = _spool_files(spool)
+    claim = read_decision(files["claim"])
+    base = {"handle": None, "spawned": False, "started_at": None, "finished_at": None,
+            "released": read_decision(files["released"]) is not None}
+    if claim is None:
+        return {**base, "state": "unknown", "quiescent": True, "process_alive": False, "units": []}
+    if claim.get("kind") == "fence":
+        return {**base, "state": "fenced", "quiescent": True, "process_alive": False, "units": []}
+    telemetry = _json_read(files["state"])
+    aggregate, units = _execution_aggregate(spool, fence_unstarted=False)
+    view = {
+        **base,
+        "spawned": bool((telemetry.get("spawn") or {}).get("unit")) or telemetry.get("state") not in (None, "starting"),
+        "started_at": telemetry.get("started_at"), "finished_at": telemetry.get("finished_at"),
+        "quiescent": aggregate, "process_alive": aggregate is not True, "units": units,
+    }
+    run = read_decision(files["run"])
+    if telemetry.get("state") == "tombstone":
+        view["state"] = "tombstone"
+        return view
+    if run is None:
+        view["state"] = "starting"
+        return view
+    if run.get("decision") == "abort":
+        view["state"] = "start_failed"
+        view["error"] = run.get("reason")
+        return view
+    view["handle"] = {key: run.get(key) for key in ("pid", "create_time", "cgroup", "unit")}
+    writer_quiescent = _unit_quiescent(run)
+    recorded = telemetry.get("state")
+    if recorded in _TERMINAL_STATES and writer_quiescent is True:
+        view["state"] = recorded
+        result = _json_read(files["result"])
+        if result:
+            view["result"] = result
+    else:
+        view["state"] = "running"
+        view["terminal_pending"] = recorded in _TERMINAL_STATES
+    return view
+
+
+def _start_answer(spool: Path, *, reused: bool) -> dict:
+    view = _execution_view(spool)
+    accepted = view["state"] not in ("unknown", "fenced", "tombstone", "start_failed")
+    answer = {"accepted": accepted, "state": view["state"], "handle": view["handle"],
+              "reused": reused, "spawned": view["spawned"]}
+    if view.get("error"):
+        answer["error"] = view["error"]
+    return answer
+
+
+def _validate_start(payload: dict) -> None:
     kind = payload.get("kind")
     if kind == "noop-sleep":
         if not _selftest_enabled():
             raise WorkerError("bad_request", "noop-sleep is available only in worker self-test mode")
         _timeout(payload, 1.0)
-    elif kind == "codex-write":
-        lease = payload.get("lease")
-        if not isinstance(lease, dict) or not isinstance(lease.get("lease_id"), str):
-            raise WorkerError("bad_request", "codex-write start requires a lease")
-        if not isinstance(payload.get("objective"), str):
-            raise WorkerError("bad_request", "codex-write start requires objective")
-        _timeout(payload, 1800.0)
-        verified = _worktree_verification(
-            payload.get("repo_id"), lease.get("worktree_path"), lease.get("branch"),
-        )
-        if not verified["ok"]:
-            raise WorkerError("authority_denied", verified["reason"])
-    else:
+        return
+    if kind != "codex-write":
         raise WorkerError("bad_request", f"unsupported start kind {kind!r}")
+    lease = payload.get("lease")
+    if not isinstance(lease, dict) or not isinstance(lease.get("lease_id"), str):
+        raise WorkerError("bad_request", "codex-write start requires a lease")
+    if not isinstance(payload.get("objective"), str):
+        raise WorkerError("bad_request", "codex-write start requires objective")
+    _timeout(payload, 1800.0)
+    verified = _worktree_verification(payload.get("repo_id"), lease.get("worktree_path"), lease.get("branch"))
+    if not verified["ok"]:
+        raise WorkerError("authority_denied", verified["reason"])
+    expected_head = lease.get("expected_head_sha")
+    if expected_head is not None:
+        if verified.get("head_sha") != expected_head:
+            raise WorkerError("authority_denied",
+                              f"worktree HEAD {verified.get('head_sha')!r} != admission head {expected_head!r}")
 
-    _SPOOL_ROOT.mkdir(parents=True, exist_ok=True)
+
+def _verb_start(payload: dict) -> dict:
+    execution_id = payload.get("execution_id")
+    spool = _spool_path(execution_id)
+    files = _spool_files(spool)
+    existing = read_decision(files["claim"])
+    if existing is not None:
+        _maybe_abort_stale_start(spool, existing)
+        return _start_answer(spool, reused=True)
+    # Everything below the claim is pre-claim validation: a refusal here is
+    # a deterministic pre-spawn refusal of THIS request only (S6.6).
+    _validate_start(payload)
+    _require_write_prerequisites()
+    won, decided = decide_once(files["claim"], {"kind": "start", "request": payload, "claimed_at": _utcnow()})
+    if not won:
+        _maybe_abort_stale_start(spool, decided)
+        return _start_answer(spool, reused=True)
+    unit = f"aoteru-run-{execution_id}"
     try:
-        spool.mkdir()
-    except FileExistsError:
-        return _existing_start_result(spool)
-    try:
-        _json_write(spool / "request.json", payload)
-        root = str(Path(get_app_root()).resolve())
-        try:
-            handle = estate_worker_procs.spawn_detached(
-                [sys.executable, "-m", "src.estate_worker", "--run-spooled", execution_id],
-                root,
-                str(spool / "worker.log"),
-            )
-        except estate_worker_procs.ProcessLayerError as exc:
-            raise WorkerError(exc.code, str(exc)) from exc
-        handle = {**handle, "spool_id": execution_id}
-        _json_write(spool / "state.json", {
-            "state": "accepted",
-            "handle": handle,
-            "started_at": None,
-            "finished_at": None,
-        })
-    except Exception:
-        shutil.rmtree(spool, ignore_errors=True)
-        raise
-    return {"accepted": True, "handle": handle, "reused": False}
+        spawn = _launch_runner("--run-spooled", [execution_id], unit=unit, log_path=files["log"])
+    except estate_worker_procs.ProcessLayerError as exc:
+        _abort_run(files["run"], "starter", f"{exc.code}: {exc}")
+        _json_write(files["result"], {"ok": False, "error": str(exc)})
+        return _start_answer(spool, reused=False)
+    _json_write(files["state"], {"state": "accepted", "spawn": spawn, "started_at": None, "finished_at": None})
+    return _start_answer(spool, reused=False)
 
 
 def _verb_status(payload: dict) -> dict:
     execution_id = payload.get("execution_id")
-    if set(payload) != {"execution_id"}:
-        raise WorkerError("bad_request", "status requires only execution_id")
+    if set(payload) - {"execution_id", "fence", "close"}:
+        raise WorkerError("bad_request", "status accepts only execution_id, fence and close")
+    fence, close = bool(payload.get("fence")), bool(payload.get("close"))
     spool = _spool_path(execution_id)
-    state = _json_read(spool / "state.json")
-    if not state:
-        return {
-            "state": "unknown", "handle": None, "process_alive": False,
-            "started_at": None, "finished_at": None,
-        }
-    handle_value = state.get("handle")
-    process_alive = estate_worker_procs.is_alive(handle_value) if isinstance(handle_value, dict) else False
-    result = {
-        "state": state.get("state", "unknown"),
-        "handle": handle_value,
-        "process_alive": process_alive,
-        "started_at": state.get("started_at"),
-        "finished_at": state.get("finished_at"),
-    }
-    result_value = _json_read(spool / "result.json")
-    if result_value:
-        result["result"] = result_value
-    return result
+    files = _spool_files(spool)
+    claim = read_decision(files["claim"])
+    fenced_now = False
+    if fence or close:
+        if claim is None:
+            fenced_now, claim = decide_once(files["claim"], {"kind": "fence", "fenced_at": _utcnow()})
+        elif claim.get("kind") == "start" and not files["run"].exists():
+            decided = _abort_run(files["run"], "fence", "fenced by status")
+            fenced_now = decided.get("by") == "fence"
+    elif claim is not None:
+        _maybe_abort_stale_start(spool, claim)
+    if close:
+        # Closer side of the Dekker pair (S6.12): closure first, then scan
+        # every attempt (fencing any without a run decision).
+        decide_once(files["closed"], {"by": "status", "at": _utcnow()})
+        _execution_aggregate(spool, fence_unstarted=True)
+    view = _execution_view(spool)
+    view["fenced_now"] = fenced_now
+    view["closed"] = read_decision(files["closed"]) is not None
+    return view
+
+
+def _verb_spool_release(payload: dict) -> dict:
+    execution_id = payload.get("execution_id")
+    resolution = payload.get("resolution")
+    if set(payload) != {"execution_id", "resolution"} or resolution not in ("not_started", "finalized", "recovered"):
+        raise WorkerError("bad_request", "spool.release requires execution_id and a resolved resolution")
+    spool = _spool_path(execution_id)
+    files = _spool_files(spool)
+    existing = read_decision(files["released"])
+    if existing is not None:
+        return {"released": True, "state": _execution_view(spool)["state"], "already_released": True}
+    _require_write_prerequisites()
+    closure = _verb_status({"execution_id": execution_id, "close": True})
+    if closure["state"] == "starting" or closure["quiescent"] is not True:
+        raise WorkerError("authority_denied",
+                          f"refusing to acknowledge resolution: execution not quiescent ({closure['state']})")
+    won, _decided = decide_once(files["released"], {"resolution": resolution, "released_at": _utcnow()})
+    return {"released": True, "state": closure["state"], "already_released": not won}
 
 
 def _verb_cancel(payload: dict) -> dict:
@@ -518,97 +904,46 @@ def _verb_cancel(payload: dict) -> dict:
     if set(payload) != {"execution_id"}:
         raise WorkerError("bad_request", "cancel requires only execution_id")
     spool = _spool_path(execution_id)
-    state = _json_read(spool / "state.json")
-    handle_value = state.get("handle")
-    if not isinstance(handle_value, dict):
+    files = _spool_files(spool)
+    claim = read_decision(files["claim"])
+    if claim is None or claim.get("kind") != "start":
         raise WorkerError("not_found", f"execution {execution_id!r} was not found")
-    outcome = estate_worker_procs.kill_tree(handle_value)
-    if outcome.get("ok"):
-        cancelled_result = {"ok": False, "error": "execution cancelled"}
-        _json_write(spool / "result.json", cancelled_result)
-        _json_write(spool / "state.json", {
-            "state": "failed",
-            "handle": handle_value,
-            "pid": state.get("pid"),
-            "started_at": state.get("started_at"),
-            "finished_at": _utcnow(),
-        })
-    return {"killed": bool(outcome.get("ok")), "still_alive_pids": outcome.get("still_alive_pids", [])}
-
-
-def _verb_worktree_finalize(payload: dict) -> dict:
-    repo_id = payload.get("repo_id")
-    worktree_path = payload.get("worktree_path")
-    branch = payload.get("branch")
-    commit_message = payload.get("commit_message")
-    if not isinstance(commit_message, str) or not commit_message:
-        raise WorkerError("bad_request", "worktree.finalize requires commit_message")
-    verified = _worktree_verification(repo_id, worktree_path, branch)
-    if not verified["ok"]:
-        raise WorkerError("authority_denied", verified["reason"])
-    path = verified["path"]
-    branch_result = _run_git(path, ["branch", "--show-current"])
-    if branch_result.returncode != 0 or branch_result.stdout.strip() != branch:
-        raise WorkerError("authority_denied", "worktree branch changed before finalization")
-    status_result = _run_git(path, ["status", "--porcelain"])
-    if status_result.returncode != 0:
-        raise WorkerError("execution_failed", status_result.stderr.strip() or "git status failed")
-    dirty_paths = [line[3:] for line in status_result.stdout.splitlines() if line.strip()]
-    if not dirty_paths:
-        head = _run_git(path, ["rev-parse", "HEAD"])
-        return {
-            "committed": False,
-            "pushed": False,
-            "commit_sha": head.stdout.strip() if head.returncode == 0 else None,
-            "dirty_paths": [],
-        }
-    added = _run_git(path, ["add", "--", *dirty_paths])
-    if added.returncode != 0:
-        raise WorkerError("execution_failed", added.stderr.strip() or "git add failed")
-    committed = _run_git(path, ["commit", "-m", commit_message])
-    if committed.returncode != 0:
-        raise WorkerError("execution_failed", committed.stderr.strip() or "git commit failed")
-    sha = _run_git(path, ["rev-parse", "HEAD"]).stdout.strip()
-    pushed = _run_git(path, ["push", "origin", branch])
-    result = {
-        "committed": True,
-        "pushed": pushed.returncode == 0,
-        "commit_sha": sha,
-        "dirty_paths": dirty_paths,
-    }
-    if pushed.returncode != 0:
-        result["push_error"] = pushed.stderr.strip() or "git push failed"
-    return result
+    run = read_decision(files["run"])
+    if run is None:
+        run = _abort_run(files["run"], "cancel", "cancelled before the runner decided")
+    if run.get("decision") == "abort":
+        return {"killed": True, "still_alive_pids": []}
+    outcome = estate_worker_procs.kill_unit(run.get("unit"))
+    quiescent = _unit_quiescent(run)
+    telemetry = _json_read(files["state"])
+    if telemetry.get("state") not in _TERMINAL_STATES:
+        _json_write(files["result"], {"ok": False, "error": "execution cancelled"})
+        _json_write(files["state"], {**telemetry, "state": "failed", "finished_at": _utcnow()})
+    return {"killed": bool(outcome.get("ok")) and quiescent is True,
+            "still_alive_pids": [] if quiescent is True else [run.get("pid")]}
 
 
 def _run_spooled(execution_id: str) -> int:
     spool = _spool_path(execution_id)
-    request = _json_read(spool / "request.json")
-    state_path = spool / "state.json"
-    initial = _json_read(state_path)
-    for _ in range(500):
-        if isinstance(initial.get("handle"), dict):
-            break
-        time.sleep(0.01)
-        initial = _json_read(state_path)
-    handle_value = initial.get("handle")
-    if not isinstance(handle_value, dict):
-        _json_write(spool / "result.json", {"ok": False, "error": "worker handle was not recorded"})
-        _json_write(state_path, {
-            "state": "failed", "handle": None, "pid": None,
-            "started_at": None, "finished_at": _utcnow(),
-        })
+    files = _spool_files(spool)
+    claim = read_decision(files["claim"])
+    if claim is None or claim.get("kind") != "start":
         return 1
+    unit = f"aoteru-run-{execution_id}.service"
+    handle, problem = _runner_self_check(unit)
+    if handle is None:
+        _abort_run(files["run"], "runner", problem)
+        return 1
+    won, _decided = decide_once(files["run"], {"decision": "execute", **handle, "at": _utcnow()})
+    if not won:
+        return 0   # an abort won first: the writer must never run
+    request = claim.get("request") or {}
     started_at = _utcnow()
+    telemetry = _json_read(files["state"])
 
     def on_started(pid: int) -> None:
-        _json_write(state_path, {
-            "state": "running",
-            "handle": handle_value,
-            "pid": pid,
-            "started_at": started_at,
-            "finished_at": None,
-        })
+        _json_write(files["state"], {**telemetry, "state": "running", "writer_pid": pid,
+                                     "started_at": started_at, "finished_at": None})
 
     kind = request.get("kind")
     try:
@@ -630,24 +965,355 @@ def _run_spooled(execution_id: str) -> int:
             raise WorkerError("bad_request", f"unsupported spooled kind {kind!r}")
     except Exception as exc:
         result = {"ok": False, "error": str(exc)}
-    _json_write(spool / "result.json", result)
+    _json_write(files["result"], result)
     error_text = str(result.get("error", "")).lower()
     terminal = "succeeded" if result.get("ok") else ("timed_out" if "timed out" in error_text or "timeout" in error_text else "failed")
-    current = _json_read(state_path)
-    _json_write(state_path, {
-        "state": terminal,
-        "handle": current.get("handle", handle_value),
-        "pid": current.get("pid"),
-        "started_at": current.get("started_at") or started_at,
-        "finished_at": _utcnow(),
-    })
+    current = _json_read(files["state"])
+    _json_write(files["state"], {**current, "state": terminal,
+                                 "started_at": current.get("started_at") or started_at, "finished_at": _utcnow()})
     return 0
+
+
+# ---------------------------------------------------------------------
+# Prepare record and runner (S6.9)
+# ---------------------------------------------------------------------
+
+def _prepare_path(lease_id: Any) -> Path:
+    if not isinstance(lease_id, str) or not _EXECUTION_ID_RE.fullmatch(lease_id):
+        raise WorkerError("bad_request", "lease_id contains unsupported characters")
+    return _PREPARE_ROOT / lease_id
+
+
+def _prepare_view(record: Path) -> dict:
+    files = _spool_files(record)
+    claim = read_decision(files["claim"])
+    if claim is None:
+        return {"state": "unknown", "quiescent": True, "record": None}
+    if claim.get("kind") == "fence":
+        return {"state": "fenced", "quiescent": True, "record": claim}
+    run = read_decision(files["run"])
+    if run is None:
+        return {"state": "preparing", "quiescent": None, "record": claim}
+    if run.get("decision") == "abort":
+        return {"state": "fenced", "quiescent": True, "record": run}
+    quiescent = _unit_quiescent(run)
+    result = _json_read(files["result"])
+    if quiescent is not True:
+        return {"state": "preparing", "quiescent": quiescent, "record": run}
+    if result.get("state") in ("prepared", "prepare_failed"):
+        return {**result, "quiescent": True, "record": run}
+    return {"state": "prepare_interrupted", "quiescent": True, "record": run}
+
+
+def _wait_s(default: float) -> float:
+    deadline = _CURRENT_DEADLINE_S["value"]
+    if isinstance(deadline, (int, float)) and deadline > 10:
+        return min(default, float(deadline) - 10)
+    return default
+
+
+def _verb_worktree_prepare(payload: dict) -> dict:
+    repo_id = payload.get("repo_id")
+    branch = payload.get("branch")
+    base_ref = payload.get("base_ref")
+    lease = payload.get("lease")
+    if not all(isinstance(value, str) and value for value in (repo_id, branch, base_ref)):
+        raise WorkerError("bad_request", "worktree.prepare requires repo_id, branch and base_ref")
+    if not isinstance(lease, dict) or not isinstance(lease.get("lease_id"), str) or not lease.get("lease_id"):
+        raise WorkerError("bad_request", "worktree.prepare requires lease {lease_id, host_id} (S6.7)")
+    record = _prepare_path(lease["lease_id"])
+    files = _spool_files(record)
+    reused = True
+    if read_decision(files["claim"]) is None:
+        _require_write_prerequisites()
+        won, _claim = decide_once(files["claim"], {"kind": "prepare", "request": payload, "claimed_at": _utcnow()})
+        if won:
+            reused = False
+            try:
+                _launch_runner("--run-prepare", [lease["lease_id"]],
+                               unit=f"aoteru-prepare-{lease['lease_id']}", log_path=files["log"])
+            except estate_worker_procs.ProcessLayerError as exc:
+                _abort_run(files["run"], "starter", f"{exc.code}: {exc}")
+    deadline = time.monotonic() + _wait_s(_DEFAULT_PREPARE_WAIT_S)
+    view = _prepare_view(record)
+    while view["state"] == "preparing" and time.monotonic() < deadline:
+        time.sleep(0.2)
+        view = _prepare_view(record)
+    return {**view, "reused": reused}
+
+
+def _verb_worktree_prepare_status(payload: dict) -> dict:
+    lease_id = payload.get("lease_id")
+    if set(payload) - {"lease_id", "fence"}:
+        raise WorkerError("bad_request", "worktree.prepare_status accepts only lease_id and fence")
+    record = _prepare_path(lease_id)
+    files = _spool_files(record)
+    if payload.get("fence"):
+        if read_decision(files["claim"]) is None:
+            decide_once(files["claim"], {"kind": "fence", "fenced_at": _utcnow()})
+        elif not files["run"].exists():
+            _abort_run(files["run"], "fence", "fenced by prepare_status")
+    return _prepare_view(record)
+
+
+def _run_prepare(lease_id: str) -> int:
+    record = _prepare_path(lease_id)
+    files = _spool_files(record)
+    claim = read_decision(files["claim"])
+    if claim is None or claim.get("kind") != "prepare":
+        return 1
+    handle, problem = _runner_self_check(f"aoteru-prepare-{lease_id}.service")
+    if handle is None:
+        _abort_run(files["run"], "runner", problem)
+        return 1
+    won, _decided = decide_once(files["run"], {"decision": "execute", **handle, "at": _utcnow()})
+    if not won:
+        return 0
+    _disable_git_side_processes(record)
+    request = claim.get("request") or {}
+    try:
+        created = worktree_ops.create_or_reuse_worktree(
+            request["repo_id"], request["branch"], base_ref=request["base_ref"],
+        )
+        verified = worktree_ops.verify_worktree(request["repo_id"], created["path"], request["branch"])
+        if not verified["ok"]:
+            result = {"state": "prepare_failed", "error": verified["reason"], "stage": "verify"}
+        else:
+            clean, _reason = git_is_clean(verified["path"])
+            result = {"state": "prepared", "path": verified["path"], "branch": verified["branch"],
+                      "head_sha": verified["head"], "clean": clean}
+    except Exception as exc:
+        result = {"state": "prepare_failed", "error": str(exc), "stage": "create"}
+    _json_write(files["result"], result)
+    _json_write(files["state"], {"state": result["state"], "finished_at": _utcnow()})
+    return 0
+
+
+# ---------------------------------------------------------------------
+# Finalize and push attempts (S6.10 / S6.12)
+# ---------------------------------------------------------------------
+
+def _record_attempt(spool: Path, kind: str, request: dict) -> int:
+    directory = spool / kind
+    number = len(_attempts(spool, kind)) + 1
+    while True:
+        won, _decided = decide_once(directory / f"attempt-{number}.json",
+                                    {"request": request, "recorded_at": _utcnow()})
+        if won:
+            return number
+        number += 1
+
+
+def _wait_attempts(spool: Path, kind: str, number: int, wait_s: float) -> dict | None:
+    """Wait for attempt `number`'s result AND quiescence of EVERY recorded
+    attempt of this kind (S6.10). Earlier attempts with no run decision are
+    fenced so they can never start later."""
+    directory = spool / kind
+    deadline = time.monotonic() + wait_s
+    while True:
+        attempts = _attempts(spool, kind)
+        pending = False
+        for other, _attempt, run in attempts:
+            if run is None and other != number:
+                run = _abort_run(directory / f"attempt-{other}.run.json", "fence",
+                                 f"superseded by attempt {number}")
+            if run is None or _unit_quiescent(run) is not True:
+                pending = True
+        result = _json_read(directory / f"attempt-{number}.result.json")
+        if result and not pending:
+            return result
+        own_run = read_decision(directory / f"attempt-{number}.run.json")
+        if own_run is not None and own_run.get("decision") == "abort" and not pending:
+            return {"outcome": "execution_closed" if "closed" in str(own_run.get("reason")) else "aborted",
+                    "reason": own_run.get("reason")}
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(0.2)
+
+
+def _verb_worktree_finalize(payload: dict) -> dict:
+    execution_id = payload.get("execution_id")
+    for name in ("repo_id", "worktree_path", "branch", "commit_message", "expected_head_sha"):
+        if not isinstance(payload.get(name), str) or not payload.get(name):
+            raise WorkerError("bad_request", f"worktree.finalize requires {name}")
+    spool = _spool_path(execution_id)
+    files = _spool_files(spool)
+    claim = read_decision(files["claim"])
+    if claim is None or claim.get("kind") != "start":
+        raise WorkerError("not_found", f"execution {execution_id!r} has no start claim on this worker")
+    verified = _worktree_verification(payload["repo_id"], payload["worktree_path"], payload["branch"])
+    if not verified["ok"]:
+        raise WorkerError("authority_denied", verified["reason"])
+    _require_write_prerequisites()
+    number = _record_attempt(spool, "finalize", payload)
+    run_path = spool / "finalize" / f"attempt-{number}.run.json"
+    # Attempt side of the Dekker pair (S6.12): recorded, THEN read closure.
+    if read_decision(files["closed"]) is not None:
+        _abort_run(run_path, "attempt", "execution_closed")
+        return {"outcome": "execution_closed", "attempt": number}
+    try:
+        _launch_runner("--run-finalize", [execution_id, str(number)],
+                       unit=f"aoteru-finalize-{execution_id}-{number}",
+                       log_path=spool / "finalize" / f"attempt-{number}.log")
+    except estate_worker_procs.ProcessLayerError as exc:
+        _abort_run(run_path, "starter", f"{exc.code}: {exc}")
+        return {"outcome": "finalize_in_progress", "attempt": number, "reason": str(exc)}
+    result = _wait_attempts(spool, "finalize", number, _wait_s(_DEFAULT_GIT_UNIT_WAIT_S))
+    if result is None:
+        return {"outcome": "finalize_in_progress", "attempt": number}
+    if result.get("outcome") == "authority_denied":
+        raise WorkerError("authority_denied", result.get("reason", "unattributable history"))
+    return {**result, "attempt": number}
+
+
+def _git(path: str, args: list[str], *, timeout: int = 120) -> subprocess.CompletedProcess:
+    return _run_git(path, args, timeout=timeout)
+
+
+def _exact_commit_push(path: str, commit_sha: str, branch: str) -> dict:
+    pushed = _git(path, ["push", "origin", f"{commit_sha}:refs/heads/{branch}"], timeout=300)
+    if pushed.returncode == 0:
+        return {"state": "pushed", "commit_sha": commit_sha, "remote": "origin", "branch": branch,
+                "contained": False, "at": _utcnow()}
+    fetched = _git(path, ["fetch", "origin", branch], timeout=300)
+    if fetched.returncode == 0:
+        ancestor = _git(path, ["merge-base", "--is-ancestor", commit_sha, "FETCH_HEAD"])
+        if ancestor.returncode == 0:
+            return {"state": "pushed", "commit_sha": commit_sha, "remote": "origin", "branch": branch,
+                    "contained": True, "at": _utcnow()}
+    return {"state": "failed", "commit_sha": commit_sha, "remote": "origin", "branch": branch,
+            "error": (pushed.stderr or "").strip()[-500:] or "git push failed", "at": _utcnow()}
+
+
+def _finalize_logic(execution_id: str, spool: Path, request: dict) -> dict:
+    path = str(Path(request["worktree_path"]).resolve())
+    branch, expected = request["branch"], request["expected_head_sha"]
+    commit_record = spool / "finalize" / "commit.json"
+    current = _git(path, ["branch", "--show-current"])
+    if current.returncode != 0 or current.stdout.strip() != branch:
+        return {"outcome": "authority_denied", "reason": "worktree branch changed before finalization"}
+
+    def _head() -> str:
+        return _git(path, ["rev-parse", "HEAD"]).stdout.strip()
+
+    def _clean() -> bool:
+        status = _git(path, ["status", "--porcelain"])
+        return status.returncode == 0 and not status.stdout.strip()
+
+    for _round in range(2):
+        proven = read_decision(commit_record)
+        head = _head()
+        if proven is not None:
+            if head == proven.get("commit_sha") and _clean():
+                return {"outcome": "finalized", "committed": True, "adopted": True,
+                        "commit_sha": head, "parent_sha": proven.get("parent_sha"),
+                        "dirty_paths": proven.get("dirty_paths", []),
+                        "push": _exact_commit_push(path, head, branch)}
+            return {"outcome": "authority_denied", "reason": "history moved after the recorded finalize commit"}
+        if head != expected:
+            parent = _git(path, ["rev-parse", "HEAD^"]).stdout.strip()
+            message = _git(path, ["log", "-1", "--format=%B"]).stdout
+            return {"outcome": "finalize_ambiguous", "head": head, "parent": parent,
+                    "trailer_matches": f"Aoteru-Execution: {execution_id}" in message}
+        status = _git(path, ["status", "--porcelain"])
+        if status.returncode != 0:
+            return {"outcome": "authority_denied", "reason": status.stderr.strip() or "git status failed"}
+        dirty_paths = [line[3:] for line in status.stdout.splitlines() if line.strip()]
+        if not dirty_paths:
+            return {"outcome": "finalized", "committed": False, "adopted": False, "commit_sha": head,
+                    "parent_sha": None, "dirty_paths": [],
+                    "push": {"state": "not_required", "commit_sha": head, "branch": branch}}
+        added = _git(path, ["add", "--", *dirty_paths])
+        committed = _git(path, ["commit", "-m", f"{request['commit_message']}\n\nAoteru-Execution: {execution_id}"]) \
+            if added.returncode == 0 else added
+        if committed.returncode != 0:
+            continue   # re-evaluate once: a concurrent same-execution attempt may have committed
+        sha = _head()
+        parent = _git(path, ["rev-parse", "HEAD^"]).stdout.strip()
+        if parent != expected:
+            return {"outcome": "finalize_ambiguous", "head": sha, "parent": parent, "trailer_matches": True}
+        decide_once(commit_record, {"commit_sha": sha, "parent_sha": parent,
+                                    "dirty_paths": dirty_paths, "at": _utcnow()})
+        return {"outcome": "finalized", "committed": True, "adopted": False, "commit_sha": sha,
+                "parent_sha": parent, "dirty_paths": dirty_paths,
+                "push": _exact_commit_push(path, sha, branch)}
+    return {"outcome": "finalize_ambiguous", "head": _head(), "parent": None, "trailer_matches": False}
+
+
+def _run_attempt(kind: str, execution_id: str, number: str) -> int:
+    spool = _spool_path(execution_id)
+    directory = spool / kind
+    attempt = read_decision(directory / f"attempt-{number}.json")
+    if attempt is None:
+        return 1
+    run_path = directory / f"attempt-{number}.run.json"
+    handle, problem = _runner_self_check(f"aoteru-{kind}-{execution_id}-{number}.service")
+    if handle is None:
+        _abort_run(run_path, "runner", problem)
+        return 1
+    won, _decided = decide_once(run_path, {"decision": "execute", **handle, "at": _utcnow()})
+    if not won:
+        return 0
+    _disable_git_side_processes(spool)
+    request = attempt.get("request") or {}
+    try:
+        if kind == "finalize":
+            result = _finalize_logic(execution_id, spool, request)
+        else:
+            result = _push_logic(request)
+    except Exception as exc:
+        result = {"outcome": "finalize_ambiguous" if kind == "finalize" else "push_failed", "reason": str(exc)}
+    _json_write(directory / f"attempt-{number}.result.json", result)
+    return 0
+
+
+def _push_logic(request: dict) -> dict:
+    repo_path = estate_router.resolve_repo_path(request["repo_id"])
+    if repo_path is None:
+        return {"outcome": "repo_unavailable", "reason": f"repo {request['repo_id']!r} does not resolve"}
+    commit_sha, branch = request["commit_sha"], request["branch"]
+    exists = _git(repo_path, ["cat-file", "-e", f"{commit_sha}^{{commit}}"])
+    if exists.returncode != 0:
+        return {"outcome": "not_found", "reason": f"commit {commit_sha} is absent on this worker"}
+    return {"outcome": "pushed_or_failed", "push": _exact_commit_push(repo_path, commit_sha, branch)}
+
+
+def _verb_worktree_push(payload: dict) -> dict:
+    execution_id = payload.get("execution_id")
+    for name in ("repo_id", "branch", "commit_sha"):
+        if not isinstance(payload.get(name), str) or not payload.get(name):
+            raise WorkerError("bad_request", f"worktree.push requires {name}")
+    if not re.fullmatch(r"[0-9a-f]{40}", payload["commit_sha"]):
+        raise WorkerError("bad_request", "commit_sha must be a full 40-hex sha")
+    spool = _spool_path(execution_id)
+    if read_decision(_spool_files(spool)["claim"]) is None:
+        raise WorkerError("not_found", f"execution {execution_id!r} has no record on this worker")
+    _require_write_prerequisites()
+    # Push never reads closed.json: it touches no worktree (S6.12, round 7).
+    number = _record_attempt(spool, "push", payload)
+    try:
+        _launch_runner("--run-push", [execution_id, str(number)], unit=f"aoteru-push-{execution_id}-{number}",
+                       log_path=spool / "push" / f"attempt-{number}.log")
+    except estate_worker_procs.ProcessLayerError as exc:
+        _abort_run(spool / "push" / f"attempt-{number}.run.json", "starter", f"{exc.code}: {exc}")
+        return {"pushed": False, "outcome": "push_in_progress", "error": str(exc)}
+    result = _wait_attempts(spool, "push", number, _wait_s(_DEFAULT_GIT_UNIT_WAIT_S))
+    if result is None:
+        return {"pushed": False, "outcome": "push_in_progress"}
+    if result.get("outcome") == "not_found":
+        raise WorkerError("not_found", result["reason"])
+    push = result.get("push") or {"state": "failed", "error": result.get("reason")}
+    return {"pushed": push.get("state") == "pushed", "contained": bool(push.get("contained")),
+            "commit_sha": payload["commit_sha"], "push": push, "error": push.get("error")}
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", help="worker checkout root")
     parser.add_argument("--run-spooled", metavar="EXECUTION_ID")
+    parser.add_argument("--run-prepare", metavar="LEASE_ID")
+    parser.add_argument("--run-finalize", nargs=2, metavar=("EXECUTION_ID", "ATTEMPT"))
+    parser.add_argument("--run-push", nargs=2, metavar=("EXECUTION_ID", "ATTEMPT"))
     args = parser.parse_args(argv)
     if args.root:
         root = Path(args.root).expanduser().resolve()
@@ -660,6 +1326,12 @@ def main(argv: list[str] | None = None) -> int:
         estate_router._CONFIG_DIR = root / "config"
     if args.run_spooled:
         return _run_spooled(args.run_spooled)
+    if args.run_prepare:
+        return _run_prepare(args.run_prepare)
+    if args.run_finalize:
+        return _run_attempt("finalize", *args.run_finalize)
+    if args.run_push:
+        return _run_attempt("push", *args.run_push)
     try:
         request = json.loads(sys.stdin.read())
     except json.JSONDecodeError as exc:
