@@ -1391,11 +1391,16 @@ def execute_codex_write_durable(objective: str, *, repo_id: str, host_id: str,
             final_state = "timed_out"
         else:
             final_state = "failed"
+        # Legacy in-process lane (removed in Stage 9; `run_task` no longer
+        # routes here after Stage 6). It predates worktree resolution, so
+        # it keeps its pre-Stage-6 admission semantics by closing its own
+        # terminal rows as `legacy_closed` -- never used by the worker path.
         _update_estate_execution(
             execution_id, lifecycle_state=final_state,
             finished_at=utcnow_naive(), result_json=json.dumps(result),
             error=None if result.get("ok") else result.get("error"),
             exit_status="0" if result.get("ok") else "1",
+            worktree_resolution="legacy_closed",
         )
         if decision_id:
             gate = "pass" if result.get("ok") and (result.get("output") or "").strip() else "fail"
