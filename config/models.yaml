@@ -1,3 +1,10 @@
+# Stage 7 (docs/aoteru-multihost-execution-implementation-plan.md):
+# `qualified_hosts` is PER-HOST qualification. An alias is routable on host H
+# only if H appears here (with evidence), in addition to the model being live
+# in H's worker inventory. A missing `qualified_hosts` means qualified
+# nowhere (fail closed). An optional per-host `binding` overrides the default
+# concrete model on that host. Qualification is evidence plus a governed
+# commit -- nothing auto-promotes; removing a host removes it from routing.
 # Aoteru estate — model/capability alias registry.
 #
 # P1 scaffold (plan section 9), now aligned to
@@ -46,6 +53,8 @@ default_paid_provider: codex
 capabilities:
   - alias: local-fast
     binding: qwen3:8b
+    qualified_hosts:
+      hz2-workstation: {evidence: docs/aoteru-estate-p7-evidence.md}
     evidence: docs/aoteru-estate-p7-evidence.md
     note: >-
       106.1 decode tok/s, fits fully in 10GB VRAM (`ollama ps` confirmed
@@ -57,6 +66,8 @@ capabilities:
       docs/aoteru-lm4-production-canary-evidence.md.
   - alias: local-strong
     binding: gpt-oss:20b
+    qualified_hosts:
+      hz2-workstation: {evidence: docs/aoteru-estate-p7-evidence.md}
     gpu_priority: yield_to_experiment  # P12.4: heaviest/longest-running local route on the shared RTX 3080 — yields first when an experiment reservation is active
     evidence: docs/aoteru-estate-p7-evidence.md
     note: >-
@@ -68,6 +79,8 @@ capabilities:
       real production route. See docs/aoteru-lm4-production-canary-evidence.md.
   - alias: code-fast
     binding: ornith:9b
+    qualified_hosts:
+      hz2-workstation: {evidence: docs/aoteru-lm2-model-discovery-evidence.md}
     evidence: docs/aoteru-lm2-model-discovery-evidence.md
     note: >-
       LM3 (2026-08-23): production Ollama upgraded 0.19.0 -> 0.32.15
@@ -85,6 +98,8 @@ capabilities:
     paid_provider: codex
   - alias: reasoning-strong
     binding: nemotron-3.5-lightning:30b-a3b
+    qualified_hosts:
+      hz2-workstation: {evidence: docs/aoteru-lm2-model-discovery-evidence.md}
     gpu_priority: yield_to_experiment  # P12.4: 25GB model on a 10GB card — heaviest GPU/CPU-offload contention of any bound alias
     evidence: docs/aoteru-lm2-model-discovery-evidence.md
     note: >-
@@ -101,6 +116,8 @@ capabilities:
       real production route. See docs/aoteru-lm4-production-canary-evidence.md.
   - alias: vision
     binding: gemma4:12b
+    qualified_hosts:
+      hz2-workstation: {evidence: docs/aoteru-lm2-model-discovery-evidence.md}
     gpu_priority: yield_to_experiment  # P12.4: vision inference competes directly with camera/perception GPU work the Jetson can't do locally
     evidence: docs/aoteru-lm2-model-discovery-evidence.md
     note: >-
@@ -129,9 +146,13 @@ capabilities:
       single trial. See docs/aoteru-lm4-production-canary-evidence.md.
   - alias: embedding
     binding: qwen3-embedding:8b
+    qualified_hosts:
+      hz2-workstation: {evidence: structural-binding-only}
     note: structural binding only (it is literally an embedding model) — no retrieval-quality benchmark run yet.
   - alias: reranker
     binding: dengcao/Qwen3-Reranker-8B:Q4_K_M
+    qualified_hosts:
+      hz2-workstation: {evidence: structural-binding-only}
     note: structural binding only, same caveat as embedding.
 
 # Candidates under consideration per the canonical plan — not selections.

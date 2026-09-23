@@ -198,11 +198,26 @@ check.
 
 ## 8. Per-alias qualification (Stage 7)
 
-Once health and (for write) the survival check pass, run the LM4 canary
-per alias against this worker (`--worker-host desktop-in7o23d`) before any
-alias is added to `config/models.yaml`'s `qualified_hosts` for this host.
-Expected first candidate: `local-fast` / `qwen3:8b`, the only model the
-2026-08-29 inventory found already present on home.
+Expected first candidate: `local-fast` / `qwen3:8b`, the only model the 2026-08-29 inventory found already present on home.
+
+An alias routes to home only when **all** of these hold at once:
+
+- `desktop-in7o23d` appears under that alias's `qualified_hosts` in `config/models.yaml`;
+- the concrete model is live in home's worker inventory;
+- home's worker is enabled.
+
+Qualification is evidence plus a governed commit. Nothing auto-promotes.
+
+1. With the home worker reachable (steps 1–6 done), measure each candidate alias through the real worker path from lab. This deliberately bypasses routing eligibility, so a not-yet-enabled host can be measured:
+
+   ```text
+   venv/bin/python scripts/run_lm4_production_canary.py --worker-host desktop-in7o23d --aliases local-fast
+   ```
+
+   Every item executes as `call_worker('desktop-in7o23d', 'execute', {kind: local-inference, ...})`, and every result must be attested by home. Results land in `BenchmarkResult`, with `runtime_base_url = worker:desktop-in7o23d` and a `[worker-host desktop-in7o23d]` reason prefix. Text aliases only.
+2. Apply the same pass criteria as LM4 (`docs/aoteru-lm4-production-canary-evidence.md`). Record the run id and per-task results in `docs/aoteru-multihost-execution-evidence.md`.
+3. Only for aliases that passed, add `desktop-in7o23d: {evidence: docs/aoteru-multihost-execution-evidence.md}` under `qualified_hosts`. If home must run a different concrete model, add a per-host `binding:`. Do this in a governed commit, which in Stage 8 lands together with `worker.enabled: true`.
+4. To withdraw a qualification, remove the host from `qualified_hosts`. That takes it out of routing immediately.
 
 ## Non-goals
 

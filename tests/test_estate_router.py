@@ -44,7 +44,7 @@ def fixture_config(tmp_path, monkeypatch):
         "paid_providers": [{"name": "codex", "concrete_model_label": "codex-cli"}],
         "default_paid_provider": "codex",
         "capabilities": [
-            {"alias": "local-fast", "binding": "test-model-fast"},
+            {"alias": "local-fast", "binding": "test-model-fast", "qualified_hosts": {"test-lab": {"evidence": "t"}, "test-home": {"evidence": "t"}}},
             {"alias": "reasoning-strong", "binding": None},
         ],
     }))
@@ -395,7 +395,7 @@ def test_resolve_alias_gpu_heavy_eligible_when_idle(fixture_config, monkeypatch)
     normally when no experiment is reserved/active."""
     models_path = fixture_config / "models.yaml"
     data = yaml.safe_load(models_path.read_text())
-    data["capabilities"][1] = {"alias": "reasoning-strong", "binding": "test-heavy-model", "gpu_priority": "yield_to_experiment"}
+    data["capabilities"][1] = {"alias": "reasoning-strong", "binding": "test-heavy-model", "gpu_priority": "yield_to_experiment", "qualified_hosts": {"test-lab": {"evidence": "t"}, "test-home": {"evidence": "t"}}}
     models_path.write_text(yaml.safe_dump(data))
     monkeypatch.setattr(estate_router, "_ollama_model_live", lambda model, timeout=3.0: (True, "live"))
     monkeypatch.setattr(estate_router, "experiment_priority_active", lambda: (False, "idle"))
@@ -412,7 +412,7 @@ def test_resolve_alias_gpu_heavy_withheld_when_experiment_active(fixture_config,
     active. A non-heavy alias (local-fast) is unaffected."""
     models_path = fixture_config / "models.yaml"
     data = yaml.safe_load(models_path.read_text())
-    data["capabilities"][1] = {"alias": "reasoning-strong", "binding": "test-heavy-model", "gpu_priority": "yield_to_experiment"}
+    data["capabilities"][1] = {"alias": "reasoning-strong", "binding": "test-heavy-model", "gpu_priority": "yield_to_experiment", "qualified_hosts": {"test-lab": {"evidence": "t"}, "test-home": {"evidence": "t"}}}
     models_path.write_text(yaml.safe_dump(data))
     monkeypatch.setattr(estate_router, "_ollama_model_live", lambda model, timeout=3.0: (True, "live"))
     monkeypatch.setattr(estate_router, "experiment_priority_active", lambda: (True, "robotics run reserved"))
@@ -480,8 +480,8 @@ def test_resolve_route_all_capabilities_resolved_succeeds(fixture_config, monkey
     monkeypatch.setattr(estate_router, "_ollama_model_live", lambda model, timeout=3.0: (True, "live"))
     (fixture_config / "models.yaml").write_text(yaml.safe_dump({
         "capabilities": [
-            {"alias": "local-fast", "binding": "test-model-fast"},
-            {"alias": "embedding", "binding": "test-model-embed"},
+            {"alias": "local-fast", "binding": "test-model-fast", "qualified_hosts": {"test-lab": {"evidence": "t"}, "test-home": {"evidence": "t"}}},
+            {"alias": "embedding", "binding": "test-model-embed", "qualified_hosts": {"test-lab": {"evidence": "t"}, "test-home": {"evidence": "t"}}},
         ],
     }))
     route = estate_router.resolve_route({

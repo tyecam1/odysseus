@@ -425,6 +425,14 @@ def resolve_alias(alias: str, host_id: Optional[str] = None) -> dict:
             }
         return {"alias": alias, "resolved": True, "concrete_model": binding, "evidence": entry.get("evidence")}
 
+    # Stage 7: per-host qualification. A host absent from qualified_hosts
+    # (or no qualified_hosts at all) is qualified nowhere -- fail closed,
+    # even if the model happens to be present in that host's inventory.
+    qualified = entry.get("qualified_hosts") or {}
+    if host_id not in qualified:
+        return {"alias": alias, "resolved": False, "reason": f"alias {alias} not qualified on {host_id}"}
+    binding = (qualified.get(host_id) or {}).get("binding") or binding
+
     from src.estate_worker_client import WorkerTransportError, worker_health, worker_inventory
     try:
         inventory = worker_inventory(host_id, [binding])
@@ -453,7 +461,8 @@ def resolve_alias(alias: str, host_id: Optional[str] = None) -> dict:
                 "alias": alias, "resolved": False, "concrete_model": binding,
                 "reason": f"withheld — experiment priority active ({gpu_yield.get('reason')})",
             }
-    return {"alias": alias, "resolved": True, "concrete_model": binding, "evidence": entry.get("evidence")}
+    return {"alias": alias, "resolved": True, "concrete_model": binding,
+            "evidence": (qualified.get(host_id) or {}).get("evidence") or entry.get("evidence")}
 
 
 def _record_decision(task: dict, *, host_id, executor, model_alias, concrete_model, status) -> str:

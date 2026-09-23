@@ -85,12 +85,15 @@ def _score(task: dict, output: str) -> tuple[bool, str]:
 
 
 def _persist(alias: str, task: dict, corpus_id: str, concrete_model: str,
-             routing_decision_id: str, result: dict, retries: int) -> None:
+             routing_decision_id: str, result: dict, retries: int, *, worker_host: str | None = None) -> None:
+    # Stage 7 --worker-host: the measured host is recorded in the existing
+    # fields (runtime_base_url + a reason prefix); no schema change.
+    base_url = f"worker:{worker_host}" if worker_host else _OLLAMA_BASE
     model_cfg = {
         "concrete_model": concrete_model,
         "runtime": "ollama",
-        "runtime_version": "0.32.15 (production)",
-        "base_url": _OLLAMA_BASE,
+        "runtime_version": "0.32.15 (production)" if not worker_host else "worker-attested",
+        "base_url": base_url,
     }
     raw_output_pointer, raw_output_sha256 = write_artifact(RUN_ID, corpus_id, alias, task, model_cfg, result)
     db = SessionLocal()
@@ -104,14 +107,14 @@ def _persist(alias: str, task: dict, corpus_id: str, concrete_model: str,
             source_pointer=task.get("source_pointer"),
             concrete_model=concrete_model,
             runtime="ollama",
-            runtime_version="0.32.15 (production)",
-            runtime_base_url=_OLLAMA_BASE,
+            runtime_version=model_cfg["runtime_version"],
+            runtime_base_url=base_url,
             context_point=result.get("context_point"),
             wall_time_ms=result.get("wall_time_ms"),
             score=result.get("score"),
             retries=retries,
             status=result["status"],
-            reason=(result.get("reason") or "")[:2000],
+            reason=((f"[worker-host {worker_host}] " if worker_host else "") + (result.get("reason") or ""))[:2000],
             raw_output_pointer=raw_output_pointer,
             raw_output_sha256=raw_output_sha256,
             model_alias=alias,
@@ -177,6 +180,59 @@ def run_text_task(alias: str, task: dict, corpus_id: str, retries: int = 0) -> d
     _update_routing_verification(decision_id, "pass" if ok else "fail")
     _persist(alias, task, corpus_id, concrete_model, decision_id, result, retries)
     print(f"[{alias}] {task['task_id']} -> {result['status']} ({str(reason)[:100]})")
+    return result
+
+
+def binding_for_host(alias: str, host_id: str) -> str | None:
+    """The concrete model to measure on `host_id`: the per-host override if
+    one exists, else the alias's default binding. Deliberately NOT gated on
+    qualification -- measuring an unqualified host is how qualification
+    evidence is produced (Stage 7)."""
+    from src.estate_router import _load_yaml
+    entry = next((c for c in _load_yaml("models").get("capabilities", []) if c.get("alias") == alias), None)
+    if entry is None or entry.get("binding") is None:
+        return None
+    return ((entry.get("qualified_hosts") or {}).get(host_id) or {}).get("binding") or entry["binding"]
+
+
+def run_text_task_on_worker(host_id: str, alias: str, task: dict, corpus_id: str, retries: int = 0) -> dict:
+    """Stage 7 `--worker-host`: execute one canary item through the REAL
+    worker contract on `host_id` (call_worker -> execute local-inference),
+    bypassing routing eligibility so a not-yet-enabled host can be measured.
+    Same scorer and BenchmarkResult shape as the routed canary. Never edits
+    config; qualification stays a governed commit."""
+    from src.estate_worker_client import WorkerTransportError, call_worker
+    concrete_model = binding_for_host(alias, host_id)
+    base = {"task_id": task["task_id"], "context_point": task.get("context_point")}
+    if concrete_model is None:
+        result = {**base, "status": "error", "reason": f"alias {alias!r} has no binding", "score": "error",
+                  "wall_time_ms": None}
+        _persist(alias, task, corpus_id, "unresolved", "", result, retries, worker_host=host_id)
+        return result
+    try:
+        response = call_worker(host_id, "execute", {
+            "kind": "local-inference", "model": concrete_model, "objective": _objective_for(task),
+            "timeout_s": 120.0,
+        }, deadline_s=135)
+    except WorkerTransportError as exc:
+        result = {**base, "status": "error", "reason": f"worker {exc.code}: {exc}", "score": "error",
+                  "wall_time_ms": None}
+        _persist(alias, task, corpus_id, concrete_model, "", result, retries, worker_host=host_id)
+        print(f"[{alias}@{host_id}] {task['task_id']} -> ERROR ({result['reason'][:100]})")
+        return result
+    attested = (response.get("attestation") or {}).get("host_id")
+    execution = response.get("result") or {}
+    output = execution.get("output") or ""
+    if attested != host_id:
+        ok, reason = False, f"attested host {attested!r} != {host_id!r}"
+    elif not execution.get("ok"):
+        ok, reason = False, f"execution failed: {execution.get('error')}"
+    else:
+        ok, reason = _score(task, output)
+    result = {**base, "status": "pass" if ok else "fail", "reason": reason, "score": "pass" if ok else "fail",
+              "wall_time_ms": execution.get("latency_ms"), "raw_output": output, "attested_host": attested}
+    _persist(alias, task, corpus_id, concrete_model, "", result, retries, worker_host=host_id)
+    print(f"[{alias}@{host_id}] {task['task_id']} -> {result['status']} ({str(reason)[:100]})")
     return result
 
 
@@ -250,7 +306,18 @@ def run_vision_task(alias: str, task: dict, corpus_id: str, retries: int = 0, tr
     return result
 
 
-def main():
+def main(argv: list[str] | None = None):
+    import argparse
+    parser = argparse.ArgumentParser(description="LM4 production canary (routed) or Stage 7 per-host qualification canary")
+    parser.add_argument("--worker-host", default=None,
+                        help="measure through the real worker on this host id, bypassing routing eligibility "
+                             "(Stage 7 qualification evidence; text aliases only; never edits config)")
+    parser.add_argument("--aliases", default=None, help="comma-separated subset of aliases to run")
+    args = parser.parse_args(argv)
+    plan = {alias: ids for alias, ids in CANARY_PLAN.items()
+            if not args.aliases or alias in args.aliases.split(",")}
+    if args.worker_host:
+        plan = {alias: ids for alias, ids in plan.items() if alias != "vision"}
     corpus = load_json(CORPUS_PATH)
     corpus_id = corpus["corpus_id"]
     tasks_by_id = {t["task_id"]: t for t in corpus["tasks"]}
@@ -260,13 +327,18 @@ def main():
     summary: dict[str, dict[str, int]] = {}
 
     with out_path.open("w", encoding="utf-8") as out_f:
-        for alias, task_ids in CANARY_PLAN.items():
+        for alias, task_ids in plan.items():
             summary[alias] = {"pass": 0, "fail": 0, "error": 0}
             for i, task_id in enumerate(task_ids):
                 task = dict(tasks_by_id[task_id])
                 # vision runs the SAME task 3x by design (trial repeats for
                 # broader coverage); every other alias/task pair is unique.
-                if alias == "vision":
+                if args.worker_host:
+                    result = run_text_task_on_worker(args.worker_host, alias, task, corpus_id)
+                    if result["status"] != "pass":
+                        print(f"  -> repeating {alias}/{task_id}@{args.worker_host} once")
+                        result = run_text_task_on_worker(args.worker_host, alias, task, corpus_id, retries=1)
+                elif alias == "vision":
                     trial = i + 1
                     if trial > 1:
                         task["task_id"] = f"{task['task_id']}-trial{trial}"
@@ -284,7 +356,7 @@ def main():
                 record = {"run_id": RUN_ID, "alias": alias, **{k: v for k, v in result.items() if k != "raw_output"}}
                 out_f.write(json.dumps(record) + "\n")
 
-    print("\n=== LM4 canary summary ===")
+    print("\n=== LM4 canary summary ===" if not args.worker_host else f"\n=== qualification canary @ {args.worker_host} ===")
     print(f"run_id={RUN_ID}")
     for alias, counts in summary.items():
         print(f"{alias}: {counts}")
