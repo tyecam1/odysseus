@@ -21,8 +21,21 @@ import uuid
 from datetime import timedelta
 from typing import Any, Optional
 
-from src import estate_router as _router
 from src import park_lease_ops
+
+
+class _LazyRouter:
+    """`src.estate_router` re-exports this module's public names, so a
+    module-level import here would be circular whenever this module is
+    imported first (found by the I9 multiprocess test). Resolve the router
+    at call time instead."""
+
+    def __getattr__(self, name):
+        import importlib
+        return getattr(importlib.import_module("src.estate_router"), name)
+
+
+_router = _LazyRouter()
 
 log = logging.getLogger(__name__)
 
