@@ -242,8 +242,14 @@ class TestParkRepoById:
 
         clean_repo = self._clean_git_repo(tmp_path / "projects" / "odysseus-aoteru")
         monkeypatch.setattr(estate_router, "resolve_repo_path", lambda repo_id: str(clean_repo))
+        # Stage 6 (S6.7/S6.9): the worktree is prepared by the worker under
+        # a committed `preparing` reservation, never in-process first.
+        from tests.helpers.inline_prepare import install_inline_prepare_worker
+        calls = install_inline_prepare_worker(monkeypatch)
 
         result = park_repo_by_id("ops-branch-repo", "test-lab", branch="feature/lease")
+        assert [(host, verb) for host, verb, _payload in calls] == [("test-lab", "worktree.prepare")]
+        assert calls[0][2]["lease"]["lease_id"] == result["lease_id"]
 
         assert result["repo_id"] == "ops-branch-repo"
         assert result["branch"] == "feature/lease"

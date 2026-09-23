@@ -1546,58 +1546,51 @@ def test_dispatch_read_only_surfaces_nonce_mismatch_as_placement_mismatch(fixtur
     assert result["placement"]["observed_host"] == "test-lab"
 
 
+def _qualify_codex_write(fixture_config, host_id="test-lab"):
+    estate_path = fixture_config / "estate.yaml"
+    estate = yaml.safe_load(estate_path.read_text())
+    for host in estate["hosts"]:
+        if host["id"] == host_id:
+            host["worker"]["qualified_executors"] = sorted(
+                set(host["worker"].get("qualified_executors") or []) | {"codex-write"})
+    estate_path.write_text(yaml.safe_dump(estate))
+
+
 def test_scenario_a_implementation_mode_dispatches_codex_write_under_active_lease(
         fixture_config, monkeypatch, tmp_path):
+    """Stage 6: implementation mode dispatches through the WORKER write lane
+    on route.host -- never in-process -- once route.host holds the lease
+    and has codex-write qualified."""
     repo_path = tmp_path / "test-repo"
     repo_path.mkdir()
-    worktree_path = tmp_path / "aoteru-worktrees" / "test-repo" / "feature"
-    worktree_path.mkdir(parents=True)
     (fixture_config / "repositories.yaml").write_text(yaml.safe_dump({
         "repos": [{"id": "test-repo", "path": str(repo_path)}],
     }))
+    _qualify_codex_write(fixture_config)
     recorded_route = {}
-    recorded_outcome = {}
 
     def fake_record(task, **kwargs):
         recorded_route.update(task=task, **kwargs)
         return "implementation-decision"
 
     monkeypatch.setattr(estate_router, "_record_decision", fake_record)
-    monkeypatch.setattr(
-        estate_router, "active_lease_for_repo",
-        lambda repo_id, host_id: {
-            "lease_id": "lease-1", "repo_id": repo_id, "host_id": host_id,
-            "worktree_path": str(worktree_path), "branch": "feature/demo", "allowed_write_scope": "repo",
-        },
-    )
-    monkeypatch.setattr(estate_router.worktree_ops, "is_live_checkout_path", lambda repo_id, path: False)
-    monkeypatch.setattr(
-        estate_router.worktree_ops,
-        "verify_worktree",
-        lambda repo_id, path, branch: {"ok": True, "path": str(worktree_path), "branch": branch},
-    )
-    captured = {}
+    monkeypatch.setattr(estate_router, "_update_decision_outcome", lambda *a, **k: None)
+    import src.estate_write_lane as write_lane
+    monkeypatch.setattr(write_lane, "_lease_authority", lambda repo_id, host_id: {
+        "ok": True, "lease_id": "lease-1", "branch": "feature/demo", "worktree_path": "/w",
+    })
+    monkeypatch.setattr(estate_router, "_execute_codex_with_sandbox",
+                        lambda *a, **k: pytest.fail("the control plane must never run codex in-process"))
+    dispatched = {}
 
-    def fake_codex_process(objective, **kwargs):
-        captured.update(objective=objective, **kwargs)
-        return {"ok": True, "provider": "codex-write", "output": "implemented", "latency_ms": 12}
+    def fake_lane(objective, **kwargs):
+        dispatched.update(objective=objective, **kwargs)
+        return {"ok": True, "provider": "codex-write", "execution_id": "exec-scenario-a",
+                "lifecycle_state": "running", "dispatch": "new",
+                "next_action": {"http": "GET /api/estate/run/exec-scenario-a?wait=60",
+                                "cli": "aoteru execution exec-scenario-a --wait 60"}}
 
-    monkeypatch.setattr(estate_router, "_execute_codex_with_sandbox", fake_codex_process)
-    monkeypatch.setattr(
-        estate_router, "_update_decision_outcome",
-        lambda decision_id, **kwargs: recorded_outcome.update(decision_id=decision_id, **kwargs),
-    )
-    # execute_codex_write_durable persists an EstateExecution row around
-    # the call above -- mocked here the same way _record_decision/
-    # _update_decision_outcome already are, so this test stays isolated
-    # from real DB schema/state rather than needing to provision the
-    # estate_executions table itself.
-    created_executions = {}
-    monkeypatch.setattr(
-        estate_router, "_create_estate_execution",
-        lambda **kwargs: created_executions.setdefault("id", "exec-scenario-a") or "exec-scenario-a",
-    )
-    monkeypatch.setattr(estate_router, "_update_estate_execution", lambda execution_id, **kwargs: None)
+    monkeypatch.setattr(estate_router, "execute_write_via_worker", fake_lane)
 
     result = estate_router.run_task({
         "task_class": "bounded_code_implementation", "objective": "implement it", "repo": "test-repo",
@@ -1605,17 +1598,32 @@ def test_scenario_a_implementation_mode_dispatches_codex_write_under_active_leas
         "routing": {"allow_paid_escalation": True, "mode": "implementation"},
     })
 
-    assert result["ok"] is True
-    assert result["executed"] is True
-    assert result["route"]["executor"] == "codex-write"
+    assert result["ok"] is True and result["executed"] is True
     assert result["execution_id"] == "exec-scenario-a"
-    assert captured["objective"] == "implement it"
-    assert captured["cwd"] == str(worktree_path)
-    assert captured["sandbox"] == "workspace-write"
+    assert result["dispatch"] == "new"
+    assert result["next_action"]["cli"] == "aoteru execution exec-scenario-a --wait 60"
+    assert dispatched == {"objective": "implement it", "repo_id": "test-repo",
+                          "host_id": result["route"]["host"], "decision_id": "implementation-decision"}
     assert recorded_route["task"]["recommended_route"] == "codex_eligible"
-    assert recorded_outcome["actual_route"] == "codex-write"
-    assert recorded_outcome["executor"] == "codex-write"
-    assert recorded_outcome["verification_outcome"] == "pass"
+
+
+def test_implementation_mode_refused_when_codex_write_not_qualified_on_route_host(fixture_config, monkeypatch, tmp_path):
+    repo_path = tmp_path / "test-repo"
+    repo_path.mkdir()
+    (fixture_config / "repositories.yaml").write_text(yaml.safe_dump({
+        "repos": [{"id": "test-repo", "path": str(repo_path)}],
+    }))
+    monkeypatch.setattr(estate_router, "_record_decision", lambda *a, **k: "implementation-decision")
+    monkeypatch.setattr(estate_router, "_update_decision_outcome", lambda *a, **k: None)
+    monkeypatch.setattr(estate_router, "execute_write_via_worker", lambda *a, **k: pytest.fail("must not dispatch"))
+    result = estate_router.run_task({
+        "task_class": "bounded_code_implementation", "objective": "implement it", "repo": "test-repo",
+        "requirements": {"capabilities": ["reasoning-strong"]},
+        "routing": {"allow_paid_escalation": True, "mode": "implementation"},
+    })
+    assert result["ok"] is False and result["executed"] is False
+    assert "not qualified" in result["execution_error"]
+    assert result["escalation_reason"] == "write_lease_missing"
 
 
 def test_record_decision_rejects_invalid_nondelegation_reason_even_off_preflight_path(fixture_config):
@@ -1654,10 +1662,13 @@ def test_implementation_mode_without_active_lease_hard_fails(fixture_config, mon
     (fixture_config / "repositories.yaml").write_text(yaml.safe_dump({
         "repos": [{"id": "test-repo", "path": str(repo_path)}],
     }))
+    _qualify_codex_write(fixture_config)
     monkeypatch.setattr(estate_router, "_record_decision", lambda *a, **k: "implementation-decision")
-    monkeypatch.setattr(estate_router, "active_lease_for_repo", lambda repo_id, host_id: None)
+    import src.park_lease_ops as ops
+    monkeypatch.setattr(ops, "active_lease_for_repo", lambda repo_id, host_id: None)
     called = []
     monkeypatch.setattr(estate_router, "_execute_codex_with_sandbox", lambda *a, **k: called.append(True))
+    monkeypatch.setattr(estate_router, "execute_write_via_worker", lambda *a, **k: called.append(True))
     monkeypatch.setattr(estate_router, "_update_decision_outcome", lambda *a, **k: None)
 
     result = estate_router.run_task({
@@ -1668,7 +1679,7 @@ def test_implementation_mode_without_active_lease_hard_fails(fixture_config, mon
 
     assert result["ok"] is False
     assert result["executed"] is False
-    assert "active non-stale lease" in result["execution_error"]
+    assert "authoritative active lease" in result["execution_error"]
     assert called == []
 
 

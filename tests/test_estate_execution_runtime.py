@@ -98,6 +98,10 @@ def _fake_popen_factory(hold_event, exit_code=0, output="ok"):
 def runtime_db(monkeypatch):
     session_local, engine, tmpfile = make_temp_sqlite(cdb.Base.metadata)
     monkeypatch.setattr(cdb, "SessionLocal", session_local)
+    # The legacy in-process lane only ever ran on the backend's own host;
+    # Stage 6 reconciliation marks a NULL-handle row on any OTHER host
+    # `lost`, so these legacy-lane tests run as that host.
+    monkeypatch.setattr(estate_router, "current_host_id", lambda: "test-lab")
     yield
     engine.dispose()
     os.unlink(tmpfile.name)
@@ -396,36 +400,6 @@ def test_new_submission_allowed_once_prior_execution_reaches_terminal_state(runt
     assert popen_call_count == 2
 
 
-def test_finalize_refuses_when_authority_now_denies_live_checkout(runtime_db, monkeypatch, tmp_path):
-    """Branch-drift/live-checkout substitution between execution and
-    finalisation must fail closed -- simulated here by authority
-    denying at finalise time even though the execution itself
-    succeeded."""
-    hold_event = threading.Event()
-    hold_event.set()
-    monkeypatch.setattr(subprocess, "Popen", _fake_popen_factory(hold_event))
-    monkeypatch.setattr(estate_router, "_codex_available", lambda: (True, "/fake/codex"))
-    _fresh_authority(tmp_path, monkeypatch)
-
-    result = estate_router.execute_codex_write_durable(
-        "implement it", repo_id="test-repo", host_id="test-lab", wait_timeout=1.0,
-    )
-    assert result["ok"] is True
-
-    monkeypatch.setattr(
-        estate_router, "_codex_write_authority",
-        lambda repo_id, host_id: {
-            "ok": False,
-            "error": f"refusing implementation mode in live registered checkout for {repo_id!r}",
-        },
-    )
-    outcome = estate_router.finalize_execution(
-        execution_id=result["execution_id"], repo_id="test-repo", host_id="test-lab",
-        commit_message="test commit",
-    )
-    assert outcome["finalized"] is False
-    assert "authority re-verification failed" in outcome["reason"]
-
 
 # ---------------------------------------------------------------------
 # Process handling
@@ -584,153 +558,8 @@ def test_reconciliation_never_relaunches_a_paid_executor(runtime_db, monkeypatch
 # Finalisation
 # ---------------------------------------------------------------------
 
-def test_finalize_commits_and_pushes_authorised_changes(runtime_db, monkeypatch, tmp_path):
-    hold_event = threading.Event()
-    hold_event.set()
-    monkeypatch.setattr(subprocess, "Popen", _fake_popen_factory(hold_event))
-    monkeypatch.setattr(estate_router, "_codex_available", lambda: (True, "/fake/codex"))
-    _fresh_authority(tmp_path, monkeypatch)
-
-    result = estate_router.execute_codex_write_durable(
-        "implement it", repo_id="test-repo", host_id="test-lab", wait_timeout=1.0,
-    )
-    assert result["ok"] is True
-
-    calls = []
-
-    def _fake_run_git_subprocess(argv, cwd, capture_output, text, timeout):
-        import types
-        calls.append(argv)
-        out = types.SimpleNamespace(returncode=0, stdout="", stderr="")
-        if argv[:2] == ["git", "branch"]:
-            out.stdout = "feat/x\n"
-        elif argv[:2] == ["git", "status"]:
-            out.stdout = " M src/thing.py\n"
-        elif argv[:2] == ["git", "rev-parse"]:
-            out.stdout = "abc1234\n"
-        return out
-
-    monkeypatch.setattr(subprocess, "run", _fake_run_git_subprocess)
-
-    outcome = estate_router.finalize_execution(
-        execution_id=result["execution_id"], repo_id="test-repo", host_id="test-lab",
-        commit_message="test commit",
-    )
-    assert outcome["finalized"] is True
-    assert outcome["commit_sha"] == "abc1234"
-    assert ["git", "add", "--", "src/thing.py"] in calls
-    assert any(c[:2] == ["git", "add"] for c in calls)
-    assert not any(c == ["git", "add", "-A"] for c in calls)
 
 
-def test_finalize_refuses_when_not_succeeded(runtime_db, monkeypatch, tmp_path):
-    from core.database import SessionLocal
-    _fresh_authority(tmp_path, monkeypatch)
-    db = SessionLocal()
-    try:
-        db.add(EstateExecution(
-            id="exec-running-still", objective="x", executor="codex-write", provider="codex",
-            host_id="test-lab", repo_id="test-repo", lease_id="lease-1",
-            worktree_path=str(tmp_path), branch="feat/x", lifecycle_state="running",
-        ))
-        db.commit()
-    finally:
-        db.close()
-
-    outcome = estate_router.finalize_execution(
-        execution_id="exec-running-still", repo_id="test-repo", host_id="test-lab",
-        commit_message="test commit",
-    )
-    assert outcome["finalized"] is False
-    assert "not succeeded" in outcome["reason"]
-
-
-def test_finalize_refuses_on_lease_drift(runtime_db, monkeypatch, tmp_path):
-    from core.database import SessionLocal
-    db = SessionLocal()
-    try:
-        db.add(EstateExecution(
-            id="exec-lease-drift", objective="x", executor="codex-write", provider="codex",
-            host_id="test-lab", repo_id="test-repo", lease_id="lease-OLD",
-            worktree_path=str(tmp_path), branch="feat/x", lifecycle_state="succeeded",
-        ))
-        db.commit()
-    finally:
-        db.close()
-
-    _fresh_authority(tmp_path, monkeypatch, lease_id="lease-NEW")
-    outcome = estate_router.finalize_execution(
-        execution_id="exec-lease-drift", repo_id="test-repo", host_id="test-lab",
-        commit_message="test commit",
-    )
-    assert outcome["finalized"] is False
-    assert "lease drift" in outcome["reason"]
-
-
-def test_finalize_refuses_on_branch_drift(runtime_db, monkeypatch, tmp_path):
-    from core.database import SessionLocal
-    db = SessionLocal()
-    try:
-        db.add(EstateExecution(
-            id="exec-branch-drift", objective="x", executor="codex-write", provider="codex",
-            host_id="test-lab", repo_id="test-repo", lease_id="lease-1",
-            worktree_path=str(tmp_path), branch="feat/original", lifecycle_state="succeeded",
-        ))
-        db.commit()
-    finally:
-        db.close()
-
-    _fresh_authority(tmp_path, monkeypatch, branch="feat/original")
-
-    def _fake_run(argv, cwd, capture_output, text, timeout):
-        import types
-        out = types.SimpleNamespace(returncode=0, stdout="", stderr="")
-        if argv[:2] == ["git", "branch"]:
-            out.stdout = "feat/switched-away\n"
-        return out
-
-    monkeypatch.setattr(subprocess, "run", _fake_run)
-
-    outcome = estate_router.finalize_execution(
-        execution_id="exec-branch-drift", repo_id="test-repo", host_id="test-lab",
-        commit_message="test commit",
-    )
-    assert outcome["finalized"] is False
-    assert "branch drift" in outcome["reason"]
-
-
-def test_finalize_refuses_when_nothing_dirty(runtime_db, monkeypatch, tmp_path):
-    from core.database import SessionLocal
-    db = SessionLocal()
-    try:
-        db.add(EstateExecution(
-            id="exec-clean", objective="x", executor="codex-write", provider="codex",
-            host_id="test-lab", repo_id="test-repo", lease_id="lease-1",
-            worktree_path=str(tmp_path), branch="feat/x", lifecycle_state="succeeded",
-        ))
-        db.commit()
-    finally:
-        db.close()
-
-    _fresh_authority(tmp_path, monkeypatch)
-
-    def _fake_run(argv, cwd, capture_output, text, timeout):
-        import types
-        out = types.SimpleNamespace(returncode=0, stdout="", stderr="")
-        if argv[:2] == ["git", "branch"]:
-            out.stdout = "feat/x\n"
-        elif argv[:2] == ["git", "status"]:
-            out.stdout = ""
-        return out
-
-    monkeypatch.setattr(subprocess, "run", _fake_run)
-
-    outcome = estate_router.finalize_execution(
-        execution_id="exec-clean", repo_id="test-repo", host_id="test-lab",
-        commit_message="test commit",
-    )
-    assert outcome["finalized"] is False
-    assert "no changes" in outcome["reason"]
 
 
 
@@ -747,3 +576,9 @@ def test_legacy_lane_keeps_row_unresolved_when_cleanup_left_survivors(runtime_db
         row = db.query(EstateExecution).filter(EstateExecution.id == result["execution_id"]).one()
         assert row.lifecycle_state == "timed_out"
         assert row.worktree_resolution == "unresolved"
+
+
+# The pre-Stage-6 local-git finalize tests (authority denial, commit+push,
+# not-succeeded, lease/branch drift, nothing dirty) were replaced by the
+# worker-path finalize tests in tests/test_estate_stage6_control.py:
+# finalize now runs through `worktree.finalize` on the row's host (S6.10).

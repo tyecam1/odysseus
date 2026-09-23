@@ -248,6 +248,8 @@ def test_cmd_park_branch_uses_isolated_worktree_not_live_checkout(monkeypatch, c
     monkeypatch.setattr(module.socket, "gethostname", lambda: "THIS-HOST")
     monkeypatch.setattr(module, "_git_is_clean", lambda path: (_ for _ in ()).throw(AssertionError("cmd_park should not call _git_is_clean directly")))
     monkeypatch.setattr(estate_router, "resolve_repo_path", lambda repo_id: str(live_repo))
+    from tests.helpers.inline_prepare import install_inline_prepare_worker
+    install_inline_prepare_worker(monkeypatch)
 
     with get_db_session() as db:
         db.query(ParkLease).filter(ParkLease.repo_id == "test-repo").delete(synchronize_session=False)

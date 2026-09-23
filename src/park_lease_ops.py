@@ -32,6 +32,29 @@ from src import worktree_ops
 class ParkConflict(Exception):
     """An active, non-stale lease already exists for this repo — fail closed."""
 
+    def __init__(self, message: str, *, lease_id=None, status=None, host_id=None, prepare_probe_due=False):
+        super().__init__(message)
+        self.lease_id = lease_id
+        self.status = status
+        self.host_id = host_id
+        self.prepare_probe_due = prepare_probe_due
+
+
+class PrepareOutcomeUnresolved(Exception):
+    """S6.9: the worker's prepare outcome is not positively known (lost
+    response, unreachable, protocol/placement error, still preparing). The
+    `preparing` reservation stays protected until
+    `resolve_preparing_reservation` proves the prepare cannot still run."""
+
+    def __init__(self, message: str, *, lease_id: str, host_id: str):
+        super().__init__(message)
+        self.lease_id = lease_id
+        self.host_id = host_id
+        self.next_action = {
+            "http": "POST /api/estate/park/<repo_id>/resolve-prepare",
+            "cli": f"aoteru resolve-prepare <repo_id> --lease {lease_id} --host {host_id}",
+        }
+
 
 class NoActiveLease(Exception):
     """heartbeat/release found no matching active lease to act on."""
@@ -165,18 +188,10 @@ def park_repo_by_id(
         )
     path = live_path
     if branch:
-        try:
-            created = worktree_ops.create_or_reuse_worktree(repo_id, branch, base_ref="HEAD")
-        except RuntimeError as exc:
-            raise WorktreeVerificationError(
-                f"refusing to park {repo_id!r} on branch {branch!r}: {exc}"
-            ) from exc
-        verification = worktree_ops.verify_worktree(repo_id, created["path"], branch)
-        if not verification["ok"]:
-            raise WorktreeVerificationError(
-                f"refusing to park {repo_id!r} on branch {branch!r}: {verification['reason']}"
-            )
-        path = verification["path"]
+        # S6.7/S6.9: reserve first, then prepare through the worker
+        # (LocalTransport for this host) under that reservation -- no
+        # worktree is created or reused before a `preparing` row exists.
+        return park_with_worktree(repo_id, host_id, branch, session_id=session_id)
     clean, reason = git_is_clean(path)
     if not clean:
         raise RepoNotClean(f"refusing to park {repo_id!r}: {reason} (fail-closed — commit/stash first)")
@@ -213,7 +228,9 @@ def park_repo(
                 if not authority["reclaimable"]:
                     raise ParkConflict(
                         f"{repo_id!r} is already parked ({existing.status} lease {existing.id} on "
-                        f"{existing.host_id!r}: {authority['reason']}) — release or recover it first"
+                        f"{existing.host_id!r}: {authority['reason']}) — release or recover it first",
+                        lease_id=existing.id, status=existing.status, host_id=existing.host_id,
+                        prepare_probe_due=bool(authority.get("prepare_probe_due")),
                     )
                 reclaimed_stale = {
                     "lease_id": existing.id, "host_id": existing.host_id,
@@ -410,3 +427,107 @@ def release_repo(repo_id: str, host_id: Optional[str] = None) -> dict:
         lease.released_at = utcnow_naive()
         return {"lease_id": lease.id, "repo_id": lease.repo_id, "host_id": lease.host_id,
                 "unpushed_executions": unpushed}
+
+
+# ---------------------------------------------------------------------
+# S6.7 / S6.9: parks that create or reuse a worktree
+# ---------------------------------------------------------------------
+
+_PREPARE_CLIENT_SIDE = frozenset({"worker_unreachable", "worker_protocol_error", "placement_mismatch"})
+
+
+def _release_reservation(lease_id: str) -> bool:
+    """Release a `preparing` reservation by exact id (always safe: no
+    execution can exist under a non-active lease)."""
+    from core.database import ParkLease, lease_serialized_transaction, utcnow_naive
+    with lease_serialized_transaction(lease_id=lease_id) as db:
+        row = db.query(ParkLease).filter(ParkLease.id == lease_id).one_or_none()
+        if row is None or row.status != "preparing":
+            return False
+        row.status = "released"
+        row.released_at = utcnow_naive()
+        return True
+
+
+def _call_prepare_worker(host_id: str, verb: str, payload: dict, deadline_s: float):
+    from src import estate_worker_client as client
+    try:
+        return client.call_worker(host_id, verb, payload, deadline_s=deadline_s).get("result") or {}, None
+    except client.WorkerTransportError as exc:
+        return None, exc
+
+
+def park_with_worktree(repo_id: str, host_id: str, branch: str, *, session_id: Optional[str] = None,
+                       base_ref: str = "HEAD") -> dict:
+    """S6.7: reserve -> prepare (worker, under the reservation) -> evidence
+    -> bind. Positively known failures release the reservation; ambiguous
+    outcomes keep it `preparing` (S6.9) and raise PrepareOutcomeUnresolved.
+    A competing stale `preparing` reservation is probed (outside any lock)
+    and the reservation retried once."""
+    from core.database import ParkLease, lease_serialized_transaction, utcnow_naive
+    try:
+        reservation = park_repo(repo_id, host_id, "", branch=branch, session_id=session_id, status="preparing")
+    except ParkConflict as conflict:
+        if conflict.status != "preparing" or not conflict.prepare_probe_due:
+            raise
+        resolve_preparing_reservation(conflict.lease_id)
+        reservation = park_repo(repo_id, host_id, "", branch=branch, session_id=session_id, status="preparing")
+    lease_id = reservation["lease_id"]
+    result, exc = _call_prepare_worker(host_id, "worktree.prepare", {
+        "repo_id": repo_id, "branch": branch, "base_ref": base_ref,
+        "lease": {"lease_id": lease_id, "host_id": host_id},
+    }, deadline_s=120)
+    if exc is not None:
+        if exc.code in _PREPARE_CLIENT_SIDE:
+            raise PrepareOutcomeUnresolved(
+                f"prepare outcome for {repo_id!r} on {host_id!r} is unresolved ({exc.code}: {exc})",
+                lease_id=lease_id, host_id=host_id,
+            ) from exc
+        _release_reservation(lease_id)            # worker pre-claim refusal: positively nothing mutated
+        raise WorktreeVerificationError(f"refusing to park {repo_id!r} on {branch!r}: {exc.code}: {exc}") from exc
+    state = result.get("state")
+    if state == "preparing":
+        raise PrepareOutcomeUnresolved(
+            f"prepare for {repo_id!r} on {host_id!r} is still running or not proven finished",
+            lease_id=lease_id, host_id=host_id,
+        )
+    if state != "prepared":
+        _release_reservation(lease_id)            # prepare_failed / fenced / interrupted: positively ended
+        raise WorktreeVerificationError(
+            f"refusing to park {repo_id!r} on {branch!r}: prepare {state}: {result.get('error')}"
+        )
+    if result.get("branch") != branch or not result.get("path") or not result.get("head_sha"):
+        _release_reservation(lease_id)
+        raise WorktreeVerificationError(f"refusing to park {repo_id!r}: prepare evidence incomplete or mismatched")
+    if result.get("clean") is not True:
+        _release_reservation(lease_id)
+        raise RepoNotClean(f"refusing to park {repo_id!r}: prepared worktree is not clean (fail-closed)")
+    with lease_serialized_transaction(lease_id=lease_id) as db:
+        row = db.query(ParkLease).filter(ParkLease.id == lease_id).one_or_none()
+        if row is None or row.status != "preparing" or row.host_id != host_id or row.branch != branch:
+            raise WorktreeVerificationError(f"reservation {lease_id} changed before bind; not bound")
+        row.worktree_path = result["path"]
+        row.status = "active"
+        row.heartbeat_at = utcnow_naive()
+    return {**reservation, "status": "active", "worktree_path": result["path"], "head_sha": result["head_sha"]}
+
+
+def resolve_preparing_reservation(lease_id: str) -> dict:
+    """S6.9: resolve an ambiguous `preparing` reservation by the same
+    lease_id. Probe with fence (no lock held); release only when the
+    worker proves the original prepare cannot still run. Never binds."""
+    from core.database import ParkLease, get_db_session
+    with get_db_session() as db:
+        row = db.query(ParkLease).filter(ParkLease.id == lease_id).one_or_none()
+        if row is None or row.status != "preparing":
+            return {"resolved": False, "reason": "no preparing reservation with that id"}
+        host_id = row.host_id
+    result, exc = _call_prepare_worker(host_id, "worktree.prepare_status",
+                                       {"lease_id": lease_id, "fence": True}, deadline_s=30)
+    if exc is not None:
+        return {"resolved": False, "reason": "worker_unreachable", "detail": str(exc)}
+    state = result.get("state")
+    if state in ("fenced", "prepare_failed", "prepare_interrupted", "prepared") and result.get("quiescent") is True:
+        released = _release_reservation(lease_id)
+        return {"resolved": released, "state": state, "released": released}
+    return {"resolved": False, "reason": "prepare_still_running", "state": state}

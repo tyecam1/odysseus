@@ -1191,79 +1191,6 @@ def _update_estate_execution(execution_id: str, **fields) -> None:
         db.close()
 
 
-def reconcile_stale_estate_executions(db, EstateExecution) -> int:
-    """Reconciliation for EstateExecution rows the backend's own process
-    no longer has any thread tracking -- e.g. after a service restart
-    while an execution was accepted/running. Mirrors
-    `scripts/agent`'s `_reconcile_stale_sessions()` (same lazy/on-query
-    invocation shape, one shared authority, never a second lifecycle
-    table) but improves on it: a recorded `worker_pid` lets existence be
-    checked directly with `os.kill(pid, 0)` instead of relying on
-    elapsed time alone. A row with no pid yet is left alone until
-    `_STALE_EXECUTION_ACCEPT_GRACE_SECONDS` has passed -- `on_started`
-    may simply not have fired yet. Never restarts a paid executor
-    invocation itself (incident finding: uncertain completion must not
-    trigger a blind retry) -- this only relabels state, it never calls
-    `_execute_codex_with_sandbox` again."""
-    import os
-    from datetime import datetime, timedelta, timezone
-    from core.database import utcnow_naive
-    cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=_STALE_EXECUTION_ACCEPT_GRACE_SECONDS)
-    cutoff_pid_grace = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=_STALE_EXECUTION_PID_GRACE_SECONDS)
-    in_flight = db.query(EstateExecution).filter(
-        EstateExecution.lifecycle_state.in_(("accepted", "running")),
-    ).all()
-    reconciled = 0
-    for row in in_flight:
-        pid = row.worker_pid
-        if pid is None:
-            if row.submitted_at is not None and row.submitted_at >= cutoff:
-                continue
-            reason = (
-                "reconciled: no worker_pid recorded and row is older than "
-                f"{_STALE_EXECUTION_ACCEPT_GRACE_SECONDS}s -- launch never confirmed"
-            )
-        else:
-            try:
-                os.kill(pid, 0)
-                continue
-            except ProcessLookupError:
-                touched_at = row.updated_at or row.submitted_at
-                if touched_at is not None and touched_at >= cutoff_pid_grace:
-                    continue  # too recent -- likely mid-legitimate-completion, not orphaned
-                reason = (
-                    "reconciled: recorded worker_pid no longer exists on this host -- backend "
-                    "likely restarted or the worker crashed while this execution was in flight"
-                )
-            except PermissionError:
-                continue
-        row.lifecycle_state = "interrupted"
-        row.finished_at = row.finished_at or utcnow_naive()
-        row.error = row.error or reason
-        reconciled += 1
-    db.commit()
-    return reconciled
-
-
-def get_estate_execution(execution_id: str) -> Optional[dict]:
-    """HTTP surface for GET /api/estate/run/{execution_id} -- the
-    authoritative persisted state a client polls for after receiving an
-    accepted response. Reconciles stale in-flight rows lazily on read
-    (same invocation shape as LogicalSession reconciliation) so a poll
-    after a backend restart reflects truthful state rather than a
-    permanently phantom "running" row."""
-    from core.database import SessionLocal, EstateExecution
-    db = SessionLocal()
-    try:
-        reconcile_stale_estate_executions(db, EstateExecution)
-        row = db.query(EstateExecution).filter(EstateExecution.id == execution_id).one_or_none()
-        if row is None:
-            return None
-        return _estate_execution_provenance(row)
-    finally:
-        db.close()
-
-
 def _in_flight_execution_for_lease(lease_id: str) -> Optional[dict]:
     """Admission-control read: is there already a non-terminal
     (accepted/running) EstateExecution under this exact lease? Grounded
@@ -1435,101 +1362,6 @@ def execute_codex_write_durable(objective: str, *, repo_id: str, host_id: str,
     return {**result, "execution_id": execution_id}
 
 
-def finalize_execution(*, execution_id: str, repo_id: str, host_id: str,
-                        commit_message: str) -> dict:
-    """Commit and push the changes made by a completed durable execution.
-
-    Reuses `_codex_write_authority` (never raw `resolve_repo_path`) so
-    the same worktree-verification/live-checkout-refusal invariant that
-    governs execution also governs finalisation -- the incident this
-    repairs was specifically a write landing in the live checkout, so
-    finalisation gets no separate, weaker cwd resolution. Re-verifies
-    authority, lease id, branch and worktree path immediately before
-    finalising rather than trusting the execution record's stored
-    values, so a lease released or reassigned between execution and
-    finalisation fails closed here rather than committing against a
-    stale or now-wrong path. Stages every dirty path individually
-    (never `git add -A`) so finalisation is traceable path-by-path; the
-    worktree's own dirty set is this execution's authorised scope by
-    construction of ParkLease's single-active-lease-per-repo invariant
-    (`ix_park_leases_active_repo_unique`) -- no other task can be
-    concurrently dirtying the same worktree.
-    """
-    from core.database import SessionLocal, EstateExecution, utcnow_naive
-    db = SessionLocal()
-    try:
-        execution = db.query(EstateExecution).filter(EstateExecution.id == execution_id).one_or_none()
-    finally:
-        db.close()
-    if execution is None:
-        return {"finalized": False, "reason": f"no execution found with id {execution_id!r}"}
-    if execution.lifecycle_state != "succeeded":
-        return {
-            "finalized": False,
-            "reason": f"execution is {execution.lifecycle_state!r}, not succeeded -- refusing to finalise",
-        }
-
-    authority = _codex_write_authority(repo_id, host_id)
-    if not authority["ok"]:
-        return {"finalized": False, "reason": f"authority re-verification failed: {authority['error']}"}
-    if authority["lease_id"] != execution.lease_id:
-        return {
-            "finalized": False,
-            "reason": f"lease drift: execution ran under {execution.lease_id!r}, "
-                      f"current active lease is {authority['lease_id']!r}",
-        }
-    if authority["cwd"] != execution.worktree_path:
-        return {
-            "finalized": False,
-            "reason": f"worktree drift: execution ran in {execution.worktree_path!r}, "
-                      f"current verified worktree is {authority['cwd']!r}",
-        }
-
-    repo_path = authority["cwd"]
-    import subprocess
-
-    def _run_git(argv):
-        return subprocess.run(["git"] + argv, cwd=repo_path, capture_output=True, text=True, timeout=60)
-
-    branch_proc = _run_git(["branch", "--show-current"])
-    actual_branch = branch_proc.stdout.strip()
-    if actual_branch != execution.branch:
-        return {
-            "finalized": False,
-            "reason": f"branch drift: execution ran on {execution.branch!r}, worktree is now on {actual_branch!r}",
-        }
-
-    status_proc = _run_git(["status", "--porcelain"])
-    dirty_paths = [line[3:] for line in status_proc.stdout.splitlines() if line.strip()]
-    if not dirty_paths:
-        return {"finalized": False, "reason": "no changes to finalize"}
-
-    add_proc = _run_git(["add", "--"] + dirty_paths)
-    if add_proc.returncode != 0:
-        return {"finalized": False, "reason": f"git add failed: {add_proc.stderr.strip()}"}
-
-    commit_proc = _run_git(["commit", "-m", commit_message])
-    if commit_proc.returncode != 0:
-        return {"finalized": False, "reason": f"git commit failed: {commit_proc.stderr.strip()}"}
-
-    commit_sha = _run_git(["rev-parse", "HEAD"]).stdout.strip()
-    push_proc = _run_git(["push", "origin", actual_branch])
-    finalization = {
-        "finalized": push_proc.returncode == 0,
-        "committed": True,
-        "pushed": push_proc.returncode == 0,
-        "commit_sha": commit_sha,
-        "branch": actual_branch,
-        "dirty_paths": dirty_paths,
-        "lease_id": authority["lease_id"],
-    }
-    if push_proc.returncode != 0:
-        finalization["push_error"] = push_proc.stderr.strip()
-
-    _update_estate_execution(execution_id, finalization_json=json.dumps(finalization))
-    return finalization
-
-
 # Provider dispatch table (Workstream C: "cheap/strong paid capability
 # aliases via config, not hardcoded names"). The *selection* of which
 # provider backs a given alias, and what name gets recorded as
@@ -1546,7 +1378,8 @@ def finalize_execution(*, execution_id: str, repo_id: str, host_id: str,
 # same way they already monkeypatch `execute_local`; binding the object
 # here at import time would silently stop honouring that patch.
 _PAID_PROVIDER_FUNCTION_NAMES = {"codex": "execute_codex"}
-_PAID_PROVIDER_WRITE_FUNCTION_NAMES = {"codex": "execute_codex_write_durable"}
+# Stage 6: the write lane dispatches through the worker on route.host.
+_PAID_PROVIDER_WRITE_FUNCTION_NAMES = {"codex": "execute_write_via_worker"}
 
 
 def _resolve_paid_provider(alias: Optional[str]) -> dict:
@@ -1733,16 +1566,24 @@ def run_task(task: dict) -> dict:
                 executor_name = f"{provider_name}-write"
                 error = None
                 repo_id = task.get("repo")
-                host_id = current_host_id()
+                # Stage 6: the write executes on route.host through its
+                # worker. The lease holder must BE route.host (D4 restated),
+                # and codex-write must be qualified there -- never a
+                # fallback to this backend host.
+                host_id = route["route"].get("host")
+                host_entry = next((h for h in (route.get("hosts_checked") or [])
+                                   if h.get("host_id") == host_id), None) or {}
                 if not repo_id:
                     error = "implementation mode requires task.repo and an existing active write lease"
                 elif host_id is None:
-                    error = "implementation mode requires this backend host to be registered in config/estate.yaml"
-                elif route["route"].get("host") != host_id:
-                    error = (
-                        f"implementation route selected {route['route'].get('host')!r}, but the "
-                        f"write executor runs on lease holder {host_id!r}"
-                    )
+                    error = "implementation route has no host"
+                elif "codex-write" not in (host_entry.get("qualified_executors") or []):
+                    error = f"executor 'codex-write' not qualified on {host_id!r}"
+                else:
+                    from src.estate_write_lane import _lease_authority
+                    authority = _lease_authority(repo_id, host_id)
+                    if not authority["ok"]:
+                        error = authority["error"]
                 if error:
                     _update_decision_outcome(
                         route["decision_id"], status="blocked", deterministic_gate="fail",
@@ -1769,6 +1610,20 @@ def run_task(task: dict) -> dict:
                         "escalation_reason": "write_lease_missing",
                         "verification_outcome": "fail",
                     }
+                if result.get("ok") is False and result.get("error_code"):
+                    # Admission refusal under the S6.1 table (unresolved /
+                    # unfinalized / lost execution, dirty worktree):
+                    # truthful, with the blocking execution and next action.
+                    _update_decision_outcome(
+                        route["decision_id"], status="blocked", deterministic_gate="fail",
+                        escalation_reason="write_lease_missing", escalated=True,
+                        verification_outcome="fail",
+                    )
+                    return {
+                        **route, "ok": False, "executed": False,
+                        "execution_error": result.get("error"), "execution": result,
+                        "escalation_reason": "write_lease_missing", "verification_outcome": "fail",
+                    }
                 if result.get("lifecycle_state") in ("accepted", "running"):
                     # Durable execution still in flight past
                     # execute_codex_write_durable's bounded wait -- the
@@ -1786,6 +1641,7 @@ def run_task(task: dict) -> dict:
                     return {
                         **route, "ok": True, "executed": True, "execution": result,
                         "execution_id": result["execution_id"],
+                        "dispatch": result.get("dispatch"), "next_action": result.get("next_action"),
                         "deterministic_gate": "pending", "verification_outcome": "pending",
                         "escalation_reason": None, "reason": reason,
                     }
@@ -1932,3 +1788,15 @@ def run_task(task: dict) -> dict:
         "escalation_reason": None if gate == "pass" else "worker_failed",
         "placement": result.get("placement"),
     }
+
+
+# Stage 6 control-plane write lane (plan §6.0). Imported last: the module
+# reads this one's helpers at call time.
+from src.estate_write_lane import (  # noqa: E402
+    execute_write_via_worker,
+    finalize_execution,
+    get_estate_execution,
+    push_finalized_execution,
+    reconcile_stale_estate_executions,
+    recover_execution_lease,
+)
