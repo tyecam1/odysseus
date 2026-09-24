@@ -32,13 +32,13 @@ Repository-local files may point here but must not duplicate the registry.
 
 1. Register a stable `prompt_id`.
 2. Store each prompt body as an immutable versioned file.
-3. Select a version explicitly from session/operator intent plus registered
-   scope. Never auto-apply an unrelated domain prompt.
-4. Use live repository authority to resolve factual drift; do not rewrite the
-   registered prompt during the session.
-5. On session close, append one application trace.
-6. Repeated trace evidence may justify a **new version**. Existing versions are
-   never silently edited to improve their historical score.
+3. Select the active graph head from session/operator intent plus registered scope.
+4. Use live repository authority to resolve factual drift; do not rewrite the active version.
+5. On session close, append one application trace and rating.
+6. Every application creates one prompt-evolution event.
+7. Derive the smallest semantic improvement from observed performance: weak rating dimensions, failure tags, verification defects, missed executable work and explicit operator feedback.
+8. If evidence supports a change, create a new immutable child version; otherwise add a reinforcement edge to the incumbent.
+9. Validate protected invariants before a child can become active. Existing versions are never rewritten and failed candidates never replace the head.
 
 ## Application trace
 
@@ -100,27 +100,55 @@ decimal. Do not inflate it to reward effort or commit count.
 `operator_overall` is null unless the operator explicitly rates the session.
 Operator feedback may be appended as an amendment/pointer; never invent it.
 
+## Prompt-evolution graph
+
+The register is an evidence graph with three node classes: immutable
+`prompt_version` nodes, rated `application` nodes, and `evolution_event`
+nodes. Supported edges are `applied`, `observed`, `derived_child`,
+`reinforced`, and `supersedes`.
+
+Every substantive application closes one loop:
+
+```text
+prompt version
+  -> application
+  -> measured performance
+  -> bounded improvement targets
+  -> child prompt OR reinforcement
+  -> protected-invariant validation
+  -> next active head
+```
+
+Improvement is relative to observed failure, not generic polishing. Repeated
+good performance reinforces an incumbent. Repeated failure on the same class
+should strengthen or restructure that instruction rather than accrete duplicate
+warnings.
+
+The graph lives under `evals/prompt-evolution/**`; the deterministic helper is
+`scripts/prompt_evolution.py`.
+
+### Protected invariants
+
+Evolution may never silently widen repository/filesystem/write scope; weaken
+evidence, verification, stop, safety or approval gates; promote an advisory
+model to acceptance authority; change model/provider identity rules without live
+evidence; replace live repository state with prompt memory; convert access
+failure into negative evidence; force unresolved scientific alternatives; or
+remove required application tracing/evolution.
+
+A candidate violating an invariant is blocked and the incumbent remains active.
+
 ## Learning and propagation
 
-Prompt traces are telemetry inputs to existing improvement/routing loops. They
-may support:
+Prompt graph telemetry feeds the same continuous-improvement system as routing
+telemetry. Aggregate by prompt id/version, ancestry, task class, failure tag and
+rating dimension. Compare descendants against their parent/siblings, not
+unrelated prompt scopes.
 
-- identifying failure patterns;
-- comparing prompt versions within the same task class;
-- proposing a revised prompt;
-- discovering that a prompt is too narrow, too permissive or too expensive;
-- identifying model/routing mismatches.
-
-They may **not** automatically:
-
-- mutate an active prompt;
-- promote a candidate prompt;
-- change model/provider authority;
-- weaken verification/evidence requirements;
-- widen filesystem/repository permissions;
-- override repository-local `AGENTS.md`, method or safety contracts.
-
-Any revised initializer is a new version with its own provenance.
+A validated evidence-derived child may become the next active head. The system
+may not optimize ratings by making the task easier, suppressing failures or
+reducing verification. Semantic drafting remains an agent task; graph structure,
+provenance and invariant checks are mandatory.
 
 ## Cross-repository discovery
 

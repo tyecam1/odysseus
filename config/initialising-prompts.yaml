@@ -1,16 +1,21 @@
-schema_version: 1
+schema_version: 2
 authority: tyecam1/odysseus
 contract: docs/initialising-prompt-register.md
 prompt_root: docs/initialising-prompts
 application_trace_root: evals/prompt-applications
+evolution_graph_root: evals/prompt-evolution
 
 rules:
   versioning: immutable
   application_traces: append-only
+  evolution_events: append-only
   operator_rating: explicit-only
-  auto_prompt_mutation: false
+  evolve_after_every_application: true
+  auto_in_place_mutation: false
   auto_authority_widening: false
+  cosmetic_version_churn: forbidden
   repository_local_duplicate_registers: forbidden
+  active_head_policy: evidence-derived-child-after-guardrail-validation
 
 prompts:
   - prompt_id: j1-long-horizon-method-loop
@@ -19,15 +24,15 @@ prompts:
     active_version: 1
     version: 1
     prompt_path: docs/initialising-prompts/j1-long-horizon-method-loop-v1.md
+    graph_path: evals/prompt-evolution/j1-long-horizon-method-loop.yaml
     created_at: 2026-09-24
     provenance:
       source_repository: tyecam1/obsidian-PhD
       source_branch: chatgpt/j1-method-contract-20260903
       last_known_checkpoint: ac52b90eb
       note: >-
-        Registered after the Safety S2 bibliography repair. The prompt itself
-        requires live-state reconstruction and does not treat this checkpoint as
-        current truth.
+        Registered after the Safety S2 bibliography repair. Live repository
+        state remains authoritative over checkpoint hints in any prompt.
     scope:
       repositories:
         - tyecam1/obsidian-PhD
@@ -36,8 +41,14 @@ prompts:
       task_classes:
         - long-horizon-research-method-loop
     application_trace_prefix: evals/prompt-applications/j1-long-horizon-method-loop/
+    evolution_trace_prefix: evals/prompt-evolution/
     rating_required: true
+    versions:
+      - version: 1
+        status: active
+        prompt_path: docs/initialising-prompts/j1-long-horizon-method-loop-v1.md
+        derived_from: operator-authored-initial-registration
     supersedes: []
     retirement_condition: >-
-      Retire only when a newer operator-approved version supersedes it or the J1
-      method loop ceases to exist.
+      Retire only when an evidence-derived child passes the protected-invariant
+      gate or the J1 method loop ceases to exist.

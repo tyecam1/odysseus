@@ -41,6 +41,10 @@ Odysseus owns the cross-repository initialising-prompt register:
 
 At the start of a substantive session, check whether the target repository/task matches an active registered initialiser. If the operator supplied a registered initialiser, resolve it by `prompt_id` + `version`; do not silently substitute another version.
 
-At substantive session closeout, record one application trace when a registered initialiser was actually used. The trace records repository/branch, start/end commits, outcome, stop reason, models/routes used, verification evidence, and a rubric-based agent rating. Operator rating is separate and optional; never invent it. Ratings are improvement telemetry only: they may justify proposing a new prompt version, but they never mutate an existing prompt, widen authority, or override repository-local instructions.
+At substantive session closeout, record one application trace when a registered initialiser was actually used. The trace records repository/branch, start/end commits, outcome, stop reason, models/routes used, verification evidence, and a rubric-based agent rating. Operator rating is separate and optional; never invent it.
+
+**Prompt evolution is a graph loop, not in-place mutation.** Every completed application must create an evolution event under `evals/prompt-evolution/**`. Failure tags, weak rating dimensions and explicit operator feedback become evidence for a child prompt version. Clean runs create a reinforcement edge instead of cosmetic wording churn. Existing prompt versions and application traces remain immutable.
+
+A child may become the active head only when its delta is traceable to observed performance and it preserves repository scope, authority, evidence/verification requirements, model-identity discipline and stop/safety gates. Prompt evolution must never improve its score by weakening the task.
 
 Repository-local agents must not create competing prompt registries. They may carry a lightweight pointer to this global register.
