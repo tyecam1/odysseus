@@ -4,6 +4,7 @@ contract: docs/initialising-prompt-register.md
 prompt_root: docs/initialising-prompts
 application_trace_root: evals/prompt-applications
 evolution_graph_root: evals/prompt-evolution
+exemplar_root: evals/prompt-exemplars
 
 rules:
   versioning: immutable
@@ -16,6 +17,12 @@ rules:
   cosmetic_version_churn: forbidden
   repository_local_duplicate_registers: forbidden
   active_head_policy: evidence-derived-child-after-guardrail-validation
+  opportunistic_exemplar_capture: true
+  exemplar_capture_domain_agnostic: true
+  exemplar_exact_prompt_required: true
+  exemplar_candidate_capture_requires_execution_evidence: false
+  exemplar_capture_grants_authority: false
+  exemplar_promotion_requires_evidence_or_explicit_operator_review: true
 
 prompts:
   - prompt_id: j1-long-horizon-method-loop
