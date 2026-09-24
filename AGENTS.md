@@ -28,3 +28,19 @@ otherwise eligible unit.
 
 `docs/aoteru-model-host-routing-contract.md` is the routing and authority
 contract. Do not duplicate or override it here.
+
+
+## Global initialising prompt register
+
+Odysseus owns the cross-repository initialising-prompt register:
+
+- registry: `config/initialising-prompts.yaml`
+- contract: `docs/initialising-prompt-register.md`
+- immutable prompt bodies: `docs/initialising-prompts/**`
+- append-only application traces: `evals/prompt-applications/**`
+
+At the start of a substantive session, check whether the target repository/task matches an active registered initialiser. If the operator supplied a registered initialiser, resolve it by `prompt_id` + `version`; do not silently substitute another version.
+
+At substantive session closeout, record one application trace when a registered initialiser was actually used. The trace records repository/branch, start/end commits, outcome, stop reason, models/routes used, verification evidence, and a rubric-based agent rating. Operator rating is separate and optional; never invent it. Ratings are improvement telemetry only: they may justify proposing a new prompt version, but they never mutate an existing prompt, widen authority, or override repository-local instructions.
+
+Repository-local agents must not create competing prompt registries. They may carry a lightweight pointer to this global register.

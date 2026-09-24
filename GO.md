@@ -14,6 +14,18 @@ While any `active` or `eligible` repository-controlled work remains, you MUST NO
 
 The durable programme-state file exists for recovery from involuntary context/session/tool loss, not as permission to schedule a handoff.
 
+## Initialising-prompt binding
+
+Before entering the long-horizon loop, read `config/initialising-prompts.yaml`.
+If the current repository/task matches an active registered prompt and the operator
+has selected or supplied that prompt, record its `prompt_id` and exact
+`version` in working session state. The registered body is immutable for that
+version; live repository authority still overrides stale factual state inside a
+prompt.
+
+Do not auto-apply a domain-specific prompt merely because it exists in the global
+register. Scope matching and operator/session intent are required.
+
 ## Long-horizon loop
 
 Repeat continuously:
@@ -27,6 +39,10 @@ Repeat continuously:
 7. commit and push the cohesive checkpoint;
 8. update programme state;
 9. immediately choose and execute the next eligible workstream.
+
+When a registered initialising prompt is in use, preserve its application id
+through checkpoints so one session produces one trace rather than one trace per
+commit.
 
 Do not ration the invocation to one or two workstreams. Complete as much of the unblocked programme as the environment can actually execute.
 
@@ -58,6 +74,25 @@ If `active_count > 0` OR `eligible_count > 0`, a voluntary final response is **f
 Do not reinterpret `eligible` as "next session" or "large enough to defer". If it can be advanced with current repo/lab/network/model/tool access, advance it now.
 
 A workstream may be changed from `eligible`/`active` to `blocked` only when a concrete external dependency is identified and recorded. Size, elapsed effort, a clean checkpoint, or desire for a fresh context are not blockers.
+
+## Session closeout trace
+
+Before any voluntary final response for a session that used a registered
+initialising prompt, append one record under `evals/prompt-applications/**`
+following `docs/initialising-prompt-register.md`.
+
+Rate the session on the five global dimensions (1-5 each):
+
+1. goal/frontier progress;
+2. correctness and verification quality;
+3. authority/scope discipline;
+4. routing/resource efficiency;
+5. continuity/handoff quality.
+
+Record the arithmetic mean as the agent rating. Operator rating is a separate
+optional field and must remain null unless explicitly supplied by the operator.
+A low rating or repeated failure tag may propose a new prompt version; it may not
+rewrite the version just used.
 
 ## Allowed stop conditions
 

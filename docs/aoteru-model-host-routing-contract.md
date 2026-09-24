@@ -212,6 +212,11 @@ task:
   context:
     source_pointers: []
     memory_pointers: []
+
+  initialising_prompt:
+    prompt_id: null
+    version: null
+    application_id: null
 ```
 
 ## Eligibility and scoring
@@ -313,6 +318,12 @@ Do not return worker scratchpads to the conversational model.
 
 Routing must improve from observed estate performance rather than remain a static hand-authored ranking.
 
+Initialising-prompt performance is part of that evidence. Aggregate prompt
+application traces by prompt id/version, repository/task class and failure tags.
+Use them to identify candidate prompt revisions, not to silently rewrite prompts.
+Prompt ratings cannot weaken permissions, domain gates, evidence requirements,
+verification requirements, model identity rules or repository-local authority.
+
 ## Telemetry to capture per routed task
 
 At minimum:
@@ -332,6 +343,9 @@ escalation occurrence and reason
 independent-review outcome
 human correction/rejection where explicitly observed
 final task status
+initialising prompt id/version/application id when one governed the session
+prompt-session rating dimensions + agent overall rating at closeout
+operator rating/correction only when explicitly supplied
 ```
 
 Record source/result pointers rather than sensitive prompt copies where possible.

@@ -1,0 +1,29 @@
+schema_version: 1
+application_id: TEMPLATE
+prompt_id: TEMPLATE
+prompt_version: 0
+repository: owner/repo
+branch: branch
+session_started_at: null
+session_ended_at: null
+start_commit: null
+end_commit: null
+outcome_status: partial
+stop_reason: null
+commits: []
+models_routes: []
+verification: []
+failure_tags: []
+rating:
+  scale: 1-5
+  goal_progress: null
+  correctness_verification: null
+  authority_scope_discipline: null
+  routing_resource_efficiency: null
+  continuity_handoff_quality: null
+  agent_overall: null
+  operator_overall: null
+  operator_note: null
+prompt_revision_recommended: false
+revision_reason: null
+evidence: []

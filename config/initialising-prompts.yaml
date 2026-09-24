@@ -1,0 +1,43 @@
+schema_version: 1
+authority: tyecam1/odysseus
+contract: docs/initialising-prompt-register.md
+prompt_root: docs/initialising-prompts
+application_trace_root: evals/prompt-applications
+
+rules:
+  versioning: immutable
+  application_traces: append-only
+  operator_rating: explicit-only
+  auto_prompt_mutation: false
+  auto_authority_widening: false
+  repository_local_duplicate_registers: forbidden
+
+prompts:
+  - prompt_id: j1-long-horizon-method-loop
+    title: J1 long-horizon method loop initializer
+    status: active
+    active_version: 1
+    version: 1
+    prompt_path: docs/initialising-prompts/j1-long-horizon-method-loop-v1.md
+    created_at: 2026-09-24
+    provenance:
+      source_repository: tyecam1/obsidian-PhD
+      source_branch: chatgpt/j1-method-contract-20260903
+      last_known_checkpoint: ac52b90eb
+      note: >-
+        Registered after the Safety S2 bibliography repair. The prompt itself
+        requires live-state reconstruction and does not treat this checkpoint as
+        current truth.
+    scope:
+      repositories:
+        - tyecam1/obsidian-PhD
+      projects:
+        - J1
+      task_classes:
+        - long-horizon-research-method-loop
+    application_trace_prefix: evals/prompt-applications/j1-long-horizon-method-loop/
+    rating_required: true
+    supersedes: []
+    retirement_condition: >-
+      Retire only when a newer operator-approved version supersedes it or the J1
+      method loop ceases to exist.

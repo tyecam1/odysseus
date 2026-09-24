@@ -118,3 +118,19 @@ and interface-PC/mobile front-door work are prepared as deployable
 artefacts but not live — see workstreams G and H in the same file.
 Interface-PC install/update/rollback procedure (once it's reachable):
 docs/aoteru-interface-pc-deployment.md.
+
+
+## Global initialising prompt register
+
+Cross-repository session initialisers are owned centrally by Odysseus:
+
+- `config/initialising-prompts.yaml` — prompt/version registry and scope;
+- `docs/initialising-prompt-register.md` — lifecycle and rating contract;
+- `docs/initialising-prompts/**` — immutable prompt bodies;
+- `evals/prompt-applications/**` — append-only application traces.
+
+A repository may point to the register but must not fork it. At session start,
+resolve the exact registered version selected for the task. At session close,
+append one trace with commits/outcome/evidence and the five-dimension agent
+rating. An explicit operator rating can be appended later as an amendment; do
+not overwrite the original trace or fabricate operator feedback.
