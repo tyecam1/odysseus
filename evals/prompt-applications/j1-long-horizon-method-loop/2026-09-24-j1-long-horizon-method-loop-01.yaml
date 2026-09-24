@@ -1,0 +1,70 @@
+schema_version: 1
+application_id: 2026-09-24-j1-long-horizon-method-loop-01
+prompt_id: j1-long-horizon-method-loop
+prompt_version: 1
+repository: tyecam1/obsidian-PhD
+branch: chatgpt/j1-method-contract-20260903
+session_started_at: "2026-09-24T09:59:00+01:00"
+session_ended_at: "2026-09-24T11:07:00+01:00"
+start_commit: ac52b90ebf01cf4ccae44d0acaf93d06834d0ad8
+end_commit: 3e70d4384351b07df294d1d30adfdf2b5f880df6
+outcome_status: partial
+stop_reason: >-
+  Agent returned at a coherent committed/pushed checkpoint while dependency-ready
+  work remained. This is a durability checkpoint, not a valid long-horizon stop.
+commits:
+  - 44f0afe35
+  - a250f94de
+  - 8b0dbb95c
+  - acfadaa57
+  - 4a01c85d8
+  - 9ab40e1ee
+  - cb85737f4
+  - e5625e8be
+  - 4a18fafef
+  - 17eb7c268
+  - 902176662
+  - de56c1c29
+  - d44ec1e47
+  - 30c4f4a46
+  - 24677b800
+  - 9a426c66e
+  - 1825b26487
+  - 0bf89c81c
+  - 3e70d4384
+models_routes:
+  - "Sonnet coordinator/execution for bounded E5 work"
+  - "native Opus synthesis -> Claude Code Agent tool model: opus -> observed claude-opus-5-5"
+  - "Sol adjudication -> codex exec gpt-5.6-sol read-only, high reasoning"
+verification:
+  - "Safety A2 r11: 37/37 S2 bibliography enumeration and screening repair"
+  - "Quality C r16, Workforce A2 r21, Delivery A2 r37 and Responsiveness A2 r18 footprint/condition-4 checks"
+  - "fresh-context Sol adjudication of native-Opus E6 synthesis"
+  - "Eimontaite 2019 full-text disposition and Rabby 2019 abstract-tier disposition"
+failure_tags:
+  - long_horizon_early_return
+  - registered_prompt_resolution_missed
+  - global_application_trace_omitted_at_closeout
+  - rabby_public_fulltext_route_missed
+  - sol_runtime_policy_identity_drift
+rating:
+  scale: 1-5
+  goal_progress: 4
+  correctness_verification: 4
+  authority_scope_discipline: 3
+  routing_resource_efficiency: 4
+  continuity_handoff_quality: 3
+  agent_overall: 3.6
+  operator_overall: null
+  operator_note: null
+prompt_revision_recommended: true
+revision_reason: >-
+  The registered prompt body should carry its prompt_id/version explicitly so a
+  pasted copy cannot be misclassified as unregistered. The existing long-horizon
+  no-voluntary-checkpoint-stop rule is adequate; that failure was execution
+  noncompliance rather than missing prompt semantics.
+evidence:
+  - "obsidian-PhD continuation 16: automation/review/J1/2026-09-24-j1-continuation-16.md"
+  - "obsidian-PhD end commit: 3e70d4384351b07df294d1d30adfdf2b5f880df6"
+  - "native Opus raw report: automation/review/J1/2026-09-24-e6-native-opus-synthesis/opus-e6-synthesis-raw.md"
+  - "Sol adjudication verdict: automation/review/J1/2026-09-24-e6-native-opus-synthesis/sol-opus-adjudication-verdict.md"
