@@ -21,18 +21,18 @@ prompts:
   - prompt_id: j1-long-horizon-method-loop
     title: J1 long-horizon method loop initializer
     status: active
-    active_version: 1
-    version: 1
-    prompt_path: docs/initialising-prompts/j1-long-horizon-method-loop-v1.md
+    active_version: 2
+    version: 2
+    prompt_path: docs/initialising-prompts/j1-long-horizon-method-loop-v2.md
     graph_path: evals/prompt-evolution/j1-long-horizon-method-loop.yaml
     created_at: 2026-09-24
     provenance:
       source_repository: tyecam1/obsidian-PhD
       source_branch: chatgpt/j1-method-contract-20260903
-      last_known_checkpoint: ac52b90eb
+      last_known_checkpoint: 3e70d4384351b07df294d1d30adfdf2b5f880df6
       note: >-
-        Registered after the Safety S2 bibliography repair. Live repository
-        state remains authoritative over checkpoint hints in any prompt.
+        Active head evolved from v1 after the first rated application. Live
+        repository state remains authoritative over checkpoint hints in any prompt.
     scope:
       repositories:
         - tyecam1/obsidian-PhD
@@ -45,10 +45,25 @@ prompts:
     rating_required: true
     versions:
       - version: 1
-        status: active
+        status: superseded
         prompt_path: docs/initialising-prompts/j1-long-horizon-method-loop-v1.md
         derived_from: operator-authored-initial-registration
-    supersedes: []
+        application_evidence:
+          - 2026-09-24-j1-long-horizon-method-loop-01
+      - version: 2
+        status: active
+        prompt_path: docs/initialising-prompts/j1-long-horizon-method-loop-v2.md
+        parent_version: 1
+        derived_from_applications:
+          - 2026-09-24-j1-long-horizon-method-loop-01
+        evolution_targets:
+          - make prompt identity self-describing so pasted copies resolve to the registry
+          - strengthen the explicit no-voluntary-checkpoint-stop gate
+          - require alternate public full-text route checks before declaring operator-gated access
+          - require live model-policy reconciliation before consequential dispatch
+          - require closeout trace plus next evolution event
+    supersedes:
+      - 1
     retirement_condition: >-
       Retire only when an evidence-derived child passes the protected-invariant
       gate or the J1 method loop ceases to exist.

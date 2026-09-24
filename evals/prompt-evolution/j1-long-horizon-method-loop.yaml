@@ -1,0 +1,64 @@
+schema_version: 1
+prompt_id: j1-long-horizon-method-loop
+active_head: prompt:v2
+nodes:
+  - id: prompt:v1
+    type: prompt_version
+    version: 1
+    path: docs/initialising-prompts/j1-long-horizon-method-loop-v1.md
+    status: superseded
+  - id: application:2026-09-24-j1-long-horizon-method-loop-01
+    type: application
+    application_id: 2026-09-24-j1-long-horizon-method-loop-01
+    trace_path: evals/prompt-applications/j1-long-horizon-method-loop/2026-09-24-j1-long-horizon-method-loop-01.yaml
+    rating:
+      agent_overall: 3.6
+      goal_progress: 4
+      correctness_verification: 4
+      authority_scope_discipline: 3
+      routing_resource_efficiency: 4
+      continuity_handoff_quality: 3
+    failure_tags:
+      - long_horizon_early_return
+      - registered_prompt_resolution_missed
+      - global_application_trace_omitted_at_closeout
+      - rabby_public_fulltext_route_missed
+      - sol_runtime_policy_identity_drift
+  - id: evolution:2026-09-24-j1-v1-to-v2
+    type: evolution_event
+    decision: evolve
+    evidence_application: 2026-09-24-j1-long-horizon-method-loop-01
+    targets:
+      - self-identifying prompt id/version
+      - explicit no-checkpoint-stop audit
+      - alternate public-full-text checks before access blocking
+      - live model-policy/runtime reconciliation
+      - mandatory trace plus evolution closeout
+  - id: prompt:v2
+    type: prompt_version
+    version: 2
+    parent_version: 1
+    path: docs/initialising-prompts/j1-long-horizon-method-loop-v2.md
+    status: active
+edges:
+  - from: prompt:v1
+    to: application:2026-09-24-j1-long-horizon-method-loop-01
+    type: applied
+  - from: application:2026-09-24-j1-long-horizon-method-loop-01
+    to: evolution:2026-09-24-j1-v1-to-v2
+    type: observed
+  - from: evolution:2026-09-24-j1-v1-to-v2
+    to: prompt:v2
+    type: derived_child
+  - from: prompt:v2
+    to: prompt:v1
+    type: supersedes
+guardrail_validation:
+  prompt:v2:
+    scope_preserved: true
+    authority_preserved: true
+    evidence_verification_preserved: true
+    stop_gate_not_weakened: true
+    model_identity_discipline_not_weakened: true
+    access_failure_ceiling_preserved: true
+    trace_evolution_required: true
