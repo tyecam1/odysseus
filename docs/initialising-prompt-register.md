@@ -9,6 +9,10 @@ Maintain one global registry of trusted operator-authored session initialisers
 across the user's active repositories, while preserving repository-local
 authority.
 
+The prompt system also preserves unusually valuable prompt designs as
+**opportunistic exemplars**, regardless of task or domain, so novel prompting
+ideas are not lost before they can be evaluated or distilled.
+
 The register answers:
 
 - which initialiser/version was used;
@@ -16,6 +20,13 @@ The register answers:
 - what the session actually achieved;
 - how well the session performed;
 - whether repeated evidence justifies proposing a revised initialiser.
+
+The exemplar store answers:
+
+- which exact prompts were unusually worth preserving;
+- why they were captured;
+- which behaviours appear reusable;
+- what execution/evaluation evidence later supported or weakened them.
 
 It is not a second scheduler, memory authority, repository authority or prompt
 self-modification system.
@@ -25,6 +36,8 @@ self-modification system.
 - registry: `config/initialising-prompts.yaml`
 - prompt bodies: `docs/initialising-prompts/**`
 - application traces: `evals/prompt-applications/**`
+- prompt-evolution graphs: `evals/prompt-evolution/**`
+- prompt exemplars: `evals/prompt-exemplars/**`
 
 Repository-local files may point here but must not duplicate the registry.
 
@@ -39,6 +52,94 @@ Repository-local files may point here but must not duplicate the registry.
 7. Derive the smallest semantic improvement from observed performance: weak rating dimensions, failure tags, verification defects, missed executable work and explicit operator feedback.
 8. If evidence supports a change, create a new immutable child version; otherwise add a reinforcement edge to the incumbent.
 9. Validate protected invariants before a child can become active. Existing versions are never rewritten and failed candidates never replace the head.
+
+## Opportunistic exemplar capture
+
+Exemplar capture is deliberately **domain-agnostic and category-free**. A prompt
+does not need to be a registered initialiser, belong to a known task class, or
+have an existing component definition before it can be preserved.
+
+### Capture trigger
+
+During any task, assess prompts that are created, encountered, or materially
+revised. Capture the exact prompt when:
+
+1. the operator explicitly says it is worth preserving; **or**
+2. the agent has high confidence that at least two aspects are unusually strong
+   or novel, for example:
+   - task framing or problem decomposition;
+   - autonomy or long-horizon continuation;
+   - verification/adversarial structure;
+   - authority or constraint handling;
+   - model/tool coordination;
+   - context compression without loss of essential state;
+   - search/retrieval strategy;
+   - stopping or escalation logic;
+   - creativity or another mechanism not already represented well in the gallery.
+
+This is a judgement trigger, not a numeric reward model. Do not capture routine
+prompts merely because they worked.
+
+### Capture first, validate later
+
+A prompt may be ingenious **before** execution evidence exists. Preserve it
+immediately as a `candidate` exemplar rather than waiting for a successful
+application and risking loss of the exact design.
+
+Capture does not imply:
+
+- scientific correctness;
+- execution success;
+- authority;
+- promotion into an initializer;
+- promotion into the component graph.
+
+Later execution traces, evaluations, failures and explicit operator review may
+change the exemplar status to `validated`, `mixed`, `superseded`, or
+`rejected`. Never rewrite the original prompt body to make its history look
+better.
+
+### Required exemplar content
+
+Each exemplar is one immutable Markdown record under
+`evals/prompt-exemplars/**` containing:
+
+- stable `exemplar_id`;
+- capture date and basis;
+- status;
+- source/task context;
+- exact prompt text;
+- concise capture rationale;
+- reusable behaviours worth testing;
+- known task-specific assumptions or limitations;
+- pointers to later applications/evaluations when available.
+
+Do not store chain-of-thought, credentials, sensitive context or unnecessary
+conversation transcript.
+
+### Relationship to prompt evolution/components
+
+The exemplar gallery is the **discovery layer**. It preserves novel prompt
+designs before the system knows whether they deserve generalisation.
+
+The prompt-evolution graph remains the **evidence layer** for registered
+initialisers.
+
+A future prompt-component graph may distil recurring behaviours from exemplars
+and application traces, but it must preserve provenance back to the exact
+exemplar(s). Components are downstream abstractions; they must never be a
+precondition for capture.
+
+A useful flow is therefore:
+
+```text
+novel prompt noticed
+  -> exact candidate exemplar captured
+  -> task/application evidence accumulates
+  -> exemplar validated, narrowed or rejected
+  -> reusable behaviour optionally distilled
+  -> governed component/initializer evolution
+```
 
 ## Application trace
 
@@ -156,5 +257,5 @@ Registered repositories should expose only a lightweight pointer in their agent
 startup instructions. Odysseus remains the single owner.
 
 If Odysseus is temporarily unavailable, continue under the repository-local
-authority and preserve the trace payload for later append. Do not create a local
-replacement registry.
+authority and preserve the trace/exemplar payload for later append. Do not create
+a local replacement registry.
