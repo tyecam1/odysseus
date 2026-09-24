@@ -162,6 +162,10 @@ class RunTaskEnvelope(TaskEnvelope):
     objective: Optional[Union[str, List[Dict[str, object]]]] = None
     allow_paid_escalation: bool = False
     mode: Optional[Literal["implementation"]] = None
+    paid_provider: Optional[str] = None
+    candidate_provider: Optional[str] = None
+    candidate_opt_in: bool = False
+    allow_unqualified_candidate: bool = False
 
     @field_validator("objective")
     @classmethod
@@ -177,10 +181,18 @@ class RunTaskEnvelope(TaskEnvelope):
         return value
 
     def to_task(self) -> dict:
-        task = self.model_dump(exclude={"allow_paid_escalation", "mode"})
+        task = self.model_dump(exclude={"allow_paid_escalation", "mode", "paid_provider",
+                                        "candidate_provider", "candidate_opt_in",
+                                        "allow_unqualified_candidate"})
         task["routing"] = {"allow_paid_escalation": self.allow_paid_escalation}
         if self.mode is not None:
             task["routing"]["mode"] = self.mode
+        if self.paid_provider is not None:
+            task["routing"]["paid_provider"] = self.paid_provider
+        if self.candidate_provider is not None:
+            task["routing"]["candidate_provider"] = self.candidate_provider
+        task["routing"]["candidate_opt_in"] = self.candidate_opt_in
+        task["routing"]["allow_unqualified_candidate"] = self.allow_unqualified_candidate
         return task
 
 
