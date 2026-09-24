@@ -1,0 +1,28 @@
+schema_version: 1
+amendment_id: 2026-09-24-j1-long-horizon-method-loop-01-a1
+amends_application_id: 2026-09-24-j1-long-horizon-method-loop-01
+created_at: "2026-09-24T11:38:00+01:00"
+corrections:
+  session_started_at:
+    previous: "2026-09-24T09:59:00+01:00"
+    corrected: null
+    reason: >-
+      Exact start timestamp was not recorded in the session evidence. 09:59 was
+      inferred from the preceding checkpoint and should not have been promoted
+      to a precise trace fact.
+  commits:
+    previous_interpretation: session-owned commit list
+    corrected_interpretation: >-
+      Observed branch delta across the application window; attribution is mixed
+      because a concurrent ChatGPT session was writing the same branch. Do not
+      use the list as producer attribution without per-commit provenance.
+unchanged:
+  prompt_id: j1-long-horizon-method-loop
+  prompt_version: 1
+  repository: tyecam1/obsidian-PhD
+  branch: chatgpt/j1-method-contract-20260903
+  end_commit: 3e70d4384351b07df294d1d30adfdf2b5f880df6
+  outcome_status: partial
+  agent_overall: 3.6
+note: >-
+  Append-only correction. The original application trace remains immutable.
