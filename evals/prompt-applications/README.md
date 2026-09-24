@@ -13,3 +13,9 @@ File naming recommendation:
 
 No raw prompts or transcripts are duplicated here; reference the immutable
 registered prompt version.
+
+
+Each trace must be consumed exactly once by the prompt-evolution graph under
+`evals/prompt-evolution/**`. The trace is immutable raw evidence; the graph
+event records what was learned from it. Rewritten prompt text never belongs in
+the application trace.

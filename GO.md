@@ -91,8 +91,23 @@ Rate the session on the five global dimensions (1-5 each):
 
 Record the arithmetic mean as the agent rating. Operator rating is a separate
 optional field and must remain null unless explicitly supplied by the operator.
-A low rating or repeated failure tag may propose a new prompt version; it may not
-rewrite the version just used.
+
+Then execute the prompt-evolution graph step before closeout:
+
+1. bind the application to the exact prompt node that started it;
+2. derive improvement targets from rating dimensions, failure tags, verification
+   defects and explicit operator feedback;
+3. append the application -> evolution event edge;
+4. if there is an evidence-backed semantic improvement, write a new immutable
+   child prompt version with `parent_version` and `derived_from_applications`;
+5. validate that the child preserves scope, authority, evidence/verification
+   requirements, model-identity discipline and stop/safety gates;
+6. update the graph and advance the registry active head only after validation;
+7. if there is no actionable defect, reinforce the current version instead of
+   creating cosmetic version churn.
+
+Use `scripts/prompt_evolution.py` for deterministic rating/graph planning.
+A failed evolution leaves the incumbent active and records the blocked reason.
 
 ## Allowed stop conditions
 
