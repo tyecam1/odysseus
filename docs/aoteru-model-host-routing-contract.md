@@ -2,7 +2,7 @@
 title: Aoteru model-host routing contract
 status: target-contract
 owner: odysseus
-as_of: 2026-08-20
+as_of: 2026-09-11
 scope: host placement, model routing, token economy, verification, continuous improvement
 ---
 
@@ -25,9 +25,24 @@ user -> Aoteru conversational front end -> Odysseus task envelope
 
 The conversational model owns intent and communication. Odysseus owns routing. Workers are disposable execution resources.
 
+## Dependency direction
+
+Aoteru/Odysseus is an external estate control plane. It may discover repositories, resolve their authority, route work to them, and operate on them from outside. Target repositories are resources and authority domains, not components of the Aoteru control plane.
+
+The dependency is intentionally one-way:
+
+```text
+Aoteru / Odysseus -> discovers, selects and operates on -> repository
+repository        -X-> requires, invokes or configures Aoteru / Odysseus
+```
+
+A repository must not require, import, invoke, configure, or inherit Aoteru merely to perform repo-native work. A Claude/Codex/other session launched directly inside a repository follows that repository's own contracts and available tools unless the operator explicitly submits the work through Aoteru. This routing contract applies to work entering through the Aoteru control plane; it is not a global policy for every agent session on a machine that happens to have Aoteru installed.
+
+External routing may read repository metadata and respect repository authority, but repository-local policy must not be rewritten to make the target repository responsible for estate routing, host selection, model selection, or Aoteru lifecycle management.
+
 ## Invariants
 
-1. One central routing authority in Odysseus. No repo, skill, MCP or worker may create a competing model-selection or host-selection policy.
+1. One central routing authority in Odysseus for tasks submitted through Aoteru. No Aoteru skill, MCP or worker may create a competing model-selection or host-selection policy, and target repositories must not implement or import Aoteru routing.
 2. Resolve authority/repository before execution host; resolve execution host before model.
 3. Deterministic software precedes model inference whenever adequate.
 4. Adequate local inference precedes paid inference when measured quality meets the task quality floor.
@@ -35,8 +50,8 @@ The conversational model owns intent and communication. Odysseus owns routing. W
 6. Routing uses stable capability aliases and live measurements, not permanent vendor/model rankings in business logic.
 7. Home and lab are first-class worker targets. Current unavailability must not be hard-coded into architecture.
 8. Today, lab is the only verified/available worker. Home remains registered but ineligible until live evidence sets verified, healthy and reachable true.
-9. The laptop/interface is the human control surface, not a normal execution worker.
-10. Repo mutation requires the existing Odysseus parking/lease authority. Routing never widens write authority.
+9. When operating as the Aoteru interface, the laptop/interface is the human control surface, not a normal Aoteru execution worker. This does not govern repo-native sessions launched directly in target repositories; those follow their own repository contracts and may use local shell, SSH or hardware interfaces where repo-local policy permits.
+10. Repo mutation through Aoteru requires the existing Odysseus parking/lease authority. Routing never widens write authority.
 11. Workers receive bounded task/evidence pointers, not whole conversational transcripts or duplicated repository context.
 12. Verification is deterministic first, then independent-model review only when required.
 13. Escalation is evidence-triggered, not based on vague difficulty judgments.
@@ -45,9 +60,9 @@ The conversational model owns intent and communication. Odysseus owns routing. W
 
 ## Human-facing default
 
-The normal laptop Claude harness should present Aoteru through a strong, efficient conversational model. The current preferred role is Claude Sonnet-class inference at a moderate effort setting, but this is a role rather than a permanent model pin.
+The Aoteru-specific laptop harness should present Aoteru through a strong, efficient conversational model. The current preferred role is Claude Sonnet-class inference at a moderate effort setting, but this is a role rather than a permanent model pin.
 
-Aoteru should normally submit work to Odysseus instead of executing heavy repo/research work in the conversational context merely because the front-end model can do it.
+Within an Aoteru session, the conversational front end should normally submit heavy repo/research work to Odysseus instead of executing it in the conversational context merely because the front-end model can do it. This rule does not capture unrelated repo-native sessions started directly inside a target repository.
 
 ## Host model
 
@@ -427,19 +442,20 @@ No architecture rewrite should be necessary.
 
 This contract is implemented only when all of the following are true:
 
-1. One Odysseus-owned routing API accepts the canonical task envelope and returns a host+mechanism+model route.
+1. One Odysseus-owned routing API accepts the canonical task envelope and returns a host+mechanism+model route for tasks explicitly submitted through Aoteru.
 2. Routing consumes live estate/model inventory and parking state rather than static prose.
 3. Lab is currently eligible; home fails truthfully as unavailable without blocking lab execution.
 4. Deterministic and local routes can be selected ahead of paid inference when they meet the quality floor.
 5. Codex and Claude workers are invoked through the same provider-neutral job/result contract.
-6. Heavy work can leave the laptop Sonnet conversation and execute next to the parked repo while only compact results return.
+6. Heavy work can leave the Aoteru laptop conversation and execute next to the parked repo while only compact results return.
 7. Evidence-triggered escalation is enforced and observable.
 8. Per-task routing telemetry is persisted.
 9. A benchmark/replay evaluator can compare incumbent versus candidate routing policies.
 10. Candidate route/policy changes are shadowed/canary-tested before promotion.
 11. Routing statistics adapt with new measured outcomes and decay stale evidence.
 12. Home can be added later through discovery + benchmark + eligibility without changing the task or routing contracts.
-13. No duplicate router, queue, lease authority, model registry or domain-specific routing policy is introduced.
+13. No duplicate router, queue, lease authority, model registry or domain-specific routing policy is introduced inside the Aoteru/Odysseus control plane.
+14. Target repositories remain independently operable without importing, invoking or configuring Aoteru/Odysseus.
 
 ## Implementation placement
 
