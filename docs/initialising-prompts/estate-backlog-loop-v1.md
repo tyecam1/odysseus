@@ -2,7 +2,7 @@
 prompt_id: estate-backlog-loop
 version: 1
 scope: registered repository agent-task queues
-status: proposed-active
+status: active
 ---
 
 # Estate agent-task backlog loop — v1
