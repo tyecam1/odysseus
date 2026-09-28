@@ -11,3 +11,8 @@ Ownership rule:
 Historical tasks migrated from `obsidian-PhD` retain their original content and queue status unless the task had already been executed, in which case the migrated copy is archived under `done/`.
 
 See `docs/aoteru-repository-ownership-trajectory.md` and `automation/review/agent-task-migration-20260923.md`.
+
+For governed autonomous traversal of existing domain/estate queues, use
+[`docs/agent-task-backlog-execution-contract.md`](../../../docs/agent-task-backlog-execution-contract.md)
+and the registered `estate-backlog-loop` initialiser. The contract does not
+move domain task ownership, grant write/approval authority, or create a second queue.
