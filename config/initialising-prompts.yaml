@@ -74,3 +74,41 @@ prompts:
     retirement_condition: >-
       Retire only when an evidence-derived child passes the protected-invariant
       gate or the J1 method loop ceases to exist.
+
+  - prompt_id: estate-backlog-loop
+    title: Cross-repository agent-task backlog initializer
+    status: active
+    active_version: 1
+    version: 1
+    prompt_path: docs/initialising-prompts/estate-backlog-loop-v1.md
+    graph_path: evals/prompt-evolution/estate-backlog-loop.yaml
+    created_at: 2026-09-28
+    provenance:
+      source_repository: tyecam1/odysseus
+      source_branch: claude/estate-backlog-operating-contract-20260928
+      note: >-
+        Executor-neutral prompt registration; this initialiser does not grant
+        queue, routing, lease, model, cloud, domain or spending authority.
+        Every session resolves actual eligibility against live estate truth.
+    scope:
+      repositories:
+        - tyecam1/odysseus
+        - tyecam1/obsidian-PhD
+        - tyecam1/misumi
+        - tyecam1/s2-e1-ros2-measurement-spine
+      task_classes:
+        - agent-task-backlog-continuation
+    application_trace_prefix: evals/prompt-applications/estate-backlog-loop/
+    evolution_trace_prefix: evals/prompt-evolution/
+    rating_required: true
+    versions:
+      - version: 1
+        status: active
+        prompt_path: docs/initialising-prompts/estate-backlog-loop-v1.md
+        derived_from: operator-requested-estate-backlog-execution-contract
+        application_evidence: []
+    supersedes: []
+    retirement_condition: >-
+      Retire only on verified evidence-backed child promotion or explicit
+      operator discontinuation. An eligible-work frontier becoming empty is
+      a session stop, not automatic retirement of the prompt.
