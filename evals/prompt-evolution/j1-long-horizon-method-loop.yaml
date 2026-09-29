@@ -1,6 +1,6 @@
 schema_version: 1
 prompt_id: j1-long-horizon-method-loop
-active_head: prompt:v4
+active_head: prompt:v5
 nodes:
   - id: prompt:v1
     type: prompt_version
@@ -104,6 +104,35 @@ nodes:
     version: 4
     parent_version: 3
     path: docs/initialising-prompts/j1-long-horizon-method-loop-v4.md
+    status: superseded
+  - id: application:2026-09-29-j1-long-horizon-method-loop-03
+    type: application
+    application_id: 2026-09-29-j1-long-horizon-method-loop-03
+    trace_path: evals/prompt-applications/j1-long-horizon-method-loop/2026-09-29-j1-long-horizon-method-loop-03.yaml
+    rating:
+      agent_overall: 4.0
+      goal_progress: 4
+      correctness_verification: 4
+      authority_scope_discipline: 4
+      routing_resource_efficiency: 4
+      continuity_handoff_quality: 4
+    failure_tags:
+      - sol_pointer_range_omitted_load_bearing_line
+      - withheld_section_not_physically_separable
+      - shell_heredoc_quoting_failure
+      - external_access_ceiling_unresolved
+  - id: evolution:2026-09-29-j1-long-horizon-method-loop-03
+    type: evolution_event
+    decision: evolve
+    evidence_application: 2026-09-29-j1-long-horizon-method-loop-03
+    targets:
+      - list every line range carrying a figure or quote the reviewer must verify, check that deterministically, and keep withheld material in a separate file
+      - when the operator supplies a URL behind a bot-verification page, load it once passively in the automation browser, record how the file was obtained, never solve a challenge
+  - id: prompt:v5
+    type: prompt_version
+    version: 5
+    parent_version: 4
+    path: docs/initialising-prompts/j1-long-horizon-method-loop-v5.md
     status: active
 edges:
   - from: prompt:v1
@@ -142,6 +171,18 @@ edges:
   - from: prompt:v4
     to: prompt:v3
     type: supersedes
+  - from: prompt:v4
+    to: application:2026-09-29-j1-long-horizon-method-loop-03
+    type: applied
+  - from: application:2026-09-29-j1-long-horizon-method-loop-03
+    to: evolution:2026-09-29-j1-long-horizon-method-loop-03
+    type: observed
+  - from: evolution:2026-09-29-j1-long-horizon-method-loop-03
+    to: prompt:v5
+    type: derived_child
+  - from: prompt:v5
+    to: prompt:v4
+    type: supersedes
 guardrail_validation:
   prompt:v2:
     scope_preserved: true
@@ -160,6 +201,14 @@ guardrail_validation:
     access_failure_ceiling_preserved: true
     trace_evolution_required: true
   prompt:v4:
+    scope_preserved: true
+    authority_preserved: true
+    evidence_verification_preserved: true
+    stop_gate_not_weakened: true
+    model_identity_discipline_not_weakened: true
+    access_failure_ceiling_preserved: true
+    trace_evolution_required: true
+  prompt:v5:
     scope_preserved: true
     authority_preserved: true
     evidence_verification_preserved: true
