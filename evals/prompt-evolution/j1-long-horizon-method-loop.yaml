@@ -1,6 +1,6 @@
 schema_version: 1
 prompt_id: j1-long-horizon-method-loop
-active_head: prompt:v2
+active_head: prompt:v3
 nodes:
   - id: prompt:v1
     type: prompt_version
@@ -39,6 +39,38 @@ nodes:
     version: 2
     parent_version: 1
     path: docs/initialising-prompts/j1-long-horizon-method-loop-v2.md
+    status: superseded
+  - id: application:2026-09-29-j1-long-horizon-method-loop-01
+    type: application
+    application_id: 2026-09-29-j1-long-horizon-method-loop-01
+    trace_path: evals/prompt-applications/j1-long-horizon-method-loop/2026-09-29-j1-long-horizon-method-loop-01.yaml
+    rating:
+      agent_overall: 3.6
+      goal_progress: 4
+      correctness_verification: 3
+      authority_scope_discipline: 4
+      routing_resource_efficiency: 3
+      continuity_handoff_quality: 4
+    failure_tags:
+      - sol_quota_exhausted_by_unprepared_packet
+      - coordinator_summary_error_caught_by_sol
+      - primary_text_omission_propagated_before_adjudication
+      - tool_classifier_outage_stall
+      - external_access_ceiling_unresolved
+  - id: evolution:2026-09-29-j1-long-horizon-method-loop-01
+    type: evolution_event
+    decision: evolve
+    evidence_application: 2026-09-29-j1-long-horizon-method-loop-01
+    targets:
+      - frontier derived from the live controller mandate, not an embedded priority list
+      - recompute counts and summaries from source rows; state read tier; label candidate readings in owner files
+      - pointer-first Sol packets with deterministically verified pre-extracted rows
+      - scope tool/quota outages to the blocked acceptance mechanism
+  - id: prompt:v3
+    type: prompt_version
+    version: 3
+    parent_version: 2
+    path: docs/initialising-prompts/j1-long-horizon-method-loop-v3.md
     status: active
 edges:
   - from: prompt:v1
@@ -53,8 +85,28 @@ edges:
   - from: prompt:v2
     to: prompt:v1
     type: supersedes
+  - from: prompt:v2
+    to: application:2026-09-29-j1-long-horizon-method-loop-01
+    type: applied
+  - from: application:2026-09-29-j1-long-horizon-method-loop-01
+    to: evolution:2026-09-29-j1-long-horizon-method-loop-01
+    type: observed
+  - from: evolution:2026-09-29-j1-long-horizon-method-loop-01
+    to: prompt:v3
+    type: derived_child
+  - from: prompt:v3
+    to: prompt:v2
+    type: supersedes
 guardrail_validation:
   prompt:v2:
+    scope_preserved: true
+    authority_preserved: true
+    evidence_verification_preserved: true
+    stop_gate_not_weakened: true
+    model_identity_discipline_not_weakened: true
+    access_failure_ceiling_preserved: true
+    trace_evolution_required: true
+  prompt:v3:
     scope_preserved: true
     authority_preserved: true
     evidence_verification_preserved: true
