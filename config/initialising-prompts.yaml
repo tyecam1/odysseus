@@ -28,18 +28,18 @@ prompts:
   - prompt_id: j1-long-horizon-method-loop
     title: J1 long-horizon method loop initializer
     status: active
-    active_version: 5
-    version: 5
-    prompt_path: docs/initialising-prompts/j1-long-horizon-method-loop-v5.md
+    active_version: 6
+    version: 6
+    prompt_path: docs/initialising-prompts/j1-long-horizon-method-loop-v6.md
     graph_path: evals/prompt-evolution/j1-long-horizon-method-loop.yaml
     created_at: 2026-09-24
     provenance:
       source_repository: tyecam1/obsidian-PhD
       source_branch: chatgpt/j1-method-contract-20260903
-      last_known_checkpoint: 67081f0c486ec725af592ded9e012aa5ef5f15dd
+      last_known_checkpoint: 293db274df96e94c9f5f725b7f92af32b65d3805
       note: >-
-        Active head evolved from v4 after the fourth rated application (v2 from v1
-        after the first; v3 from v2 after the second; v4 from v3 after the third). Live
+        Active head evolved from v5 after the fifth rated application (v2 from v1
+        after the first; v3 from v2 after the second; v4 from v3 after the third; v5 from v4 after the fourth). Live
         repository state remains authoritative over checkpoint hints in any prompt.
     scope:
       repositories:
@@ -97,7 +97,7 @@ prompts:
           - try repository and journal-native open-archive copies after publisher hosts fail; never solve or bypass bot challenges
           - use absolute paths or git -C instead of a persistent shell cd
       - version: 5
-        status: active
+        status: superseded
         prompt_path: docs/initialising-prompts/j1-long-horizon-method-loop-v5.md
         parent_version: 4
         derived_from_applications:
@@ -105,11 +105,21 @@ prompts:
         evolution_targets:
           - list every line range carrying a figure or quote the reviewer must verify, check that deterministically, and keep withheld material in a separate file
           - when the operator supplies a URL behind a bot-verification page, load it once passively in the automation browser, record how the file was obtained, never solve a challenge
+      - version: 6
+        status: active
+        prompt_path: docs/initialising-prompts/j1-long-horizon-method-loop-v6.md
+        parent_version: 5
+        derived_from_applications:
+          - 2026-09-29-j1-long-horizon-method-loop-04
+        evolution_targets:
+          - when the operator names a Sol model newer than the policy pin, confirm it in the client catalogue, smoke-test the exact client, try the vendor's newer bundled client after a client-version refusal, record the deviation from the pin and leave governed policy files for an operator step
+          - treat a truncating browser extraction as a read tier; verify quotes by in-page string test, count whole-text terms for absence statements, inspect results figures as rendered images, and tell reviewers when evidence is transcribed
     supersedes:
       - 1
       - 2
       - 3
       - 4
+      - 5
     retirement_condition: >-
       Retire only when an evidence-derived child passes the protected-invariant
       gate or the J1 method loop ceases to exist.
