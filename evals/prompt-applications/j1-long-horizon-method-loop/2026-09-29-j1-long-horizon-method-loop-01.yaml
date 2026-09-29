@@ -1,0 +1,81 @@
+schema_version: 1
+application_id: 2026-09-29-j1-long-horizon-method-loop-01
+prompt_id: j1-long-horizon-method-loop
+prompt_version: 2
+repository: tyecam1/obsidian-PhD
+branch: sonnet/j1-long-horizon-20260929
+# Start time is the first filesystem artefact of the session (scratchpad creation); approximate, not a precise fact.
+session_started_at: "2026-09-29T15:29:00+01:00"
+session_ended_at: "2026-09-29T21:15:00+01:00"
+start_commit: b8637e46df4d5dc94df25195d6d2a2e3721d0731
+end_commit: a1ad1c50aca6ea9381bb4dfb02ce4a069ca789d0
+outcome_status: partial
+stop_reason: >-
+  Reached the authorial boundary of the stagewise mandate: E5 coverage work
+  executed to its access ceiling, three-case test, one native-Opus E6 synthesis
+  with fresh Sol challenge and reconciliation, and a Gate 4/5 author packet with
+  two IDEA cards posted to issue #479. Remaining ready work is access-limited
+  (publisher/repository 403s and bot walls, S2 API 429) and is batched for the
+  operator; the next dependency is an author ruling. No gate was passed and no
+  novelty, promotion or manuscript step was taken.
+commits:
+  - ba54ae1c7
+  - 71f4ad4b0
+  - 6e0cc395b
+  - 60d3828aa
+  - 386a55c10
+  - 6523a3935
+  - b5becda4f
+  - 3a5a1e72c
+  - f083945c6
+  - e964c676d
+  - f2cf738bf
+  - 7a3bd10da
+  - e90ac84d1
+  - a1ad1c50a
+  - "700459416"
+models_routes:
+  - "Sonnet coordinator/execution (Claude Code, claude-sonnet-5-5 as stated by the session)"
+  - "Sonnet read-only subagents (Agent tool) for bounded extraction: owner-state, three-case evidence pack, workforce full-text rows; identity not separately observed"
+  - "native Opus E6 synthesis: requested claude-opus-5-5 -> Agent tool model=opus -> self-reported claude-opus-5-5 plus sibling-call API metadata claude-opus-5-5; subagent transcript file empty, so no API-level message.model for the pass itself"
+  - "Sol adjudication: requested gpt-6-sol via codex exec read-only high reasoning (packets 21, 22, 23); first workforce packet hit the Codex usage limit before its final message; server identity not independently verified"
+  - "no GLM lane used"
+verification:
+  - "deterministic: OpenAlex OA-location lookups and persisted top-100 exports; term-prefilters; verbatim-quote substring check of extraction rows against raw-order text; pointer-existence check"
+  - "Sol pkt 21: workforce closing A, thin objectives B, three-case test C all AMEND, applied"
+  - "Sol pkt 22: E6 propositions 7 amend, 1 retain; prior AMEND; ceilings CLEAN; authority NO; reopen NONE"
+  - "Sol pkt 23: Sanna/Roveda addendum AMEND (count arithmetic, Sanna task-time error corrected); author packet authority NO, fidelity CLEAN, IDEA complete"
+  - "primary-extraction check corrected D12/UHTP task attribution in the productivity owner"
+failure_tags:
+  - sol_quota_exhausted_by_unprepared_packet
+  - coordinator_summary_error_caught_by_sol
+  - primary_text_omission_propagated_before_adjudication
+  - tool_classifier_outage_stall
+  - external_access_ceiling_unresolved
+rating:
+  scale: 1-5
+  goal_progress: 4
+  correctness_verification: 3
+  authority_scope_discipline: 4
+  routing_resource_efficiency: 3
+  continuity_handoff_quality: 4
+  agent_overall: 3.6
+  operator_overall: null
+  operator_note: null
+prompt_revision_recommended: true
+revision_reason: >-
+  Three evidence-backed defects. (1) The registered body still embeds a
+  "current audit-derived priorities" list that is stale relative to the live
+  controller mandate (the operator's task text had to override it). (2) The
+  coordinator carried a count ("12/13"), a "no task time recorded" statement and
+  an under-described cost candidate into owner brackets before Sol adjudication;
+  Sol had to amend them. (3) The first Sol packet asked a fresh-context reviewer
+  to read raw texts from scratch and exhausted the Codex pool without a verdict.
+  The v2 stop gate, access-ceiling and identity rules performed adequately and
+  are preserved.
+evidence:
+  - "obsidian-PhD continuation 33: automation/review/J1/2026-09-29-j1-continuation-33.md (branch sonnet/j1-long-horizon-20260929)"
+  - "E6 reconciliation: automation/review/J1/2026-09-29-e6-active-checkpoint/e6-active-reconciliation.md"
+  - "Sol verdicts: automation/review/J1/2026-09-29-sol-packet-{21,22,23}/*-final.txt"
+  - "author packet and issue #479 comment: https://github.com/tyecam1/obsidian-PhD/issues/479#issuecomment-5897914258"
+  - "end commit: a1ad1c50aca6ea9381bb4dfb02ce4a069ca789d0"
