@@ -1,6 +1,6 @@
 schema_version: 1
 prompt_id: j1-long-horizon-method-loop
-active_head: prompt:v5
+active_head: prompt:v6
 nodes:
   - id: prompt:v1
     type: prompt_version
@@ -133,6 +133,37 @@ nodes:
     version: 5
     parent_version: 4
     path: docs/initialising-prompts/j1-long-horizon-method-loop-v5.md
+    status: superseded
+  - id: application:2026-09-29-j1-long-horizon-method-loop-04
+    type: application
+    application_id: 2026-09-29-j1-long-horizon-method-loop-04
+    trace_path: evals/prompt-applications/j1-long-horizon-method-loop/2026-09-29-j1-long-horizon-method-loop-04.yaml
+    rating:
+      agent_overall: 3.6
+      goal_progress: 3
+      correctness_verification: 4
+      authority_scope_discipline: 4
+      routing_resource_efficiency: 3
+      continuity_handoff_quality: 4
+    failure_tags:
+      - shell_cd_drift_repeated
+      - operator_named_model_refused_by_installed_client
+      - sol_reviewer_relied_on_transcribed_evidence
+      - browser_extraction_truncation_and_filter
+      - session_date_naming_error
+      - external_access_ceiling_unresolved
+  - id: evolution:2026-09-29-j1-long-horizon-method-loop-04
+    type: evolution_event
+    decision: evolve
+    evidence_application: 2026-09-29-j1-long-horizon-method-loop-04
+    targets:
+      - when the operator names a Sol model newer than the policy pin, confirm it in the client catalogue, smoke-test the exact client, try the vendor's newer bundled client after a client-version refusal, record the deviation from the pin and leave governed policy files for an operator step
+      - treat a truncating browser extraction as a read tier; verify quotes by in-page string test, count whole-text terms for absence statements, inspect results figures as rendered images, and tell reviewers when evidence is transcribed
+  - id: prompt:v6
+    type: prompt_version
+    version: 6
+    parent_version: 5
+    path: docs/initialising-prompts/j1-long-horizon-method-loop-v6.md
     status: active
 edges:
   - from: prompt:v1
@@ -183,6 +214,18 @@ edges:
   - from: prompt:v5
     to: prompt:v4
     type: supersedes
+  - from: prompt:v5
+    to: application:2026-09-29-j1-long-horizon-method-loop-04
+    type: applied
+  - from: application:2026-09-29-j1-long-horizon-method-loop-04
+    to: evolution:2026-09-29-j1-long-horizon-method-loop-04
+    type: observed
+  - from: evolution:2026-09-29-j1-long-horizon-method-loop-04
+    to: prompt:v6
+    type: derived_child
+  - from: prompt:v6
+    to: prompt:v5
+    type: supersedes
 guardrail_validation:
   prompt:v2:
     scope_preserved: true
@@ -209,6 +252,14 @@ guardrail_validation:
     access_failure_ceiling_preserved: true
     trace_evolution_required: true
   prompt:v5:
+    scope_preserved: true
+    authority_preserved: true
+    evidence_verification_preserved: true
+    stop_gate_not_weakened: true
+    model_identity_discipline_not_weakened: true
+    access_failure_ceiling_preserved: true
+    trace_evolution_required: true
+  prompt:v6:
     scope_preserved: true
     authority_preserved: true
     evidence_verification_preserved: true
