@@ -1,6 +1,6 @@
 schema_version: 1
 prompt_id: j1-long-horizon-method-loop
-active_head: prompt:v6
+active_head: prompt:v7
 nodes:
   - id: prompt:v1
     type: prompt_version
@@ -164,6 +164,38 @@ nodes:
     version: 6
     parent_version: 5
     path: docs/initialising-prompts/j1-long-horizon-method-loop-v6.md
+    status: superseded
+  - id: application:2026-09-30-j1-long-horizon-method-loop-01
+    type: application
+    application_id: 2026-09-30-j1-long-horizon-method-loop-01
+    trace_path: evals/prompt-applications/j1-long-horizon-method-loop/2026-09-30-j1-long-horizon-method-loop-01.yaml
+    rating:
+      agent_overall: 3.8
+      goal_progress: 4
+      correctness_verification: 4
+      authority_scope_discipline: 4
+      routing_resource_efficiency: 3
+      continuity_handoff_quality: 4
+    failure_tags:
+      - shell_cd_drift_repeated
+      - prior_correction_not_propagated_to_e5_owner
+      - sol_reviewer_false_positive_from_unread_packet
+      - bash_hook_blocked_protected_root_string_in_script
+      - tool_classifier_outage_transient
+      - external_access_ceiling_unresolved
+  - id: evolution:2026-09-30-j1-long-horizon-method-loop-01
+    type: evolution_event
+    decision: evolve
+    evidence_application: 2026-09-30-j1-long-horizon-method-loop-01
+    targets:
+      - after any correction, string-sweep every E5 owner and current-reliance surface for the superseded value and supersede stale adjudication-owed statuses
+      - before closing a multi-file correction, run a fresh-context Sol contradiction audit with the coordinator's findings withheld, and check its findings against the sources before applying
+      - route consultant-recommended new tests through a fresh-context Sol design critique before executing or recommending them; verify carried reference mappings by an independent route
+  - id: prompt:v7
+    type: prompt_version
+    version: 7
+    parent_version: 6
+    path: docs/initialising-prompts/j1-long-horizon-method-loop-v7.md
     status: active
 edges:
   - from: prompt:v1
@@ -226,6 +258,18 @@ edges:
   - from: prompt:v6
     to: prompt:v5
     type: supersedes
+  - from: prompt:v6
+    to: application:2026-09-30-j1-long-horizon-method-loop-01
+    type: applied
+  - from: application:2026-09-30-j1-long-horizon-method-loop-01
+    to: evolution:2026-09-30-j1-long-horizon-method-loop-01
+    type: observed
+  - from: evolution:2026-09-30-j1-long-horizon-method-loop-01
+    to: prompt:v7
+    type: derived_child
+  - from: prompt:v7
+    to: prompt:v6
+    type: supersedes
 guardrail_validation:
   prompt:v2:
     scope_preserved: true
@@ -260,6 +304,14 @@ guardrail_validation:
     access_failure_ceiling_preserved: true
     trace_evolution_required: true
   prompt:v6:
+    scope_preserved: true
+    authority_preserved: true
+    evidence_verification_preserved: true
+    stop_gate_not_weakened: true
+    model_identity_discipline_not_weakened: true
+    access_failure_ceiling_preserved: true
+    trace_evolution_required: true
+  prompt:v7:
     scope_preserved: true
     authority_preserved: true
     evidence_verification_preserved: true
