@@ -28,18 +28,18 @@ prompts:
   - prompt_id: j1-long-horizon-method-loop
     title: J1 long-horizon method loop initializer
     status: active
-    active_version: 6
-    version: 6
-    prompt_path: docs/initialising-prompts/j1-long-horizon-method-loop-v6.md
+    active_version: 7
+    version: 7
+    prompt_path: docs/initialising-prompts/j1-long-horizon-method-loop-v7.md
     graph_path: evals/prompt-evolution/j1-long-horizon-method-loop.yaml
     created_at: 2026-09-24
     provenance:
       source_repository: tyecam1/obsidian-PhD
       source_branch: chatgpt/j1-method-contract-20260903
-      last_known_checkpoint: 293db274df96e94c9f5f725b7f92af32b65d3805
+      last_known_checkpoint: badc510cb7b5205c2379b51cfa3f7a388c1603cf
       note: >-
-        Active head evolved from v5 after the fifth rated application (v2 from v1
-        after the first; v3 from v2 after the second; v4 from v3 after the third; v5 from v4 after the fourth). Live
+        Active head evolved from v6 after the sixth rated application (v2 from v1
+        after the first; v3 from v2 after the second; v4 from v3 after the third; v5 from v4 after the fourth; v6 from v5 after the fifth). Live
         repository state remains authoritative over checkpoint hints in any prompt.
     scope:
       repositories:
@@ -106,7 +106,7 @@ prompts:
           - list every line range carrying a figure or quote the reviewer must verify, check that deterministically, and keep withheld material in a separate file
           - when the operator supplies a URL behind a bot-verification page, load it once passively in the automation browser, record how the file was obtained, never solve a challenge
       - version: 6
-        status: active
+        status: superseded
         prompt_path: docs/initialising-prompts/j1-long-horizon-method-loop-v6.md
         parent_version: 5
         derived_from_applications:
@@ -114,12 +114,23 @@ prompts:
         evolution_targets:
           - when the operator names a Sol model newer than the policy pin, confirm it in the client catalogue, smoke-test the exact client, try the vendor's newer bundled client after a client-version refusal, record the deviation from the pin and leave governed policy files for an operator step
           - treat a truncating browser extraction as a read tier; verify quotes by in-page string test, count whole-text terms for absence statements, inspect results figures as rendered images, and tell reviewers when evidence is transcribed
+      - version: 7
+        status: active
+        prompt_path: docs/initialising-prompts/j1-long-horizon-method-loop-v7.md
+        parent_version: 6
+        derived_from_applications:
+          - 2026-09-30-j1-long-horizon-method-loop-01
+        evolution_targets:
+          - after any correction, string-sweep every E5 owner and current-reliance surface for the superseded value and supersede stale adjudication-owed statuses
+          - before closing a multi-file correction, run a fresh-context Sol contradiction audit with the coordinator's findings withheld, and check its findings against the sources before applying
+          - route consultant-recommended new tests through a fresh-context Sol design critique before executing or recommending them; verify carried reference mappings by an independent route
     supersedes:
       - 1
       - 2
       - 3
       - 4
       - 5
+      - 6
     retirement_condition: >-
       Retire only when an evidence-derived child passes the protected-invariant
       gate or the J1 method loop ceases to exist.
