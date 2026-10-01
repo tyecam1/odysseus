@@ -1,22 +1,24 @@
 # Aoteru estate — host/service registry (P1, plan section 4).
 #
 # Hosts are added here only once genuinely inventoried or explicitly named
-# by the operator — never speculatively. `verified: false` / `tailscale:
-# false` / `os: unknown` mean exactly that: named, not yet confirmed.
+# by the operator — never speculatively. Identity confirmation and worker
+# qualification are deliberately separate: `identity_verified` records a
+# confirmed machine identity but grants no execution eligibility by itself;
+# `worker.enabled` and `worker.qualified_executors` are the governed routing
+# gates. `tailscale: false` / `os: unknown` still mean exactly that: named,
+# not yet confirmed.
 #
 # P12.7 re-entry (2026-08-29, first laptop-run session — see
 # docs/aoteru-p12-active-estate-convergence-evidence.md and its P13
 # addendum): home (`desktop-in7o23d`) and the interface PC
 # (`desktop-rifpr07`, formerly `interface-pc` with unknown identity) are
 # both now live-confirmed reachable over LAN SSH and Tailscale, with
-# pinned/matching SSH host-key fingerprints. `verified: true` on
-# `interface-pc` is safe (the `interface` role is never
-# execution_worker-eligible regardless, config/routing.yaml). `home`
-# deliberately stays `verified: false` — identity is confirmed but
-# execution-worker eligibility additionally needs P12.7's benchmark
-# evidence (item 4), which `eligible_hosts()` has no separate gate for
-# today; see that host's notes and the evidence doc's residual risks.
-# registered != reachable != verified != execution-worker-eligible.
+# pinned/matching SSH host-key fingerprints. Both machines therefore have
+# `identity_verified: true`. `interface-pc` has no worker block because the
+# `interface` role is never execution-worker-eligible. `home` has an explicit
+# disabled worker pending qualification evidence, so its confirmed identity
+# cannot accidentally promote it into routing.
+# registered != identity-verified != worker-enabled != reachable/healthy.
 #
 # Services are logical names (plan section 5.6). None are provisioned yet —
 # that's P2 (private connectivity). `endpoint: null` means "not live";
@@ -84,6 +86,14 @@ hosts:
     hostname: dmem-HP-Z2-Tower-G9-Workstation-Desktop-PC
     role: lab
     os: linux
+    identity_verified: true
+    worker:
+      enabled: true
+      transport: local
+      qualified_executors: [deterministic, local, codex, codex-write]
+      qualification_evidence:
+        - docs/aoteru-lm4-production-canary-evidence.md
+        - docs/aoteru-p12-active-estate-convergence-evidence.md
     tailscale: true  # cap/is-admin, cap/is-owner, cap/ssh on this node's identity
     inventoried_at: "2026-08-19"
     notes: >-
@@ -123,7 +133,7 @@ hosts:
     os: windows  # Windows 10 Pro, build 19045
     tailscale: true
     tailscale_dns: desktop-rifpr07.tail171792.ts.net
-    verified: true  # identity live-confirmed 2026-08-29 (see notes) — safe to set: `interface` role is never execution_worker-eligible (config/routing.yaml) regardless of this flag, so this does not grant any routing eligibility.
+    identity_verified: true  # identity live-confirmed 2026-08-29 (see notes); `interface` role is never execution_worker-eligible and no worker is configured.
     inventoried_at: "2026-08-29"
     notes: >-
       P12.7 interface re-entry executed 2026-08-29, first laptop-run
@@ -154,7 +164,18 @@ hosts:
     os: windows  # Windows 11 Pro, build 26200
     tailscale: true
     tailscale_dns: desktop-in7o23d.tail171792.ts.net
-    verified: false  # identity IS now live-confirmed (see notes) — deliberately still false: this is the sole gate `eligible_hosts()`/`host_reachable()` has today, and flipping it grants execution_worker eligibility immediately with zero benchmark evidence. P12.7 item 4 (benchmark before promotion) is a documented process step, not yet a separate code gate — see residual risk in the evidence doc. Flip only once benchmark evidence justifies worker eligibility, not merely because identity is confirmed.
+    identity_verified: true
+    identity_evidence: docs/aoteru-p13-laptop-reentry-evidence.md
+    worker:
+      enabled: false
+      transport: ssh
+      ssh:
+        target: null
+        host_public_key: null
+        command: null
+      machine_fingerprint: null
+      qualified_executors: []
+      qualification_evidence: null
     inventoried_at: "2026-08-29"
     notes: >-
       P12.7 home re-entry executed 2026-08-29, first laptop-run session.
@@ -183,8 +204,9 @@ hosts:
       authority. KEEP as-is, untouched; no migration needed. Tailscale
       installed + authorized 2026-08-29 (silent MSI install over SSH,
       operator completed the interactive login); no Funnel/serve config.
-      P12.7 remaining: hardware/benchmark qualification (item 4) before any
-      worker route is added — not done this pass.
+      Identity evidence is recorded separately above. The estate worker stays
+      disabled, with no qualified executors, until hardware/benchmark and
+      transport qualification evidence supports a governed promotion.
 
   - id: glovebox
     hostname: glovebox

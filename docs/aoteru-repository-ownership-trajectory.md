@@ -6,6 +6,18 @@ Odysseus is the shared backend/runtime for both the PhD and personal knowledge e
 
 The task-queue ownership migration began on 2026-09-23. Backend/shared task records may therefore move before all referenced implementation/output artefacts are migrated. Capability/file convergence remains a separate, evidence-backed pass.
 
+## Authority summary
+
+Each repository owns a distinct kind of truth. **Execution location never transfers knowledge authority**: running a task on Odysseus, the home worker or the lab worker does not change which repository owns its subject matter.
+
+| Repository | Owns |
+| --- | --- |
+| `tyecam1/misumi` | Household/personal (domain) truth and policy; Misumi interface and capture UX; persona and Misumi-specific capability; the Misumi domain task queue. |
+| `tyecam1/odysseus` | Shared backend/runtime: routing, execution, workers, leases and lifecycle; sessions and runtime memory machinery; model/provider and home/lab host routing; shared orchestration and telemetry; transcript runtime storage; the shared agent-task queue; the global initialising-prompt register. |
+| `tyecam1/obsidian-PhD` | PhD research truth, evidence and workflow, and the PhD-domain task queue. |
+
+Do not reintroduce shared/backend task authority into the Misumi repository merely because a programme concerns Misumi, and do not move genuinely Misumi-specific interface, privacy or persona tasks into Odysseus merely because Odysseus executes them. The Misumi long-horizon convergence programme (`misumi-long-horizon-programme`, operating contract `automation/review/agent-tasks/inbox/2026-10-01-misumi-long-horizon-session-operating-contract.agent-task.md`) is run under exactly this boundary.
+
 ## Target steady state
 
 - **Odysseus**: shared backend/runtime and cross-repository agentic capability. It owns routing, execution, workers, leases, lifecycle, provider/model routing, generic orchestration, shared task-engine primitives, reusable agent skills/runtime, cross-repository observability and other backend-wide capability.
@@ -37,6 +49,12 @@ The first convergence pass moves backend/shared **agent-task records** out of `o
 This pass deliberately does not blindly relocate every script, config file, report or historical output referenced by those tasks. Those artefacts are migrated only when their capability authority is established and the replacement path is proven.
 
 Historical mixed-queue audit reports may remain in `obsidian-PhD` because they describe the state of that repository at the time.
+
+## Transitional provenance and multihost continuity
+
+The Odysseus multihost implementation was driven from an earlier, transitional task trail kept in `obsidian-PhD` (including the staged implementation operating task introduced by PR #575). That trail is valid **provenance** and is not rewritten or deleted. Its shared-backend successors now live in the Odysseus agent-task queue (for example `automation/review/agent-tasks/ready/2026-09-23-odysseus-staged-implementation-loop.agent-task.md`).
+
+The multihost stage history and Sol adjudication evidence are recorded in `docs/aoteru-multihost-adjudication-log.md` and the plan in `docs/aoteru-multihost-execution-implementation-plan.md`. Ownership convergence is not performed silently in the middle of a multihost stage; the repository-boundary capability convergence below is an explicit operator checkpoint at the backend completion boundary, and the task-queue migration above does not pre-empt it.
 
 ## Downstream capability convergence
 

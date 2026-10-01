@@ -11,7 +11,8 @@ file rather than a second launcher/config system.
     agent status                       # live host + registry resolution, JSON
     agent where                        # current repo's registry identity + lease
     agent sync                         # regenerate the disposable bay + workspace bootstrap
-    agent park <repo_id> [--host ID]   # acquire a write lease (fails closed on dirty/conflict; reclaims a stale lease)
+    agent park <repo_id> [--host ID]   # acquire a write lease on THIS host (fails closed on dirty/conflict; reclaims only a reclaimable lease)
+                                       # a lease on ANOTHER host: POST /api/estate/park/<repo>?host=<id>&branch=<b> (aoteru park --host)
     agent release <repo_id> [--host ID]
     agent heartbeat <repo_id> [--host ID]   # renew an active lease's heartbeat_at (run periodically during work)
     agent claude <auto|lab|home> "<task>" [--repo ID]   # resolve + dispatch, fails truthfully if unreachable
@@ -256,6 +257,12 @@ def cmd_release(args):
     except ops.NoActiveLease as e:
         fail(str(e))
         return
+    except ops.LeaseHasUnresolvedExecution as e:
+        # S6.2: refused, never forced; report the blocker and next action.
+        emit({"ok": False, "error": "lease_has_unresolved_execution", "message": str(e),
+              "lease_id": e.lease_id, "execution_id": e.execution_id,
+              "lifecycle_state": e.lifecycle_state, "next_action": e.next_action}, args)
+        sys.exit(1)
 
     emit({"ok": True, **result}, args)
 
@@ -473,6 +480,40 @@ def _recent_routing_decisions_summary(limit: int = 10) -> list:
         return []
 
 
+def _capabilities_on_this_host(models, this_host):
+    """Stage 5/7 diagnostic: each alias's config facts PLUS its actual
+    resolution on THIS host via the canonical resolve_alias(alias, host) --
+    qualification, per-host binding, live inventory and GPU-yield included.
+    `bound` stays the config's default-binding fact. Degrades truthfully
+    (resolved None + reason) when the router cannot be imported or errors."""
+    host_id = this_host["id"] if this_host else None
+    try:
+        from src.estate_router import resolve_alias
+    except Exception as exc:  # any router import failure degrades, never aborts status
+        resolve_alias, import_error = None, str(exc)
+    out = []
+    for c in models.get("capabilities", []):
+        host_entry = ((c.get("qualified_hosts") or {}).get(host_id) or {}) if host_id else {}
+        row = {
+            "alias": c["alias"], "bound": c.get("binding") is not None,
+            "qualified_on_this_host": bool(str(host_entry.get("evidence") or "").strip()),
+            "binding_on_this_host": (host_entry.get("binding") or c.get("binding")) if host_id else None,
+        }
+        if host_id is None:
+            row.update(resolved_on_this_host=False, reason="this host is not registered in config/estate.yaml")
+        elif resolve_alias is None:
+            row.update(resolved_on_this_host=None, reason=f"router unavailable: {import_error}")
+        else:
+            try:
+                resolution = resolve_alias(c["alias"], host_id)
+                row.update(resolved_on_this_host=bool(resolution.get("resolved")),
+                           reason=resolution.get("reason"), concrete_model=resolution.get("concrete_model"))
+            except Exception as exc:
+                row.update(resolved_on_this_host=None, reason=f"resolution failed: {exc}")
+        out.append(row)
+    return out
+
+
 def cmd_status(args):
     host_local = _load_host_local()
     live = _live_host_inventory()
@@ -495,10 +536,7 @@ def cmd_status(args):
             {"id": s["id"], "description": s.get("description"), "live": s.get("endpoint") is not None}
             for s in estate.get("services", [])
         ],
-        "capabilities": [
-            {"alias": c["alias"], "bound": c.get("binding") is not None}
-            for c in models.get("capabilities", [])
-        ],
+        "capabilities": _capabilities_on_this_host(models, this_host),
         "memory_sources": [
             {"id": s["id"], "status": s.get("status")} for s in memory_sources.get("sources", [])
         ],
@@ -520,11 +558,16 @@ def cmd_explain(args):
     eligibility logic here — a second copy would drift, exactly what
     docs/aoteru-model-host-routing-contract.md's single-routing-authority
     rule forbids."""
-    from src.estate_router import eligible_hosts, resolve_alias, RoutingConfigError
+    from src.estate_router import current_host_id, eligible_hosts, resolve_alias, RoutingConfigError
     from src.routing_evaluator import load_and_aggregate
 
     try:
-        resolution = resolve_alias(args.alias)
+        this_host = current_host_id()
+        # Stage 7: never the legacy unqualified resolver -- fail closed when
+        # this host is not registered.
+        resolution = (resolve_alias(args.alias, this_host) if this_host is not None else
+                      {"alias": args.alias, "resolved": False,
+                       "reason": "this host is not registered in config/estate.yaml"})
     except RoutingConfigError as e:
         fail(str(e))  # exits; nothing below runs
 
@@ -585,6 +628,7 @@ def cmd_where(args):
     if current is not None:
         try:
             from core.database import get_db_session, ParkLease, park_lease_is_stale
+            from src.park_lease_ops import lease_authority_state
         except ModuleNotFoundError:
             lease = "unavailable (core.database not importable from this environment)"
         else:
@@ -593,19 +637,21 @@ def cmd_where(args):
                     ParkLease.repo_id == current["id"], ParkLease.status == "active"
                 ).first()
                 if row is not None:
-                    # `stale` is the technical write-enforcement signal: an
-                    # active-looking lease whose holder stopped renewing
-                    # heartbeat_at is not actually being worked on right
-                    # now, and a caller (human, or a future PreToolUse/
-                    # git-hook gate) deciding whether a write is really
-                    # authorized should see that plainly rather than
-                    # trusting `status == "active"` alone.
+                    # `stale` is heartbeat-age TELEMETRY only (multihost
+                    # Stage 6, S6.4). Whether the lease is still write
+                    # authority, or may be reclaimed, is decided solely by
+                    # `lease_authority_state`: a stale lease protected by an
+                    # unresolved execution remains authoritative.
+                    authority = lease_authority_state(db, row)
                     lease = {
                         "lease_id": row.id, "host_id": row.host_id,
                         "branch": row.branch, "session_id": row.session_id,
                         "heartbeat_at": row.heartbeat_at.isoformat() if row.heartbeat_at else None,
                         "allowed_write_scope": row.allowed_write_scope,
                         "stale": park_lease_is_stale(row),
+                        "authoritative": authority["authoritative"],
+                        "reclaimable": authority["reclaimable"],
+                        "protected_by": authority["protected_by_execution_id"],
                     }
 
     emit({

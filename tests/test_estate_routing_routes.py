@@ -596,6 +596,27 @@ class TestParkHeartbeatReleaseRoutes:
         response = client.post("/api/estate/park/my-repo/release")
         assert response.status_code == 409
 
+    def test_release_with_unresolved_execution_returns_structured_409(self, monkeypatch):
+        """S6.2: ordinary release refusal is a structured conflict carrying
+        the blocking execution and next action, never a server error."""
+        client = self._client(monkeypatch)
+        import routes.estate_routing_routes as mod
+
+        monkeypatch.setattr(mod, "current_host_id", lambda: "test-lab")
+
+        def refuse(repo_id, host_id=None):
+            raise mod.LeaseHasUnresolvedExecution(
+                "blocked", lease_id="L1", execution_id="E1", lifecycle_state="succeeded",
+                next_action="finalize_or_recover",
+            )
+        monkeypatch.setattr(mod, "release_repo", refuse)
+
+        response = client.post("/api/estate/park/my-repo/release")
+        assert response.status_code == 409
+        detail = response.json()["detail"]
+        assert detail["error"] == "lease_has_unresolved_execution"
+        assert detail["execution_id"] == "E1" and detail["next_action"] == "finalize_or_recover"
+
     def test_heartbeat_requires_estate_execute_scope(self, monkeypatch):
         """A read-only estate:read token must not be able to mutate a
         lease — same scope discipline as /api/estate/run."""

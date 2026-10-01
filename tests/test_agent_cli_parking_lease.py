@@ -153,12 +153,28 @@ def test_eligible_hosts_ignores_stale_conflicting_lease(monkeypatch, tmp_path):
     config_dir.mkdir()
     (config_dir / "estate.yaml").write_text(yaml.safe_dump({
         "hosts": [
-            {"id": "test-lab", "hostname": "THIS-HOST", "role": "lab", "tailscale": True},
+            {
+                "id": "test-lab",
+                "hostname": "THIS-HOST",
+                "role": "lab",
+                "tailscale": True,
+                "identity_verified": True,
+                "worker": {"enabled": True, "transport": "local", "qualified_executors": ["local"]},
+            },
         ],
     }))
     (config_dir / "models.yaml").write_text(yaml.safe_dump({"capabilities": []}))
     monkeypatch.setattr(estate_router, "_CONFIG_DIR", config_dir)
     monkeypatch.setattr(socket, "gethostname", lambda: "THIS-HOST")
+    import src.estate_worker_client as estate_worker_client
+    monkeypatch.setattr(
+        estate_worker_client, "worker_health",
+        lambda host_id, *, deadline_s=20.0: {"ollama": {"reachable": True}, "codex": {"available": True}},
+    )
+    monkeypatch.setattr(
+        estate_worker_client, "worker_repo_probe",
+        lambda host_id, repo_id, *, deadline_s=15.0: {"resolved": True},
+    )
 
     stale_heartbeat = utcnow_naive() - timedelta(seconds=PARK_LEASE_STALE_SECONDS + 60)
     with get_db_session() as db:
@@ -232,6 +248,8 @@ def test_cmd_park_branch_uses_isolated_worktree_not_live_checkout(monkeypatch, c
     monkeypatch.setattr(module.socket, "gethostname", lambda: "THIS-HOST")
     monkeypatch.setattr(module, "_git_is_clean", lambda path: (_ for _ in ()).throw(AssertionError("cmd_park should not call _git_is_clean directly")))
     monkeypatch.setattr(estate_router, "resolve_repo_path", lambda repo_id: str(live_repo))
+    from tests.helpers.inline_prepare import install_inline_prepare_worker
+    install_inline_prepare_worker(monkeypatch)
 
     with get_db_session() as db:
         db.query(ParkLease).filter(ParkLease.repo_id == "test-repo").delete(synchronize_session=False)

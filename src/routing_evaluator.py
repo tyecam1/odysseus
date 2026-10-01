@@ -371,6 +371,7 @@ def get_decision_by_id(decision_id: str) -> Optional[dict]:
             "nondelegation_reason": row.nondelegation_reason,
             "recommended_route": row.recommended_route,
             "actual_route": row.actual_route,
+            "executed_host_id": row.executed_host_id,
             "status": row.status,
             "created_at": row.created_at.isoformat() if row.created_at else None,
             "updated_at": row.updated_at.isoformat() if row.updated_at else None,

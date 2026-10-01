@@ -39,6 +39,14 @@ import yaml
 from src.runtime_paths import get_app_root
 from src.park_lease_ops import active_lease_for_repo
 from src import worktree_ops
+from src import estate_worker_procs as _estate_worker_procs
+from src.estate_worker_procs import (
+    _kill_process_tree as _worker_kill_process_tree,
+    _proc_is_live_nonzombie,
+    _proc_ppid,
+    _proc_stat_fields,
+    _process_tree_pids,
+)
 
 _CONFIG_DIR = Path(get_app_root()) / "config"
 
@@ -61,38 +69,53 @@ def _load_yaml(name: str) -> dict:
         raise RoutingConfigError(f"config/{name}.yaml is malformed: {e}") from e
 
 
+def host_static_state(host: dict) -> dict:
+    """Return the governed, non-live worker state for one host.
+
+    `verified` is a compatibility input through Stage 8 only. It represents
+    identity, never worker enablement, and a host with neither identity key
+    fails closed.
+    """
+    worker = host.get("worker") or {}
+    identity_verified = host.get("identity_verified")
+    if identity_verified is None and "identity_verified" not in host:
+        identity_verified = host.get("verified", False)
+    return {
+        "identity_verified": bool(identity_verified),
+        "worker_enabled": bool(worker.get("enabled")),
+        "transport": worker.get("transport"),
+        "qualified_executors": worker.get("qualified_executors") or [],
+    }
+
+
 def host_reachable(host: dict, live_hostname: str) -> tuple[bool, str]:
     """Shared with `scripts/agent`, which imports this function directly
     rather than maintaining its own copy — a second, slightly-different
     reachability rule would itself be the kind of duplicate authority the
     routing contract forbids.
 
-    Explicit `verified: false` (config/estate.yaml) is a hard gate checked
-    before reachability, not after: a host that merely answers on the
-    tailnet is not the same claim as a host whose identity has actually
-    been confirmed (finding: "a newly reachable but unverified home host
-    must never become eligible automatically"). A host with no `verified`
-    key at all defaults to verified — this is the existing lab/interface
-    convention, not a new category; only hosts that explicitly opt out
-    (currently just the home host) are affected."""
-    if host.get("verified", True) is False:
-        return False, f"{host['id']!r} is not verified (config/estate.yaml verified: false) — reachability alone is not sufficient"
+    Identity confirmation and worker qualification are independent hard
+    gates checked before live reachability. Legacy `verified` is accepted as
+    identity evidence only; it never enables a worker.
+
+    Stage 5: this is now only the *static* half of reachability — no TCP
+    probe. Live liveness comes from `eligible_hosts()` actually calling
+    `estate_worker_client.worker_health()`, which proves a real attested
+    worker answered, not just that port 22 accepted a connection (a signal
+    that never told this module anything about the worker itself, only
+    that sshd was up). Kept as a plain function (not folded into
+    `eligible_hosts`) because `scripts/agent` imports it directly for its
+    own static-gate display."""
+    state = host_static_state(host)
+    if not state["identity_verified"]:
+        return False, f"{host['id']} identity not verified"
+    if not state["worker_enabled"]:
+        return False, f"{host['id']} identity verified; worker not enabled (worker qualification pending)"
     if host.get("hostname") == live_hostname:
         return True, "this host"
     if not host.get("tailscale"):
         return False, f"{host['id']!r} is not a tailnet member"
-    dns = host.get("tailscale_dns")
-    if not dns:
-        return False, f"{host['id']!r} has no tailscale_dns recorded in config/estate.yaml"
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(4)
-    try:
-        s.connect((dns, 22))
-        return True, "SSH port reachable over the tailnet"
-    except OSError as e:
-        return False, f"unreachable: {e}"
-    finally:
-        s.close()
+    return True, "tailnet member; live health checked separately"
 
 
 _HOST_LOCAL_ROOT_VAR_RE = re.compile(r"\$\{(\w+)\}")
@@ -157,35 +180,82 @@ def eligible_hosts(repo_id: Optional[str] = None) -> list[dict]:
     laptop/interface is the human control surface, not a normal execution
     worker"). If `repo_id` is given, a host also becomes ineligible when a
     *different* host already holds an active ParkLease for that repo —
-    routing never widens write authority (invariant 10)."""
+    routing never widens write authority (invariant 10).
+
+    Stage 5: a host that passes the static gates still isn't eligible
+    unless a real worker actually answers `health` right now — the TCP-22
+    probe `host_reachable` used to do told this module nothing about the
+    worker itself, only that sshd was up. `worker_health` is TTL-cached
+    (`estate_worker_client`), so calling this repeatedly in one request
+    doesn't re-dispatch a subprocess/SSH round trip every time."""
     estate = _load_yaml("estate")
     live_hostname = socket.gethostname()
     out = []
     for host in estate.get("hosts", []):
         if host.get("role") not in ("lab", "home"):
             continue
+        state = host_static_state(host)
         reachable, reason = host_reachable(host, live_hostname)
-        entry = {"host_id": host["id"], "role": host.get("role"), "eligible": reachable, "reason": reason}
+        healthy = None
+        if reachable:
+            from src.estate_worker_client import WorkerTransportError, worker_health
+            try:
+                worker_health(host["id"])
+                healthy = True
+            except WorkerTransportError as exc:
+                healthy = False
+                reachable = False
+                reason = f"worker unreachable: {exc.code}: {exc}"
+        entry = {
+            "host_id": host["id"],
+            "role": host.get("role"),
+            "identity_verified": state["identity_verified"],
+            "worker_enabled": state["worker_enabled"],
+            "qualified_executors": state["qualified_executors"],
+            "reachable": reachable,
+            "healthy": healthy,
+            "eligible": reachable,
+            "reason": reason,
+        }
         if reachable and repo_id:
-            from core.database import ParkLease, get_db_session, park_lease_is_stale
+            from src.estate_worker_client import WorkerTransportError, worker_repo_probe
+            # A host that is healthy and model-capable is still not a
+            # repo-aware candidate unless the repo actually resolves
+            # *there* -- a config binding or the control-plane's own
+            # checkout having the repo is not evidence that this
+            # particular worker host does (Stage 5 review finding: repo
+            # locality was missing from host selection entirely).
+            try:
+                probe = worker_repo_probe(host["id"], repo_id)
+            except WorkerTransportError as exc:
+                entry["eligible"] = False
+                entry["reason"] = f"repo {repo_id!r} probe failed on {host['id']!r}: {exc.code}: {exc}"
+            else:
+                if not probe.get("resolved"):
+                    entry["eligible"] = False
+                    entry["reason"] = f"repo {repo_id!r} does not resolve on {host['id']!r}"
+
+        if entry["eligible"] and reachable and repo_id:
+            from core.database import ParkLease, get_db_session
+            from src.park_lease_ops import lease_authority_state
             with get_db_session() as db:
                 conflicting = db.query(ParkLease).filter(
                     ParkLease.repo_id == repo_id,
-                    ParkLease.status == "active",
+                    ParkLease.status.in_(("active", "preparing")),
                     ParkLease.host_id != host["id"],
                 ).first()
-                # A stale lease (holder crashed/killed, heartbeat never
-                # renewed — see park_lease_is_stale) does not get to block
-                # routing forever; only a lease that is still actually
-                # alive widens no other host's write authority (invariant
-                # 10 is about live conflicts, not abandoned ones). This is
-                # a read-only check — reclaiming the row itself still only
-                # happens through `agent park`'s explicit reclaim path.
-                if conflicting is not None and park_lease_is_stale(conflicting):
+                # S6.4: only `lease_authority_state` decides whether another
+                # host's lease (or `preparing` reservation) may be ignored.
+                # Heartbeat age alone never does: a stale lease protected by
+                # an unresolved execution still blocks, and a reservation is
+                # never reclaimable by age (S6.9). Read-only; reclaiming the
+                # row still happens only through the explicit park path.
+                if conflicting is not None and lease_authority_state(db, conflicting)["reclaimable"]:
                     conflicting = None
-            if conflicting is not None:
+                conflicting_host = conflicting.host_id if conflicting is not None else None
+            if conflicting_host is not None:
                 entry["eligible"] = False
-                entry["reason"] = f"repo {repo_id!r} is parked on {conflicting.host_id!r}, not here"
+                entry["reason"] = f"repo {repo_id!r} is parked on {conflicting_host!r}, not here"
         out.append(entry)
     return out
 
@@ -308,45 +378,103 @@ def experiment_priority_active() -> tuple[bool, str]:
     return False, "no reservation; no significant non-ollama GPU load"
 
 
-def resolve_alias(alias: str) -> dict:
+def resolve_alias(alias: str, host_id: Optional[str] = None) -> dict:
     """WHAT half: resolve a capability alias to a concrete model from
     config/models.yaml's evidence-backed bindings. Never a hardcoded brand
     in this function — an unbound alias fails truthfully rather than
-    guessing a model. A bound alias is additionally checked live before
-    being reported resolved — a config binding alone is not proof the
-    model is actually available right now (see `_ollama_model_live`).
+    guessing a model.
+
+    `host_id=None` keeps the pre-Stage-5 legacy behaviour (liveness
+    checked against this backend's own Ollama via `_ollama_model_live`) —
+    used only by callers not yet migrated to per-host resolution
+    (Stage 9 removes this mode once none remain). `host_id` given: a bound
+    alias is checked live against *that host's* worker inventory instead —
+    a config binding is not proof the model is actually loadable on the
+    host a route actually selected, and lab's own Ollama liveness says
+    nothing true about a different host (D5 in the implementation plan).
 
     P12.4: an alias tagged `gpu_priority: yield_to_experiment` in
-    config/models.yaml fails truthfully (not silently) while
-    `experiment_priority_active()` says an experiment is reserved/active
-    — heavy background inference must not contend with a live robotics
-    experiment for the one shared RTX 3080. Aliases without that tag
-    (`local-fast`, `code-fast`) are unaffected; idle-state routing is
-    unaffected either way."""
+    config/models.yaml fails truthfully (not silently) while an
+    experiment is reserved/active on the checked host — heavy background
+    inference must not contend with a live robotics experiment for a
+    shared GPU. Aliases without that tag are unaffected either way."""
     models = _load_yaml("models")
     entry = next((c for c in models.get("capabilities", []) if c["alias"] == alias), None)
     if entry is None:
         return {"alias": alias, "resolved": False, "reason": f"unknown alias {alias!r}"}
     binding = entry.get("binding")
+    if host_id is not None:
+        # Stage 7: qualification is checked FIRST (so an unqualified host
+        # always reports "not qualified on"), then the EFFECTIVE binding --
+        # the per-host override, else the default -- before the unbound
+        # check, so a host override can qualify a null-default alias.
+        host_entry = (entry.get("qualified_hosts") or {}).get(host_id)
+        if not isinstance(host_entry, dict) or not str(host_entry.get("evidence") or "").strip():
+            return {"alias": alias, "resolved": False, "reason": f"alias {alias} not qualified on {host_id}"}
+        if host_entry.get("binding"):
+            binding = host_entry["binding"]
     if binding is None:
         return {
             "alias": alias, "resolved": False,
             "reason": "no evidence-backed binding yet — see config/models.yaml",
         }
-    if entry.get("gpu_priority") == "yield_to_experiment":
-        active, reason = experiment_priority_active()
-        if active:
+
+    if host_id is None:
+        if entry.get("gpu_priority") == "yield_to_experiment":
+            active, reason = experiment_priority_active()
+            if active:
+                return {
+                    "alias": alias, "resolved": False, "concrete_model": binding,
+                    "reason": f"withheld — experiment priority active ({reason})",
+                }
+        live, live_reason = _ollama_model_live(binding)
+        if not live:
             return {
                 "alias": alias, "resolved": False, "concrete_model": binding,
-                "reason": f"withheld — experiment priority active ({reason})",
+                "reason": f"bound but not currently live: {live_reason}",
             }
-    live, live_reason = _ollama_model_live(binding)
-    if not live:
+        return {"alias": alias, "resolved": True, "concrete_model": binding, "evidence": entry.get("evidence")}
+
+    # Stage 7: per-host qualification. A host absent from qualified_hosts
+    # (or no qualified_hosts at all) is qualified nowhere -- fail closed,
+    # even if the model happens to be present in that host's inventory.
+    qualified = entry.get("qualified_hosts") or {}
+    host_entry = qualified.get(host_id)
+    if not isinstance(host_entry, dict) or not str(host_entry.get("evidence") or "").strip():
+        # Stage 7: qualification IS host evidence -- a host entry without
+        # its own non-empty evidence qualifies nothing (Stage 7 finding 1).
+        return {"alias": alias, "resolved": False, "reason": f"alias {alias} not qualified on {host_id}"}
+    binding = host_entry.get("binding") or binding
+
+    from src.estate_worker_client import WorkerTransportError, worker_health, worker_inventory
+    try:
+        inventory = worker_inventory(host_id, [binding])
+    except WorkerTransportError as exc:
         return {
             "alias": alias, "resolved": False, "concrete_model": binding,
-            "reason": f"bound but not currently live: {live_reason}",
+            "reason": f"worker unreachable: {exc.code}: {exc}",
         }
-    return {"alias": alias, "resolved": True, "concrete_model": binding, "evidence": entry.get("evidence")}
+    live_models = {m.get("name") for m in inventory.get("models") or []}
+    if binding not in live_models:
+        return {
+            "alias": alias, "resolved": False, "concrete_model": binding,
+            "reason": f"bound but not currently live on {host_id!r}: not listed by that host's Ollama",
+        }
+    if entry.get("gpu_priority") == "yield_to_experiment":
+        try:
+            health = worker_health(host_id)
+        except WorkerTransportError as exc:
+            return {
+                "alias": alias, "resolved": False, "concrete_model": binding,
+                "reason": f"worker unreachable: {exc.code}: {exc}",
+            }
+        gpu_yield = health.get("gpu_yield") or {}
+        if gpu_yield.get("active"):
+            return {
+                "alias": alias, "resolved": False, "concrete_model": binding,
+                "reason": f"withheld — experiment priority active ({gpu_yield.get('reason')})",
+            }
+    return {"alias": alias, "resolved": True, "concrete_model": binding, "evidence": host_entry["evidence"]}
 
 
 def _record_decision(task: dict, *, host_id, executor, model_alias, concrete_model, status) -> str:
@@ -398,6 +526,74 @@ _UNVERIFIABLE_BUDGET_FIELDS = (
     "max_worker_calls", "max_paid_calls", "max_frontier_calls",
     "max_context_tokens", "latency_priority",
 )
+
+
+def _select_host(eligible: list[dict], capabilities: list[str]) -> tuple[dict, list[dict], str]:
+    """Stage 5's host+model selection (plan §E, Stage 5, replacing the old
+    `host = eligible[0]`). `eligible` is already in `config/estate.yaml`
+    order (`eligible_hosts()` preserves file order), so "first host that
+    qualifies" here is a real, auditable priority, not an accident of
+    dict iteration.
+
+    No capabilities requested: the first eligible host, `deterministic`
+    (nothing executes, so no per-host alias resolution is meaningful).
+
+    Otherwise, in order:
+    1. the first host with `local` in its qualified executors where every
+       requested alias actually resolves *on that host* (model present,
+       gpu_yield clear) — real per-host truth, not lab's own Ollama used
+       as a proxy for every host (D5);
+    2. the first host with `codex` qualified and a live, worker-attested
+       `health.codex.available` — a paid-escalation candidate, decided by
+       the caller opting in later, not automatic;
+    3. failing both, the first eligible host with `needs_escalation` — the
+       paid lane then fails `executor_unavailable` truthfully rather than
+       this function inventing a placement.
+
+    Returns `(host, capability_resolutions, executor)`. `executor` is one
+    of `deterministic` / `local` / `none` — `resolve_route` decides the
+    final recorded status (a `local` candidate can still be downgraded to
+    `needs_escalation` by a quality-floor/context failure `resolve_alias`
+    itself can't see)."""
+    if not capabilities:
+        return eligible[0], [], "deterministic"
+
+    for host in eligible:
+        if "local" not in (host.get("qualified_executors") or []):
+            continue
+        resolutions = [resolve_alias(alias, host["host_id"]) for alias in capabilities]
+        if all(r.get("resolved") for r in resolutions):
+            return host, resolutions, "local"
+
+    # No host resolved every alias locally — capability_resolutions for
+    # the response/telemetry come from the first eligible host, matching
+    # the single-host messaging this replaced (still real evidence, just
+    # not necessarily every candidate's).
+    from src.estate_worker_client import WorkerTransportError, worker_health
+    for host in eligible:
+        if "codex" not in (host.get("qualified_executors") or []):
+            continue
+        try:
+            health = worker_health(host["host_id"])
+        except WorkerTransportError:
+            continue
+        if (health.get("codex") or {}).get("available"):
+            # capability_resolutions must describe *this* host, not
+            # whichever host happened to be eligible[0] -- a route whose
+            # route.host is this host must never carry alias/capability
+            # evidence evaluated against a different one (Stage 5 review
+            # finding).
+            resolutions = [resolve_alias(alias, host["host_id"]) for alias in capabilities]
+            return host, resolutions, "none"
+
+    # No host resolved every alias locally and no codex-qualified host is
+    # healthy either -- capability_resolutions for the response/telemetry
+    # come from the first eligible host, matching the single-host
+    # messaging this replaced (still real evidence, just not necessarily
+    # every candidate's, and consistent with the eligible[0] this function
+    # is about to return).
+    fallback_resolutions = [resolve_alias(alias, eligible[0]["host_id"]) for alias in capabilities]
+    return eligible[0], fallback_resolutions, "none"
 
 
 def resolve_route(task: dict, *, record_decision: bool = True) -> dict:
@@ -479,14 +675,8 @@ def resolve_route(task: dict, *, record_decision: bool = True) -> dict:
             "decision_id": decision_id,
         }
 
-    # Lab-first: exactly one worker role is ever reachable, so there is
-    # nothing to score among yet. This still goes through eligible_hosts()
-    # rather than a hardcoded "lab" — a future multi-host scoring pass
-    # extends the selection here, it doesn't redesign the function.
-    host = eligible[0]
-
     capabilities = (task.get("requirements") or {}).get("capabilities") or []
-    capability_resolutions = [resolve_alias(a) for a in capabilities]
+    host, capability_resolutions, candidate_executor = _select_host(eligible, capabilities)
     alias = capabilities[0] if capabilities else None
     alias_result = capability_resolutions[0] if capability_resolutions else {
         "resolved": False, "reason": "no capability requested",
@@ -512,12 +702,18 @@ def resolve_route(task: dict, *, record_decision: bool = True) -> dict:
     context_error = None
     context_note = None
     if context_tokens and alias and alias_result.get("resolved"):
-        from src.model_context import get_context_length_known
-        window, known = get_context_length_known(_OLLAMA_BASE, alias_result["concrete_model"])
+        from src.estate_worker_client import WorkerTransportError, worker_inventory
+        concrete_model = alias_result["concrete_model"]
+        try:
+            inventory = worker_inventory(host["host_id"], [concrete_model])
+            ctx = (inventory.get("context") or {}).get(concrete_model) or {}
+            window, known = ctx.get("length", 0), bool(ctx.get("known"))
+        except WorkerTransportError:
+            window, known = 0, False
         if known and context_tokens > window:
             context_error = (
                 f"requirements.context_tokens={context_tokens} exceeds "
-                f"{alias_result['concrete_model']!r}'s known context window of {window}"
+                f"{concrete_model!r}'s known context window of {window} on {host['host_id']!r}"
             )
         elif not known:
             context_note = f"requested context_tokens={context_tokens} could not be verified (unknown context window)"
@@ -526,7 +722,7 @@ def resolve_route(task: dict, *, record_decision: bool = True) -> dict:
         executor, status = "deterministic", "complete"
     elif quality_floor_error or context_error:
         executor, status = "none", "needs_escalation"
-    elif all_resolved:
+    elif candidate_executor == "local" and all_resolved:
         executor, status = "local", "complete"
     else:
         executor, status = "none", "needs_escalation"
@@ -580,7 +776,8 @@ def _update_decision_outcome(decision_id: str, *, status: str, deterministic_gat
                              latency_ms: Optional[int] = None, escalation_reason: Optional[str] = None,
                              executor: Optional[str] = None, escalated: Optional[bool] = None,
                              actual_route: Optional[str] = None,
-                             verification_outcome: Optional[str] = None) -> None:
+                             verification_outcome: Optional[str] = None,
+                             executed_host_id: Optional[str] = None) -> None:
     """Execution happens after `resolve_route()` already wrote its
     decision row — update that same row with the real outcome rather than
     writing a second telemetry row for one routed task (`RoutingDecision`
@@ -609,6 +806,8 @@ def _update_decision_outcome(decision_id: str, *, status: str, deterministic_gat
                     row.actual_route = actual_route
                 if verification_outcome is not None:
                     row.verification_outcome = verification_outcome
+                if executed_host_id is not None:
+                    row.executed_host_id = executed_host_id
     except Exception:
         import logging
         logging.getLogger(__name__).exception("routing_decisions outcome update failed; execution result is unaffected")
@@ -743,149 +942,17 @@ def _codex_available() -> tuple[bool, str]:
     return True, binary
 
 
-def _proc_stat_fields(pid: int) -> Optional[tuple[str, int, int]]:
-    """(state, ppid, starttime) from /proc/<pid>/stat, the only
-    dependency-free way to read this (no psutil in this codebase). The
-    comm field is parenthesised and may itself contain spaces or
-    parens, so split on the *last* ')' rather than whitespace-splitting
-    the whole line -- everything after it is state/ppid/pgrp/session/...
-    in fixed order; starttime (ticks since boot) is field 20 of that
-    fixed order, i.e. rest[19] once state=rest[0]. starttime is what
-    makes PID-reuse detection possible: two different process instances
-    that happen to share a pid can never share a starttime."""
-    try:
-        with open(f"/proc/{pid}/stat", "r") as f:
-            raw = f.read()
-        rest = raw.rsplit(")", 1)[1].split()
-        return rest[0], int(rest[1]), int(rest[19])  # state, ppid, starttime
-    except (FileNotFoundError, ProcessLookupError, IndexError, ValueError, OSError):
-        return None
-
-
-def _proc_ppid(pid: int) -> Optional[int]:
-    fields = _proc_stat_fields(pid)
-    return fields[1] if fields else None
-
-
-def _proc_is_live_nonzombie(pid: int, expected_starttime: Optional[int] = None) -> bool:
-    """True only for a process that can still hold resources (pipes,
-    CPU, an unreaped worktree lock, etc.) -- a zombie ('Z') already
-    received its kill and is just awaiting reap by its parent (which,
-    once its own leader has also been killed, is typically PID 1 taking
-    over promptly, not instant). Re-scanning after a kill must not count
-    an already-dead zombie as "still alive" merely because /proc/<pid>
-    has not been removed yet.
-
-    When expected_starttime is given, a pid whose current starttime
-    doesn't match it is treated as gone (not "still alive") -- the
-    original target already exited and this pid number has since been
-    reused by an unrelated process; that unrelated process is not what
-    the caller is waiting on."""
-    fields = _proc_stat_fields(pid)
-    if fields is None:
-        return False
-    state, _ppid, starttime = fields
-    if expected_starttime is not None and starttime != expected_starttime:
-        return False
-    return state != "Z"
-
-
-def _process_tree_pids(root_pid: int) -> dict[int, int]:
-    """Every live descendant of root_pid (root included), found by
-    scanning /proc rather than relying on process-group/session
-    membership -- a descendant that has escaped into its own process
-    group (observed live: a codex-spawned MCP server child calls
-    something equivalent to setpgid(0, 0), landing in its own pgid
-    while remaining in the parent's session) is still found here,
-    because this walks real parent-child links instead. Returns
-    {pid: starttime} rather than a bare list so a caller can later
-    detect pid reuse (a killed pid's number reassigned to an unrelated
-    process before cleanup gets to it) rather than trusting pid alone."""
-    import os as _os
-    children: dict[int, list[int]] = {}
-    try:
-        pids = [int(name) for name in _os.listdir("/proc") if name.isdigit()]
-    except OSError:
-        fields = _proc_stat_fields(root_pid)
-        return {root_pid: fields[2] if fields else 0}
-    for pid in pids:
-        ppid = _proc_ppid(pid)
-        if ppid is not None:
-            children.setdefault(ppid, []).append(pid)
-    tree = [root_pid]
-    frontier = [root_pid]
-    while frontier:
-        next_frontier: list[int] = []
-        for pid in frontier:
-            for child in children.get(pid, []):
-                if child not in tree:
-                    tree.append(child)
-                    next_frontier.append(child)
-        frontier = next_frontier
-    result: dict[int, int] = {}
-    for pid in tree:
-        fields = _proc_stat_fields(pid)
-        result[pid] = fields[2] if fields else 0
-    return result
-
-
 def _kill_process_tree(root_pid: int, process_group_id: int, *, reap_timeout: float = 5.0) -> dict:
-    """Timeout cleanup for a codex-launched process, robust to a
-    descendant that has left the leader's process group. Kills both the
-    process group (cheap, covers the common case, unchanged behaviour
-    for a tree with no escapees) AND every PID found by walking real
-    /proc parent-child links (covers an escapee like the observed MCP
-    server child), then re-scans /proc to prove the whole tree is
-    actually gone rather than assuming the kill succeeded. Fails closed:
-    returns ok=False with the surviving pids if any remain, instead of
-    silently reporting a clean kill.
-
-    PID-reuse safe: every pid is snapshotted with its starttime before
-    signalling and re-checked against that same starttime afterward, so
-    a target that already exited and whose pid number has since been
-    reused by an unrelated process is never signalled or reported as
-    "still alive" -- the unrelated occupant is left alone either way.
-    """
-    import os as _os
-    import signal as _signal
-    import time as _time
-
-    tree_before = _process_tree_pids(root_pid)  # {pid: starttime}
-
+    """Compatibility re-export preserving existing router monkeypatch seams."""
+    original_stat = _estate_worker_procs._proc_stat_fields
+    original_tree = _estate_worker_procs._process_tree_pids
     try:
-        _os.killpg(process_group_id, _signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-    except OSError:
-        pass
-
-    for pid, starttime in tree_before.items():
-        current = _proc_stat_fields(pid)
-        if current is None or current[2] != starttime:
-            continue  # already gone, or this pid now belongs to someone else
-        try:
-            _os.kill(pid, _signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        except OSError:
-            pass
-
-    deadline = _time.monotonic() + reap_timeout
-    still_alive: list[int] = list(tree_before)
-    while _time.monotonic() < deadline:
-        still_alive = [
-            pid for pid, starttime in tree_before.items()
-            if _proc_is_live_nonzombie(pid, expected_starttime=starttime)
-        ]
-        if not still_alive:
-            break
-        _time.sleep(0.2)
-
-    return {
-        "ok": not still_alive,
-        "attempted_pids": list(tree_before),
-        "still_alive_pids": still_alive,
-    }
+        _estate_worker_procs._proc_stat_fields = _proc_stat_fields
+        _estate_worker_procs._process_tree_pids = _process_tree_pids
+        return _worker_kill_process_tree(root_pid, process_group_id, reap_timeout=reap_timeout)
+    finally:
+        _estate_worker_procs._proc_stat_fields = original_stat
+        _estate_worker_procs._process_tree_pids = original_tree
 
 
 def _execute_codex_with_sandbox(objective: str, *, sandbox: str, provider: str,
@@ -1033,16 +1100,15 @@ def execute_codex_write(objective: str, *, repo_id: str, host_id: str,
     worktree so direct Python callers cannot bypass `run_task`'s gate. It
     deliberately cannot acquire or broaden write authority.
     """
-    authority = _codex_write_authority(repo_id, host_id)
-    if not authority["ok"]:
-        return {
-            "ok": False, "provider": "codex-write",
-            "authority_denied": True, "error": authority["error"],
-        }
-    return _execute_codex_with_sandbox(
-        objective, sandbox="workspace-write", provider="codex-write", timeout=timeout,
-        cwd=authority["cwd"],
-    )
+    # Stage 6 (gate round 6 finding 2): the direct, untracked in-process
+    # write lane is closed. A workspace-write run must go through
+    # execute_write_via_worker -- an EstateExecution row, a decide_once run
+    # decision and a tracked runner unit. Removed entirely in Stage 9; the
+    # signature stays for callers that introspect the timeout bound.
+    return {
+        "ok": False, "provider": "codex-write", "authority_denied": True,
+        "error": "execute_codex_write is closed in Stage 6; use execute_write_via_worker",
+    }
 
 
 _STALE_EXECUTION_ACCEPT_GRACE_SECONDS = 120
@@ -1145,79 +1211,6 @@ def _update_estate_execution(execution_id: str, **fields) -> None:
         db.close()
 
 
-def reconcile_stale_estate_executions(db, EstateExecution) -> int:
-    """Reconciliation for EstateExecution rows the backend's own process
-    no longer has any thread tracking -- e.g. after a service restart
-    while an execution was accepted/running. Mirrors
-    `scripts/agent`'s `_reconcile_stale_sessions()` (same lazy/on-query
-    invocation shape, one shared authority, never a second lifecycle
-    table) but improves on it: a recorded `worker_pid` lets existence be
-    checked directly with `os.kill(pid, 0)` instead of relying on
-    elapsed time alone. A row with no pid yet is left alone until
-    `_STALE_EXECUTION_ACCEPT_GRACE_SECONDS` has passed -- `on_started`
-    may simply not have fired yet. Never restarts a paid executor
-    invocation itself (incident finding: uncertain completion must not
-    trigger a blind retry) -- this only relabels state, it never calls
-    `_execute_codex_with_sandbox` again."""
-    import os
-    from datetime import datetime, timedelta, timezone
-    from core.database import utcnow_naive
-    cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=_STALE_EXECUTION_ACCEPT_GRACE_SECONDS)
-    cutoff_pid_grace = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=_STALE_EXECUTION_PID_GRACE_SECONDS)
-    in_flight = db.query(EstateExecution).filter(
-        EstateExecution.lifecycle_state.in_(("accepted", "running")),
-    ).all()
-    reconciled = 0
-    for row in in_flight:
-        pid = row.worker_pid
-        if pid is None:
-            if row.submitted_at is not None and row.submitted_at >= cutoff:
-                continue
-            reason = (
-                "reconciled: no worker_pid recorded and row is older than "
-                f"{_STALE_EXECUTION_ACCEPT_GRACE_SECONDS}s -- launch never confirmed"
-            )
-        else:
-            try:
-                os.kill(pid, 0)
-                continue
-            except ProcessLookupError:
-                touched_at = row.updated_at or row.submitted_at
-                if touched_at is not None and touched_at >= cutoff_pid_grace:
-                    continue  # too recent -- likely mid-legitimate-completion, not orphaned
-                reason = (
-                    "reconciled: recorded worker_pid no longer exists on this host -- backend "
-                    "likely restarted or the worker crashed while this execution was in flight"
-                )
-            except PermissionError:
-                continue
-        row.lifecycle_state = "interrupted"
-        row.finished_at = row.finished_at or utcnow_naive()
-        row.error = row.error or reason
-        reconciled += 1
-    db.commit()
-    return reconciled
-
-
-def get_estate_execution(execution_id: str) -> Optional[dict]:
-    """HTTP surface for GET /api/estate/run/{execution_id} -- the
-    authoritative persisted state a client polls for after receiving an
-    accepted response. Reconciles stale in-flight rows lazily on read
-    (same invocation shape as LogicalSession reconciliation) so a poll
-    after a backend restart reflects truthful state rather than a
-    permanently phantom "running" row."""
-    from core.database import SessionLocal, EstateExecution
-    db = SessionLocal()
-    try:
-        reconcile_stale_estate_executions(db, EstateExecution)
-        row = db.query(EstateExecution).filter(EstateExecution.id == execution_id).one_or_none()
-        if row is None:
-            return None
-        return _estate_execution_provenance(row)
-    finally:
-        db.close()
-
-
 def _in_flight_execution_for_lease(lease_id: str) -> Optional[dict]:
     """Admission-control read: is there already a non-terminal
     (accepted/running) EstateExecution under this exact lease? Grounded
@@ -1253,227 +1246,13 @@ def execute_codex_write_durable(objective: str, *, repo_id: str, host_id: str,
                                 decision_id: Optional[str] = None,
                                 wait_timeout: float = 30.0,
                                 timeout: float = 1800.0) -> dict:
-    """Durable wrapper around `_execute_codex_with_sandbox` that decouples
-    the caller's HTTP request lifetime from the underlying Codex
-    process's actual runtime (the >45s /api/estate/run problem must be
-    solved structurally, not by increasing an HTTP timeout). Does not
-    touch `_execute_codex_with_sandbox`'s own timeout/process-group-kill
-    handling (d8f9836/70844c3/8d529d5) at all -- that remains the single
-    execution watchdog/process-group authority; this only adds
-    persistence and a bounded wait before returning early. The worker
-    keeps running under that same watchdog either way.
-
-    Authority is resolved once, synchronously, before anything durable
-    is created -- a denied request creates no EstateExecution row, same
-    as the prior synchronous `execute_codex_write` returning an
-    authority-denied result without ever starting a process.
-
-    Admission control (P12.5, 2026-09-01 incident): a repeated dispatch
-    against a lease that already has a non-terminal execution reuses
-    that execution's id rather than spawning a second worker. This is
-    the bounded-concurrency/no-conflicting-simultaneous-execution/
-    reuse-in-progress-submissions invariant, implemented directly on
-    EstateExecution + ParkLease's existing single-active-lease
-    guarantee -- no new semaphore, queue or scheduler.
-    """
-    authority = _codex_write_authority(repo_id, host_id)
-    if not authority["ok"]:
-        return {
-            "ok": False, "provider": "codex-write",
-            "authority_denied": True, "error": authority["error"],
-        }
-
-    in_flight = _in_flight_execution_for_lease(authority["lease_id"])
-    if in_flight is not None:
-        return {
-            "ok": True, "provider": "codex-write",
-            "execution_id": in_flight["execution_id"],
-            "lifecycle_state": in_flight["lifecycle_state"],
-            "reused_existing_execution": True,
-        }
-
-    lease = active_lease_for_repo(repo_id, host_id) or {}
-    try:
-        execution_id = _create_estate_execution(
-            decision_id=decision_id, objective=objective, executor="codex-write",
-            provider="codex", host_id=host_id, repo_id=repo_id,
-            lease_id=authority["lease_id"], worktree_path=authority["cwd"],
-            branch=lease.get("branch"),
-        )
-    except _ConcurrentExecutionExists:
-        # Lost the race to a truly concurrent caller between the read
-        # above and this insert -- reuse whichever execution actually
-        # won, same contract as the in_flight branch above.
-        winner = _in_flight_execution_for_lease(authority["lease_id"])
-        if winner is not None:
-            return {
-                "ok": True, "provider": "codex-write",
-                "execution_id": winner["execution_id"],
-                "lifecycle_state": winner["lifecycle_state"],
-                "reused_existing_execution": True,
-            }
-        # Vanishingly unlikely (winner already reconciled to terminal
-        # between the constraint violation and this re-read) -- fail
-        # closed rather than silently spawning a worker with no
-        # admission check having actually passed.
-        return {
-            "ok": False, "provider": "codex-write",
-            "error": f"admission control conflict for lease {authority['lease_id']!r} "
-                     "could not be resolved to a reusable execution",
-        }
-
-    import threading
-    from core.database import utcnow_naive
-
-    outcome: dict = {}
-
-    def _on_started(process_group_id: int) -> None:
-        _update_estate_execution(
-            execution_id, lifecycle_state="running",
-            worker_pid=process_group_id, process_group_id=process_group_id,
-            started_at=utcnow_naive(),
-        )
-
-    def _run() -> None:
-        result = _execute_codex_with_sandbox(
-            objective, sandbox="workspace-write", provider="codex-write",
-            timeout=timeout, cwd=authority["cwd"], on_started=_on_started,
-        )
-        outcome["result"] = result
-        if result.get("ok"):
-            final_state = "succeeded"
-        elif "timed out" in (result.get("error") or ""):
-            final_state = "timed_out"
-        else:
-            final_state = "failed"
-        _update_estate_execution(
-            execution_id, lifecycle_state=final_state,
-            finished_at=utcnow_naive(), result_json=json.dumps(result),
-            error=None if result.get("ok") else result.get("error"),
-            exit_status="0" if result.get("ok") else "1",
-        )
-        if decision_id:
-            gate = "pass" if result.get("ok") and (result.get("output") or "").strip() else "fail"
-            _update_decision_outcome(
-                decision_id, status="complete" if gate == "pass" else "failed",
-                deterministic_gate=gate, latency_ms=result.get("latency_ms"),
-                escalation_reason="insufficient_capability" if gate == "pass" else "worker_failed",
-                executor="codex-write", escalated=True, actual_route="codex-write",
-                verification_outcome=gate,
-            )
-
-    thread = threading.Thread(target=_run, name=f"codex-write-{execution_id}", daemon=True)
-    thread.start()
-    thread.join(wait_timeout)
-
-    if thread.is_alive():
-        # on_started may already have flipped the row to "running" by
-        # now (it fires right after Popen, before wait_timeout would
-        # typically elapse) -- report the row's actual current state
-        # rather than assuming "accepted", so a caller that polls
-        # immediately after this response sees a consistent state.
-        current = get_estate_execution(execution_id)
-        return {
-            "ok": True, "provider": "codex-write", "execution_id": execution_id,
-            "lifecycle_state": current["lifecycle_state"] if current else "accepted",
-        }
-    result = outcome.get("result", {})
-    return {**result, "execution_id": execution_id}
-
-
-def finalize_execution(*, execution_id: str, repo_id: str, host_id: str,
-                        commit_message: str) -> dict:
-    """Commit and push the changes made by a completed durable execution.
-
-    Reuses `_codex_write_authority` (never raw `resolve_repo_path`) so
-    the same worktree-verification/live-checkout-refusal invariant that
-    governs execution also governs finalisation -- the incident this
-    repairs was specifically a write landing in the live checkout, so
-    finalisation gets no separate, weaker cwd resolution. Re-verifies
-    authority, lease id, branch and worktree path immediately before
-    finalising rather than trusting the execution record's stored
-    values, so a lease released or reassigned between execution and
-    finalisation fails closed here rather than committing against a
-    stale or now-wrong path. Stages every dirty path individually
-    (never `git add -A`) so finalisation is traceable path-by-path; the
-    worktree's own dirty set is this execution's authorised scope by
-    construction of ParkLease's single-active-lease-per-repo invariant
-    (`ix_park_leases_active_repo_unique`) -- no other task can be
-    concurrently dirtying the same worktree.
-    """
-    from core.database import SessionLocal, EstateExecution, utcnow_naive
-    db = SessionLocal()
-    try:
-        execution = db.query(EstateExecution).filter(EstateExecution.id == execution_id).one_or_none()
-    finally:
-        db.close()
-    if execution is None:
-        return {"finalized": False, "reason": f"no execution found with id {execution_id!r}"}
-    if execution.lifecycle_state != "succeeded":
-        return {
-            "finalized": False,
-            "reason": f"execution is {execution.lifecycle_state!r}, not succeeded -- refusing to finalise",
-        }
-
-    authority = _codex_write_authority(repo_id, host_id)
-    if not authority["ok"]:
-        return {"finalized": False, "reason": f"authority re-verification failed: {authority['error']}"}
-    if authority["lease_id"] != execution.lease_id:
-        return {
-            "finalized": False,
-            "reason": f"lease drift: execution ran under {execution.lease_id!r}, "
-                      f"current active lease is {authority['lease_id']!r}",
-        }
-    if authority["cwd"] != execution.worktree_path:
-        return {
-            "finalized": False,
-            "reason": f"worktree drift: execution ran in {execution.worktree_path!r}, "
-                      f"current verified worktree is {authority['cwd']!r}",
-        }
-
-    repo_path = authority["cwd"]
-    import subprocess
-
-    def _run_git(argv):
-        return subprocess.run(["git"] + argv, cwd=repo_path, capture_output=True, text=True, timeout=60)
-
-    branch_proc = _run_git(["branch", "--show-current"])
-    actual_branch = branch_proc.stdout.strip()
-    if actual_branch != execution.branch:
-        return {
-            "finalized": False,
-            "reason": f"branch drift: execution ran on {execution.branch!r}, worktree is now on {actual_branch!r}",
-        }
-
-    status_proc = _run_git(["status", "--porcelain"])
-    dirty_paths = [line[3:] for line in status_proc.stdout.splitlines() if line.strip()]
-    if not dirty_paths:
-        return {"finalized": False, "reason": "no changes to finalize"}
-
-    add_proc = _run_git(["add", "--"] + dirty_paths)
-    if add_proc.returncode != 0:
-        return {"finalized": False, "reason": f"git add failed: {add_proc.stderr.strip()}"}
-
-    commit_proc = _run_git(["commit", "-m", commit_message])
-    if commit_proc.returncode != 0:
-        return {"finalized": False, "reason": f"git commit failed: {commit_proc.stderr.strip()}"}
-
-    commit_sha = _run_git(["rev-parse", "HEAD"]).stdout.strip()
-    push_proc = _run_git(["push", "origin", actual_branch])
-    finalization = {
-        "finalized": push_proc.returncode == 0,
-        "committed": True,
-        "pushed": push_proc.returncode == 0,
-        "commit_sha": commit_sha,
-        "branch": actual_branch,
-        "dirty_paths": dirty_paths,
-        "lease_id": authority["lease_id"],
-    }
-    if push_proc.returncode != 0:
-        finalization["push_error"] = push_proc.stderr.strip()
-
-    _update_estate_execution(execution_id, finalization_json=json.dumps(finalization))
-    return finalization
+    """Stage 6 (gate round 7 finding 1): the legacy in-process durable lane
+    is closed -- it validated the lease outside any serialized transaction
+    and ran workspace-write in-process with no run decision or tracked unit.
+    Every call is delegated to the Stage 6 worker lane, which re-validates
+    the exact lease inside `lease_serialized_transaction`. Deleted in Stage 9."""
+    return execute_write_via_worker(objective, repo_id=repo_id, host_id=host_id, decision_id=decision_id,
+                                    wait_timeout=wait_timeout, timeout=timeout)
 
 
 # Provider dispatch table (Workstream C: "cheap/strong paid capability
@@ -1492,7 +1271,8 @@ def finalize_execution(*, execution_id: str, repo_id: str, host_id: str,
 # same way they already monkeypatch `execute_local`; binding the object
 # here at import time would silently stop honouring that patch.
 _PAID_PROVIDER_FUNCTION_NAMES = {"codex": "execute_codex"}
-_PAID_PROVIDER_WRITE_FUNCTION_NAMES = {"codex": "execute_codex_write_durable"}
+# Stage 6: the write lane dispatches through the worker on route.host.
+_PAID_PROVIDER_WRITE_FUNCTION_NAMES = {"codex": "execute_write_via_worker"}
 
 
 def _resolve_paid_provider(alias: Optional[str]) -> dict:
@@ -1514,6 +1294,96 @@ def _resolve_paid_provider(alias: Optional[str]) -> dict:
         "provider": provider_name,
         "concrete_model_label": provider_entry.get("concrete_model_label", provider_name),
     }
+
+
+def _dispatch_read_only(host_id: str, executor: str, task: dict, *, concrete_model: Optional[str] = None,
+                        timeout: Optional[float] = None) -> dict:
+    """Dispatch one read-only execution (`local` inference or advisory
+    `codex`) to the worker on `host_id`, replacing the historical
+    in-process `execute_local`/`execute_codex` calls from `run_task`
+    (Stage 3, D1/D2: host selection was metadata because nothing between
+    selection and execution actually read `route.host`). Every call —
+    even one routed to this same host — crosses `estate_worker_client`, so
+    `placement.attested` in the result is always backed by a real
+    attestation, not an assumption that "local" means "here".
+
+    Never raises: a transport, protocol or attestation failure comes back
+    as `{"ok": False, "error": ..., "error_code": ...}` with `placement`
+    still populated (`attested: False`), matching every other truthful-
+    failure shape in this module. There is no retry on another host and
+    no in-process fallback — the whole point of this seam is that a
+    worker failure is reported as a worker failure, not silently absorbed
+    by executing here instead.
+
+    `placement.observed_host` (pre-Stage-6 review finding) carries the
+    attested host id a `placement_mismatch` failure actually observed,
+    when one was observed, distinct from `placement.executed_host` (which
+    a mismatch always leaves `None` -- an observed-but-wrong host must
+    never be treated as having executed anything)."""
+    from src.estate_worker_client import WorkerTransportError, call_worker
+
+    objective = task.get("objective")
+    placement = {
+        "routed_host": host_id, "executed_host": None, "attested": False, "transport": None,
+        "observed_host": None,
+    }
+    try:
+        host_cfg = _load_yaml("estate")
+        host_entry = next((h for h in host_cfg.get("hosts", []) if h.get("id") == host_id), None)
+        placement["transport"] = (host_entry.get("worker") or {}).get("transport") if host_entry else None
+    except RoutingConfigError:
+        pass
+
+    if executor == "local":
+        payload = {
+            "kind": "local-inference",
+            "model": concrete_model,
+            "objective": objective,
+            "timeout_s": float(timeout or 60.0),
+        }
+    elif executor == "codex":
+        payload = {
+            "kind": "codex-readonly",
+            "objective": objective if isinstance(objective, str) else str(objective),
+            "timeout_s": float(timeout or 180.0),
+        }
+        repo_id = task.get("repo")
+        if repo_id:
+            payload["repo_id"] = repo_id
+    else:
+        return {
+            "ok": False, "error": f"_dispatch_read_only does not support executor {executor!r}",
+            "error_code": "bad_request", "placement": placement,
+        }
+
+    try:
+        response = call_worker(host_id, "execute", payload, deadline_s=payload["timeout_s"] + 15)
+    except WorkerTransportError as exc:
+        placement["observed_host"] = exc.observed_host_id
+        return {"ok": False, "error": str(exc), "error_code": exc.code, "placement": placement}
+
+    result = dict(response["result"])
+    attested_host = response["attestation"]["host_id"]
+    placement["executed_host"] = attested_host
+    placement["attested"] = attested_host == host_id
+    result["placement"] = placement
+    return result
+
+
+def _dispatch_failure_actual_route(result: dict) -> Optional[str]:
+    """`actual_route` telemetry for a failed `_dispatch_read_only()`
+    result (pre-Stage-6 review finding). A placement mismatch — the
+    worker attested as a different (or differently-fingerprinted) host
+    than routed — carries that observed host id, so telemetry can
+    distinguish "no worker answered at all" from "the wrong worker
+    answered"; every other dispatch failure leaves this `None`, same as
+    before this function existed."""
+    if result.get("error_code") != "placement_mismatch":
+        return None
+    observed_host = (result.get("placement") or {}).get("observed_host")
+    if not observed_host:
+        return None
+    return f"placement_mismatch:{observed_host}"
 
 
 def run_task(task: dict) -> dict:
@@ -1584,33 +1454,42 @@ def run_task(task: dict) -> dict:
                 )}
             objective = task.get("objective")
             paid_objective = objective if isinstance(objective, str) else str(objective)
-            # Ground the paid worker in the task's actual repo if one was
-            # named (docs/aoteru-final-convergence-activation.agent-
-            # task.md item 4: "a task that cannot read its repo is a
-            # failed qualification, even if the CLI process exits zero").
-            # Without this, execute_codex() defaults to an empty scratch
-            # dir regardless of what repo the task is about — confirmed
-            # live: a real repo_reconnaissance task previously reported
-            # 'No src/ directory found' because it was never pointed at
-            # the repo at all. resolve_repo_path() returns None (no cwd
-            # override) for an unknown/unresolved repo id rather than
-            # guessing a path.
-            repo_cwd = resolve_repo_path(task.get("repo")) if task.get("repo") else None
             executor_name = provider_name
+            paid_host = route["route"].get("host")
+            paid_entry = next((h for h in (route.get("hosts_checked") or []) if h.get("host_id") == paid_host), None) or {}
+            if not implementation_mode and "codex" not in (paid_entry.get("qualified_executors") or []):
+                # Stage 5 rule, enforced for the paid lane too (Stage 7
+                # finding 2): never dispatch an executor not qualified on
+                # route.host.
+                _update_decision_outcome(
+                    route["decision_id"], status="blocked", deterministic_gate="fail",
+                    escalation_reason="worker_failed", verification_outcome="fail",
+                )
+                return {**route, "ok": False, "executed": False,
+                        "execution_error": f"executor 'codex' not qualified on {paid_host!r}",
+                        "escalation_reason": "worker_failed"}
             if implementation_mode:
                 executor_name = f"{provider_name}-write"
                 error = None
                 repo_id = task.get("repo")
-                host_id = current_host_id()
+                # Stage 6: the write executes on route.host through its
+                # worker. The lease holder must BE route.host (D4 restated),
+                # and codex-write must be qualified there -- never a
+                # fallback to this backend host.
+                host_id = route["route"].get("host")
+                host_entry = next((h for h in (route.get("hosts_checked") or [])
+                                   if h.get("host_id") == host_id), None) or {}
                 if not repo_id:
                     error = "implementation mode requires task.repo and an existing active write lease"
                 elif host_id is None:
-                    error = "implementation mode requires this backend host to be registered in config/estate.yaml"
-                elif route["route"].get("host") != host_id:
-                    error = (
-                        f"implementation route selected {route['route'].get('host')!r}, but the "
-                        f"write executor runs on lease holder {host_id!r}"
-                    )
+                    error = "implementation route has no host"
+                elif "codex-write" not in (host_entry.get("qualified_executors") or []):
+                    error = f"executor 'codex-write' not qualified on {host_id!r}"
+                else:
+                    from src.estate_write_lane import _lease_authority
+                    authority = _lease_authority(repo_id, host_id)
+                    if not authority["ok"]:
+                        error = authority["error"]
                 if error:
                     _update_decision_outcome(
                         route["decision_id"], status="blocked", deterministic_gate="fail",
@@ -1637,6 +1516,20 @@ def run_task(task: dict) -> dict:
                         "escalation_reason": "write_lease_missing",
                         "verification_outcome": "fail",
                     }
+                if result.get("ok") is False and result.get("error_code"):
+                    # Admission refusal under the S6.1 table (unresolved /
+                    # unfinalized / lost execution, dirty worktree):
+                    # truthful, with the blocking execution and next action.
+                    _update_decision_outcome(
+                        route["decision_id"], status="blocked", deterministic_gate="fail",
+                        escalation_reason="write_lease_missing", escalated=True,
+                        verification_outcome="fail",
+                    )
+                    return {
+                        **route, "ok": False, "executed": False,
+                        "execution_error": result.get("error"), "execution": result,
+                        "escalation_reason": "write_lease_missing", "verification_outcome": "fail",
+                    }
                 if result.get("lifecycle_state") in ("accepted", "running"):
                     # Durable execution still in flight past
                     # execute_codex_write_durable's bounded wait -- the
@@ -1654,11 +1547,47 @@ def run_task(task: dict) -> dict:
                     return {
                         **route, "ok": True, "executed": True, "execution": result,
                         "execution_id": result["execution_id"],
+                        "dispatch": result.get("dispatch"), "next_action": result.get("next_action"),
                         "deterministic_gate": "pending", "verification_outcome": "pending",
                         "escalation_reason": None, "reason": reason,
                     }
             else:
-                result = provider_fn(paid_objective, cwd=repo_cwd)
+                # Dispatched to the worker on route['route']['host'] rather
+                # than called in-process (Stage 3, D2): the worker resolves
+                # `task['repo']` to a real path on *its own* host (see
+                # `_verb_execute` -> `resolve_repo_path`), which is what
+                # actually grounds a repo-aware task now that host
+                # selection can name a host other than this backend.
+                result = _dispatch_read_only(route["route"]["host"], "codex", task, timeout=180.0)
+                if (result.get("placement") or {}).get("executed_host") is None:
+                    # Same truthful-failure requirement as the local
+                    # branch below: a transport/protocol/pre-execution
+                    # worker failure with no attested execution host must
+                    # never be reported as executed (Stage 3 review
+                    # finding). The implementation-mode (codex-write)
+                    # branch above has its own terminal/durable result
+                    # shapes and is not affected by this guard. This is a
+                    # post-route dispatch failure, not a pre-execution
+                    # admission/authority refusal, so the recorded status
+                    # is `failed` (routing succeeded; dispatch did not),
+                    # matching the write-lease/qualification checks
+                    # elsewhere in this function that correctly stay
+                    # `blocked` because they never reach dispatch at all.
+                    actual_route = _dispatch_failure_actual_route(result)
+                    _update_decision_outcome(
+                        route["decision_id"], status="failed", deterministic_gate="fail",
+                        escalation_reason="worker_failed", verification_outcome="fail",
+                        actual_route=actual_route,
+                    )
+                    return {
+                        **route, "ok": False, "executed": False,
+                        "execution": result,
+                        "execution_error": result.get("error"),
+                        "deterministic_gate": "fail",
+                        "escalation_reason": "worker_failed",
+                        "verification_outcome": "fail",
+                        "placement": result.get("placement"),
+                    }
             gate = "pass" if result.get("ok") and (result.get("output") or "").strip() else "fail"
             if not implementation_mode:
                 _update_decision_outcome(
@@ -1671,6 +1600,7 @@ def run_task(task: dict) -> dict:
                     escalated=True,
                     actual_route=executor_name,
                     verification_outcome=gate,
+                    executed_host_id=(result.get("placement") or {}).get("executed_host"),
                 )
             # implementation_mode, terminal within execute_codex_write_durable's
             # wait_timeout: the decision outcome was already recorded by
@@ -1693,6 +1623,7 @@ def run_task(task: dict) -> dict:
                 "execution_id": result.get("execution_id"),
                 "deterministic_gate": gate, "verification_outcome": gate,
                 "escalation_reason": "insufficient_capability" if gate == "pass" else "worker_failed",
+                "placement": result.get("placement"),
             }
         return {**route, "executed": False}
 
@@ -1701,7 +1632,51 @@ def run_task(task: dict) -> dict:
     if not objective:
         return {**route, "executed": False, "execution_error": "no objective provided to execute"}
 
-    result = execute_local(concrete_model, objective)
+    host_entry = next(
+        (h for h in (route.get("hosts_checked") or []) if h.get("host_id") == route["route"]["host"]), None,
+    )
+    if "local" not in ((host_entry or {}).get("qualified_executors") or []):
+        # Defence in depth: _select_host already only returns "local" for a
+        # host with "local" in its qualified_executors, so this only fires
+        # if config changed between resolve_route() and here, or a caller
+        # reached this point through some other path.
+        _update_decision_outcome(
+            route["decision_id"], status="blocked", deterministic_gate="fail",
+            escalation_reason="worker_failed", verification_outcome="fail",
+        )
+        return {
+            **route, "ok": False, "executed": False,
+            "execution_error": f"executor 'local' not qualified on {route['route']['host']!r}",
+            "escalation_reason": "worker_failed",
+        }
+
+    result = _dispatch_read_only(route["route"]["host"], "local", task, concrete_model=concrete_model, timeout=60.0)
+    attested_host = (result.get("placement") or {}).get("executed_host")
+    if attested_host is None:
+        # Transport/protocol/pre-execution worker failure: no host ever
+        # attested it actually ran this task, so `executed` must be
+        # false, not a hollow true covering for a dispatch that never
+        # happened (Stage 3 review finding). Routing itself succeeded --
+        # this is a post-route dispatch failure -- so the recorded
+        # status is `failed`, not `blocked` (which stays reserved for
+        # pre-execution admission/authority refusals that never reach
+        # dispatch, e.g. the qualified_executors check above).
+        actual_route = _dispatch_failure_actual_route(result)
+        _update_decision_outcome(
+            route["decision_id"], status="failed", deterministic_gate="fail",
+            escalation_reason="worker_failed", verification_outcome="fail",
+            actual_route=actual_route,
+        )
+        return {
+            **route, "ok": False, "executed": False,
+            "execution": result,
+            "execution_error": result.get("error"),
+            "deterministic_gate": "fail",
+            "escalation_reason": "worker_failed",
+            "verification_outcome": "fail",
+            "placement": result.get("placement"),
+        }
+
     gate = "pass" if result.get("ok") and (result.get("output") or "").strip() else "fail"
     _update_decision_outcome(
         route["decision_id"],
@@ -1711,9 +1686,23 @@ def run_task(task: dict) -> dict:
         escalation_reason=None if gate == "pass" else "worker_failed",
         actual_route="local",
         verification_outcome=gate,
+        executed_host_id=attested_host,
     )
     return {
         **route, "executed": True, "execution": result,
         "deterministic_gate": gate, "verification_outcome": gate,
         "escalation_reason": None if gate == "pass" else "worker_failed",
+        "placement": result.get("placement"),
     }
+
+
+# Stage 6 control-plane write lane (plan §6.0). Imported last: the module
+# reads this one's helpers at call time.
+from src.estate_write_lane import (  # noqa: E402
+    execute_write_via_worker,
+    finalize_execution,
+    get_estate_execution,
+    push_finalized_execution,
+    reconcile_stale_estate_executions,
+    recover_execution_lease,
+)
