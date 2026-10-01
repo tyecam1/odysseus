@@ -1,4 +1,4 @@
-﻿# Misumi long-horizon programme â€” operating evidence
+# Misumi long-horizon programme â€” operating evidence
 
 Prompt: `misumi-long-horizon-programme@v1` (register: `config/initialising-prompts.yaml`).
 Application: `2026-10-01-misumi-long-horizon-programme-01` (Sonnet orchestrator, laptop session).
@@ -58,5 +58,21 @@ Operator rules attached to the change:
 3. Unexplained "dangerous" â€” creating a scratch clone of `tyecam1/misumi` and replacing its `interface-box/` directory to build the recovery branch for the deployed interface-box snapshot; left for the operator. The secret-scanned snapshot (70 files) is retained in the session scratch area.
 4. "Remote Shell Writes" â€” sparse-checkout configuration and restore inside the new home clone (above).
 
-(Remaining sections are appended as stages complete: PR #44 merge record, Stage 8 home qualification, Phase 2 transcript runtime, retrospective Sol review.)
+### Phase 2 — durable transcript runtime (merged, disabled by default)
+- **PR #46** merged to `dev` as `c81b06cc`: `misumi_transcript_events` (UNIQUE(owner, domain, event_id), NOT NULL owner) and a per-owner retention policy; `/misumi/transcript/*` (audio ingest with ack only after commit, text ingest, wake attach after persistence, bounded query/export, policy, importer for the interface box's day files); home-only audio locality; feature flag `ODYSSEUS_MISUMI_TRANSCRIPT_ENABLED` and per-owner archive policy both default **off**; an explicit `history_mode` on `/misumi/respond` that decouples session history from semantic retention while keeping the legacy coupling when it is omitted; `scripts/misumi_transcript_import.py`; `docs/misumi-durable-transcript-runtime.md`. 28 new tests, mutation-checked. Full suite 5684 passed / 0 failed / 19 pre-existing `source_events` errors.
+- Home deployment of the transcript runtime, the box-side forwarder (stage B) and the interface changes are **not** done; nothing is deployed.
 
+### Retrospective Sol review #1 (non-blocking, run after PR #44 and PR #46)
+- Route: `/home/agent/.local/bin/codex exec -m gpt-6-sol --sandbox read-only` on the lab (codex-cli 0.155.1), fresh context, read-only. A first attempt with the older client `/home/agent/.local/codex-cli/node_modules/.bin/codex` (0.149.0) was refused by the service ("model not supported when using Codex with a ChatGPT account"); the newer client is the one the multihost log used. No weaker model was substituted.
+- Verdicts: **Part A (PR #44) ACCEPT_WITH_FINDINGS** (no material counterexample on home eligibility, remote fallback, `route.host`, lease ambiguity or the explain-test fix); **Part B (transcript runtime) REJECT** on one critical finding, with no counterexample on commit-before-ack, unique-key arbitration, owner filtering, scope guards or legacy behaviour.
+- Findings and disposition:
+  1. *Critical* — consultation capsules/handoffs were gated on conversation history rather than `retention_mode`, so history on + semantic retention off still wrote memory. **Verified and repaired (PR #47).**
+  2. *Major* — an `endpoint:<id>` STT provider would send household audio elsewhere while the row claimed the home host. **Repaired**: only the local provider is accepted, before any audio is read.
+  3. *Major* — the local transcriber's `delete=False` temp file survived a crash. **Repaired**: dedicated directory, stale files purged at start-up and before each transcription.
+  4. *Major* — retention was enforced only on ingest and one purge removed at most 200 rows. **Repaired**: enforced on read, bounded multi-batch drain, `POST /misumi/transcript/purge`.
+  5. *Major* — no PostgreSQL migration for the Stage 6 columns (PR #44 code; SQLite only). **Not repaired here**: latent (every deployment is SQLite) and no PostgreSQL available to test; tracked as `2026-10-01-postgres-estate-migration`.
+  6. *Minor* — credential filter missed ordinary phrasing. **Repaired** (documented as not a guarantee).
+- **PR #47** merged as `65550dc1`: 19 new regression tests (including real consultation scenarios); full suite 5703 passed / 0 failed / 19 pre-existing errors; CI pytest 5685 passed / 0 failed / same 19; `gitleaks` still reports only the 69 pre-existing findings from two old commits (`ddb5ec37`, `f88ec808`) on every PR.
+- A second retrospective pass over PR #47 and the Stage 8 evidence is still owed.
+
+(Remaining sections are appended as stages complete: Stage 8 home qualification, lab deployment, interface/ambient work, retrospective Sol review #2.)
