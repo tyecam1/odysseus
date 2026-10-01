@@ -5,6 +5,9 @@
 # memory, and tool selection are core paths, so they ship by default now.
 
 # Local speech-to-text (microphone -> text) via faster-whisper, for the
+# faster-whisper 1.2.x passes an argument (metadata_errors) that PyAV 19 removed; transcription then fails
+# with a TypeError even though the model loads. Verified 2026-10-01: av 18.1.0 works (base.en, CPU, ~0.75s/clip).
+av<19
 # "local" STT provider. Runs on CPU out of the box (CTranslate2 backend, no
 # torch needed). Install if you want to dictate/transcribe with the mic
 # without sending audio to an external endpoint.
