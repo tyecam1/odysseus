@@ -1,0 +1,100 @@
+schema_version: 1
+application_id: 2026-09-30-j1-long-horizon-method-loop-02
+prompt_id: j1-long-horizon-method-loop
+prompt_version: 7
+repository: tyecam1/obsidian-PhD
+branch: sonnet/j1-long-horizon-20260929
+# Start and end times are approximate clock artefacts of the session.
+session_started_at: "2026-09-30T08:50:00+01:00"
+session_ended_at: "2026-10-01T04:10:00+01:00"
+start_commit: 575c5e21c18c9de1e2c5751bd5e706f5f9a37c31
+end_commit: 4bb13ee7b8236117fc83b41e3e4de9d09d858cf7
+outcome_status: partial
+stop_reason: >-
+  Governed initialisation, author rulings R1-R7 recorded (transcribed in the
+  vault, issue #479), and the one authorised bounded independent intervention
+  sample registered, amended twice before results (Sol pkt 30 critique; full-text
+  design; headline-claim reading), retrieved (7,037 raw to 5,034 records), screened by three
+  lanes with a second-lane audit, acquired by lawful open routes (195 full texts
+  of 900 attempted), extracted (49 rows, 3,929 quotes verified deterministically)
+  and blind-classified (17 eligible). Interim result: the Morandini observation
+  is not isolated (one independent confirmed match, adjudication owed), recurrence
+  across two resolved independent lineages is not established, most issues are
+  unmeasured-benefit headline claims, and four adaptive controllers with isolating
+  contrasts are retained as counter-evidence. The sample is not at a registered
+  stopping point (49 of an 80-study cap; no unchanged-block test). Stopped because
+  every model lane was exhausted at once: GLM usage expired (operator), the Codex
+  pool is exhausted until 2026-10-04 15:02, and the Claude session limit hit
+  mid-run (resets about 02:20 London); remaining work (12 unclassified rows, 148
+  unextracted texts, Sol adjudication, closest-prior check, snowball coverage
+  check) is dependency-ready but needs a lane. No gate passed, no architecture
+  selected, no novelty declared, no canonical file or manuscript touched.
+commits:
+  - 5fe10e7b4
+  - 3dda7a4ba
+  - f20457eed
+  - 5fd5f58f1
+  - b6c3a8d82
+  - 415d92dba
+  - 972fe9f81
+  - 7a1922bae
+  - 9dcd65775
+  - 72f15a50d
+  - 9de230573
+  - d556b0d10
+  - 4bb13ee7b
+models_routes:
+  - "Sonnet coordinator (Claude Code, claude-sonnet-5-5 as stated by the session)"
+  - "Sol: requested gpt-6.1-sol, codex exec read-only via the Codex desktop app's bundled client (0.159.2 per the transcript header); CLI-reported model gpt-6.1-sol; pkt 30 registration critique, the screening audit and second-lane re-screen of 1,190 exclusions, 14 screening batches; request and client observation only, not an authenticated backend attestation; the repo policy now pins gpt-6.1-sol (operator amendment 2026-09-30 08:34)"
+  - "GLM-Flash (claude-glm-flash launcher): 84 title/abstract batches; observed modelUsage glm-5.3-flash[1m]; usage expired mid-run"
+  - "Claude Haiku via the Agent tool, requested claude-haiku-4-5-20251001 (the API error echoed that model id): 156 screening batches, validated by script; identity otherwise not authenticated"
+  - "Claude Sonnet via the Agent tool, requested sonnet: 39 extractions, 49 blind classifications; identity not authenticated; session limit stopped a further block"
+  - "native Opus not used (no new load-bearing synthesis arose from changed evidence)"
+verification:
+  - "deterministic: frozen query script; raw cell exports kept; dedupe log; Table-2 exclusion by DOI/arXiv/title; every extracted quote checked as a normalised substring of the staged text (3,929 quotes, 25 failed, 0.6 percent); id-order and code validation of every screening and classification output; OpenAlex author-id overlap against the 23 Table-2 studies (95 author ids) for the 17 eligible studies"
+  - "Sol pkt 30 (fresh-context critique of the prospective registration): 17 BLOCKING defects, all checked against the registration and contract and accepted before any query; section 6.5 audit: 346 exclusions re-coded blind by a different lane, 26 percent would include, above the 5 percent trigger, so all remaining exclusions were re-screened and the union kept"
+  - "coordinator audit of the first classification found the BEYOND-DESIGN pattern (12 of 12 studies) was an artefact of over-inclusive claim harvesting and a rubric that did not separate design or outlook sentences from attribution claims; recorded as amendment A3 with both readings; every headline code under the restricted reading was confirmed by the coordinator against the sentence and the conditions actually run, and two disputed cases were checked at source"
+  - "own tallies re-derived from the data before the interim record stood: wrong quote, family and contrast counts written from memory were corrected"
+  - "access: no challenge page was solved or bypassed; 403 and bot-check hosts were stopped; the Bash hook blocked a recursive force delete and later a script that only contained that phrase as text; neither was bypassed (files were moved aside; the script text was reworded and written with the file tool)"
+failure_tags:
+      - model_lane_quota_exhausted_mid_run
+      - high_concurrency_triggered_rate_limit_failures
+      - duplicate_background_driver_started
+      - operator_instruction_misread_stop_driver
+      - layout_mode_text_broke_quote_verification
+      - over_inclusive_claim_harvest_inflated_pattern
+      - unverified_figures_written_from_memory_then_corrected
+      - shell_cd_drift_repeated
+      - bash_hook_blocked_recursive_force_delete_not_bypassed
+rating:
+  scale: 1-5
+  goal_progress: 3
+  correctness_verification: 3
+  authority_scope_discipline: 4
+  routing_resource_efficiency: 2
+  continuity_handoff_quality: 4
+  agent_overall: 3.2
+  operator_overall: null
+  operator_note: null
+prompt_revision_recommended: true
+revision_reason: >-
+  Four evidence-backed defects demonstrated this session. (1) Long unattended
+  bulk runs were launched on model lanes without probing headroom: GLM at 16
+  workers produced 429 failures, 14 parallel Claude agents hit the session limit
+  and died mid-batch, Codex ran out silently (the runner discarded stderr so an
+  empty stdout looked like a parse failure), and a second driver was started on
+  the same work; the operator also had to correct a misreading (an instruction
+  to continue the work with other lanes was acted on as stopping the running
+  driver). A bulk run should start with a one-call quota smoke, cap concurrency
+  to what the lane sustains, capture stderr, never start a second driver on the
+  same queue, and stop a lane at its first quota error. (2) A text-extraction
+  mode that interleaved two-column text failed 25 of 61 quotes on the first
+  paper; it was caught only because quote verification ran on a pilot before
+  scale. A pilot of the extraction mode and the claim unit should precede bulk
+  extraction. (3) The first summary count (every eligible study carrying a
+  pattern) was an artefact of an over-inclusive claim unit; a result that fits
+  the hypothesis everywhere is a prompt to audit the unit, not a finding, and the
+  claim unit must be registered so design and outlook sentences cannot be coded
+  as attribution. (4) Tallies written into a record from memory were wrong and
+  were corrected only on re-derivation; every figure should be recomputed from
+  the data immediately before it is written.
