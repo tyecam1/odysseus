@@ -1,0 +1,186 @@
+schema_version: 2
+authority: tyecam1/odysseus
+contract: docs/initialising-prompt-register.md
+prompt_root: docs/initialising-prompts
+application_trace_root: evals/prompt-applications
+evolution_graph_root: evals/prompt-evolution
+exemplar_root: evals/prompt-exemplars
+
+rules:
+  versioning: immutable
+  application_traces: append-only
+  evolution_events: append-only
+  operator_rating: explicit-only
+  evolve_after_every_application: true
+  auto_in_place_mutation: false
+  auto_authority_widening: false
+  cosmetic_version_churn: forbidden
+  repository_local_duplicate_registers: forbidden
+  active_head_policy: evidence-derived-child-after-guardrail-validation
+  opportunistic_exemplar_capture: true
+  exemplar_capture_domain_agnostic: true
+  exemplar_exact_prompt_required: true
+  exemplar_candidate_capture_requires_execution_evidence: false
+  exemplar_capture_grants_authority: false
+  exemplar_promotion_requires_evidence_or_explicit_operator_review: true
+
+prompts:
+  - prompt_id: j1-long-horizon-method-loop
+    title: J1 long-horizon method loop initializer
+    status: active
+    active_version: 8
+    version: 8
+    prompt_path: docs/initialising-prompts/j1-long-horizon-method-loop-v8.md
+    graph_path: evals/prompt-evolution/j1-long-horizon-method-loop.yaml
+    created_at: 2026-09-24
+    provenance:
+      source_repository: tyecam1/obsidian-PhD
+      source_branch: chatgpt/j1-method-contract-20260903
+      last_known_checkpoint: 4bb13ee7b8236117fc83b41e3e4de9d09d858cf7
+      note: >-
+        Active head evolved from v7 after the seventh rated application (v2 from v1
+        after the first; v3 from v2 after the second; v4 from v3 after the third; v5 from v4 after the fourth; v6 from v5 after the fifth; v7 from v6 after the sixth). Live
+        repository state remains authoritative over checkpoint hints in any prompt.
+    scope:
+      repositories:
+        - tyecam1/obsidian-PhD
+      projects:
+        - J1
+      task_classes:
+        - long-horizon-research-method-loop
+    application_trace_prefix: evals/prompt-applications/j1-long-horizon-method-loop/
+    evolution_trace_prefix: evals/prompt-evolution/
+    rating_required: true
+    versions:
+      - version: 1
+        status: superseded
+        prompt_path: docs/initialising-prompts/j1-long-horizon-method-loop-v1.md
+        derived_from: operator-authored-initial-registration
+        application_evidence:
+          - 2026-09-24-j1-long-horizon-method-loop-01
+      - version: 2
+        status: superseded
+        prompt_path: docs/initialising-prompts/j1-long-horizon-method-loop-v2.md
+        parent_version: 1
+        derived_from_applications:
+          - 2026-09-24-j1-long-horizon-method-loop-01
+        evolution_targets:
+          - make prompt identity self-describing so pasted copies resolve to the registry
+          - strengthen the explicit no-voluntary-checkpoint-stop gate
+          - require alternate public full-text route checks before declaring operator-gated access
+          - require live model-policy reconciliation before consequential dispatch
+          - require closeout trace plus next evolution event
+        application_evidence:
+          - 2026-09-29-j1-long-horizon-method-loop-01
+      - version: 3
+        status: superseded
+        prompt_path: docs/initialising-prompts/j1-long-horizon-method-loop-v3.md
+        parent_version: 2
+        derived_from_applications:
+          - 2026-09-29-j1-long-horizon-method-loop-01
+        evolution_targets:
+          - derive the frontier from the live controller mandate; embedded priority lists are hints to verify
+          - recompute counts and classification summaries from source rows before propagation and state the read tier
+          - label coordinator-derived readings as candidate in owner files until the owed adjudication
+          - stage Sol packets pointer-first with pre-extracted, deterministically verified rows
+          - scope tool or quota outages to the blocked acceptance mechanism and continue unaffected work
+      - version: 4
+        status: superseded
+        prompt_path: docs/initialising-prompts/j1-long-horizon-method-loop-v4.md
+        parent_version: 3
+        derived_from_applications:
+          - 2026-09-29-j1-long-horizon-method-loop-02
+        evolution_targets:
+          - re-read open-access anchor primaries at the source (text plus figure/table images) before propagating sample sizes, units, denominators or comparators; owner-row values are candidates
+          - classify each wider claim as documented or illustrative before an integrative tier; state evidence per criterion element and never write that an author-reserved criterion is satisfied
+          - register iteration and stopping rules in the method's own terms and label deviations before results
+          - try repository and journal-native open-archive copies after publisher hosts fail; never solve or bypass bot challenges
+          - use absolute paths or git -C instead of a persistent shell cd
+      - version: 5
+        status: superseded
+        prompt_path: docs/initialising-prompts/j1-long-horizon-method-loop-v5.md
+        parent_version: 4
+        derived_from_applications:
+          - 2026-09-29-j1-long-horizon-method-loop-03
+        evolution_targets:
+          - list every line range carrying a figure or quote the reviewer must verify, check that deterministically, and keep withheld material in a separate file
+          - when the operator supplies a URL behind a bot-verification page, load it once passively in the automation browser, record how the file was obtained, never solve a challenge
+      - version: 6
+        status: superseded
+        prompt_path: docs/initialising-prompts/j1-long-horizon-method-loop-v6.md
+        parent_version: 5
+        derived_from_applications:
+          - 2026-09-29-j1-long-horizon-method-loop-04
+        evolution_targets:
+          - when the operator names a Sol model newer than the policy pin, confirm it in the client catalogue, smoke-test the exact client, try the vendor's newer bundled client after a client-version refusal, record the deviation from the pin and leave governed policy files for an operator step
+          - treat a truncating browser extraction as a read tier; verify quotes by in-page string test, count whole-text terms for absence statements, inspect results figures as rendered images, and tell reviewers when evidence is transcribed
+      - version: 7
+        status: superseded
+        prompt_path: docs/initialising-prompts/j1-long-horizon-method-loop-v7.md
+        parent_version: 6
+        derived_from_applications:
+          - 2026-09-30-j1-long-horizon-method-loop-01
+        evolution_targets:
+          - after any correction, string-sweep every E5 owner and current-reliance surface for the superseded value and supersede stale adjudication-owed statuses
+          - before closing a multi-file correction, run a fresh-context Sol contradiction audit with the coordinator's findings withheld, and check its findings against the sources before applying
+          - route consultant-recommended new tests through a fresh-context Sol design critique before executing or recommending them; verify carried reference mappings by an independent route
+      - version: 8
+        status: active
+        prompt_path: docs/initialising-prompts/j1-long-horizon-method-loop-v8.md
+        parent_version: 7
+        derived_from_applications:
+          - 2026-09-30-j1-long-horizon-method-loop-02
+        evolution_targets:
+          - probe a model lane with a one-call smoke test before a long bulk run, cap concurrency, capture stderr, never start a second driver on a live queue, stop a lane at its first quota error, and read an operator redirection literally
+          - pilot the text-extraction mode and the claim unit before bulk extraction; treat a first summary count in which every unit fits the hypothesis as a prompt to audit the unit and report the registered and restricted readings together
+          - recompute every figure from the data immediately before writing it into a record
+    supersedes:
+      - 1
+      - 2
+      - 3
+      - 4
+      - 5
+      - 6
+      - 7
+    retirement_condition: >-
+      Retire only when an evidence-derived child passes the protected-invariant
+      gate or the J1 method loop ceases to exist.
+
+  - prompt_id: misumi-long-horizon-programme
+    title: Misumi long-horizon convergence programme initializer
+    status: active
+    active_version: 1
+    version: 1
+    prompt_path: docs/initialising-prompts/misumi-long-horizon-programme-v1.md
+    graph_path: evals/prompt-evolution/misumi-long-horizon-programme.yaml
+    created_at: 2026-10-01
+    provenance:
+      source_repository: tyecam1/odysseus
+      source_branch: chatgpt/misumi-long-horizon-20261001
+      note: >-
+        Registered from the 2026-10-01 live Misumi/Odysseus re-entry audit.
+        Live repository, runtime, queue and host state always outrank the
+        baseline task snapshots embedded in the programme contract.
+    scope:
+      repositories:
+        - tyecam1/odysseus
+        - tyecam1/misumi
+      projects:
+        - Misumi
+      task_classes:
+        - long-horizon-system-convergence
+        - multihost-runtime-convergence
+        - household-interface-convergence
+    application_trace_prefix: evals/prompt-applications/misumi-long-horizon-programme/
+    evolution_trace_prefix: evals/prompt-evolution/
+    rating_required: true
+    versions:
+      - version: 1
+        status: active
+        prompt_path: docs/initialising-prompts/misumi-long-horizon-programme-v1.md
+        derived_from: operator-directed-2026-10-01-audit-convergence
+    supersedes: []
+    retirement_condition: >-
+      Retire only when an evidence-derived child passes the protected-invariant
+      gate or the Misumi convergence programme reaches its governed completion
+      boundary.

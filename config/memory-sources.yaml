@@ -56,3 +56,16 @@ sensitivity_rules:
   # allowlist and the rule that governs it live next to each other.
   default: domain-scoped
   cross_domain_write: deny
+
+
+  - id: initialising-prompt-register
+    description: global operator-authored initialising prompts and application-rating pointers
+    domain: neutral
+    status: active
+    path: config/initialising-prompts.yaml
+    note: >-
+      Cross-repository control metadata owned by Odysseus. Memory/retrieval may
+      index prompt ids, versions, scopes, trace pointers and ratings for recall,
+      but must not inject a prompt automatically, treat ratings as authority, or
+      duplicate prompt bodies into domain memory. Exact prompt text remains at
+      the registry's immutable prompt_path.

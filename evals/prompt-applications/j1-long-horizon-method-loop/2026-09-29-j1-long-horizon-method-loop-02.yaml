@@ -1,0 +1,79 @@
+schema_version: 1
+application_id: 2026-09-29-j1-long-horizon-method-loop-02
+prompt_id: j1-long-horizon-method-loop
+prompt_version: 3
+repository: tyecam1/obsidian-PhD
+branch: sonnet/j1-long-horizon-20260929
+# Start time is the first filesystem/clock artefact of the session; approximate.
+session_started_at: "2026-09-29T21:38:00+01:00"
+session_ended_at: "2026-09-29T22:15:00+01:00"
+start_commit: e299ba73a4f6aadc3d65d3a5e5639c7b9cbcba8d
+end_commit: f05c4436720f260a945801a83dc63be9b88d8448
+outcome_status: partial
+stop_reason: >-
+  Reached the authorial boundary of the finite scientific-completion mandate. All
+  agent-executable dependencies were executed or proven access-limited/author-
+  controlled (13 dependency groups with their exact per-claim effect recorded); a
+  fresh Sol check applied; the decision packet v2 (R1-R6) and the exact Gate-4
+  amendment for the human-controlled route were prepared and posted to issue #479.
+  No gate was passed, no architecture selected, no novelty declared, no amendment
+  applied, no canonical file edited, no manuscript prose written. Remaining work
+  needs lawful full text supplied by the author or an author ruling.
+commits:
+  - cf5be0bd2
+  - e831c1ade
+  - b21b68086
+  - cd4cec6e6
+  - 2614fe826
+  - 4c8572585
+  - ef22fafc8
+  - 124ba886e
+  - f05c44367
+models_routes:
+  - "Sonnet coordinator/execution (Claude Code, claude-sonnet-5-5 as stated by the session); no subagents"
+  - "Sol adjudication: requested gpt-6-sol via codex exec read-only high reasoning (live policy field subscriptions.codex_gpt.model reconciled before dispatch); one pointer-first packet (24); server identity not independently verified"
+  - "native Opus: not used (no E6 change trigger met: changed inputs required a wording correction, not a new convergence question)"
+  - "no GLM lane used"
+verification:
+  - "deterministic: Morandini counts re-derived by parsing the audit row table; verbatim-quote substring checks for ledger/QB1/U-shaped quotes; amendment text checked as exact substrings of the directive and strategy; OpenAlex/Unpaywall/Crossref/DOAJ/S2 lookups; PDF page-image reads of QB1 Fig. 10, 14-18 and AV77 Table 1"
+  - "Sol pkt 24: QB1 facts 5/5 confirmed; E6-1/E6-2/S-H wording AMEND (applied); wider-claim ledger AGREE; central synthesis BARELY survives prior occupancy; strongest collision Brouwer 2015; workforce iteration REDUNDANT, conditions 1 and 3 remain NOT MET; authority flag on one ledger sentence (corrected)"
+  - "source-level corrections found and recorded: QB1 analysed sample n=12 groups (owner said 36 within-subject); 928 vs 705 trials; QB1/QC3 same twelve-participant design (candidate)"
+  - "registered workforce iteration I1 before results (commit e831c1ade); deviation from method 12.1/12.2 wording disclosed and reported under both readings"
+failure_tags:
+  - owner_row_sample_size_error_carried_until_primary_reread
+  - ledger_overreach_caught_by_sol
+  - registration_rule_stricter_than_method_declared_deviation
+  - shell_cwd_drift_from_persistent_cd
+  - external_access_ceiling_unresolved
+rating:
+  scale: 1-5
+  goal_progress: 4
+  correctness_verification: 4
+  authority_scope_discipline: 4
+  routing_resource_efficiency: 4
+  continuity_handoff_quality: 4
+  agent_overall: 4.0
+  operator_overall: null
+  operator_note: null
+prompt_revision_recommended: true
+revision_reason: >-
+  Three evidence-backed defects. (1) A sample size, unit of analysis and denominator
+  carried through owner rows into a case test, an E6 proposition and an author packet
+  ("N = 36 within-subject") was wrong at the source (12 groups, un-normalised counts,
+  a 24 percent trial-count gap); an open-access primary anchoring a case must be
+  re-read at the source before propagation. (2) The coordinator's own ledger wrote
+  that a gate criterion element was "satisfied", an authority overreach caught by the
+  fresh check; documented-versus-illustrative claim provenance and per-element
+  evidence statements should precede any integrative tier. (3) The iteration rule was
+  registered stricter than the method's own 12.1-12.2 wording; rules should be
+  registered in the method's terms with deviations labelled before results. Access
+  routing also improved when repository and journal-native open archives were tried
+  after publisher hosts failed. v3's stop gate, access ceiling, identity and
+  pointer-first packet rules performed well and are preserved.
+evidence:
+  - "obsidian-PhD continuation 34: automation/review/J1/2026-09-29-j1-continuation-34.md (branch sonnet/j1-long-horizon-20260929)"
+  - "decision packet v2 and amendment file: automation/review/J1/2026-09-29-gate45-authorial-packet-v2/"
+  - "wider-claim ledger, QB1 source check, dependency ledger: automation/review/J1/2026-09-29-continuation-34/"
+  - "Sol pkt 24 final: automation/review/J1/2026-09-29-sol-packet-24/sol-packet-24-final.txt"
+  - "issue #479 comment: https://github.com/tyecam1/obsidian-PhD/issues/479#issuecomment-5898956439"
+  - "end commit: f05c4436720f260a945801a83dc63be9b88d8448"

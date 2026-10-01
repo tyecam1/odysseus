@@ -232,6 +232,11 @@ task:
   context:
     source_pointers: []
     memory_pointers: []
+
+  initialising_prompt:
+    prompt_id: null
+    version: null
+    application_id: null
 ```
 
 ## Eligibility and scoring
@@ -333,6 +338,20 @@ Do not return worker scratchpads to the conversational model.
 
 Routing must improve from observed estate performance rather than remain a static hand-authored ranking.
 
+Initialising-prompt performance is part of that evidence. Prompt versions form
+an explicit graph: version -> rated application -> evolution event -> validated
+child version or reinforcement. Aggregate by ancestry as well as prompt
+id/version, repository/task class and failure tags.
+
+Every substantive application adds one graph event. A child should address the
+smallest observed failure class and may become the next active head only after
+protected-invariant validation. Clean applications reinforce the incumbent
+instead of causing cosmetic version churn.
+
+Prompt evolution cannot weaken permissions, domain gates, evidence requirements,
+verification requirements, model-identity rules, stop gates or repository-local
+authority in order to improve its measured score.
+
 ## Telemetry to capture per routed task
 
 At minimum:
@@ -352,6 +371,10 @@ escalation occurrence and reason
 independent-review outcome
 human correction/rejection where explicitly observed
 final task status
+initialising prompt id/version/application id when one governed the session
+prompt-session rating dimensions + agent overall rating at closeout
+operator rating/correction only when explicitly supplied
+prompt evolution parent/child/reinforcement edge and evidence-backed change targets
 ```
 
 Record source/result pointers rather than sensitive prompt copies where possible.
