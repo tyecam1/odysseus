@@ -67,6 +67,7 @@ class MisumiRespondRequest(BaseModel):
     session_id: Optional[str] = Field(default=None, max_length=120)
     retention_mode: Literal["auto", "off"] = "auto"
     persist_turn: bool = True
+    history_mode: Optional[Literal["auto", "off"]] = None
 
 
 class MisumiTaskRequest(BaseModel):
@@ -141,6 +142,23 @@ class MisumiHandoffRequest(BaseModel):
     action: str
     capsule_id: Optional[str] = None
     note: Optional[str] = None
+
+
+def _persists_history(body: "MisumiRespondRequest") -> bool:
+    """Whether this turn is written to the ordinary conversation session history.
+
+    ``history_mode`` is the explicit control and is independent of
+    ``retention_mode`` (semantic memory / artifacts), so turning semantic memory
+    off no longer silently turns ordinary history off. When a caller omits
+    ``history_mode`` the historical coupling is kept on purpose: clients written
+    before the split send ``retention_mode: "off"`` to mean "store nothing", and
+    reinterpreting that would make a client that believes it is private start
+    saving history. ``persist_turn: false`` remains the true incognito switch."""
+    if not body.persist_turn:
+        return False
+    if body.history_mode is None:
+        return body.retention_mode == "auto"
+    return body.history_mode == "auto"
 
 
 def _owner(request: Request) -> Optional[str]:
@@ -728,7 +746,8 @@ def setup_misumi_routes(
     @router.post("/respond")
     async def respond(request: Request, body: MisumiRespondRequest):
         _require_api_scope(request, "misumi:read")
-        if body.retention_mode == "auto" and body.persist_turn:
+        persist_history = _persists_history(body)
+        if persist_history or (body.retention_mode == "auto" and body.persist_turn):
             _require_api_scope(request, "misumi:execute")
         started = time.monotonic()
         request_id = events.request_id()
@@ -790,7 +809,7 @@ def setup_misumi_routes(
                     for target, contribution in contributions
                 ]
 
-        should_persist = body.persist_turn and body.retention_mode == "auto"
+        should_persist = persist_history
         if should_persist:
             session_id, session = _ensure_session(
                 session_manager,
@@ -919,6 +938,7 @@ def setup_misumi_routes(
             "sources": sources,
             "session_id": session_id,
             "retention": retention,
+            "history_persisted": bool(should_persist and session_id),
         }
         if _consultation_enabled():
             response.update({

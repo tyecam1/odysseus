@@ -169,3 +169,10 @@ http://DESKTOP-IN7O23D:420/misumi
 ```
 
 The interface-box server appends `/respond`. Store `ODYSSEUS_API_TOKEN` only in the box process environment; its proxy adds the Authorization header server-side. Keep port 4500 as the fallback until end-to-end evals pass.
+
+
+## Durable transcripts and history controls
+
+`POST /misumi/respond` now accepts `history_mode` (`"auto"` or `"off"`), an independent control for the ordinary conversation session history. `retention_mode` continues to govern semantic memory and artifacts. When `history_mode` is omitted the historical coupling is kept so that clients which send `retention_mode: "off"` to mean "store nothing" stay private; `persist_turn: false` is always incognito. The response reports `history_persisted`.
+
+Durable, owner-scoped, idempotent microphone transcripts live under `/misumi/transcript/*` (audio ingest, text ingest, wake attachment, bounded query/export, retention policy, box day-file import). Disabled by default (`ODYSSEUS_MISUMI_TRANSCRIPT_ENABLED`) and gated per owner. See `docs/misumi-durable-transcript-runtime.md`.
