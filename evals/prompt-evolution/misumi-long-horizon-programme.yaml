@@ -1,0 +1,9 @@
+schema_version: 1
+prompt_id: misumi-long-horizon-programme
+active_head: prompt:v1
+nodes:
+  - id: prompt:v1
+    type: prompt_version
+    version: 1
+    path: docs/initialising-prompts/misumi-long-horizon-programme-v1.md
+    status: active
