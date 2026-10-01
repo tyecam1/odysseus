@@ -1,0 +1,19 @@
+schema_version: 1
+prompt_id: estate-backlog-loop
+active_head: prompt:v1
+nodes:
+  - id: prompt:v1
+    type: prompt_version
+    version: 1
+    path: docs/initialising-prompts/estate-backlog-loop-v1.md
+    status: active
+edges: []
+guardrail_validation:
+  prompt:v1:
+    scope_preserved: true
+    authority_preserved: true
+    evidence_verification_preserved: true
+    stop_gate_not_weakened: true
+    model_identity_discipline_not_weakened: true
+    budget_and_lease_gates_preserved: true
+    trace_evolution_required: true
