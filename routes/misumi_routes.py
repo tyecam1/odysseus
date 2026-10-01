@@ -747,7 +747,10 @@ def setup_misumi_routes(
     async def respond(request: Request, body: MisumiRespondRequest):
         _require_api_scope(request, "misumi:read")
         persist_history = _persists_history(body)
-        if persist_history or (body.retention_mode == "auto" and body.persist_turn):
+        # Semantic memory (capsules, handoffs, artifacts) follows retention_mode
+        # alone; ordinary history follows history_mode. They must never be conflated.
+        semantic_on = body.persist_turn and body.retention_mode == "auto"
+        if persist_history or semantic_on:
             _require_api_scope(request, "misumi:execute")
         started = time.monotonic()
         request_id = events.request_id()
@@ -850,7 +853,10 @@ def setup_misumi_routes(
             "model"
         )
 
-        if contributions and should_persist:
+        # Consultation capsules/handoffs are semantic-memory writes: gate them on
+        # semantic retention, not on conversation history (found in retrospective
+        # review: history on + retention off used to still write a capsule).
+        if contributions and semantic_on:
             capsule_type = (
                 "decision"
                 if re.search(r"\b(plan|planning|decide|deciding|decision)\b", prompt, re.I)

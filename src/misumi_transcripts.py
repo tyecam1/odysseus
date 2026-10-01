@@ -75,6 +75,12 @@ CREDENTIAL_PATTERNS = (
     re.compile(r"\bbearer\s+[A-Za-z0-9._~+/-]{8,}", re.IGNORECASE),
     re.compile(r"\beyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}"),
     re.compile(r"(?:\b\d[ -]?){13,19}\b"),
+    # Added after retrospective review: ordinary household phrasing the ported box
+    # patterns miss. "wifi key is abcd1234", "the door code is 4821". Still a blunt
+    # filter and not a guarantee: spelled-out digits and indirect references are
+    # not caught, so ambient retention stays finite and the box filters first.
+    re.compile(r"\b(?:wi[\s-]*fi|wifi|network|router)\b[^.\n]{0,24}\b(?:key|code|pass\w*)\b", re.IGNORECASE),
+    re.compile(r"\b(?:key|code|pin|passcode|pass)\s+(?:is|was|=|:)\s*\S*\d\S*", re.IGNORECASE),
 )
 
 
@@ -235,14 +241,24 @@ def _validate(event_id: str, text: str, capture_mode: str) -> tuple[str, str]:
     return event_id, text
 
 
-def find_event(db, owner: Optional[str], domain: str, event_id: str) -> Optional[TranscriptEvent]:
-    return db.execute(
-        select(TranscriptEvent).where(
-            TranscriptEvent.owner == normalize_owner(owner),
-            TranscriptEvent.domain == domain,
-            TranscriptEvent.event_id == event_id,
-        )
-    ).scalar_one_or_none()
+def retention_cutoff(db, owner: Optional[str], now: Optional[datetime] = None) -> datetime:
+    """Rows persisted before this instant are expired for this owner."""
+    days = get_policy(db, owner)["transcript_retention_days"]
+    return (now or utcnow_naive()) - timedelta(days=days)
+
+
+def find_event(db, owner: Optional[str], domain: str, event_id: str, *,
+               live_only: bool = True) -> Optional[TranscriptEvent]:
+    """Owner-scoped lookup. By default an expired-but-not-yet-purged row is treated
+    as absent, so retention holds even if nothing has triggered a purge."""
+    stmt = select(TranscriptEvent).where(
+        TranscriptEvent.owner == normalize_owner(owner),
+        TranscriptEvent.domain == domain,
+        TranscriptEvent.event_id == event_id,
+    )
+    if live_only:
+        stmt = stmt.where(TranscriptEvent.persisted_at >= retention_cutoff(db, owner))
+    return db.execute(stmt).scalar_one_or_none()
 
 
 def lookup_existing(db, owner, domain, event_id) -> Optional[TranscriptEvent]:
@@ -273,6 +289,14 @@ def ingest_event(
     event_id, text = _validate(event_id, text, capture_mode)
     owner_key = normalize_owner(owner)
     digest = _text_sha(text)
+
+    # Drop anything already expired first, so an expired row can never be reported
+    # as "already saved" and the unique key is free to be reused.
+    try:
+        purge_expired(db, owner_key, max_batches=2)
+    except Exception:
+        db.rollback()
+        logger.warning("transcript pre-ingest purge failed", exc_info=True)
 
     # A retry of something already stored is reported truthfully even if the
     # archive has since been switched off: the row exists.
@@ -313,7 +337,7 @@ def ingest_event(
         # Lost a race against a concurrent insert of the same key: the unique
         # constraint arbitrated. Return what the winner wrote.
         db.rollback()
-        winner = find_event(db, owner_key, domain, event_id)
+        winner = find_event(db, owner_key, domain, event_id, live_only=False)
         if winner is None:
             raise
         if winner.text_sha256 != digest:
@@ -324,7 +348,7 @@ def ingest_event(
         raise
 
     try:
-        purge_expired(db, owner_key, now=stamp)
+        purge_expired(db, owner_key, now=stamp, max_batches=2)
     except Exception:  # retention housekeeping must never turn a saved row into a failure
         db.rollback()
         logger.warning("transcript retention purge failed", exc_info=True)
@@ -334,26 +358,29 @@ def ingest_event(
 # ---- retention --------------------------------------------------------------
 
 def purge_expired(db, owner: Optional[str], *, now: Optional[datetime] = None,
-                  batch: int = PURGE_BATCH) -> int:
-    """Delete this owner's rows older than their retention window, in one bounded batch."""
+                  batch: int = PURGE_BATCH, max_batches: int = 1) -> int:
+    """Delete this owner's expired rows in bounded batches (at most ``max_batches``
+    of ``batch`` rows), so a large backlog drains over a few calls instead of one
+    unbounded delete. Returns the number of rows removed."""
     owner_key = normalize_owner(owner)
-    days = get_policy(db, owner_key)["transcript_retention_days"]
-    cutoff = (now or utcnow_naive()) - timedelta(days=days)
-    seqs = [
-        row[0]
-        for row in db.execute(
-            select(TranscriptEvent.seq)
-            .where(TranscriptEvent.owner == owner_key, TranscriptEvent.persisted_at < cutoff)
-            .order_by(TranscriptEvent.seq)
-            .limit(batch)
-        ).all()
-    ]
-    if not seqs:
-        return 0
-    db.execute(delete(TranscriptEvent).where(TranscriptEvent.seq.in_(seqs)))
-    _commit(db)
-    return len(seqs)
-
+    cutoff = retention_cutoff(db, owner_key, now)
+    removed = 0
+    for _ in range(max(1, max_batches)):
+        seqs = [
+            row[0]
+            for row in db.execute(
+                select(TranscriptEvent.seq)
+                .where(TranscriptEvent.owner == owner_key, TranscriptEvent.persisted_at < cutoff)
+                .order_by(TranscriptEvent.seq)
+                .limit(batch)
+            ).all()
+        ]
+        if not seqs:
+            break
+        db.execute(delete(TranscriptEvent).where(TranscriptEvent.seq.in_(seqs)))
+        _commit(db)
+        removed += len(seqs)
+    return removed
 
 # ---- query / export ---------------------------------------------------------
 
@@ -407,7 +434,11 @@ def query_events(
     limit = max(1, min(int(limit), QUERY_MAX_LIMIT))
     owner_key = normalize_owner(owner)
     stmt = select(TranscriptEvent).where(
-        TranscriptEvent.owner == owner_key, TranscriptEvent.domain == domain
+        TranscriptEvent.owner == owner_key,
+        TranscriptEvent.domain == domain,
+        # Retention is enforced on read, not only by the purge: expired rows are
+        # never returned even if no ingest has run since the window moved.
+        TranscriptEvent.persisted_at >= retention_cutoff(db, owner_key),
     )
     since_n, until_n = _as_naive_utc(since), _as_naive_utc(until)
     if since_n is not None:

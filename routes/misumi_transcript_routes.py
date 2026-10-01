@@ -155,6 +155,15 @@ def setup_misumi_transcript_routes(
         finally:
             db.close()
 
+    def drain_expired(db, owner) -> None:
+        """Opportunistic bounded purge on reads; the read queries also filter by
+        the retention cutoff, so expired rows are never returned either way."""
+        try:
+            svc.purge_expired(db, owner, max_batches=5)
+        except Exception:
+            db.rollback()
+            logger.warning("transcript read-time purge failed", exc_info=True)
+
     def refusal(exc: svc.TranscriptError):
         return JSONResponse(
             status_code=exc.status_code,
@@ -224,6 +233,22 @@ def setup_misumi_transcript_routes(
         if stt_service is None or not stt_service.available:
             raise HTTPException(503, {"persisted": False, "state": "stt_unavailable"})
 
+        # Household audio may only be transcribed by the instance's own local STT.
+        # An `endpoint:<id>` provider would send the audio to another service
+        # (possibly off site) while this row would still claim the home host ran it,
+        # so only `local` is accepted and anything else is refused before any
+        # audio is read.
+        try:
+            settings = stt_service._load_settings()  # provider/model attribution
+        except Exception:
+            settings = {}
+        provider = settings.get("stt_provider")
+        if provider != "local":
+            raise HTTPException(403, {"persisted": False, "state": "stt_provider_not_local",
+                                      "detail": "audio is only transcribed by the local STT provider "
+                                                "(data_locality: home-lan)",
+                                      "provider": provider})
+
         audio = await read_upload_limited(file, STT_MAX_AUDIO_BYTES, "Audio file")
         if not audio:
             raise HTTPException(400, {"persisted": False, "state": "empty_audio"})
@@ -241,12 +266,6 @@ def setup_misumi_transcript_routes(
             return JSONResponse(status_code=200, content={"persisted": False, "state": "no_speech",
                                                           "event_id": event_id})
 
-        settings = {}
-        try:
-            settings = stt_service._load_settings()  # provider/model attribution only
-        except Exception:
-            settings = {}
-        provider = settings.get("stt_provider")
         model = settings.get("stt_model") or settings.get("whisper_model_size")
 
         started = svc.parse_timestamp(capture_started_at)
@@ -299,10 +318,15 @@ def setup_misumi_transcript_routes(
         _require_api_scope(request, "misumi:read")
         require_enabled()
         owner = _owner(request)
-        return with_db(lambda db: svc.query_events(
-            db, owner, DOMAIN, since=svc.parse_timestamp(since), until=svc.parse_timestamp(until),
-            after_seq=after_seq, before_seq=before_seq, limit=limit, newest_first=(order == "desc"),
-        ))
+
+        def run(db):
+            drain_expired(db, owner)
+            return svc.query_events(
+                db, owner, DOMAIN, since=svc.parse_timestamp(since), until=svc.parse_timestamp(until),
+                after_seq=after_seq, before_seq=before_seq, limit=limit, newest_first=(order == "desc"),
+            )
+
+        return with_db(run)
 
     @router.get("/export")
     def export(
@@ -315,10 +339,14 @@ def setup_misumi_transcript_routes(
         _require_api_scope(request, "misumi:read")
         require_enabled()
         owner = _owner(request)
-        body = with_db(lambda db: svc.export_events(
-            db, owner, DOMAIN, since=svc.parse_timestamp(since), until=svc.parse_timestamp(until),
-            limit=limit, fmt=format,
-        ))
+        def run(db):
+            drain_expired(db, owner)
+            return svc.export_events(
+                db, owner, DOMAIN, since=svc.parse_timestamp(since), until=svc.parse_timestamp(until),
+                limit=limit, fmt=format,
+            )
+
+        body = with_db(run)
         media = "text/markdown" if format == "md" else "application/x-ndjson"
         return PlainTextResponse(body, media_type=media)
 
@@ -337,6 +365,20 @@ def setup_misumi_transcript_routes(
         return with_db(lambda db: svc.set_policy(
             db, owner, transcript_archive=body.transcript_archive,
             transcript_retention_days=body.transcript_retention_days))
+
+    @router.post("/purge")
+    def purge(request: Request):
+        """Drain this owner's expired rows now (bounded: at most 50 batches per call)."""
+        _require_api_scope(request, "misumi:execute")
+        require_enabled()
+        owner = _owner(request)
+
+        def run(db):
+            removed = svc.purge_expired(db, owner, max_batches=50)
+            return {"removed": removed,
+                    "retention_days": svc.get_policy(db, owner)["transcript_retention_days"]}
+
+        return with_db(run)
 
     @router.post("/import")
     def import_box(request: Request, body: ImportRequest):

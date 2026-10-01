@@ -3,12 +3,50 @@
 
 import io
 import logging
+import os
+import time
 import httpx
 import tempfile
 from pathlib import Path
 from typing import Optional, Dict, Any
 
+from src.constants import DATA_DIR
+
 logger = logging.getLogger(__name__)
+
+STT_TMP_PREFIX = "odysseus-stt-"
+STT_TMP_MAX_AGE_S = 600.0
+
+
+def stt_tmp_dir() -> Path:
+    """Dedicated, private directory for the transient audio file the local
+    transcriber needs, so leftovers can be found and removed."""
+    override = os.environ.get("ODYSSEUS_STT_TMP_DIR", "").strip()
+    path = Path(override) if override else Path(DATA_DIR) / "stt-tmp"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def purge_stale_temp_audio(max_age_s: float = STT_TMP_MAX_AGE_S, now: Optional[float] = None) -> int:
+    """Delete transient audio files older than ``max_age_s``.
+
+    The normal path unlinks its file in a ``finally`` block, but a kill or crash
+    between write and unlink would otherwise leave raw household audio on disk
+    indefinitely. This runs at start-up and before every local transcription."""
+    cutoff = (time.time() if now is None else now) - max_age_s
+    removed = 0
+    try:
+        entries = list(stt_tmp_dir().iterdir())
+    except OSError:
+        return 0
+    for entry in entries:
+        try:
+            if entry.is_file() and entry.name.startswith(STT_TMP_PREFIX) and entry.stat().st_mtime < cutoff:
+                entry.unlink()
+                removed += 1
+        except OSError:
+            continue
+    return removed
 
 
 class STTService:
@@ -24,6 +62,10 @@ class STTService:
 
     def __init__(self):
         self._whisper_model = None  # lazy-init
+        try:
+            purge_stale_temp_audio()
+        except Exception:
+            logger.warning("stale STT temp audio cleanup failed", exc_info=True)
 
     # ── Settings ──
 
@@ -94,7 +136,9 @@ class STTService:
         tmp_path = None
         try:
             # Write to temp file (faster-whisper needs a file path or file-like)
-            with tempfile.NamedTemporaryFile(suffix=".webm", delete=False) as tmp:
+            purge_stale_temp_audio()
+            with tempfile.NamedTemporaryFile(dir=stt_tmp_dir(), prefix=STT_TMP_PREFIX,
+                                             suffix=".webm", delete=False) as tmp:
                 tmp.write(audio_bytes)
                 tmp_path = tmp.name
 
