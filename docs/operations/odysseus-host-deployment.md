@@ -43,6 +43,10 @@ powershell -ExecutionPolicy Bypass -File .\scripts\windows\odysseus-host.ps1 -Ac
 
 The scheduled task requests Windows restart-on-failure and the wrapper also supervises Uvicorn directly, restarting a crashed child after ten seconds. `Stop` terminates the scheduled wrapper before stopping its listener, so an intentional stop does not relaunch the service.
 
+## Transcript runtime switch
+
+The durable Misumi transcript runtime (`docs/misumi-durable-transcript-runtime.md`) is off by default. Pass `-TranscriptRuntime` to `Install` (and `Run`) to enable it: the script sets `ODYSSEUS_MISUMI_TRANSCRIPT_ENABLED=1` for the service and records the switch in the scheduled task's arguments, so it is visible in the task definition and reversible by re-running `Install` without it. Each owner's transcript archive stays separately off until switched on.
+
 ## Readiness contract
 
 `GET /api/health` proves only that the process can answer. `GET /api/ready` reports database and data-directory integrity, auth versus bind safety, household reachability, skill and scheduler availability, vector state, model health, and optional interface health.
