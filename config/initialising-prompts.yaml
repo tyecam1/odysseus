@@ -149,9 +149,9 @@ prompts:
   - prompt_id: misumi-long-horizon-programme
     title: Misumi long-horizon convergence programme initializer
     status: active
-    active_version: 1
-    version: 1
-    prompt_path: docs/initialising-prompts/misumi-long-horizon-programme-v1.md
+    active_version: 2
+    version: 2
+    prompt_path: docs/initialising-prompts/misumi-long-horizon-programme-v2.md
     graph_path: evals/prompt-evolution/misumi-long-horizon-programme.yaml
     created_at: 2026-10-01
     provenance:
@@ -160,7 +160,8 @@ prompts:
       note: >-
         Registered from the 2026-10-01 live Misumi/Odysseus re-entry audit.
         Live repository, runtime, queue and host state always outrank the
-        baseline task snapshots embedded in the programme contract.
+        baseline task snapshots embedded in the programme contract. Active head
+        evolved from v1 after the first rated application.
     scope:
       repositories:
         - tyecam1/odysseus
@@ -176,10 +177,26 @@ prompts:
     rating_required: true
     versions:
       - version: 1
-        status: active
+        status: superseded
         prompt_path: docs/initialising-prompts/misumi-long-horizon-programme-v1.md
         derived_from: operator-directed-2026-10-01-audit-convergence
-    supersedes: []
+        application_evidence:
+          - 2026-10-01-misumi-long-horizon-programme-01
+      - version: 2
+        status: active
+        prompt_path: docs/initialising-prompts/misumi-long-horizon-programme-v2.md
+        parent_version: 1
+        derived_from_applications:
+          - 2026-10-01-misumi-long-horizon-programme-01
+        evolution_targets:
+          - inventory deployed state on every involved host (scheduled tasks, services, release provenance, stores) before designing any persistent mechanism; deployed state outranks repository and audit prose, and a contradiction is an Opus gate
+          - probe a paid lane with a one-call smoke test and resolve the exact client version before a long dispatch; on quota exhaustion record the reset time, block only the affected action and continue other lanes
+          - enumerate every consumer of a coupled flag when splitting it, test each consumer and direction, mutation-check each guard, and preserve the old meaning for callers that omit the new control
+          - surface likely operator-permission gates together at session start, record exact denials and do not retry them in pieces
+          - make resume prompts re-read live state and skip completed steps
+          - keep remote-shell transport simple (files over stdin or encoded commands, local JSON parsing, no cleanup verbs in command text)
+    supersedes:
+      - 1
     retirement_condition: >-
       Retire only when an evidence-derived child passes the protected-invariant
       gate or the Misumi convergence programme reaches its governed completion
