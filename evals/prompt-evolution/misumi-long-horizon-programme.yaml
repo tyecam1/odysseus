@@ -1,9 +1,64 @@
 schema_version: 1
 prompt_id: misumi-long-horizon-programme
-active_head: prompt:v1
+active_head: prompt:v2
 nodes:
   - id: prompt:v1
     type: prompt_version
     version: 1
     path: docs/initialising-prompts/misumi-long-horizon-programme-v1.md
+    status: superseded
+  - id: application:2026-10-01-misumi-long-horizon-programme-01
+    type: application
+    application_id: 2026-10-01-misumi-long-horizon-programme-01
+    trace_path: evals/prompt-applications/misumi-long-horizon-programme/2026-10-01-misumi-long-horizon-programme-01.yaml
+    rating:
+      agent_overall: 3.8
+      goal_progress: 4
+      correctness_verification: 3
+      authority_scope_discipline: 4
+      routing_resource_efficiency: 4
+      continuity_handoff_quality: 4
+    failure_tags:
+      - codex_quota_exhausted_unprobed_before_dispatch
+      - existing_deployed_mechanism_missed_by_audit_found_late
+      - coupled_policy_flag_consumer_missed_until_retrospective_review
+      - permission_gates_discovered_serially_not_batched
+      - sol_client_version_mismatch_gpt6_sol_refused
+      - stale_scheduled_resume_prompt_fired_after_completion
+      - shell_quoting_and_harness_precheck_retries
+  - id: evolution:2026-10-01-misumi-long-horizon-programme-01
+    type: evolution_event
+    decision: evolve
+    evidence_application: 2026-10-01-misumi-long-horizon-programme-01
+    targets:
+      - inventory deployed state on every involved host (scheduled tasks, services, release provenance, stores) before designing any persistent mechanism; deployed state outranks repository and audit prose, and a contradiction is an Opus gate
+      - probe a paid lane with a one-call smoke test and resolve the exact client version before a long dispatch; on quota exhaustion record the reset time, block only the affected action and continue other lanes
+      - enumerate every consumer of a coupled flag when splitting it, test each consumer and direction, mutation-check each guard, and preserve the old meaning for callers that omit the new control
+      - surface likely operator-permission gates together at session start, record exact denials and do not retry them in pieces
+      - make resume prompts re-read live state and skip completed steps
+      - keep remote-shell transport simple (files over stdin or encoded commands, local JSON parsing, no cleanup verbs in command text)
+  - id: prompt:v2
+    type: prompt_version
+    version: 2
+    parent_version: 1
+    path: docs/initialising-prompts/misumi-long-horizon-programme-v2.md
     status: active
+edges:
+  - from: prompt:v1
+    to: application:2026-10-01-misumi-long-horizon-programme-01
+    type: applied
+  - from: application:2026-10-01-misumi-long-horizon-programme-01
+    to: evolution:2026-10-01-misumi-long-horizon-programme-01
+    type: observed
+  - from: evolution:2026-10-01-misumi-long-horizon-programme-01
+    to: prompt:v2
+    type: derived_child
+guardrail_validation:
+  prompt:v2:
+    scope_preserved: true
+    authority_preserved: true
+    evidence_verification_preserved: true
+    stop_gate_not_weakened: true
+    model_identity_discipline_not_weakened: true
+    access_failure_ceiling_preserved: true
+    trace_evolution_required: true
