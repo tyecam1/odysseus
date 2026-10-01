@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 from urllib.parse import unquote, urlparse
-from sqlalchemy import event, create_engine, Column, String, Text, Boolean, DateTime, Integer, ForeignKey, JSON, Index, func, text
+from sqlalchemy import event, create_engine, Column, String, Text, Boolean, DateTime, Integer, ForeignKey, JSON, Index, UniqueConstraint, func, text
 from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.types import TypeDecorator
 from sqlalchemy.ext.declarative import declarative_base, declared_attr
@@ -1126,6 +1126,64 @@ class BenchmarkResult(TimestampMixin, Base):
     __table_args__ = (
         Index('ix_benchmark_results_run_model_task', 'run_id', 'concrete_model', 'task_id'),
     )
+
+
+class TranscriptEvent(TimestampMixin, Base):
+    """Durable, owner-scoped Misumi transcript event (append-oriented).
+
+    NOT a semantic-memory table and NOT household truth: this is operational
+    speech history, kept separate from `src/misumi_memory.py` capsules and from
+    the Misumi Git knowledgebase. `(owner, domain, event_id)` is unique so a
+    client retry after an ambiguous timeout can never create a second row.
+    `owner` is NOT NULL (empty string = the local/no-auth owner) because SQLite
+    treats NULLs as distinct inside a unique constraint. Raw audio is never
+    stored here. See docs/misumi-durable-transcript-runtime.md.
+    """
+    __tablename__ = "misumi_transcript_events"
+
+    seq                 = Column(Integer, primary_key=True, autoincrement=True)
+    owner               = Column(String, nullable=False, default="")
+    domain              = Column(String, nullable=False, default="misumi")
+    event_id            = Column(String, nullable=False)   # client-generated idempotency key
+    text                = Column(Text, nullable=False)     # verbatim STT text
+    text_sha256         = Column(String, nullable=False)   # detects same-id/different-text conflicts
+    capture_mode        = Column(String, nullable=False, default="ambient")  # ambient | ptt
+    source              = Column(String, nullable=False, default="text-event")
+    capture_started_at  = Column(DateTime, nullable=True)  # client capture time, naive UTC
+    capture_ended_at    = Column(DateTime, nullable=True)
+    persisted_at        = Column(DateTime, nullable=False, default=utcnow_naive)
+    stt_provider        = Column(String, nullable=True)
+    stt_model           = Column(String, nullable=True)
+    stt_host            = Column(String, nullable=True)    # physical executor, never a guess
+    stt_latency_ms      = Column(Integer, nullable=True)
+    persona             = Column(String, nullable=True)    # presentation context only
+    wake_result         = Column(Text, nullable=True)      # JSON, attached AFTER persistence
+    wake_recorded_at    = Column(DateTime, nullable=True)
+    session_id          = Column(String, nullable=True)
+    response_request_id = Column(String, nullable=True)
+    state               = Column(String, nullable=False, default="persisted")
+
+    __table_args__ = (
+        UniqueConstraint("owner", "domain", "event_id", name="uq_misumi_transcript_owner_domain_event"),
+        Index("ix_misumi_transcript_owner_domain_seq", "owner", "domain", "seq"),
+        Index("ix_misumi_transcript_owner_persisted", "owner", "persisted_at"),
+    )
+
+
+class MisumiRetentionPolicy(TimestampMixin, Base):
+    """Per-owner retention policy for the dimensions the server itself enforces.
+
+    Transcript archive defaults OFF (nothing is stored until explicitly enabled)
+    and retention is finite (1-90 days, default 14). Raw-audio retention is fixed
+    at "off". Conversation-history, semantic-promotion and artifact retention are
+    enforced per request on /misumi/respond, not here.
+    """
+    __tablename__ = "misumi_retention_policies"
+
+    owner                     = Column(String, primary_key=True)   # "" = local/no-auth owner
+    transcript_archive        = Column(Boolean, nullable=False, default=False)
+    transcript_retention_days = Column(Integer, nullable=False, default=14)
+    raw_audio_retention       = Column(String, nullable=False, default="off")
 
 
 class Memory(Base):
