@@ -41,6 +41,17 @@
 paid_providers:
   - name: codex
     concrete_model_label: codex-cli
+    routing_eligible: true
+  - name: glm
+    concrete_model_label: glm-5.3
+    launcher: claude-glm
+    routing_eligible: false
+    candidate_only: true
+    note: >-
+      Host-local Claude Code sidecar. The launcher owns Z.AI endpoint,
+      model and credential setup; Odysseus never reads or sets those values.
+      Candidate selection is explicit and remains blocked from normal routing
+      until paired benchmark evidence qualifies it.
 default_paid_provider: codex
 
 capabilities:
