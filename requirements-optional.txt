@@ -5,15 +5,15 @@
 # memory, and tool selection are core paths, so they ship by default now.
 
 # Local speech-to-text (microphone -> text) via faster-whisper, for the
-# faster-whisper 1.2.x passes an argument (metadata_errors) that PyAV 19 removed; transcription then fails
-# with a TypeError even though the model loads. Verified 2026-10-01: av 18.1.0 works (base.en, CPU, ~0.75s/clip).
-av<19
 # "local" STT provider. Runs on CPU out of the box (CTranslate2 backend, no
 # torch needed). Install if you want to dictate/transcribe with the mic
 # without sending audio to an external endpoint.
 # Optional extra: install `torch` too if you have a CUDA GPU and want
 # GPU-accelerated transcription — it's auto-detected, CPU is used otherwise.
 faster-whisper
+# faster-whisper 1.2.x passes an argument (metadata_errors) that PyAV 19 removed, so transcription fails
+# with a TypeError even though the model loads. Verified 2026-10-01: av 18.1.0 works (base.en, CPU, ~0.75s/clip).
+av<19
 
 # DuckDuckGo as a search provider option.
 # Install if you want DDG in the search-provider dropdown.
