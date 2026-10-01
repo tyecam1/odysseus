@@ -16,7 +16,7 @@ Transcript rows are operational history. They are not semantic memory (`src/misu
 ## Authority and placement
 
 - **Write authority:** one Odysseus instance — the household deployment on the home host. No replica, no failover, no second writer. During a home outage the *client* buffers; the server does not fail over.
-- **Audio locality (`data_locality: home-lan`):** `POST /misumi/transcript/audio` is refused (`403 audio_locality_refused`) unless this host is a registered `home` host in `config/estate.yaml`. There is no fallback to another host and an unregistered host fails closed. `ODYSSEUS_TRANSCRIPT_AUDIO_HOSTS` (comma-separated host ids or `*`) is an explicit operator override for development and tests only. Speech-to-text runs through the instance's own STT service, so `stt.host` is the physical host that executed it.
+- **Audio locality (`data_locality: home-lan`):** `POST /misumi/transcript/audio` is refused (`403 audio_locality_refused`) unless this host is a registered `home` host in `config/estate.yaml`. There is no fallback to another host and an unregistered host fails closed. Only the **local** STT provider is accepted (`403 stt_provider_not_local` otherwise, before any audio is read): an `endpoint:<id>` provider would send the audio to another service while the row still claimed the home host ran it. `ODYSSEUS_TRANSCRIPT_AUDIO_HOSTS` (comma-separated host ids or `*`) is an explicit operator override for development and tests only. Speech-to-text runs through the instance's own STT service, so `stt.host` is the physical host that executed it.
 - **Enabling:** two independent switches must both be on. `ODYSSEUS_MISUMI_TRANSCRIPT_ENABLED=1` (deployment kill-switch; every route returns `503 runtime_disabled` otherwise) and the owner's `transcript_archive` policy (default **off**; with it off nothing is stored and the response says so).
 - **Ambient production is human-gated.** The ratified 2026-07-20 ambient-capture contract is conditional on everyone in range knowing and agreeing; record that consent before enabling the archive for a shared space.
 
@@ -40,7 +40,7 @@ Transcript rows are operational history. They are not semantic memory (`src/misu
 | `session_id`, `response_request_id` | optional linkage to a Misumi conversation |
 | `state` | `persisted` |
 
-`misumi_retention_policies` (per owner): `transcript_archive` (default **false**), `transcript_retention_days` (default **14**, clamped to 1–90, "keep forever" is not expressible), `raw_audio_retention` (fixed `off`).
+`misumi_retention_policies` (per owner): `transcript_archive` (default **false**), `transcript_retention_days` (default **14**, clamped to 1–90, "keep forever" is not expressible). Retention is enforced **on read** (rows older than the window are never returned, looked up or exported, even if no purge has run, and shortening the window takes effect immediately) and physically removed by bounded drain purges on ingest, on list/export and via `POST /misumi/transcript/purge`, `raw_audio_retention` (fixed `off`).
 
 ## Endpoints (all owner-scoped; `misumi:execute` to write, `misumi:read` to read)
 
@@ -53,6 +53,7 @@ Transcript rows are operational history. They are not semantic memory (`src/misu
 | `GET /misumi/transcript/{event_id}` | one event. |
 | `GET /misumi/transcript/export` | `jsonl` or `md`, oldest first, bounded (`limit` ≤ 1000). |
 | `GET/PUT /misumi/transcript/policy` | read/set `transcript_archive` and `transcript_retention_days`. |
+| `POST /misumi/transcript/purge` | drain this owner's expired rows now (bounded: at most 50 batches per call). |
 | `POST /misumi/transcript/import` | idempotent import of interface-box day-file lines (compat stage A). |
 
 ## Client-visible states
@@ -66,15 +67,16 @@ Transcript rows are operational history. They are not semantic memory (`src/misu
 | `event_id_conflict` | 409 | same `event_id`, different text; never overwritten | treat as a client bug |
 | `audio_locality_refused` | 403 | host is not a registered home host | do not retry elsewhere |
 | `runtime_disabled` | 503 | feature flag off on this host | not retryable until configured |
+| `stt_provider_not_local` | 403 | the configured STT provider is not `local` | fix the configuration; do not retry |
 | `stt_unavailable` / `stt_failed` / `persist_failed` | 503 / 502 / 503 | not persisted | **retry with the same `event_id`** |
 
 ## Retention dimensions
 
 1. **Transcript archive** — this runtime (`transcript_archive`, finite `transcript_retention_days`, bounded purge on every ingest).
 2. **Conversation/session history** — `history_mode` on `/misumi/respond`.
-3. **Semantic-memory promotion** — `retention_mode` on `/misumi/respond`.
+3. **Semantic-memory promotion** — `retention_mode` on `/misumi/respond`. This includes consultation capsules and handoffs: they follow `retention_mode` alone and are never written merely because history is on.
 4. **Artifact creation** — `retention_mode` on `/misumi/respond`.
-5. **Raw audio** — never retained by the server; clients may hold it only until a `persisted` ack.
+5. **Raw audio** — never retained by the server; clients may hold it only until a `persisted` ack. The local transcriber's transient file lives in a dedicated directory (`ODYSSEUS_STT_TMP_DIR`, default `data/stt-tmp`); anything older than ten minutes is removed at start-up and before every local transcription, so a killed process cannot leave household audio behind.
 
 ### The `/misumi/respond` coupling fix
 
@@ -101,3 +103,11 @@ Empty/no-speech audio, STT unavailable, STT error, commit failure (never acknowl
 ## Not in scope here
 
 A capture daemon; a lab replica or automatic failover; any raw-audio archive; Git storage of transcripts; moving STT onto an estate worker (the audio endpoint uses the instance's own STT service on the home host); the box-side forwarder (stage B). Home worker qualification (Stage 8) is tracked separately.
+
+## Credential filter limits
+
+The filter (ported from the interface box, then broadened after retrospective review to catch phrasing such as "the wifi key is ..." and "the door code is 4821") is deliberately blunt and is **not a guarantee**: spelled-out digits and indirect references are not caught. Ambient retention therefore stays finite and the box filters first.
+
+## Known gap (tracked)
+
+The Stage 6 estate-execution columns (PR #44) are migrated only for SQLite. An existing PostgreSQL deployment would need an explicit migration before the write lane is used there; every current deployment is SQLite. Tracked as `2026-10-01-postgres-estate-migration`.
