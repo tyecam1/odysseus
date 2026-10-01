@@ -1,6 +1,6 @@
 schema_version: 1
 prompt_id: j1-long-horizon-method-loop
-active_head: prompt:v7
+active_head: prompt:v8
 nodes:
   - id: prompt:v1
     type: prompt_version
@@ -196,6 +196,41 @@ nodes:
     version: 7
     parent_version: 6
     path: docs/initialising-prompts/j1-long-horizon-method-loop-v7.md
+    status: superseded
+  - id: application:2026-09-30-j1-long-horizon-method-loop-02
+    type: application
+    application_id: 2026-09-30-j1-long-horizon-method-loop-02
+    trace_path: evals/prompt-applications/j1-long-horizon-method-loop/2026-09-30-j1-long-horizon-method-loop-02.yaml
+    rating:
+      agent_overall: 3.2
+      goal_progress: 3
+      correctness_verification: 3
+      authority_scope_discipline: 4
+      routing_resource_efficiency: 2
+      continuity_handoff_quality: 4
+    failure_tags:
+      - model_lane_quota_exhausted_mid_run
+      - high_concurrency_triggered_rate_limit_failures
+      - duplicate_background_driver_started
+      - operator_instruction_misread_stop_driver
+      - layout_mode_text_broke_quote_verification
+      - over_inclusive_claim_harvest_inflated_pattern
+      - unverified_figures_written_from_memory_then_corrected
+      - shell_cd_drift_repeated
+      - bash_hook_blocked_recursive_force_delete_not_bypassed
+  - id: evolution:2026-09-30-j1-long-horizon-method-loop-02
+    type: evolution_event
+    decision: evolve
+    evidence_application: 2026-09-30-j1-long-horizon-method-loop-02
+    targets:
+      - probe a model lane with a one-call smoke test before a long bulk run, cap concurrency, capture stderr, never start a second driver on a live queue, stop a lane at its first quota error, and read an operator redirection literally
+      - pilot the text-extraction mode and the claim unit before bulk extraction; treat a first summary count in which every unit fits the hypothesis as a prompt to audit the unit and report the registered and restricted readings together
+      - recompute every figure from the data immediately before writing it into a record
+  - id: prompt:v8
+    type: prompt_version
+    version: 8
+    parent_version: 7
+    path: docs/initialising-prompts/j1-long-horizon-method-loop-v8.md
     status: active
 edges:
   - from: prompt:v1
@@ -270,6 +305,18 @@ edges:
   - from: prompt:v7
     to: prompt:v6
     type: supersedes
+  - from: prompt:v7
+    to: application:2026-09-30-j1-long-horizon-method-loop-02
+    type: applied
+  - from: application:2026-09-30-j1-long-horizon-method-loop-02
+    to: evolution:2026-09-30-j1-long-horizon-method-loop-02
+    type: observed
+  - from: evolution:2026-09-30-j1-long-horizon-method-loop-02
+    to: prompt:v8
+    type: derived_child
+  - from: prompt:v8
+    to: prompt:v7
+    type: supersedes
 guardrail_validation:
   prompt:v2:
     scope_preserved: true
@@ -312,6 +359,14 @@ guardrail_validation:
     access_failure_ceiling_preserved: true
     trace_evolution_required: true
   prompt:v7:
+    scope_preserved: true
+    authority_preserved: true
+    evidence_verification_preserved: true
+    stop_gate_not_weakened: true
+    model_identity_discipline_not_weakened: true
+    access_failure_ceiling_preserved: true
+    trace_evolution_required: true
+  prompt:v8:
     scope_preserved: true
     authority_preserved: true
     evidence_verification_preserved: true
