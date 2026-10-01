@@ -24,6 +24,9 @@ param(
     [int]$RestartDelaySeconds = 10,
     [string]$LanCidr = '192.168.4.0/24',
     [switch]$InstallFirewall,
+    # Enables the durable Misumi transcript runtime (ODYSSEUS_MISUMI_TRANSCRIPT_ENABLED). Off by default;
+    # recorded in the scheduled task's arguments so the setting is visible and reversible.
+    [switch]$TranscriptRuntime,
     [int]$Tail = 120
 )
 
@@ -108,6 +111,7 @@ switch ($Action) {
         if ($InterfaceHealthUrl) { $env:MISUMI_INTERFACE_HEALTH_URL = $InterfaceHealthUrl }
         if ($ModelUrl) { $env:MISUMI_MODEL_URL = $ModelUrl }
         if ($Model) { $env:MISUMI_MODEL = $Model }
+        if ($TranscriptRuntime) { $env:ODYSSEUS_MISUMI_TRANSCRIPT_ENABLED = '1' } else { Remove-Item Env:ODYSSEUS_MISUMI_TRANSCRIPT_ENABLED -ErrorAction SilentlyContinue }
         Set-Location -LiteralPath $SourceRoot
         # Windows PowerShell 5.1 turns native stderr lines into error records.
         # Uvicorn logs normally on stderr, so a global Stop preference would
@@ -140,6 +144,7 @@ switch ($Action) {
         if ($ModelUrl) { $argumentParts += @('-ModelUrl',('"' + $ModelUrl + '"')) }
         if ($Model) { $argumentParts += @('-Model',('"' + $Model + '"')) }
         $argumentParts += @('-RestartDelaySeconds',[string]$RestartDelaySeconds)
+        if ($TranscriptRuntime) { $argumentParts += '-TranscriptRuntime' }
         $arguments = $argumentParts -join ' '
         $taskAction = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $arguments
         $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
