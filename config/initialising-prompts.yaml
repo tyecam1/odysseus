@@ -145,3 +145,42 @@ prompts:
     retirement_condition: >-
       Retire only when an evidence-derived child passes the protected-invariant
       gate or the J1 method loop ceases to exist.
+
+  - prompt_id: misumi-long-horizon-programme
+    title: Misumi long-horizon convergence programme initializer
+    status: active
+    active_version: 1
+    version: 1
+    prompt_path: docs/initialising-prompts/misumi-long-horizon-programme-v1.md
+    graph_path: evals/prompt-evolution/misumi-long-horizon-programme.yaml
+    created_at: 2026-10-01
+    provenance:
+      source_repository: tyecam1/odysseus
+      source_branch: chatgpt/misumi-long-horizon-20261001
+      note: >-
+        Registered from the 2026-10-01 live Misumi/Odysseus re-entry audit.
+        Live repository, runtime, queue and host state always outrank the
+        baseline task snapshots embedded in the programme contract.
+    scope:
+      repositories:
+        - tyecam1/odysseus
+        - tyecam1/misumi
+      projects:
+        - Misumi
+      task_classes:
+        - long-horizon-system-convergence
+        - multihost-runtime-convergence
+        - household-interface-convergence
+    application_trace_prefix: evals/prompt-applications/misumi-long-horizon-programme/
+    evolution_trace_prefix: evals/prompt-evolution/
+    rating_required: true
+    versions:
+      - version: 1
+        status: active
+        prompt_path: docs/initialising-prompts/misumi-long-horizon-programme-v1.md
+        derived_from: operator-directed-2026-10-01-audit-convergence
+    supersedes: []
+    retirement_condition: >-
+      Retire only when an evidence-derived child passes the protected-invariant
+      gate or the Misumi convergence programme reaches its governed completion
+      boundary.
