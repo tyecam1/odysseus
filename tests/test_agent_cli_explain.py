@@ -38,6 +38,9 @@ def test_explain_assembles_resolution_hosts_and_evidence(monkeypatch, capsys):
     monkeypatch.setattr(estate_router, "resolve_alias", lambda alias, host_id=None: {
         "alias": alias, "resolved": True, "concrete_model": "qwen3:8b", "evidence": "docs/x.md",
     })
+    # Hermetic: `agent explain` fails closed when this machine is not a registered
+    # estate host, so pin the host instead of depending on the runner's hostname.
+    monkeypatch.setattr(estate_router, "current_host_id", lambda: "hz2-workstation")
     monkeypatch.setattr(estate_router, "eligible_hosts", lambda repo=None: [
         {"host_id": "hz2-workstation", "role": "lab", "eligible": True, "reason": "this host"},
     ])
