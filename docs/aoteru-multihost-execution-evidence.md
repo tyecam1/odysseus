@@ -165,3 +165,28 @@ With the home worker checkout advanced to `6f3135f7` and the game *Orcs Must Die
 
 This validates the reading and the classification against the real card and the real game. It is not a benchmark and
 qualifies nothing: `local-fast` is still unqualified on home, and still needs the canary re-run while the GPU is free.
+
+## Home `local-fast` qualified (2026-10-02, live canary on a free GPU)
+
+The earlier canary (`lm4-canary-32c8bfb757`, 0 pass / 3 fail, every item a 120 s timeout) was an admission failure: a game
+held about 92% of the GPU. At the operator's instruction the game's two processes were stopped on home. A live admission
+read through home's worker `health` then showed three samples at 5-7% utilisation and about 0.8 GB of VRAM in use, and the
+classifier returned `free`.
+
+`scripts/run_lm4_production_canary.py --worker-host desktop-in7o23d --aliases local-fast`, run id `lm4-canary-be6cd25f2a`,
+ran through the real worker path (`call_worker ... execute local-inference`) from the lab with an isolated database:
+**3 pass, 0 fail, 0 error**, every item attested `host=desktop-in7o23d` (`recon-01` 22.5 s including the cold model load,
+`recon-02` 8.4 s, `summarisation-01` 7.8 s at the 8000-token context point). The canary's admission gate checked a fresh
+reading before each item and never had to refuse. Result file: `evals/local_models/results/lm4-canary-be6cd25f2a.jsonl`.
+
+Governed changes in the same commit:
+
+- `config/models.yaml`: `desktop-in7o23d` is added to `local-fast` `qualified_hosts` with this document as its evidence.
+- `config/estate.yaml`: home's `qualified_executors` becomes `[deterministic, local]`.
+
+Still **not** qualified on home: `codex` (not installed), `codex-write` (operator decision, no Windows detached runners, S6.12),
+and every other alias. Routing consequences: a request pinned to home for `local-fast` now resolves to home (`route.host`
+names it); an unpinned request is unchanged and still resolves to the lab; and because home opts in to GPU admission, a busy
+GPU withholds the work up front with a named reason instead of timing out. The evidence is the same three-item canary used
+for the lab, not a quality-floor benchmark, and the household GPU is not reliably free: withdraw by removing the
+`qualified_hosts` entry or `local` from home's executors.

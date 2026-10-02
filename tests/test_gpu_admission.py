@@ -314,7 +314,8 @@ def test_the_shipped_registry_opts_home_in_and_lab_out():
     by_id = {h["id"]: h for h in real["hosts"]}
     assert by_id["desktop-in7o23d"]["worker"]["gpu_admission"] == {"busy_util_pct": 60}
     assert "gpu_admission" not in (by_id["hz2-workstation"].get("worker") or {})
-    assert by_id["desktop-in7o23d"]["worker"]["qualified_executors"] == ["deterministic"]
+    # Home is qualified for deterministic compute and local inference only (never codex or codex-write).
+    assert by_id["desktop-in7o23d"]["worker"]["qualified_executors"] == ["deterministic", "local"]
 
 
 # ---- worker health -----------------------------------------------------------------------------

@@ -1,0 +1,3 @@
+{"run_id": "lm4-canary-be6cd25f2a", "alias": "local-fast", "task_id": "recon-01", "context_point": 8000, "status": "pass", "reason": "pass", "score": "pass", "wall_time_ms": 22483, "attested_host": "desktop-in7o23d"}
+{"run_id": "lm4-canary-be6cd25f2a", "alias": "local-fast", "task_id": "recon-02", "context_point": 8000, "status": "pass", "reason": "pass", "score": "pass", "wall_time_ms": 8391, "attested_host": "desktop-in7o23d"}
+{"run_id": "lm4-canary-be6cd25f2a", "alias": "local-fast", "task_id": "summarisation-01", "context_point": 8000, "status": "pass", "reason": "pass", "score": "pass", "wall_time_ms": 7813, "attested_host": "desktop-in7o23d"}

@@ -348,9 +348,10 @@ def test_identity_verified_never_implies_worker_enabled(fixture_config):
 
 
 def test_shipped_estate_config_home_worker_is_compute_only_and_pinned():
-    """Stage 8: home is enabled for deterministic compute ONLY. It must never gain write authority by accident:
-    `codex-write` stays unqualified (operator decision; S6.12 Windows job objects are not implemented), `local`
-    stays unqualified until the model benchmark has actually been passed, and the transport stays pinned."""
+    """Stage 8: home is enabled for deterministic compute and, since the live canary on a free GPU
+    (lm4-canary-be6cd25f2a, docs/aoteru-multihost-execution-evidence.md), local inference. It must never gain write
+    authority by accident: `codex` and `codex-write` stay unqualified (operator decision; S6.12 Windows job
+    objects are not implemented), and the transport stays pinned."""
     import base64
     import hashlib
 
@@ -359,8 +360,8 @@ def test_shipped_estate_config_home_worker_is_compute_only_and_pinned():
     home = next(host for host in estate["hosts"] if host["id"] == "desktop-in7o23d")
     worker = home["worker"]
     assert worker["enabled"] is True and worker["transport"] == "ssh"
-    assert worker["qualified_executors"] == ["deterministic"]
-    assert "codex-write" not in worker["qualified_executors"]
+    assert worker["qualified_executors"] == ["deterministic", "local"]
+    assert "codex-write" not in worker["qualified_executors"] and "codex" not in worker["qualified_executors"]
 
     # the host key is pinned and is exactly the documented, operator-supplied fingerprint
     ssh = worker["ssh"]

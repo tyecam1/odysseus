@@ -55,6 +55,7 @@ capabilities:
     binding: qwen3:8b
     qualified_hosts:
       hz2-workstation: {evidence: docs/aoteru-estate-p7-evidence.md}
+      desktop-in7o23d: {evidence: docs/aoteru-multihost-execution-evidence.md}  # run lm4-canary-be6cd25f2a, 3/3, attested home, GPU free
     evidence: docs/aoteru-estate-p7-evidence.md
     note: >-
       106.1 decode tok/s, fits fully in 10GB VRAM (`ollama ps` confirmed
