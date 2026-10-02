@@ -15,9 +15,10 @@
 # both now live-confirmed reachable over LAN SSH and Tailscale, with
 # pinned/matching SSH host-key fingerprints. Both machines therefore have
 # `identity_verified: true`. `interface-pc` has no worker block because the
-# `interface` role is never execution-worker-eligible. `home` has an explicit
-# disabled worker pending qualification evidence, so its confirmed identity
-# cannot accidentally promote it into routing.
+# `interface` role is never execution-worker-eligible. `home` carries an explicit
+# worker block so its confirmed identity cannot accidentally promote it into routing: as of 2026-10-02 the governed state
+# is `enabled: true` with `qualified_executors: [deterministic, local]` (Stage 8, then the live `local-fast` canary on a
+# free GPU); `codex` and `codex-write` are NOT qualified. The worker block below is authoritative, not this prose.
 # registered != identity-verified != worker-enabled != reachable/healthy.
 #
 # Services are logical names (plan section 5.6). None are provisioned yet —
@@ -217,9 +218,14 @@ hosts:
       authority. KEEP as-is, untouched; no migration needed. Tailscale
       installed + authorized 2026-08-29 (silent MSI install over SSH,
       operator completed the interactive login); no Funnel/serve config.
-      Identity evidence is recorded separately above. The estate worker stays
-      disabled, with no qualified executors, until hardware/benchmark and
-      transport qualification evidence supports a governed promotion.
+      Identity evidence is recorded separately above. The estate worker was
+      kept disabled until hardware/benchmark and transport qualification evidence
+      supported a governed promotion. Superseded 2026-10-02: it is now enabled
+      with `qualified_executors: [deterministic, local]` (see the worker block and
+      docs/aoteru-multihost-execution-evidence.md); `codex` and `codex-write` stay
+      unqualified. The 2026-08-29 reconciliation above describes the household
+      deployment as it then was (`e68288238b3c`); it has since been cut over to
+      current `dev` releases with the transcript runtime.
 
   - id: glovebox
     hostname: glovebox
@@ -272,9 +278,10 @@ services:
       small idle python.exe processes, no listening service found) — stays
       null/deferred until actually built, not merely because the box was
       unreachable.
-  - id: svc:memory
-    description: memory broker API (home primary, lab read-cache fallback)
-    endpoint: null
+  # There is deliberately no `svc:memory`. The Ratified Phase 4 architecture (tyecam1/misumi
+  # docs/memory-architecture.md) adopts no memory broker, no lab memory replica and no automatic failover: runtime
+  # memory is the household Odysseus deployment on the home host (single writer), and recoverability is a verified
+  # encrypted backup plus a drilled restore. The lab is a compute worker.
   - id: svc:models-lab
     description: model serving on the lab host
     endpoint: null

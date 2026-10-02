@@ -258,6 +258,8 @@ unsafe self-modification.
 
 ## Workstream E — memory broker and cross-session continuity
 
+> **Superseded in part (2026-10-02).** The Ratified Phase 4 architecture (tyecam1/misumi `docs/memory-architecture.md`) adopts no memory broker, no lab fallback/read-cache role and no home-primary promotion or failover. Items below that ask to strengthen the lab fallback/read-cache/outbox role or to make a broker ready for home-primary promotion no longer apply; what remains is verified encrypted backup and restore, the existing provenance mechanisms, and bounded retrieval (deferred). Kept as history.
+
 Audit implementation against the canonical plan rather than assuming P4 closed
 all long-horizon requirements.
 

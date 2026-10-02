@@ -30,7 +30,7 @@ Never create a second queue/task lifecycle/schema, router/model gateway, schedul
 
 ## Authority
 
-- Odysseus: neutral estate discovery, execution, routing, jobs, parking and personal-memory broker.
+- Odysseus: neutral estate discovery, execution, routing, jobs, parking and the household runtime memory (a single writer on the home host; no separate memory broker or replica, per the Ratified Phase 4 architecture in tyecam1/misumi `docs/memory-architecture.md`).
 - Misumi: Aoteru persona and household policy.
 - obsidian-PhD: PhD knowledge, research workflow, evidence/trust/write gates.
 - Other repos retain their own local authority.

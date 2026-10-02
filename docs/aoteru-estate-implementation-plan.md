@@ -1,6 +1,7 @@
 ---
 title: Aoteru estate implementation plan
 status: target-plan
+superseded_in_part_by: tyecam1/misumi docs/memory-architecture.md (Ratified 2026-10-02): section 6 and the memory-broker, lab read-cache and home-primary/lab-failover assumptions elsewhere in this plan
 owner: odysseus
 as_of: 2026-08-19
 scope: operator access, memory, routing, repos, models, mobile, two-PC execution
@@ -24,7 +25,7 @@ This plan is the canonical cross-estate implementation sequence. Domain reposito
 ## 1. Non-negotiable invariants
 
 1. **Identity:** Aoteru persona truth remains in `tyecam1/misumi`; model identity never replaces persona identity.
-2. **Runtime:** Odysseus owns domain-neutral estate discovery, memory broker, routing transport, jobs, model/service discovery and parking leases.
+2. **Runtime:** Odysseus owns domain-neutral estate discovery, routing transport, jobs, model/service discovery and parking leases, and hosts the household runtime memory (a single writer on the home host; there is no separate memory broker, see the banner at section 6).
 3. **Domain truth:** `obsidian-PhD`, Misumi/household and other repos remain authoritative for their own knowledge, permissions and workflows.
 4. **Single writer:** repo mutation occurs only on the active parking lease/worktree. No active-active editing of one branch across machines.
 5. **Memory:** personal memory stores source-linked facts, preferences, decisions, episodes, open loops and authority pointers; it does not duplicate whole repositories as truth.
@@ -136,7 +137,7 @@ Use Tailscale if permitted on all devices.
 
 ```text
 svc:aoteru        # authenticated Aoteru/Odysseus front door; home + lab backends
-svc:memory        # broker API; home primary, lab read-cache fallback
+                  # (no svc:memory: superseded 2026-10-02, see the banner at section 6)
 svc:models-lab
 svc:models-home
 svc:odysseus-lab
@@ -149,6 +150,8 @@ svc:odysseus-home
 If university policy blocks Tailscale, keep the same logical service contract and substitute the approved private VPN/SSH path. Do not change application ownership to work around network policy.
 
 ## 6. Aoteru memory broker
+
+> **Superseded in part (2026-10-02).** The operator ratified the Phase 4 architecture (tyecam1/misumi `docs/memory-architecture.md` (Ratified 2026-10-02)). It adopts **no memory broker, no Mem0 store, no additional MCP memory authority, no lab memory replica and no automatic failover**, and keeps the existing Odysseus runtime memory as the only runtime-memory mechanism, with the transcript archive as permanent (user-deletable) operational history and Misumi Git as household canon. Read this section as history: 6.1 (reuse `src/misumi_memory.py`, preserve JSONL compatibility) and 6.3 (a derived, rebuildable index) still hold; 6.2's new tables and `memory_outbox`, and **6.5 (home primary, lab snapshot/read cache and failover) are not adopted**. Recoverability is a verified age-encrypted backup to a personally controlled off-site destination and a drilled restore (`docs/backup-restore.md`). Provenance is the existing `source_events` and `MemoryRelation`, whose coverage is incomplete; no second provenance or memory store is created to repair that.
 
 ### 6.1 Reuse first
 
@@ -437,8 +440,8 @@ Build:
 - SQLite source/memory/relation/revision/open-loop/outbox schema;
 - migration adapter from existing Misumi JSONL;
 - Chroma derived index;
-- broker API/MCP;
-- home primary + lab snapshot/outbox failover.
+- ~~broker API/MCP~~ (not adopted; see the banner at section 6);
+- ~~home primary + lab snapshot/outbox failover~~ (not adopted; recovery is a verified encrypted backup and a drilled restore).
 
 Gate:
 - existing Misumi memory survives round-trip migration;
@@ -543,7 +546,7 @@ Completion means the acceptance tests below all pass from clean boots.
 7. Authority: Aoteru can search across registered sources but cannot mutate an unparked repo or bypass domain gates.
 8. Failover: either worker can disappear without corrupting memory/repo/task state; remaining routes continue where technically possible.
 9. Cost: routine routing/memory/indexing work stays deterministic/local; paid escalation is recorded and explainable.
-10. Recovery: after reboot, services, registry, memory broker, Aoteru surface and worker health return without laptop intervention.
+10. Recovery: after reboot, services, registry, household runtime memory, Aoteru surface and worker health return without laptop intervention.
 
 ## 14. Explicit non-goals
 
