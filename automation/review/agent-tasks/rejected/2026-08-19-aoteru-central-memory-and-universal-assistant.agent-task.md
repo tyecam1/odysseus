@@ -3,11 +3,12 @@ artifact_type: agent-task
 task_schema: agent-task/v2
 task_id: 2026-08-19-aoteru-central-memory-and-universal-assistant
 title: "Build Aoteru central memory and universal assistant"
-status: inbox
-priority: high
+status: rejected
+rejection_reason: superseded_by_ratified_adr
+priority: low
 task_type: architecture-convergence
 created_by: migrated-from-obsidian-phd
-updated_at: 2026-10-02T15:20:00+01:00
+updated_at: 2026-10-02T18:00:00+01:00
 executor: ""
 execution_mode: review-first
 requires_remote_compute: false
@@ -28,12 +29,21 @@ notes: "Migrated as shared backend/cross-repository work. Original body preserve
 
 # Build Aoteru central memory and universal assistant
 
-## 2026-10-02 Phase 4 re-grounding (proposed disposition; the original body below is preserved)
+## 2026-10-02 Retirement (Phase 4 ADR ratified; the original body below is preserved as history)
 
-Misumi long-horizon programme, application `2026-10-02-misumi-long-horizon-programme-02`. A bounded Opus architecture gate
-was run against live evidence. Its conclusions are recorded as a **Proposed** ADR, `docs/memory-architecture.md` in
-`tyecam1/misumi` (PR #45), and take effect only when the operator ratifies it. This task is **not closed** because two of
-its items are real; the rest is obsolete or already satisfied.
+Misumi long-horizon programme, applications `-02` to `-04`. A bounded Opus architecture gate was run against live evidence;
+its conclusions are recorded in `docs/memory-architecture.md` in `tyecam1/misumi`, **Ratified by the operator on 2026-10-02**
+(Misumi PR #46). The ADR adopts the existing Odysseus runtime memory as the only runtime-memory mechanism and rejects a Mem0
+store, a new Memory Broker, an additional MCP memory authority, a lab memory replica and automatic failover.
+
+**This task is retired (status `rejected`, reason `superseded_by_ratified_adr`).** Leaving it at high priority in the inbox
+would contradict the ratified decision. The two items below that were genuinely deferred (not obsolete) now have their own
+scoped, low-priority owner tasks, so nothing real is lost with this one:
+
+- `2026-10-02-bounded-read-only-session-start-retrieval` (tranche item 6, read-only half only)
+- `2026-10-02-chatgpt-export-ingestion-via-memory-sources` (tranche item 7)
+
+The re-grounding evidence follows unchanged.
 
 Evidence that changes the premises: the design document this task cites
 (`automation/review/architecture/2026-08-19-aoteru-central-memory-and-agent-fabric.md`) does not exist in the repository;
@@ -49,8 +59,8 @@ rejected as a second authority.
 | 3 Memory Broker with an append-only ledger | Obsolete: a second router and store; the transcript archive is the ledger |
 | 4 Self-hosted Mem0 pilot | Obsolete: a new store behind a new broker |
 | 5 `aoteru-memory` MCP | Obsolete: `mcp_servers/memory_server.py` exists |
-| 6 Claude Code lifecycle hooks | **Deferred, not obsolete:** read-only bounded retrieval may be real later; candidate capture would be a second write path and risks crossing the PhD boundary, so it needs a domain-scoping design first |
-| 7 Incremental ChatGPT export ingestion | **Deferred, not obsolete:** a separate ingestion item under `config/memory-sources.yaml`, after an owner privacy decision |
+| 6 Claude Code lifecycle hooks | **Deferred, now `2026-10-02-bounded-read-only-session-start-retrieval`:** read-only bounded retrieval may be real later; candidate capture would be a second write path and risks crossing the PhD boundary, so it needs a domain-scoping design first |
+| 7 Incremental ChatGPT export ingestion | **Deferred, now `2026-10-02-chatgpt-export-ingestion-via-memory-sources`:** a separate ingestion item under `config/memory-sources.yaml`, after an owner privacy decision |
 | 8 Repo registry, parking lease, launcher | Satisfied (`config/repositories.yaml`, ParkLease) |
 | 9 Benchmark local models | Subordinate to `2026-09-13-operating-contract-model-role-evaluation-system` (PR #62); not memory work |
 | 10 Home-primary memory with lab warm replica and read failover | **Rejected:** contradicts the single-writer design and the rule that the lab is never a second writer; replaced by an encrypted verified scheduled backup and a drilled restore with a stated recovery point |
@@ -64,7 +74,7 @@ rejected as a second authority.
 | Memory read-only from the lab if home is down | Obsolete: replaced by restore within a measured time |
 | Local model defaults from measured results; local extraction by default | Owned by the model-role evaluation task |
 
-Retiring the obsolete rows is a consequence of ratifying the ADR; this note does not change the task's status.
+The obsolete rows are retired by the ratified ADR; the model-benchmark row stays with the model-role evaluation task.
 
 ## Goal
 
