@@ -5,7 +5,8 @@ Programme: ``misumi-long-horizon-programme`` (Phase 4, first slice). Task contex
 "Failure semantics"); backup tool: ``docs/backup-restore.md``.
 
 This drives the *existing* ``scripts/odysseus-backup`` (snapshot, verify, restore)
-against a disposable, file-backed archive. It adds no store, tool or mechanism. It
+against a disposable, file-backed archive, in both layouts: ``<repo>/data`` and an external directory named by
+``ODYSSEUS_DATA_DIR`` (how the household deployment runs). It adds no store, tool or mechanism. It
 proves what the runtime document asserts but nothing exercised before:
 
 * the archive survives snapshot -> destroy -> restore row for row (full-row parity,
@@ -67,15 +68,25 @@ def _digest(rows):
 class Drill:
     """A disposable repository root with a real ``data/app.db`` and the real backup script."""
 
-    def __init__(self, root, monkeypatch, capsys):
+    def __init__(self, root, monkeypatch, capsys, external):
         self.root = root
-        self.data = root / "data"
-        self.data.mkdir()
-        self.db_path = self.data / "app.db"
         self.capsys = capsys
-        self.backup = load_script("odysseus-backup")
-        monkeypatch.setattr(self.backup, "_REPO_ROOT", root)
-        monkeypatch.setattr(self.backup, "_DATA_DIR", self.data)
+        if external:
+            # The production layout: the runtime's data lives outside the release checkout and is named by
+            # ODYSSEUS_DATA_DIR (the household deployment's -DataRoot). The tool must find it from the variable.
+            self.data = root / "AppData" / "Odysseus" / "Misumi"
+            self.data.mkdir(parents=True)
+            monkeypatch.setenv("ODYSSEUS_DATA_DIR", str(self.data))
+            self.backup = load_script("odysseus-backup")
+            assert self.backup._DATA_DIR == self.data
+        else:
+            self.data = root / "data"
+            self.data.mkdir()
+            monkeypatch.delenv("ODYSSEUS_DATA_DIR", raising=False)
+            self.backup = load_script("odysseus-backup")
+            monkeypatch.setattr(self.backup, "_REPO_ROOT", root)
+            monkeypatch.setattr(self.backup, "_DATA_DIR", self.data)
+        self.db_path = self.data / "app.db"
         monkeypatch.setattr(self.backup, "_BACKUP_DIR", root / "backups")
         self.engine, self.factory = _factory(self.db_path)
 
@@ -136,11 +147,11 @@ class Drill:
             )
 
 
-@pytest.fixture()
-def drill(tmp_path, monkeypatch, capsys):
+@pytest.fixture(params=["in-tree", "external"])
+def drill(request, tmp_path, monkeypatch, capsys):
     root = tmp_path / "repo"
     root.mkdir()
-    d = Drill(root, monkeypatch, capsys)
+    d = Drill(root, monkeypatch, capsys, external=request.param == "external")
     d.seed()
     yield d
     d.engine.dispose()
@@ -249,7 +260,7 @@ def test_recovery_point_is_the_snapshot_and_the_stash_allows_rollback(drill):
 
     # ...but the previous data directory was stashed untouched, so the restore can be rolled back.
     stash = result["previous_data_stashed_at"]
-    assert stash and "data.before-restore-" in stash
+    assert stash and ".before-restore-" in stash
     stashed_engine, stashed_factory = _factory(f"{stash}/app.db")
     try:
         with stashed_factory() as db:
