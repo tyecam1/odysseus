@@ -28,7 +28,15 @@ import argparse, json, logging, os, shutil, sqlite3, subprocess, sys, tarfile, t
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 
-_DATA_DIR = _REPO_ROOT / "data"
+def _resolve_data_dir() -> Path:
+    """The runtime's own data directory. ``ODYSSEUS_DATA_DIR`` wins when set (``src/constants.py`` reads the
+    same variable, and the household deployment keeps its data outside the release checkout), otherwise
+    ``<repo>/data``."""
+    override = os.environ.get("ODYSSEUS_DATA_DIR")
+    return Path(override).expanduser() if override else _REPO_ROOT / "data"
+
+
+_DATA_DIR = _resolve_data_dir()
 _BACKUP_DIR = _REPO_ROOT / "backups"
 
 # Stuff inside data/ that we explicitly skip — anything we can re-derive
@@ -100,7 +108,7 @@ def cmd_snapshot(args):
             for p in sorted(_DATA_DIR.rglob("*")):
                 if not p.is_file() or p.is_symlink():
                     continue
-                rel = p.relative_to(_DATA_DIR.parent)
+                rel = Path("data") / p.relative_to(_DATA_DIR)  # the archive layout is always data/...
                 # Skip user-asked-to-skip categories
                 if not args.include_research and "deep_research" in rel.parts:
                     continue
@@ -194,10 +202,12 @@ def _validate_restore_members(members):
             fail(f"refusing tarball with special file entry: {m.name!r}")
 
 
-def _extract_restore_members(tar, members, root: Path) -> None:
-    """Extract only regular files/directories after validation."""
+def _extract_restore_members(tar, members, root: Path, data_dir: Path | None = None) -> None:
+    """Extract only regular files/directories after validation. Archive entries are always
+    ``data/...``; ``data_dir`` (when given) is where that prefix lands."""
     for m in members:
-        target = root.joinpath(*PurePosixPath(m.name).parts)
+        parts = PurePosixPath(m.name).parts
+        target = data_dir.joinpath(*parts[1:]) if data_dir is not None else root.joinpath(*parts)
         if m.isdir():
             target.mkdir(parents=True, exist_ok=True)
             continue
@@ -225,10 +235,10 @@ def cmd_restore(args):
         _validate_restore_members(members)
         # Save a safety copy of current data/ before extracting.
         if _DATA_DIR.exists() or _DATA_DIR.is_symlink():
-            stash = _REPO_ROOT / f"data.before-restore-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+            stash = _DATA_DIR.with_name(f"{_DATA_DIR.name}.before-restore-{datetime.now().strftime('%Y%m%d-%H%M%S')}")
             os.rename(_DATA_DIR, stash)
         try:
-            _extract_restore_members(tar, members, _REPO_ROOT)
+            _extract_restore_members(tar, members, _REPO_ROOT, _DATA_DIR)
         except Exception as e:
             fail(f"extract failed: {e}")
     emit({

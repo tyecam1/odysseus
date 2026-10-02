@@ -347,12 +347,43 @@ def test_identity_verified_never_implies_worker_enabled(fixture_config):
     )
 
 
-def test_shipped_estate_config_home_worker_disabled():
+def test_shipped_estate_config_home_worker_is_compute_only_and_pinned():
+    """Stage 8: home is enabled for deterministic compute ONLY. It must never gain write authority by accident:
+    `codex-write` stays unqualified (operator decision; S6.12 Windows job objects are not implemented), `local`
+    stays unqualified until the model benchmark has actually been passed, and the transport stays pinned."""
+    import base64
+    import hashlib
+
     estate_path = Path(__file__).parents[1] / "config" / "estate.yaml"
     estate = yaml.safe_load(estate_path.read_text())
     home = next(host for host in estate["hosts"] if host["id"] == "desktop-in7o23d")
-    assert home["worker"]["enabled"] is False
-    assert "verified" not in home
+    worker = home["worker"]
+    assert worker["enabled"] is True and worker["transport"] == "ssh"
+    assert worker["qualified_executors"] == ["deterministic"]
+    assert "codex-write" not in worker["qualified_executors"]
+
+    # the host key is pinned and is exactly the documented, operator-supplied fingerprint
+    ssh = worker["ssh"]
+    assert ssh["target"] and ssh["host_public_key"]
+    blob = base64.b64decode(ssh["host_public_key"].split()[1])
+    fingerprint = "SHA256:" + base64.b64encode(hashlib.sha256(blob).digest()).decode().rstrip("=")
+    assert fingerprint == "SHA256:rmuPA4DUnFnR8UPXBHrksljQbT86l2aZZAztNZ1TIeU"
+
+    # Windows OpenSSH already runs a forced command through cmd.exe: a nested `cmd.exe /c` loses the `cd /d`
+    assert "cmd.exe" not in ssh["command"] and ssh["command"].startswith("cd /d ")
+
+    # qualification evidence names a file that exists
+    for evidence in worker["qualification_evidence"]:
+        assert (Path(__file__).parents[1] / evidence).is_file(), evidence
+
+
+def test_no_alias_is_qualified_on_home_without_benchmark_evidence():
+    """Home may only appear under an alias's `qualified_hosts` once a passing benchmark is recorded for it."""
+    models = yaml.safe_load((Path(__file__).parents[1] / "config" / "models.yaml").read_text())
+    for entry in models["capabilities"]:
+        home = (entry.get("qualified_hosts") or {}).get("desktop-in7o23d")
+        if home is not None:
+            assert home.get("evidence"), f"{entry['alias']} is qualified on home without recorded evidence"
 
 
 def test_shipped_estate_config_lab_worker_local():

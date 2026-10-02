@@ -15,6 +15,14 @@ write can't corrupt the snapshot.
 > private, never commit them to Git, and prefer an encrypted destination when
 > copying them offsite.
 
+## Which directory is backed up
+
+The tool snapshots and restores the runtime's own data directory: `ODYSSEUS_DATA_DIR` when that variable is set (the
+variable `src/constants.py` reads, and the one the Windows household deployment sets through
+`odysseus-host.ps1 -DataRoot`), otherwise `data/` in the repository. The tarball layout is always `data/...`, whatever
+the directory is called, so a tarball from one layout restores into the other. Run the tool with the same environment the
+app runs with: a snapshot taken without `ODYSSEUS_DATA_DIR` on a host that sets it would capture the checkout's own
+`data/` instead of the live data.
 ## Quick start
 
 Run the tool from the repository root:
@@ -81,8 +89,9 @@ Overwrites `data/` from a tarball.
 > is required so a mistyped command can't wipe your live state.
 
 Restore is not a blind delete: before extracting, the tool **renames your current
-`data/` to `data.before-restore-<timestamp>`** in the repository root. If a
-restore turns out to be wrong, your previous state is still there — delete the
+`data/` to `data.before-restore-<timestamp>`** next to it (in the repository root for the default layout; beside the directory as
+`<name>.before-restore-<timestamp>` when `ODYSSEUS_DATA_DIR` names another one). If a restore
+turns out to be wrong, your previous state is still there — delete the
 restored `data/` and rename the stashed directory back. The restore path is also
 validated entry-by-entry: archives containing absolute paths, `..` segments,
 symlinks, or anything outside `data/` are rejected.
