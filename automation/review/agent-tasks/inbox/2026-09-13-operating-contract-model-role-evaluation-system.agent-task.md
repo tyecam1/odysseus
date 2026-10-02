@@ -2,19 +2,19 @@
 artifact_type: agent-task
 task_schema: agent-task/v2
 task_id: 2026-09-13-operating-contract-model-role-evaluation-system
-title: "Build operating-contract and model-role evaluation system"
+title: "Build operating-contract, model-role and local-estate evaluation system"
 status: inbox
-priority: medium
+priority: high
 task_type: evaluation-observability
 created_by: migrated-from-obsidian-phd
-updated_at: 2026-09-23T15:26:00+01:00
+updated_at: 2026-10-02T10:41:00+01:00
 executor: ""
 execution_mode: review-first
-requires_remote_compute: false
-requires_local_model: false
+requires_remote_compute: true
+requires_local_model: true
 requires_zotero: false
 requires_mcp: false
-requires_web: false
+requires_web: true
 verification_route: V2_HUMAN_VERIFIED
 risk_level: medium
 approval_required: true
@@ -321,3 +321,179 @@ Do not create a publication merely because telemetry exists. The HRC PhD critica
 - maximising task volume at the expense of research quality
 - forcing controlled comparisons when natural repository evidence already resolves the decision
 - turning agent-system evaluation into a higher priority than the HRC research programme
+
+
+## 2026-10-02 local-estate model portfolio extension
+
+This task is also the canonical cross-estate authority for selecting and re-evaluating local foundation models used by Odysseus and by Misumi through Odysseus. It absorbs the model-selection portion of the dual-PC runtime work rather than creating another benchmark programme.
+
+Misumi retains domain authority for persona purpose, behaviour and evaluation cases. The Odysseus evaluation layer owns backend model/provider comparison, host fit, deployment evidence and routing recommendations. The Misumi persona-calibration programme is therefore an input benchmark/corpus to this task, not a second model-selection authority.
+
+### Deployment intent
+
+Treat these as target deployment classes to validate, not invitations to proliferate models:
+
+- **Home PC / Misumi persona lane:** use an **abliterated** local model for persona execution. Quantisation may also be used because abliteration and quantisation are independent model attributes. One selected model should serve the Misumi personas by default; do not create one model per persona unless measured capability requirements prove that a persona needs a materially different model class.
+- **Lab PC / stronger local reasoning lane:** use a **quantised stronger model** selected for Odysseus research, coding, synthesis, verification and other higher-demand local work that the lab hardware can sustain.
+- A model may serve multiple roles when evidence shows it is best for those roles.
+- Do **not** retain multiple production models whose measured role, skill coverage and deployment purpose are materially equivalent. A second overlapping model is permitted only as a time-bounded challenger, rollback candidate or controlled experiment and must have an explicit removal/adoption decision.
+
+The aim is the **smallest non-redundant model portfolio that covers the required capability graph**.
+
+### Model properties to evaluate
+
+Do not reduce model selection to parameter count or public leaderboard position. Quantisation and abliteration are two useful axes, not the whole design space. At minimum assess:
+
+- model family, architecture and release/version;
+- dense versus MoE structure, total parameters and active parameters;
+- instruction tuning and role-following behaviour;
+- abliteration/uncensoring method, refusal behaviour and any measurable quality regression;
+- quantisation format and level, including measured degradation rather than filename alone;
+- inference backend compatibility and maturity on the actual hosts;
+- GPU offload behaviour and CPU fallback cost;
+- native and practical context length;
+- KV-cache memory cost at representative context lengths and concurrency;
+- prompt-prefill speed, generation throughput, time-to-first-token and cold-load time;
+- tool/function calling correctness;
+- structured-output/JSON/schema adherence;
+- coding and patch-generation quality where relevant;
+- verifier/critic performance where relevant;
+- long-context retrieval and instruction retention;
+- reasoning-mode controllability and unnecessary reasoning overhead;
+- multimodal capability only where an actual application needs it;
+- persona fidelity, tone stability and long-session drift for Misumi;
+- operating-contract adherence, scope discipline and escalation behaviour;
+- robustness to malformed tool output, retries and partial failures;
+- privacy/offline suitability and data-locality constraints;
+- licence, provenance, model-card quality, publisher/repository trust and update cadence;
+- runtime stability on Windows/NVIDIA estate hardware;
+- VRAM, system-RAM and **disk-space footprint** of weights, projectors, caches and duplicate quant variants;
+- power/thermal impact where sustained operation makes it material.
+
+For modified/abliterated models, benchmark against the corresponding unmodified/base or official instruct model where practical so refusal reduction is not mistaken for improved task quality.
+
+### Storage and host-fit gate
+
+Before downloading or benchmarking candidates, inventory the **live** estate:
+
+- CPU and GPU;
+- VRAM;
+- system RAM;
+- OS/runtime/driver versions;
+- relevant drive/volume identities;
+- total and **free disk space** on each volume;
+- current local-model files and their exact on-disk sizes;
+- duplicate models/quant variants and caches;
+- current model-store location and any runtime duplication of blobs.
+
+Define an explicit free-space reserve for each host from actual operational needs before bulk downloads. A candidate must not be downloaded if it would breach that reserve.
+
+For every candidate record:
+
+- download size;
+- installed/on-disk size;
+- additional projector/tokenizer/cache files;
+- model-store duplication caused by the runtime;
+- peak VRAM and RAM;
+- context-dependent memory;
+- temporary benchmark storage;
+- whether the candidate can be deleted immediately after adjudication.
+
+After selection, remove superseded candidate weights and redundant quant variants once rollback/evidence requirements are satisfied. Do not allow model experimentation to become an unbounded disk cache.
+
+### Evidence sequence
+
+Model selection must proceed in this order:
+
+1. **Re-ground live use cases and capability classes.**
+   Derive required model capabilities from current Odysseus routing/contracts and current Misumi persona evaluation, not from model marketing.
+2. **Deep external evidence review.**
+   Review current model cards, quantisation reports, ablation methods, independent benchmarks and inference-runtime support. Use public benchmarks only where they predict an estate task.
+3. **Shortlist a Pareto set.**
+   Eliminate candidates dominated on capability, hardware fit, latency or storage before downloading them.
+4. **Benchmark on the actual hosts.**
+   Run representative tasks under fixed prompts/contracts/tool schemas and record hardware/resource telemetry.
+5. **Run controlled base-versus-modified comparisons where needed.**
+   Especially compare official versus abliterated variants and meaningful quantisation levels.
+6. **Adjudicate by role/capability class.**
+   Select the minimum set of models needed. Do not create a global leaderboard.
+7. **Deploy provisionally and observe naturalistic runs.**
+   Feed accepted/revised/escalated outcomes into the longitudinal model-role-contract system.
+8. **Ratify or roll back.**
+   Promote routing only after the evidence threshold is met. Delete losing candidates when safe.
+
+### Benchmark families and estate relevance
+
+External benchmark review should be selective and task-linked. Examples of useful evidence include:
+
+- instruction-following benchmarks for operating-contract adherence;
+- function/tool-calling benchmarks for Odysseus and Misumi actions;
+- agent benchmarks for multi-step tool use;
+- coding benchmarks for implementation/review roles;
+- long-context benchmarks for repository/document workloads;
+- structured-output reliability tests;
+- refusal/over-refusal tests for persona suitability;
+- quantisation-perplexity or task-regression evidence;
+- independent local throughput/memory measurements on comparable hardware.
+
+General knowledge benchmarks such as MMLU-style scores are supporting evidence only when they discriminate candidates relevant to the application. Do not select a model because it wins unrelated academic benchmarks.
+
+### Representative local evaluation suite
+
+Use real or sanitized estate tasks. At minimum cover:
+
+**Misumi**
+- persona-consistent conversational response;
+- household Q&A with retrieval;
+- voice-path short-turn latency;
+- long-session persona stability;
+- tool selection and argument correctness;
+- refusal/over-refusal on legitimate persona requests;
+- operating-contract boundary adherence;
+- recovery from unavailable tools or incomplete context.
+
+**Odysseus**
+- task classification/routing;
+- structured extraction/transformation;
+- repository Q&A;
+- bounded code patch;
+- code/repository review;
+- task decomposition;
+- evidence/research synthesis;
+- verifier/critic pass;
+- long-context contract retention;
+- tool calling and schema adherence.
+
+Keep task fixtures, acceptance criteria and verifier identity fixed when comparing models.
+
+### Non-redundancy decision rule
+
+For each production model, maintain a short capability justification:
+
+- host;
+- capability classes served;
+- roles served;
+- measured advantages;
+- resource cost;
+- why an already-deployed model cannot adequately cover the same work.
+
+If two deployed models serve the same effective roles at comparable quality and constraints, keep the one with the stronger evidence-adjusted utility and retire the other. Distinct model families are not a benefit by themselves.
+
+The system may retain diversity when it has a measured purpose, for example independent verification, substantially different context capability, multimodal input, materially stronger coding, or failover resilience. State that purpose explicitly.
+
+### Initial candidate review
+
+The October 2026 search identified candidates such as Qwen3.5-class dense models, Gemma 4-class models, lightweight MoE models, Qwen3.6-class MoE models, GPT-OSS and Nemotron families. Treat these only as search seeds. Do not encode any of them as defaults until the evidence sequence above is complete against the live machines and current workloads.
+
+### Additional acceptance criteria
+
+- The home Misumi persona production route uses an abliterated model selected through measured persona/task evaluation.
+- The lab stronger-local route uses a quantised model selected through measured Odysseus/research-task evaluation.
+- Abliteration and quantisation are represented as independent attributes in evaluation records.
+- Both hosts have a recorded live storage inventory and model-store budget before candidate acquisition.
+- Candidate evaluation records include model-file footprint and peak RAM/VRAM as well as quality/latency.
+- No two retained production models have materially identical role/capability justification without an explicit diversity, failover or experimental rationale.
+- Misumi persona calibration feeds the shared evaluation system without moving persona authority into Odysseus.
+- The dual-PC runtime consumes the selected model portfolio rather than maintaining a separate model benchmark authority.
+- Losing/superseded candidate weights are removed after adjudication and rollback requirements are satisfied.
+- Public benchmark claims are linked to the estate task they are intended to predict and are verified by local representative tests before routing changes.
