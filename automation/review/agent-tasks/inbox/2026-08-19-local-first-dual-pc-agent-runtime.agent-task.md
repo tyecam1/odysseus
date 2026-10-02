@@ -7,7 +7,7 @@ status: inbox
 priority: high
 task_type: architecture-convergence
 created_by: migrated-from-obsidian-phd
-updated_at: 2026-09-23T15:26:00+01:00
+updated_at: 2026-10-02T10:41:00+01:00
 executor: ""
 execution_mode: review-first
 requires_remote_compute: false
@@ -257,25 +257,26 @@ Introduce explicit routing metadata for each task/run:
 
 Provide a weekly report showing which task classes consumed Claude/Codex usage and which could have been routed locally. The purpose is to continuously move low-value paid work downward without degrading research quality.
 
-## Local model selection benchmark
+## Local model selection benchmark authority
 
-Before changing routing defaults:
+The canonical cross-estate model-selection and model-role evaluation authority is:
 
-1. Inventory CPU, GPU, VRAM, system RAM, storage and OS on both PCs.
-2. Inventory current runtimes and drivers.
-3. Define a representative benchmark suite from actual repository work:
-   - metadata/routing
-   - PDF span summarisation
-   - evidence relevance
-   - literature synthesis
-   - code patch
-   - code review
-   - research-note Q&A
-   - Misumi household query
-4. Test multiple model sizes/quantisations that fit each host.
-5. Record quality, latency, tokens/s, context capacity, peak VRAM/RAM and failure rate.
-6. Choose a small default and stronger default per host.
-7. Keep model names/configuration replaceable. Routing targets capability classes, not permanent model brands.
+`automation/review/agent-tasks/inbox/2026-09-13-operating-contract-model-role-evaluation-system.agent-task.md`
+
+Do not run a separate model tournament from this architecture task. This task supplies the hardware, runtime, topology, load and storage evidence required by that evaluation programme, then implements the ratified portfolio.
+
+Required host evidence includes CPU, GPU, VRAM, system RAM, OS/runtime/driver state, measured throughput, context behaviour, and total/free space for every relevant drive/volume.
+
+Deployment intent:
+
+- home PC: primary Misumi persona execution using the selected abliterated model; use an appropriate quantisation as needed for hardware fit;
+- lab PC: stronger quantised local model for higher-demand Odysseus/research work;
+- one production model per materially distinct capability niche where possible;
+- overlapping models exist only as explicit challengers, rollback candidates or measured independent-verification diversity.
+
+Abliteration and quantisation are independent attributes. The selection task must also evaluate architecture, active parameters, context/KV memory, tool calling, structured output, inference backend, latency, RAM/VRAM, disk footprint, licence/provenance, stability and workload-specific quality.
+
+Misumi's persona-calibration work supplies domain-specific persona/task fixtures. It does not create a second backend model-selection authority.
 
 ## Routing architecture
 

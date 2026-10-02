@@ -9,9 +9,16 @@ app can keep running during the snapshot.
 
     odysseus-backup snapshot                       # → backups/YYYY-MM-DD-HHMMSS.tar.gz
     odysseus-backup snapshot --out /mnt/nas/x.tgz
+    odysseus-backup snapshot --exclude-rebuildable --encrypt-recipients keys.txt
     odysseus-backup list                           # entries in backups/
     odysseus-backup restore PATH [--yes]           # overwrite current data/ from a tarball
-    odysseus-backup verify PATH                    # tarball integrity check (no extract)
+    odysseus-backup verify PATH [--deep]           # tarball integrity check (no extract)
+    odysseus-backup prune --dir DIR [--yes]        # keep 7 daily / 4 weekly / 12 monthly
+
+Every snapshot verifies itself before it is reported as written: all members are read back and every
+SQLite database in it gets `PRAGMA integrity_check`. A snapshot that fails is deleted and the command
+exits non-zero. A `<snapshot>.manifest.json` beside it records the sha256 and per-table row counts so a
+later restore can be proved against it. Restore verifies the archive the same way BEFORE it touches `data/`.
 
 Restore is destructive: it overwrites `data/` in place. Always pass
 `--yes` so a typo can't nuke your live state.
@@ -24,12 +31,31 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "_lib"))
 from cli import quiet_logs, emit, fail, common_parser, run, REPO_ROOT as _REPO_ROOT
 quiet_logs()
 
-import argparse, json, logging, os, shutil, sqlite3, subprocess, sys, tarfile, tempfile
-from datetime import datetime
+import argparse, hashlib, json, logging, os, re, shutil, socket, sqlite3, subprocess, sys, tarfile, tempfile, zlib
+from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
-_DATA_DIR = _REPO_ROOT / "data"
+def _resolve_data_dir() -> Path:
+    """The runtime's own data directory. ``ODYSSEUS_DATA_DIR`` wins when set (``src/constants.py`` reads the
+    same variable, and the household deployment keeps its data outside the release checkout), otherwise
+    ``<repo>/data``."""
+    override = os.environ.get("ODYSSEUS_DATA_DIR")
+    return Path(override).expanduser() if override else _REPO_ROOT / "data"
+
+
+_DATA_DIR = _resolve_data_dir()
 _BACKUP_DIR = _REPO_ROOT / "backups"
+
+_TOOL_VERSION = 2
+_SQLITE_MAGIC = b"SQLite format 3\x00"
+_MANIFEST_SUFFIX = ".manifest.json"
+_SNAPSHOT_NAME_RE = re.compile(r"^odysseus-backup-(\d{8})-(\d{6})\.tar\.gz(\.age)?$")
+
+# Top-level data/ directories that are re-created on demand and are never the only copy of anything:
+# ``--exclude-rebuildable`` skips them. Vector/RAG indexes are deliberately NOT here: they are only
+# disposable once a rebuild from the canonical sources has been proven, so exclude them explicitly
+# (``--exclude chroma``) when that is true.
+_REBUILDABLE_DIRS = ("cache", "tts_cache", "stt-tmp", "models")
 
 # Stuff inside data/ that we explicitly skip — anything we can re-derive
 # from the SQLite DB + JSON state. Keeps the tarball small.
@@ -40,20 +66,31 @@ _SKIP_PATTERNS = {
 }
 
 
+def _is_sqlite_file(path: Path) -> bool:
+    try:
+        with open(path, "rb") as f:
+            return f.read(16) == _SQLITE_MAGIC
+    except OSError:
+        return False
+
+
 def _sqlite_safe_copy(src: Path, dst: Path) -> None:
     """Use SQLite's `.backup` API instead of a file copy so a write
-    in-flight doesn't corrupt the snapshot. Falls back to plain copy
-    if the file isn't a SQLite DB."""
+    in-flight doesn't corrupt the snapshot. A file that is not a SQLite
+    database (a stray ``*.db``) is copied as bytes. A REAL SQLite database
+    is never raw-copied if the backup API fails: a byte copy of a live
+    database can be torn, so the error is surfaced and the snapshot fails."""
+    if not _is_sqlite_file(src):
+        dst.write_bytes(src.read_bytes())
+        return
+    src_conn = sqlite3.connect(str(src))
+    dst_conn = sqlite3.connect(str(dst))
     try:
-        src_conn = sqlite3.connect(str(src))
-        dst_conn = sqlite3.connect(str(dst))
         with dst_conn:
             src_conn.backup(dst_conn)
+    finally:
         src_conn.close()
         dst_conn.close()
-    except Exception:
-        # Not a SQLite DB or backup unsupported — fall back.
-        dst.write_bytes(src.read_bytes())
 
 
 def _reject_output_inside_data(out_path: Path) -> None:
@@ -66,24 +103,170 @@ def _reject_output_inside_data(out_path: Path) -> None:
     fail("backup output path must be outside data/")
 
 
+def _sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _excluded(rel: Path, excludes) -> bool:
+    """``rel`` is ``data/<...>``. A bare name excludes that top-level directory of data/ only (so a nested
+    folder that merely shares the name is never dropped by accident); ``a/b`` excludes that path prefix."""
+    inner = rel.parts[1:]
+    posix = "/".join(inner)
+    for ex in excludes:
+        ex = str(ex).strip().strip("/")
+        if not ex:
+            continue
+        if "/" in ex:
+            if posix == ex or posix.startswith(ex + "/"):
+                return True
+        elif inner[:1] == (ex,):
+            return True
+    return False
+
+
+def _db_report(path: Path) -> dict:
+    """Integrity result and per-table row counts for one SQLite file."""
+    conn = sqlite3.connect(str(path))
+    try:
+        result = conn.execute("PRAGMA integrity_check").fetchall()
+        if result != [("ok",)]:
+            return {"integrity": "; ".join(str(r[0]) for r in result[:5]), "tables": {}}
+        tables = {}
+        names = [r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")]
+        for name in names:
+            quoted = name.replace('"', '""')
+            tables[name] = conn.execute(f'SELECT count(*) FROM "{quoted}"').fetchone()[0]
+        return {"integrity": "ok", "tables": tables}
+    except sqlite3.DatabaseError as exc:
+        return {"integrity": f"unreadable: {exc}", "tables": {}}
+    finally:
+        conn.close()
+
+
+def _deep_check(archive: Path, expect_sqlite: "set[str] | None" = None) -> dict:
+    """Read EVERY member back (so truncation/CRC damage surfaces) and integrity-check every SQLite database.
+    Returns ``{members, databases, problems}``; ``problems`` empty means the archive is sound. Path-safety
+    violations still go through ``fail`` (a refusal, not a report)."""
+    problems: list[str] = []
+    databases: list[dict] = []
+    try:
+        with tarfile.open(archive, "r:gz") as tar:
+            members = tar.getmembers()
+            _validate_restore_members(members)
+            with tempfile.TemporaryDirectory() as tmp_str:
+                for m in members:
+                    if not m.isfile():
+                        continue
+                    src = tar.extractfile(m)
+                    if src is None:
+                        problems.append(f"{m.name}: unreadable member")
+                        continue
+                    if not m.name.endswith(".db"):
+                        with src:
+                            while src.read(1024 * 1024):
+                                pass
+                        continue
+                    target = Path(tmp_str) / f"db{len(databases)}.sqlite"
+                    with src, open(target, "wb") as dst:
+                        shutil.copyfileobj(src, dst)
+                    if _is_sqlite_file(target):
+                        report = _db_report(target)
+                        if report["integrity"] != "ok":
+                            problems.append(f"{m.name}: SQLite integrity check failed: {report['integrity']}")
+                    else:
+                        report = {"integrity": "not-sqlite", "tables": {}}
+                        if expect_sqlite and m.name in expect_sqlite:
+                            problems.append(f"{m.name}: was a SQLite database but the archived copy is not one")
+                    databases.append({"name": m.name, **report})
+    except (tarfile.TarError, EOFError, OSError, zlib.error) as exc:
+        problems.append(f"archive unreadable: {exc}")
+        return {"members": 0, "databases": databases, "problems": problems}
+    return {"members": len(members), "databases": databases, "problems": problems}
+
+
+def _find_age() -> str:
+    exe = shutil.which("age")
+    if not exe:
+        fail("`age` is not installed or not on PATH; refusing to write an unencrypted snapshot "
+             "when encryption was requested")
+    return exe
+
+
+def _age_run(args: list[str]) -> None:
+    proc = subprocess.run(args, capture_output=True, text=True)
+    if proc.returncode != 0:
+        fail(f"age failed (exit {proc.returncode}): {(proc.stderr or proc.stdout).strip()[:300]}")
+
+
+def _age_encrypt(plain: Path, recipients: Path, out: Path) -> None:
+    _age_run([_find_age(), "-R", str(recipients), "-o", str(out), str(plain)])
+
+
+def _age_decrypt(src: Path, identity: Path, out: Path) -> None:
+    _age_run([_find_age(), "-d", "-i", str(identity), "-o", str(out), str(src)])
+
+
+def _manifest_path(archive: Path) -> Path:
+    return archive.with_name(archive.name + _MANIFEST_SUFFIX)
+
+
+def _read_manifest(archive: Path) -> "dict | None":
+    mp = _manifest_path(archive)
+    if not mp.is_file():
+        return None
+    try:
+        return json.loads(mp.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        fail(f"manifest {mp.name} is unreadable: {exc}")
+
+
+def _check_against_manifest(archive: Path) -> "bool | None":
+    """None: no manifest beside it. True: matches. A mismatch refuses (corruption or tampering)."""
+    manifest = _read_manifest(archive)
+    if manifest is None:
+        return None
+    if manifest.get("archive_sha256") != _sha256(archive):
+        fail(f"{archive.name} does not match its manifest (sha256 differs): corrupted or modified since it was written")
+    return True
+
+
 def cmd_snapshot(args):
     """Write a tar.gz of the entire data/ directory.
 
     SQLite databases are dumped via .backup() into a temp file before
     being added to the tar, so a running web app can't corrupt the
-    snapshot. Everything else is copied as-is."""
+    snapshot. Everything else is copied as-is. The result is verified
+    (every member read, every database integrity-checked) before it is
+    reported; a snapshot that fails verification is deleted."""
     if not _DATA_DIR.is_dir():
         fail(f"no data dir at {_DATA_DIR}")
+    recipients = getattr(args, "encrypt_recipients", None)
+    if recipients:
+        _find_age()  # fail closed BEFORE anything is written
+        if not Path(recipients).is_file():
+            fail(f"no recipients file at {recipients}")
+    excludes = list(getattr(args, "exclude", None) or [])
+    if getattr(args, "exclude_rebuildable", False):
+        excludes += list(_REBUILDABLE_DIRS)
     _BACKUP_DIR.mkdir(parents=True, exist_ok=True)
     out_path = Path(args.out) if args.out else (
         _BACKUP_DIR / f"odysseus-backup-{datetime.now().strftime('%Y%m%d-%H%M%S')}.tar.gz"
     )
+    if recipients and not out_path.name.endswith(".age"):
+        out_path = out_path.with_name(out_path.name + ".age")
     _reject_output_inside_data(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     sqlite_dbs = [p for p in _DATA_DIR.rglob("*.db") if p.is_file() and not p.is_symlink()]
     files_added = 0
     total_bytes = 0
+    expect_sqlite: set[str] = set()
+    plain_sha = None
 
     with tempfile.TemporaryDirectory() as tmp_str:
         tmp = Path(tmp_str)
@@ -91,39 +274,93 @@ def cmd_snapshot(args):
         db_map: dict[Path, Path] = {}
         for db in sqlite_dbs:
             rel = db.relative_to(_DATA_DIR)
-            staged = tmp / rel
+            staged = tmp / "dbs" / rel
             staged.parent.mkdir(parents=True, exist_ok=True)
             _sqlite_safe_copy(db, staged)
             db_map[db] = staged
+            if _is_sqlite_file(db):
+                expect_sqlite.add((Path("data") / rel).as_posix())
 
-        with tarfile.open(out_path, "w:gz") as tar:
+        # Encrypted snapshots are built in the temp dir: the plaintext never exists at the final path.
+        plain_path = (tmp / "snapshot.tar.gz") if recipients else out_path
+        with tarfile.open(plain_path, "w:gz") as tar:
             for p in sorted(_DATA_DIR.rglob("*")):
                 if not p.is_file() or p.is_symlink():
                     continue
-                rel = p.relative_to(_DATA_DIR.parent)
+                rel = Path("data") / p.relative_to(_DATA_DIR)  # the archive layout is always data/...
                 # Skip user-asked-to-skip categories
-                if not args.include_research and "deep_research" in rel.parts:
+                if not getattr(args, "include_research", False) and "deep_research" in rel.parts:
                     continue
-                if not args.include_attachments and "mail-attachments" in rel.parts:
+                if not getattr(args, "include_attachments", False) and "mail-attachments" in rel.parts:
+                    continue
+                if _excluded(rel, excludes):
                     continue
                 # Substitute SQLite snapshots for the live files
                 source = db_map.get(p, p)
-                tar.add(source, arcname=str(rel))
+                tar.add(source, arcname=rel.as_posix())
                 files_added += 1
                 try:
                     total_bytes += source.stat().st_size
                 except Exception:
                     pass
 
+        # Verify before reporting success.
+        try:
+            report = _deep_check(plain_path, expect_sqlite)
+        except SystemExit:
+            plain_path.unlink(missing_ok=True)
+            raise
+        if report["problems"]:
+            plain_path.unlink(missing_ok=True)
+            fail("snapshot failed verification and was deleted: " + "; ".join(report["problems"][:5]))
+        plain_sha = _sha256(plain_path)
+        if recipients:
+            try:
+                _age_encrypt(plain_path, Path(recipients), out_path)
+            except SystemExit:
+                out_path.unlink(missing_ok=True)
+                raise
+
+    archive_sha = _sha256(out_path)
+    manifest = {
+        "manifest_version": 1,
+        "tool_version": _TOOL_VERSION,
+        "created_utc": datetime.now(timezone.utc).isoformat(),
+        "host": socket.gethostname(),
+        "data_dir": str(_DATA_DIR),
+        "archive": out_path.name,
+        "archive_bytes": out_path.stat().st_size,
+        "archive_sha256": archive_sha,
+        "encrypted": bool(recipients),
+        "plaintext_sha256": plain_sha if recipients else None,
+        "files": files_added,
+        "excluded": excludes,
+        "included_research": bool(getattr(args, "include_research", False)),
+        "included_attachments": bool(getattr(args, "include_attachments", False)),
+        "verified": True,
+        "databases": report["databases"],
+    }
+    mp = _manifest_path(out_path)
+    tmp_manifest = mp.with_name(mp.name + ".tmp")
+    tmp_manifest.write_text(json.dumps(manifest, indent=2, default=str), encoding="utf-8")
+    os.replace(tmp_manifest, mp)
+
     emit({
         "ok": True,
         "path": str(out_path),
+        "manifest": str(mp),
         "files": files_added,
         "uncompressed_bytes": total_bytes,
         "compressed_bytes": out_path.stat().st_size,
         "ratio": round(out_path.stat().st_size / max(total_bytes, 1), 4),
-        "included_research": bool(args.include_research),
-        "included_attachments": bool(args.include_attachments),
+        "included_research": bool(getattr(args, "include_research", False)),
+        "included_attachments": bool(getattr(args, "include_attachments", False)),
+        "excluded": excludes,
+        "encrypted": bool(recipients),
+        "verified": True,
+        "sha256": archive_sha,
+        "databases": [{"name": d["name"], "integrity": d["integrity"], "tables": len(d["tables"])}
+                      for d in report["databases"]],
     }, args)
 
 
@@ -134,6 +371,8 @@ def cmd_list(args):
         return
     entries = []
     for p in _BACKUP_DIR.iterdir():
+        if p.name.endswith(_MANIFEST_SUFFIX):
+            continue
         entry = _backup_entry(p)
         if entry is not None:
             entries.append(entry)
@@ -161,23 +400,54 @@ def _backup_entry(p):
 
 def cmd_verify(args):
     """Open the tarball read-only and walk its members — confirms
-    integrity without extracting anything."""
+    integrity without extracting anything. ``--deep`` also reads every
+    member back and integrity-checks each SQLite database; a manifest
+    beside the archive is always checked against its sha256."""
     path = Path(args.path)
     if not path.exists():
         fail(f"no file at {path}")
+    manifest_checked = _check_against_manifest(path)
+    deep = bool(getattr(args, "deep", False))
+    identity = getattr(args, "decrypt_identity", None)
+
+    if path.name.endswith(".age"):
+        if not deep:
+            emit({"ok": True, "path": str(path), "encrypted": True, "manifest_checked": manifest_checked,
+                  "note": "encrypted archive: only its checksum was verified; use --deep --decrypt-identity FILE to verify its contents"}, args)
+            return
+        if not identity:
+            fail("verifying an encrypted archive's contents needs --decrypt-identity FILE")
+        with tempfile.TemporaryDirectory() as tmp_str:
+            plain = Path(tmp_str) / "verify.tar.gz"
+            _age_decrypt(path, Path(identity), plain)
+            report = _deep_check(plain)
+        if report["problems"]:
+            fail("archive failed verification: " + "; ".join(report["problems"][:5]))
+        emit({"ok": True, "path": str(path), "encrypted": True, "members": report["members"],
+              "manifest_checked": manifest_checked, "databases": report["databases"]}, args)
+        return
+
     try:
         with tarfile.open(path, "r:gz") as tar:
             members = tar.getmembers()
             _validate_restore_members(members)
     except (tarfile.TarError, OSError) as e:
         fail(f"tarball is corrupt: {e}")
-    emit({
+    out = {
         "ok": True,
         "path": str(path),
         "members": len(members),
         "first": members[0].name if members else None,
         "last": members[-1].name if members else None,
-    }, args)
+    }
+    if manifest_checked is not None:
+        out["manifest_checked"] = manifest_checked
+    if deep:
+        report = _deep_check(path)
+        if report["problems"]:
+            fail("archive failed verification: " + "; ".join(report["problems"][:5]))
+        out["databases"] = report["databases"]
+    emit(out, args)
 
 
 def _validate_restore_members(members):
@@ -194,10 +464,12 @@ def _validate_restore_members(members):
             fail(f"refusing tarball with special file entry: {m.name!r}")
 
 
-def _extract_restore_members(tar, members, root: Path) -> None:
-    """Extract only regular files/directories after validation."""
+def _extract_restore_members(tar, members, root: Path, data_dir: Path | None = None) -> None:
+    """Extract only regular files/directories after validation. Archive entries are always
+    ``data/...``; ``data_dir`` (when given) is where that prefix lands."""
     for m in members:
-        target = root.joinpath(*PurePosixPath(m.name).parts)
+        parts = PurePosixPath(m.name).parts
+        target = data_dir.joinpath(*parts[1:]) if data_dir is not None else root.joinpath(*parts)
         if m.isdir():
             target.mkdir(parents=True, exist_ok=True)
             continue
@@ -210,31 +482,99 @@ def _extract_restore_members(tar, members, root: Path) -> None:
 
 
 def cmd_restore(args):
-    """Overwrite `data/` from a tarball. Destructive; requires --yes."""
+    """Overwrite `data/` from a tarball. Destructive; requires --yes.
+    The archive is verified (members, checksum against its manifest, every
+    database integrity-checked) BEFORE the live data directory is touched."""
     path = Path(args.path)
     if not path.exists():
         fail(f"no file at {path}")
     if not args.yes:
         fail("restore is destructive — pass --yes to confirm overwriting data/")
-    # Sanity check: tarball entries must all be safe, regular files/dirs under
-    # `data/`. Avoid extractall() so symlink/hardlink entries can't redirect a
-    # later write outside the repo.
+    identity = getattr(args, "decrypt_identity", None)
+    _check_against_manifest(path)
     stash = None
-    with tarfile.open(path, "r:gz") as tar:
-        members = tar.getmembers()
-        _validate_restore_members(members)
-        # Save a safety copy of current data/ before extracting.
-        if _DATA_DIR.exists() or _DATA_DIR.is_symlink():
-            stash = _REPO_ROOT / f"data.before-restore-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
-            os.rename(_DATA_DIR, stash)
-        try:
-            _extract_restore_members(tar, members, _REPO_ROOT)
-        except Exception as e:
-            fail(f"extract failed: {e}")
+    with tempfile.TemporaryDirectory() as tmp_str:
+        archive = path
+        if path.name.endswith(".age"):
+            if not identity:
+                fail("this archive is encrypted: pass --decrypt-identity FILE")
+            archive = Path(tmp_str) / "restore.tar.gz"
+            _age_decrypt(path, Path(identity), archive)
+        # Sanity check: tarball entries must all be safe, regular files/dirs under
+        # `data/`, and its databases must be sound. Avoid extractall() so symlink/hardlink
+        # entries can't redirect a later write outside the repo.
+        report = _deep_check(archive)
+        if report["problems"]:
+            fail("refusing to restore, the archive failed verification (nothing was changed): "
+                 + "; ".join(report["problems"][:5]))
+        with tarfile.open(archive, "r:gz") as tar:
+            members = tar.getmembers()
+            _validate_restore_members(members)
+            # Save a safety copy of current data/ before extracting.
+            if _DATA_DIR.exists() or _DATA_DIR.is_symlink():
+                stash = _DATA_DIR.with_name(f"{_DATA_DIR.name}.before-restore-{datetime.now().strftime('%Y%m%d-%H%M%S')}")
+                os.rename(_DATA_DIR, stash)
+            try:
+                _extract_restore_members(tar, members, _REPO_ROOT, _DATA_DIR)
+            except Exception as e:
+                fail(f"extract failed: {e}" + (f" (the previous data is intact at {stash})" if stash else ""))
     emit({
         "ok": True,
         "restored_from": str(path),
         "previous_data_stashed_at": str(stash) if stash else None,
+        "databases_verified": len(report["databases"]),
+    }, args)
+
+
+def _gfs_keep(snaps, keep_daily: int, keep_weekly: int, keep_monthly: int) -> dict:
+    """``snaps``: newest-first ``[(datetime, Path)]``. The newest snapshot is always kept. Each tier keeps the
+    newest snapshot of each of the most recent N distinct days / ISO weeks / months. Returns ``{Path: [reasons]}``."""
+    keep: dict = {}
+    if snaps:
+        keep.setdefault(snaps[0][1], []).append("newest")
+    for label, count, keyfn in (
+        ("daily", keep_daily, lambda t: t.strftime("%Y-%m-%d")),
+        ("weekly", keep_weekly, lambda t: "%d-W%02d" % t.isocalendar()[:2]),
+        ("monthly", keep_monthly, lambda t: t.strftime("%Y-%m")),
+    ):
+        seen: set = set()
+        for ts, p in snaps:
+            key = keyfn(ts)
+            if key in seen:
+                continue
+            if len(seen) >= max(0, count):
+                break
+            seen.add(key)
+            keep.setdefault(p, []).append(label)
+    return keep
+
+
+def cmd_prune(args):
+    """Keep N daily / N weekly / N monthly snapshots (newest of each period) and delete the rest, with their
+    manifests. Only files named ``odysseus-backup-YYYYMMDD-HHMMSS.tar.gz[.age]`` are ever considered. Dry run
+    unless ``--yes``."""
+    directory = Path(args.dir)
+    if not directory.is_dir():
+        fail(f"no directory at {directory}")
+    snaps = []
+    for p in directory.iterdir():
+        m = _SNAPSHOT_NAME_RE.match(p.name)
+        if m and p.is_file():
+            snaps.append((datetime.strptime(m.group(1) + m.group(2), "%Y%m%d%H%M%S"), p))
+    snaps.sort(key=lambda s: s[0], reverse=True)
+    keep = _gfs_keep(snaps, args.keep_daily, args.keep_weekly, args.keep_monthly)
+    doomed = [p for _, p in snaps if p not in keep]
+    deleted = []
+    if args.yes:
+        for p in doomed:
+            p.unlink()
+            _manifest_path(p).unlink(missing_ok=True)
+            deleted.append(p.name)
+    emit({
+        "ok": True,
+        "dry_run": not args.yes,
+        "kept": [{"name": p.name, "because": keep[p]} for _, p in snaps if p in keep],
+        "would_delete" if not args.yes else "deleted": [p.name for p in doomed] if not args.yes else deleted,
     }, args)
 
 
@@ -250,6 +590,12 @@ def _build_parser():
                     help="include data/deep_research/ (skipped by default; large)")
     ps.add_argument("--include-attachments", action="store_true",
                     help="include data/mail-attachments/ (skipped by default; re-derivable)")
+    ps.add_argument("--exclude", action="append", metavar="NAME",
+                    help="skip a top-level data/ directory by name, or a path prefix like skills/cache (repeatable)")
+    ps.add_argument("--exclude-rebuildable", action="store_true",
+                    help="skip the top-level directories that are re-created on demand: " + ", ".join(_REBUILDABLE_DIRS))
+    ps.add_argument("--encrypt-recipients", metavar="FILE",
+                    help="encrypt with `age -R FILE` (fails closed if age is missing); the plaintext never exists at the output path")
     ps.set_defaults(func=cmd_snapshot)
 
     pl = sub.add_parser("list", parents=[common])
@@ -257,13 +603,25 @@ def _build_parser():
 
     pv = sub.add_parser("verify", parents=[common])
     pv.add_argument("path")
+    pv.add_argument("--deep", action="store_true",
+                    help="read every member back and integrity-check every SQLite database")
+    pv.add_argument("--decrypt-identity", metavar="FILE", help="age identity, to verify an encrypted archive's contents")
     pv.set_defaults(func=cmd_verify)
 
     pr = sub.add_parser("restore", parents=[common])
     pr.add_argument("path")
     pr.add_argument("--yes", action="store_true",
                     help="confirm overwriting current data/")
+    pr.add_argument("--decrypt-identity", metavar="FILE", help="age identity, for an encrypted archive")
     pr.set_defaults(func=cmd_restore)
+
+    pp = sub.add_parser("prune", parents=[common])
+    pp.add_argument("--dir", required=True, help="directory holding odysseus-backup-*.tar.gz[.age] snapshots")
+    pp.add_argument("--keep-daily", type=int, default=7)
+    pp.add_argument("--keep-weekly", type=int, default=4)
+    pp.add_argument("--keep-monthly", type=int, default=12)
+    pp.add_argument("--yes", action="store_true", help="actually delete (default: dry run)")
+    pp.set_defaults(func=cmd_prune)
 
     return p
 

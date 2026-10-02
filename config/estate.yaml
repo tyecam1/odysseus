@@ -181,6 +181,11 @@ hosts:
         # aoteru-worker-lab key (SHA256:uJEKTOnr4qkeT8C+TVMI5+3bk+F8MmGAfpD1ppAHv/0).
         command: 'cd /d E:\aoteru\odysseus-aoteru && venv\Scripts\python.exe -m src.estate_worker --root E:\aoteru\odysseus-aoteru'
       machine_fingerprint: 63bcf7a63d612973
+      # Household GPU admission (src/gpu_admission.py). Home is a shared gaming desktop: sustained GPU
+      # utilisation with no estate work in flight withholds local inference up front instead of letting it
+      # time out after 120 s. This block qualifies nothing and is withdrawn by deleting it or `enabled: false`.
+      gpu_admission:
+        busy_util_pct: 60
       qualified_executors: [deterministic]
       qualification_evidence:
         - docs/aoteru-multihost-execution-evidence.md
