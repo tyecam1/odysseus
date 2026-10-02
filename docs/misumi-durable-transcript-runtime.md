@@ -173,3 +173,36 @@ What permanent does **not** mean:
   40 MB, 24 hours). An outage longer than that window can cost segments, and the loss is recorded visibly (a durable
   ledger entry and an `ERROR` archive state), never turned into indefinite raw-audio retention.
 - The outbox is therefore **not** lossless indefinite storage, and must not be described as such.
+
+## Backup and restore drill
+
+`tests/test_misumi_transcript_backup_restore_drill.py` drives the existing `scripts/odysseus-backup` (snapshot, verify,
+restore) against a disposable file-backed archive, in both layouts: `<repo>/data` and an external directory named by
+`ODYSSEUS_DATA_DIR` (how the household deployment runs; before Odysseus PR #65 the tool ignored that variable). It adds no
+store, tool or mechanism. On every run it proves:
+
+- snapshot, destroy the live database, restore: every row comes back identical in every column (including `seq` and the
+  timestamps), with the same per-owner counts, the retention policies and a passing SQLite integrity check;
+- replaying every event id after a restore deduplicates and changes nothing; a same-id/different-text event is still
+  refused; the database's unique key still rejects a raw duplicate insert;
+- a `permanent` policy and a 400-day-old row survive a restore and a purge removes nothing, and a days-only policy change
+  does not turn the restored archive into a deleting one;
+- the **recovery point** is the snapshot: a write made after it is not recovered by the restore, the previous `data/` is
+  stashed as `data.before-restore-<timestamp>` for rollback, and the client's replay of the lost event persists it exactly
+  once.
+
+Mutation-checked: a snapshot that omits `app.db`, a retention rule that ignores `permanent`, and a restore that stops
+stashing the previous data each fail the matching tests.
+
+What it does **not** establish, stated plainly:
+
+- **No scheduled snapshot exists on the home host** (checked 2026-10-02 by listing its scheduled tasks and the known backup
+  locations). The only copies of the household database are one-off `app.db` backups taken by hand before each deployment
+  cutover, on the same disk. For a `permanent` archive the effective recovery point is therefore the last manual copy, and
+  the interface box's outbox (100 items, 40 MB, 24 hours) cannot cover more than a day of that gap.
+- A snapshot contains household speech and the Fernet key, so where an off-host copy goes, and whether it is encrypted, is
+  a privacy decision for the operator, not something to automate silently. Tracked in the Misumi card
+  `backup-and-restore-memory-store`.
+- Restore onto a different release or host, the household runtime's other stores (memory vectors, RAG indexes), the path
+  by which Misumi Git facts outrank a contradicting transcript, and any failover. There is no failover by design: lab is
+  never a second writer.
