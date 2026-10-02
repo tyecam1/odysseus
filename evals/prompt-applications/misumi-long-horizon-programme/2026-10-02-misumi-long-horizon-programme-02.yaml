@@ -1,0 +1,94 @@
+schema_version: 1
+application_id: 2026-10-02-misumi-long-horizon-programme-02
+prompt_id: misumi-long-horizon-programme
+prompt_version: 2
+repository: tyecam1/odysseus
+# Cross-repository programme: tyecam1/odysseus (dev) and tyecam1/misumi (main).
+branch: dev
+# Start and end times are approximate clock artefacts of the session.
+session_started_at: "2026-10-02T13:25:00+01:00"
+session_ended_at: "2026-10-02T16:15:00+01:00"
+start_commit: a02e85cc5a43b8e6423b4baa9788100a7e7b87cd
+end_commit: f7ac7b0b8750a50a101530120b40a1312a1c8f6a
+outcome_status: partial
+stop_reason: >-
+  Live-state reconstruction matched the session prompt's frontier list apart from
+  the lab not being deployed and the physical kiosk gate. The two genuine
+  human-only gates (the lab sudo fast-forward and restart, and the physical
+  microphone and outbox acceptance on the real kiosk) and the free-GPU condition
+  (live local-fast qualification only) remain open and ready, with the
+  acceptance harness, verification script and a free-GPU watcher prepared.
+  Dependency-ready work was executed in parallel: the Phase 4 backup chain
+  (Odysseus #65 ODYSSEUS_DATA_DIR correctness fix, #64 restore drill in both
+  layouts, #67 verified snapshots with manifests, restore pre-verification,
+  retention pruning and a fail-closed age hook, #68 Windows task wrapper tested on
+  the real home host against fake data), the household GPU-admission signal (#66),
+  consolidation of local-model selection ownership (#62), a Proposed memory
+  architecture ADR, backup runbook and card dispositions (Misumi #45), and the
+  evidence reconciliation (#63). Not done: lab deployment verification, physical
+  acceptance, the local-fast canary and seed-order live prompts (free GPU),
+  retrospective Sol review #3, backlog cleanup, and installing any scheduled
+  backup (it needs one operator decision on destination and key custody).
+  The session first reported the executable frontier as exhausted; the operator
+  corrected that and the above followed.
+commits:
+  - 2a4958b156
+  - c9ffb08e15
+  - c34a66ebdb
+  - 6f3135f7e3
+  - de527596
+  - ef1f57d00d
+  - "misumi 9ad4dd53d4 (merge of PR #45)"
+  - f7ac7b0b87
+models_routes:
+  - "Sonnet orchestrator (Claude Code, claude-sonnet-5-5 as stated by the session)"
+  - "Opus advisory gates via the Agent tool, requested opus (identity not authenticated), no tools: (1) frontier sequencing and the autonomous close/merge evidence rule after live-state reconstruction; (2) the Phase 4 minimum architecture, task dispositions and recoverability requirements. Two of its assumptions were corrected from live facts before anything was committed (bbc/v1.db is canonical state with a hash-chained ledger, not a cache; memories rows carry thin provenance and the links live in MemoryRelation and source_events); its suggestion to run the seed-order card on the deterministic executor was declined because the card needs real generation"
+  - "Sol: not invoked in this application; retrospective review #3 over PRs #57-#68 and the lab and physical evidence is owed and non-blocking"
+  - "Deterministic lab shell as user agent over Tailscale SSH: every test run used a fresh git archive tree of dev with the lab venv (Python 3.12), never the live checkout; the only live-checkout writes were git fetch (refs and objects) and one fresh sqlite backup"
+  - "Home and interface PC over the tailnet with HostKeyAlias set to the pinned LAN host-key entry and StrictHostKeyChecking=yes (the laptop was off the home LAN): read-only metadata surveys, a worker-checkout fast-forward in the authorised Odysseus checkout path, and a Windows script test in a scratch directory with fake data (removed afterwards); no household file contents were opened"
+  - "GitHub through gh and the Git Data API (branches, blobs, trees, commits) with no local Odysseus checkout on the laptop"
+verification:
+  - "deterministic: GPU admission 49 new tests plus the 533 existing estate, worker, canary and registry tests unchanged; backup tool 27 new tests plus the earlier 5-case drill run in both layouts (10), the 7 external-directory tests and the existing backup suites, all passing together; all on lab trees of the then-current dev; CI green on every merged PR (#62 and #64 to #68)"
+  - "mutation checks: six GPU-admission mutants (spike counted as sustained, in-flight load ignored, staleness removed, unreadable GPU parsed as idle, exclusive threshold, router ignoring a busy verdict), three drill mutants (snapshot omits the database, retention ignores permanent, restore stops stashing), three external-directory mutants and seven backup-feature mutants all turned the matching tests red; one mutant (plaintext written at the output path) first survived, which exposed a real gap in the test and led to a stronger assertion"
+  - "live: with the home game running, home's real worker health reported gpu_load 98% on three samples while the pre-existing gpu_yield reported inactive (blind on Windows) and the new classifier reported busy; the Windows backup wrapper was exercised on the real home host (parse, local run, refusal of an unencrypted destination, retention, checksum and row-count parity, failed run exit 1, Status exit 2, -WhatIf registered nothing); read-only home, interface-box and lab state checked before any claim"
+  - "defects found in existing tooling: odysseus-backup ignored ODYSSEUS_DATA_DIR (would have snapshotted an empty checkout data/ and reported success), silently raw-copied a real SQLite database when the backup API failed, and restore validated tar paths but not database integrity before replacing live data; all three fixed with tests"
+  - "access and authority: one auto-mode denial (Merge Without Review on the first attempt to merge #63) was recorded and not retried in any form; the operator then explicitly authorised governed merges and every later merge followed; the harness pre-check blocked cleanup verbs in a command and the script was moved into a file; the lab deployment and the physical gate were not attempted and not substituted"
+failure_tags:
+  - executable_frontier_declared_exhausted_while_dependency_ready_work_remained
+  - merge_attempted_before_policy_confirmed_denied_by_auto_mode
+  - application_trace_not_persisted_until_prompted
+  - shell_and_api_transport_pitfalls_recurred_despite_v2_refinement_6
+  - test_mutant_survived_until_strengthened
+rating:
+  scale: 1-5
+  goal_progress: 4
+  correctness_verification: 4
+  authority_scope_discipline: 4
+  routing_resource_efficiency: 3
+  continuity_handoff_quality: 3
+  agent_overall: 3.6
+  operator_overall: null
+  operator_note: null
+prompt_revision_recommended: true
+revision_reason: >-
+  Evolve to v3. The deterministic planner returned evolve for this trace, and the
+  register's own rule applies: a failure class that recurs despite existing
+  instruction text should be restructured. Shell and API transport pitfalls were
+  tagged in both applications although v2 refinement 6 existed, so the guidance
+  becomes a checklist (probe the host's default shell, pass structured API bodies
+  as files, decide success from exit codes, assert replacement anchors match
+  once, keep cleanup verbs out of command text). The session also reported the
+  frontier exhausted while Phase 4, GPU admission and tracing were
+  dependency-ready, which v2's stop rule already forbade but did not make
+  checkable, so a pre-stop check is added (classify every remaining contract item
+  as human-only gate, environment condition or executable). A denied merge showed
+  that merging to a protected branch was missing from the permission gates
+  surfaced together at session start, and the trace was persisted only when
+  prompted, so a hand-back that reports a stop now counts as the end of the
+  session for tracing. Each change only adds a gate or a check; no scope,
+  authority, verification, model-identity or stop rule is weakened.evidence:
+  - "odysseus PRs merged: #62 model-role and local-model selection ownership, #64 restore drill, #65 ODYSSEUS_DATA_DIR backup fix, #66 GPU admission, #67 verified snapshots and retention, #68 Windows task wrapper, #63 evidence reconciliation; misumi PR #45 merged (Proposed memory architecture ADR, backup runbook, card dispositions)"
+  - "automation/review/misumi-long-horizon-programme-evidence.md (reconciled live state, GPU admission, Phase 4, open gates); docs/aoteru-multihost-execution-evidence.md (live admission observation); docs/backup-restore.md; docs/misumi-durable-transcript-runtime.md; automation/review/agent-tasks/inbox/2026-10-02-home-gpu-admission-signal.agent-task.md"
+  - "tyecam1/misumi docs/memory-architecture.md and docs/operations/backup-restore.md (Proposed, not ratified); dispositions on converged-memory-architecture, misumi-memory-consolidation-and-transparency, context-portability-hygiene and backup-and-restore-memory-store"
+  - "Open human gates carried forward: lab sudo fast-forward and restart; physical kiosk acceptance; one sentence of operator decision for a scheduled off-host backup (destination and key custody); legacy audio classification; meaning of permanent retention for deletion; ratification of the Phase 4 ADR. Environment gate: a free home GPU for the local-fast canary and the seed-order live prompts."
+  - "Operator ratings: none supplied"
