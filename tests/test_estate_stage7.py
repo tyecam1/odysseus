@@ -90,10 +90,19 @@ def test_shipped_models_config_every_bound_alias_declares_qualified_hosts():
     assert next(c for c in _shipped() if c["alias"] == "code-strong").get("binding") is None
 
 
-def test_shipped_models_config_home_not_qualified():
-    """Changed only by Stage 8's governed enablement commit."""
+def test_shipped_models_config_home_qualified_for_local_fast_only_with_evidence():
+    """Qualification is per alias and evidence-backed. After the live canary on a free GPU (lm4-canary-be6cd25f2a)
+    home is qualified for `local-fast` and for nothing else, and the entry points at a document that exists."""
+    from pathlib import Path
+
     for entry in _shipped():
-        assert HOME not in (entry.get("qualified_hosts") or {}), entry["alias"]
+        qualified = entry.get("qualified_hosts") or {}
+        if entry["alias"] == "local-fast":
+            evidence = str((qualified.get(HOME) or {}).get("evidence") or "")
+            assert evidence, "home's local-fast qualification must carry evidence"
+            assert (Path(__file__).parents[1] / evidence).is_file(), evidence
+        else:
+            assert HOME not in qualified, entry["alias"]
 
 
 def test_canary_worker_host_executes_through_the_worker_and_records_the_host(monkeypatch):

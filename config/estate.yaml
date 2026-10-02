@@ -186,7 +186,7 @@ hosts:
       # time out after 120 s. This block qualifies nothing and is withdrawn by deleting it or `enabled: false`.
       gpu_admission:
         busy_util_pct: 60
-      qualified_executors: [deterministic]
+      qualified_executors: [deterministic, local]
       qualification_evidence:
         - docs/aoteru-multihost-execution-evidence.md
     inventoried_at: "2026-08-29"
