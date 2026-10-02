@@ -71,8 +71,13 @@ Authorize its **public** key on home with a forced command and every
 restriction option, so the key can only ever run the worker entry point:
 
 ```
-command="cmd.exe /c cd /d E:\aoteru\odysseus-aoteru && venv\Scripts\python.exe -m src.estate_worker --root E:\aoteru\odysseus-aoteru",no-pty,no-port-forwarding,no-agent-forwarding,no-X11-forwarding ssh-ed25519 AAAA... aoteru-worker-lab
+command="cd /d E:\aoteru\odysseus-aoteru && venv\Scripts\python.exe -m src.estate_worker --root E:\aoteru\odysseus-aoteru",no-pty,no-port-forwarding,no-agent-forwarding,no-X11-forwarding ssh-ed25519 AAAA... aoteru-worker-lab
 ```
+
+Do **not** prefix the command with `cmd.exe /c`. Windows OpenSSH already runs a forced command
+through `cmd.exe /c`, so an extra `cmd.exe /c` nests two shells: the outer one evaluates `&&`, the inner `cd /d` is lost
+before `python.exe` runs, and the session fails with "The system cannot find the path specified." (found live on home,
+2026-10-02; see `docs/aoteru-multihost-execution-evidence.md`).
 
 The explicit `cd /d E:\aoteru\odysseus-aoteru &&` is required, not
 cosmetic: `python -m src.estate_worker` has to *import* `src.estate_worker`
