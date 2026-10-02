@@ -53,6 +53,8 @@ Transcript rows are operational history. They are not semantic memory (`src/misu
 | `GET /misumi/transcript/{event_id}` | one event. |
 | `GET /misumi/transcript/export` | `jsonl` or `md`, oldest first, bounded (`limit` ≤ 1000). |
 | `GET/PUT /misumi/transcript/policy` | read/set `transcript_archive`, `transcript_retention_mode` and `transcript_retention_days`. |
+| `POST /misumi/transcript/delete` | explicit user deletion of selected rows (`{"event_ids": [...]}`, at most 200): works under every retention mode, including `permanent`. Reports `deleted` and `not_found` and carries a `backup_notice` (below). |
+| `DELETE /misumi/transcript/{event_id}` | the same for one row; `404 event_not_found` when it does not exist for this owner. |
 | `POST /misumi/transcript/purge` | drain this owner's expired rows now (bounded: at most 50 batches per call). |
 | `POST /misumi/transcript/import` | idempotent import of interface-box day-file lines (compat stage A). |
 
@@ -146,7 +148,7 @@ In `permanent` mode, for that owner only:
   `removed: 0`), and query, direct lookup, export, the duplicate pre-check and the box-file importer all see every row;
 - `transcript_retention_days` is reported as `null`; the stored window is kept (`transcript_retention_days_if_finite`)
   and is what a later switch back to `finite` uses;
-- an unreadable stored mode fails **safe**, as permanent, because deleting text is irreversible.
+- an unreadable stored mode fails **safe**, as permanent, because *automatic* deletion is irreversible.
 
 Safety rails:
 
@@ -158,6 +160,24 @@ Safety rails:
 - Existing finite policies are untouched: the new column is added by an additive, re-runnable migration (SQLite and
   PostgreSQL) with default `finite`.
 
+### Permanent is not undeletable
+
+`permanent` means **no automatic expiry, but explicitly user-deletable**. An explicit deletion
+(`POST /misumi/transcript/delete` or `DELETE /misumi/transcript/{event_id}`, `misumi:execute` scope, owner-scoped) removes the
+selected transcript text from the live archive in every retention mode and even if the owner's archive has since been
+switched off. It removes only the transcript row: conversation history, semantic memory and artifacts are separate stores with
+their own controls. A deleted `event_id` can later be stored again as a new row (deletion removes the idempotency key too).
+
+Backups and copies honour a deletion in three steps (`docs/backup-restore.md`, "Deleting data and backups"):
+
+1. delete from the live archive;
+2. invalidate every backup snapshot that can contain the deleted material (`odysseus-backup prune --all`, or the Windows task's
+   `-Action Invalidate`);
+3. take and verify a fresh encrypted snapshot (`Invalidate` does this).
+
+Until step 2 has been run, **a live deletion remains recoverable from older backup snapshots** until those age out of the
+retention schedule; every deletion response says so in `backup_notice`. The interface box's own recovery copy (7 days at most,
+deleted automatically) is separate and is not touched by a server-side deletion.
 What permanent does **not** mean:
 
 - Raw audio never becomes permanent. This runtime stores no audio in any mode; `raw_audio_retention` is fixed at `off`.

@@ -56,6 +56,7 @@ RETENTION_MODES = (RETENTION_MODE_FINITE, RETENTION_MODE_PERMANENT)
 QUERY_DEFAULT_LIMIT = 50
 QUERY_MAX_LIMIT = 200
 EXPORT_MAX_LIMIT = 1000
+MAX_DELETE_IDS = 200
 PURGE_BATCH = 200
 CAPTURE_MODES = ("ambient", "ptt")
 _EVENT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:\-]*$")
@@ -443,6 +444,49 @@ def purge_expired(db, owner: Optional[str], *, now: Optional[datetime] = None,
         _commit(db)
         removed += len(seqs)
     return removed
+
+# ---- explicit deletion ------------------------------------------------------
+
+def delete_events(db, owner: Optional[str], domain: str, event_ids) -> dict:
+    """Explicit user deletion of selected transcript rows from the live archive.
+
+    ``permanent`` retention means no *automatic* expiry; it never means undeletable. This works under every
+    retention mode and even when the owner's archive is switched off (a row can exist from before). It is
+    owner-scoped (another owner's id is reported as ``not_found``, never revealed), bounded, and idempotent. It
+    removes only the transcript text: conversation history, semantic memory and artifacts are separate stores
+    with their own controls, and older backup snapshots can still hold the text until they are invalidated."""
+    if not isinstance(event_ids, (list, tuple)) or not event_ids:
+        raise TranscriptInvalid("event_ids must be a non-empty list")
+    ids: list[str] = []
+    for raw in event_ids:
+        value = (raw or "").strip() if isinstance(raw, str) else ""
+        if not value:
+            raise TranscriptInvalid("every event id must be a non-empty string")
+        if value not in ids:
+            ids.append(value)
+    if len(ids) > MAX_DELETE_IDS:
+        raise TranscriptInvalid(f"at most {MAX_DELETE_IDS} event ids per deletion")
+    owner_key = normalize_owner(owner)
+    present = set(db.execute(
+        select(TranscriptEvent.event_id).where(
+            TranscriptEvent.owner == owner_key,
+            TranscriptEvent.domain == domain,
+            TranscriptEvent.event_id.in_(ids),
+        )
+    ).scalars().all())
+    if present:
+        db.execute(delete(TranscriptEvent).where(
+            TranscriptEvent.owner == owner_key,
+            TranscriptEvent.domain == domain,
+            TranscriptEvent.event_id.in_(sorted(present)),
+        ))
+        _commit(db)
+        logger.info("transcript deletion: owner=%r domain=%r deleted=%d", owner_key, domain, len(present))
+    return {
+        "deleted": [i for i in ids if i in present],
+        "not_found": [i for i in ids if i not in present],
+    }
+
 
 # ---- query / export ---------------------------------------------------------
 

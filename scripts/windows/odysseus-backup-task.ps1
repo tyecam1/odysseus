@@ -12,11 +12,19 @@
     -Action Install    Register a daily scheduled task that runs `-Action Run` with the same parameters.
                        Supports -WhatIf. Nothing is registered unless you ask for it.
     -Action Uninstall  Remove that scheduled task. Backups are left in place.
+    -Action Invalidate Honour an explicit deletion: delete EVERY snapshot and manifest in -StagingDir and -DestinationDir,
+                       then take and verify a fresh snapshot (run it after the deletion has been made in the live archive).
+                       Supports -WhatIf. A deletion made in the live archive stays recoverable from older snapshots until
+                       this is run or they age out.
     -Action Status     Print backup-status.json. Exits 2 if the last run failed or is older than -MaxAgeHours.
 
   Safety rules enforced here:
     * A snapshot contains household speech AND the Fernet key. Copying to -DestinationDir without -RecipientsFile
       (encryption) is refused unless -AllowUnencryptedDestination is passed explicitly.
+    * The final destination must not be a fixed disk on this host (that is not disaster recovery): a local fixed volume is
+      refused unless -AllowLocalDestination is passed. UNC paths and removable media are accepted.
+    * -RecipientsFile must hold only PUBLIC recipients: a file containing an AGE-SECRET-KEY is refused. The age private
+      identity must live in a password manager and an offline copy, never on this host, in Git or at the destination.
     * Encrypted snapshots are built by the tool in a temporary directory; plaintext never exists at the output path.
     * Every copy is re-checked against the manifest sha256 before it counts.
     * A failed run exits non-zero and records the error; it never reports success.
@@ -35,13 +43,14 @@
 #>
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
-    [Parameter(Mandatory = $true)][ValidateSet('Run', 'Install', 'Uninstall', 'Status')][string]$Action,
+    [Parameter(Mandatory = $true)][ValidateSet('Run', 'Install', 'Uninstall', 'Status', 'Invalidate')][string]$Action,
     [string]$SourceRoot,
     [string]$DataRoot = (Join-Path $env:LOCALAPPDATA 'Odysseus\Misumi'),
     [string]$StagingDir,
     [string]$DestinationDir,
     [string]$RecipientsFile,
     [switch]$AllowUnencryptedDestination,
+    [switch]$AllowLocalDestination,
     [string]$Python,
     [switch]$IncludeRebuildable,
     [int]$KeepDaily = 7,
@@ -87,6 +96,42 @@ function Invoke-Tool([string[]]$ToolArgs) {
     return $text
 }
 
+function Test-RecipientsPublic([string]$Path) {
+    if (-not $Path) { return }
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "-RecipientsFile not found: $Path" }
+    if ((Get-Content -LiteralPath $Path -Raw) -match 'AGE-SECRET-KEY-') {
+        throw "-RecipientsFile contains an AGE-SECRET-KEY. Only public recipients may be kept on this host; keep the private identity in a password manager and an offline copy."
+    }
+}
+
+function Test-DestinationAllowed {
+    if (-not $DestinationDir) { return }
+    if (-not $RecipientsFile -and -not $AllowUnencryptedDestination) {
+        throw 'Refusing to use -DestinationDir without -RecipientsFile (encryption). A snapshot contains household speech and the Fernet key.'
+    }
+    $root = [IO.Path]::GetPathRoot([IO.Path]::GetFullPath($DestinationDir))
+    if ($root -match '^[A-Za-z]:\\$') {
+        $disk = Get-CimInstance Win32_LogicalDisk -Filter ("DeviceID='" + $root.Substring(0, 2) + "'")
+        if ($disk -and $disk.DriveType -eq 3 -and -not $AllowLocalDestination) {
+            throw "-DestinationDir $DestinationDir is a fixed disk on this host, which is not disaster recovery. Use removable media or a network or off-site destination, or pass -AllowLocalDestination to accept that explicitly."
+        }
+    }
+}
+
+function Get-RunArgs([bool]$Quote = $true) {
+    # $Quote: embed literal quotes (for the scheduled task's command-line string); off for a native-call splat.
+    $q = if ($Quote) { '"' } else { '' }
+    $a = @('-SourceRoot', "$q$SourceRoot$q", '-DataRoot', "$q$DataRoot$q", '-StagingDir', "$q$StagingDir$q",
+        '-KeepDaily', $KeepDaily, '-KeepWeekly', $KeepWeekly, '-KeepMonthly', $KeepMonthly)
+    if ($IncludeRebuildable) { $a += '-IncludeRebuildable' }
+    if ($DestinationDir) { $a += @('-DestinationDir', "$q$DestinationDir$q") }
+    if ($RecipientsFile) { $a += @('-RecipientsFile', "$q$RecipientsFile$q") }
+    if ($AllowUnencryptedDestination) { $a += '-AllowUnencryptedDestination' }
+    if ($AllowLocalDestination) { $a += '-AllowLocalDestination' }
+    if ($Python) { $a += @('-Python', "$q$Python$q") }
+    return $a
+}
+
 function Get-Sha256([string]$Path) { (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() }
 
 function Require([string]$Name, $Value) {
@@ -117,18 +162,10 @@ switch ($Action) {
     'Install' {
         Require 'SourceRoot' $SourceRoot
         Require 'StagingDir' $StagingDir
-        if ($DestinationDir -and -not $RecipientsFile -and -not $AllowUnencryptedDestination) {
-            throw 'Refusing to schedule a copy to -DestinationDir without -RecipientsFile (encryption). A snapshot contains household speech and the Fernet key.'
-        }
+        Test-RecipientsPublic $RecipientsFile
+        Test-DestinationAllowed
         $self = $MyInvocation.MyCommand.Path
-        $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$self`"", '-Action', 'Run',
-            '-SourceRoot', "`"$SourceRoot`"", '-DataRoot', "`"$DataRoot`"", '-StagingDir', "`"$StagingDir`"",
-            '-KeepDaily', $KeepDaily, '-KeepWeekly', $KeepWeekly, '-KeepMonthly', $KeepMonthly)
-        if ($IncludeRebuildable) { $argList += '-IncludeRebuildable' }
-        if ($DestinationDir) { $argList += @('-DestinationDir', "`"$DestinationDir`"") }
-        if ($RecipientsFile) { $argList += @('-RecipientsFile', "`"$RecipientsFile`"") }
-        if ($AllowUnencryptedDestination) { $argList += '-AllowUnencryptedDestination' }
-        if ($Python) { $argList += @('-Python', "`"$Python`"") }
+        $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$self`"", '-Action', 'Run') + (Get-RunArgs)
         $taskAction = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument ($argList -join ' ')
         $trigger = New-ScheduledTaskTrigger -Daily -At $At
         $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType S4U -RunLevel Limited
@@ -146,6 +183,27 @@ switch ($Action) {
         }
     }
 
+    'Invalidate' {
+        Require 'SourceRoot' $SourceRoot
+        Require 'StagingDir' $StagingDir
+        Test-RecipientsPublic $RecipientsFile
+        Test-DestinationAllowed
+        $dirs = @(@($StagingDir, $DestinationDir) | Where-Object { $_ })
+        foreach ($dir in $dirs) {
+            $preview = (Invoke-Tool @('prune', '--dir', $dir, '--all')) | ConvertFrom-Json
+            Write-Output ("{0}: {1} snapshot(s) would be deleted" -f $dir, @($preview.would_delete).Count)
+        }
+        if ($PSCmdlet.ShouldProcess(($dirs -join ', '), 'Delete every snapshot and take a fresh verified one')) {
+            foreach ($dir in $dirs) {
+                $done = (Invoke-Tool @('prune', '--dir', $dir, '--all', '--yes')) | ConvertFrom-Json
+                Write-Output ("{0}: deleted {1}" -f $dir, @($done.deleted).Count)
+            }
+            $self = $MyInvocation.MyCommand.Path
+            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $self -Action Run @(Get-RunArgs $false)
+            exit $LASTEXITCODE
+        }
+    }
+
     'Run' {
         Require 'SourceRoot' $SourceRoot
         Require 'StagingDir' $StagingDir
@@ -157,9 +215,8 @@ switch ($Action) {
             copied_to_destination = $false; pruned = $null; error = $null
         }
         try {
-            if ($DestinationDir -and -not $RecipientsFile -and -not $AllowUnencryptedDestination) {
-                throw 'Refusing to copy to -DestinationDir without -RecipientsFile (encryption). A snapshot contains household speech and the Fernet key.'
-            }
+            Test-RecipientsPublic $RecipientsFile
+            Test-DestinationAllowed
             if (-not (Test-Path -LiteralPath $DataRoot -PathType Container)) { throw "DataRoot not found: $DataRoot" }
             if (-not (Test-Path -LiteralPath (Join-Path $SourceRoot 'scripts\odysseus-backup'))) { throw "scripts\odysseus-backup not found under $SourceRoot" }
             New-Item -ItemType Directory -Force -Path $StagingDir | Out-Null
