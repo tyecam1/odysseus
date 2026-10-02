@@ -1,0 +1,71 @@
+schema_version: 1
+application_id: 2026-10-02-misumi-long-horizon-programme-04
+prompt_id: misumi-long-horizon-programme
+prompt_version: 3
+repository: tyecam1/odysseus
+# Cross-repository programme: tyecam1/odysseus (dev) and tyecam1/misumi (main).
+branch: dev
+# Start and end times are approximate clock artefacts of the session.
+session_started_at: "2026-10-02T17:30:00+01:00"
+session_ended_at: "2026-10-02T18:30:00+01:00"
+start_commit: 36e256c6bddbd1c14820f20927b9a9ff1a7df60e
+end_commit: 5b74598dca402361f0d7baff79fe2b84607df13f
+outcome_status: partial
+stop_reason: >-
+  The v3 pre-stop rule rejected the first hand-back, and the executable frontier was then worked through: registry and
+  config drift removed (the rejected memory-broker service entry and stale home-host prose), the old central-memory task
+  retired with its two genuinely deferred pieces kept as scoped owner tasks, the memory policy and context drift check
+  delivered with no new store or authority, the Seed Order verification fixtures rebuilt and re-run (a real steering defect,
+  now owned by a task), the dirty home host-agent files audited read-only (subsumed by main, nothing touched), a first
+  evidence-backed backlog batch applied, and current dev deployed to the household runtime on home through the governed
+  side-by-side process with backup and an unused automatic rollback. Remaining items are genuinely human or physical: the
+  lab sudo deployment, physical kiosk acceptance, the provider and path for the off-site backup with the public age recipient
+  and the say-so to install age, the say-so to reconcile the home Misumi clone (discard three superseded edits, fast-forward,
+  restart the host agent), and later Phase B policy decisions including ratification of the memory policy. Sol review 3 was
+  held back by the operator until lab and kiosk evidence exists.
+commits:
+  - "odysseus 2997506c9a (PR #74 merged)"
+  - "odysseus 5b74598dca (PR #75 merged)"
+  - "misumi d66253a1fb (PR #47 merged)"
+models_routes:
+  - "Sonnet orchestrator (Claude Code, claude-sonnet-5-5 as stated by the session)"
+  - "Opus: not invoked (no new architecture decision was needed; the ratified Phase 4 ADR was applied, not revised)"
+  - "Sol: not invoked, by explicit operator instruction; retrospective review 3 remains owed and non-blocking"
+  - "Seed Order fixtures: requests sent from the interface box to its own loopback /agent proxy, which adds the service credential server-side; the credential was never read, printed, copied or persisted; every request set persist_turn false, retention_mode off, history_mode off. Model route reported by the runtime: qwen3:8b on home, GPU free"
+  - "Deterministic shells: lab as user agent over Tailscale SSH on fresh git archive trees (never the live checkout); home and the interface PC over the tailnet with HostKeyAlias to the pinned LAN host-key entry and StrictHostKeyChecking yes; GitHub through gh and the Git Data API with no local Odysseus checkout"
+verification:
+  - "deterministic: Misumi scripts/validate.py 38 checks plus memory-policy and context-drift checks passing, new unit tests for the policy checker, the drift check and the Seed Order scorer; Odysseus CI green on PR #74 (including the four new registry guard tests) and PR #75; scripts/publish_tree.py has 6 tests and 3 mutants caught"
+  - "mutation and strictness: the Seed Order scorer was made strict after a BOM-prefixed first line was silently dropped (it now fails on an unparseable line and on an empty input); the drift check's rejected-design rule has an exemption for headings that record a rejection, with a test"
+  - "live: the corrected Seed Order fixtures ran 3 times each for prompts 2 and 3 against the real household runtime (0 of 3 pass each, recorded as failures, fixtures not altered); the home deployment was proved in stages (side-by-side checkout with the live release's exact package pins and a clean pip check, a test instance on port 1420 against a copy of live data, then a cutover with a consistent backup and an exported task XML), health 200 on the live port about 13 s after start, live transcript table unchanged (3 events), the interface box health ok after one degraded probe during the restart window"
+  - "honest reporting: the deletion endpoint is recorded as present in the running release but not exercised against live data; the memory policy is recorded as proposed, not ratified; backlog cards that need a human, privacy, security or Phase B decision were left untouched; two of my own staging checks were wrong (a router attribute name and a quoting error) and were redone with a Python file rather than reported as results"
+  - "access and authority: no commit, reset, stash, pull or restart in the dirty home Misumi clone; the box credential was used only through the box's own proxy as authorised; no private age identity handled; nothing installed or scheduled for backups; no command blocked by the harness in this application"
+failure_tags:
+  - shell_and_api_transport_pitfalls_recurred_despite_v3_checklist
+  - pr_description_template_not_read_before_opening
+rating:
+  scale: 1-5
+  goal_progress: 4
+  correctness_verification: 4
+  authority_scope_discipline: 5
+  routing_resource_efficiency: 3
+  continuity_handoff_quality: 4
+  agent_overall: 4.0
+  operator_overall: null
+  operator_note: null
+prompt_revision_recommended: false
+revision_reason: >-
+  Reinforce v3; no child. The deterministic planner returned evolve for the failure tags (its default for any tag); that
+  output is overridden and the override is recorded in the evolution event. The v3 pre-stop rule worked: the first hand-back
+  was rejected on live evidence and the executable frontier was then exhausted before stopping. The transport failure class
+  (an unquoted URL with an ampersand passed through PowerShell, a native command's stderr becoming a terminating error under
+  a Stop preference, and two guesses about the home host that live probes then contradicted: the size of its data root and
+  whether the repository checks out on Windows) recurred a fourth time. Application 03 said a fourth occurrence would move
+  the fix out of prompt text into a reusable helper, and that is done (scripts/publish_tree.py with tests), so the prompt is
+  not extended again. The second tag, opening a pull request whose description did not follow the repository template that CI
+  enforces, was a one-off and cost one CI cycle.
+evidence:
+  - "odysseus PR #74 (registry and prose drift, guard tests) and PR #75 (central-memory task retired, deferred work scoped, Seed Order steering task) merged; misumi PR #47 (memory policy, context ownership and drift check, Seed Order fixtures v2 with scorer and runner, backlog batch 1, dirty-clone audit) merged"
+  - "automation/review/misumi-long-horizon-programme-evidence.md (application 04 section and refreshed gates); misumi docs/memory-policy.md, docs/context-ownership.md, docs/audits/2026-10-02-home-clone-dirty-working-copy.md and docs/audits/2026-10-02-backlog-reconciliation-batch-1.md"
+  - "household runtime on home now runs release 2997506c9ae0 (backup and task XML in C:\\Users\\User\\odysseus-releases\\cutover-backup-20261002b; rollback = re-Install release 9c2bc47c2d1a)"
+  - "Open human or physical gates carried forward: lab sudo fast-forward and restart (resolve current dev first); physical kiosk acceptance; provider and path for the off-site backup with the public age recipient and permission to install age on home; say-so to reconcile the home Misumi clone; Phase B policy decisions and ratification of the memory policy"
+  - "Operator ratings: none supplied"
