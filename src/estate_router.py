@@ -378,6 +378,36 @@ def experiment_priority_active() -> tuple[bool, str]:
     return False, "no reservation; no significant non-ollama GPU load"
 
 
+def host_gpu_admission_config(host_id: Optional[str]) -> Optional[dict]:
+    """``worker.gpu_admission`` for ``host_id`` in config/estate.yaml, or None when the host has none
+    (a host without the block is never subject to GPU admission; see src/gpu_admission.py)."""
+    if not host_id:
+        return None
+    for host in _load_yaml("estate").get("hosts", []):
+        if host.get("id") == host_id:
+            cfg = (host.get("worker") or {}).get("gpu_admission")
+            return cfg if isinstance(cfg, dict) else None
+    return None
+
+
+def gpu_admission_for_host(host_id: str) -> dict:
+    """Classify household GPU contention on ``host_id`` from its (TTL-cached) worker health. Never raises for a
+    transport problem: an unreadable host is ``unknown``, which does not withhold work."""
+    from src import gpu_admission
+    from src.estate_worker_client import WorkerTransportError, worker_health
+
+    cfg = host_gpu_admission_config(host_id)
+    if cfg is None or cfg.get("enabled") is False:
+        return {"state": "disabled", "reason": "GPU admission is not configured for this host"}
+    try:
+        health = worker_health(host_id)
+    except WorkerTransportError as exc:
+        return {"state": "unknown", "reason": f"worker unreachable: {exc.code}: {exc}"}
+    return gpu_admission.classify_gpu_load(
+        health.get("gpu_load"), in_flight=health.get("in_flight"), config=cfg,
+    )
+
+
 def resolve_alias(alias: str, host_id: Optional[str] = None) -> dict:
     """WHAT half: resolve a capability alias to a concrete model from
     config/models.yaml's evidence-backed bindings. Never a hardcoded brand
@@ -460,6 +490,14 @@ def resolve_alias(alias: str, host_id: Optional[str] = None) -> dict:
             "alias": alias, "resolved": False, "concrete_model": binding,
             "reason": f"bound but not currently live on {host_id!r}: not listed by that host's Ollama",
         }
+    # Household GPU contention is an admission refusal, decided up front and named as such. It is never a
+    # model verdict, and it never moves the work to another host: that stays the placement rules' decision.
+    admission = gpu_admission_for_host(host_id)
+    if admission["state"] == "busy":
+        return {
+            "alias": alias, "resolved": False, "concrete_model": binding,
+            "reason": f"withheld \u2014 {admission['reason']}", "gpu_admission": admission,
+        }
     if entry.get("gpu_priority") == "yield_to_experiment":
         try:
             health = worker_health(host_id)
@@ -474,7 +512,10 @@ def resolve_alias(alias: str, host_id: Optional[str] = None) -> dict:
                 "alias": alias, "resolved": False, "concrete_model": binding,
                 "reason": f"withheld — experiment priority active ({gpu_yield.get('reason')})",
             }
-    return {"alias": alias, "resolved": True, "concrete_model": binding, "evidence": host_entry["evidence"]}
+    resolved = {"alias": alias, "resolved": True, "concrete_model": binding, "evidence": host_entry["evidence"]}
+    if admission["state"] != "disabled":
+        resolved["gpu_admission"] = admission  # "free" or "unknown": reported, never silently assumed
+    return resolved
 
 
 def _record_decision(task: dict, *, host_id, executor, model_alias, concrete_model, status) -> str:

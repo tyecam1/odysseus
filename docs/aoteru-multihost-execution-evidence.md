@@ -120,3 +120,34 @@ Follow-ups: re-run the `local-fast` canary on a free GPU, then add `desktop-in7o
 `qualified_hosts` in `config/models.yaml` by a governed commit; implement S6.12 job objects before any Windows write
 lane; and the privilege-boundary task
 `automation/review/agent-tasks/inbox/2026-10-02-home-worker-non-admin-identity.agent-task.md`.
+
+## Household GPU admission (2026-10-02, logic only; nothing qualified from it)
+
+The canary's 120 s timeouts were an admission failure, and the estate had no signal that could say so. The existing
+`gpu_yield` reading (`estate_router.experiment_priority_active`) asks `nvidia-smi --query-compute-apps` for per-process
+memory, and on Windows (WDDM) that column is `[N/A]` for every process, so a game on home was invisible to it by
+construction. `src/gpu_admission.py` extends that one health signal instead of adding a router, scheduler or store:
+
+- **Worker** (`health`): on a host whose registry entry has `worker.gpu_admission`, report raw readings from
+  `nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total` (works on Windows), three samples inside the one
+  call because the worker is spawned per call and keeps no state. Hosts without the block are not sampled and are
+  unchanged (lab is unchanged).
+- **Router** (`resolve_alias`, per-host path): classify with the host's threshold. `busy` means every sample is at or
+  above `busy_util_pct` (default 60) with **no estate execution in flight**, so load our own jobs explain is never
+  "household contention". `busy` withholds up front with a named reason (`withheld - household GPU busy: 98% utilisation
+  sustained over 3 samples, 7.6 of 8.0 GB VRAM used, no estate work in flight`) and does not itself move the work to
+  another host. A missing, unreadable or stale reading is `unknown`, which is reported and is never treated as free.
+- **Canary** (`scripts/run_lm4_production_canary.py --worker-host`): checks a fresh reading before every item. A busy
+  GPU is recorded as `not_run`, and a failure observed while the GPU became busy is `inconclusive` and is not repeated,
+  so an admission problem can no longer be counted as a model failure (or as a pass on a retry). Either outcome ends
+  the run with exit code 3 and "re-run when the GPU is free". The routing-telemetry row that the existing per-attempt
+  path writes for the failed attempt itself is not retracted.
+- **Registry**: `config/estate.yaml` opts home in (`busy_util_pct: 60`). That block qualifies nothing; delete it or set
+  `enabled: false` to withdraw.
+
+Evidence: 49 new tests (parsing the exact Windows output seen on home, `[N/A]` never read as idle, spike versus
+sustained, in-flight attribution, unknown-not-free, router, worker health and the canary paths), mutation-checked, plus
+the existing 533 estate, worker, canary and registry tests unchanged. All of it is simulated. **No host is qualified
+from simulated evidence**: `local-fast` stays unqualified on home until the canary is re-run on the physical RTX 3070
+while it is free, and the admission logic stays unvalidated against a real game until a live read of the busy GPU is
+recorded here. The home worker checkout must be advanced to this change before home reports `gpu_load`.
