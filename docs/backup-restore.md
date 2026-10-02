@@ -180,3 +180,22 @@ where you run it matters:
 >
 > On native installs ChromaDB lives at `data/chroma/` and is included in the
 > snapshot normally.
+
+## Windows scheduled task (household host)
+
+`scripts/windows/odysseus-backup-task.ps1` runs the tool on a schedule on Windows. It chooses **no destination and no
+key**: both are parameters, and with neither the run is a local, same-disk snapshot.
+
+| `-Action` | Effect |
+| --- | --- |
+| `Run` | Snapshot (the tool verifies it and writes the manifest), optionally copy to `-DestinationDir` and re-check the sha256 there, prune staging and destination, write `backup-status.json`. Exits 1 and records the error on any failure. |
+| `Install` | Register a daily task (default 02:30) that runs `Run` with the same parameters. Supports `-WhatIf`. Registers nothing unless asked. |
+| `Uninstall` | Remove the task; backups stay. |
+| `Status` | Print `backup-status.json`; exit 2 if the last run failed or is older than `-MaxAgeHours` (default 36), so a monitor can alert on it. |
+
+Guard rails: copying to `-DestinationDir` without `-RecipientsFile` (age encryption) is refused unless
+`-AllowUnencryptedDestination` is passed, because a snapshot contains household speech and the Fernet key; every copy is
+re-checked against the manifest sha256; `cache`, `tts_cache`, `stt-tmp` and `models` are excluded unless
+`-IncludeRebuildable`. The task runs as the current user with S4U logon (no stored password, no network credentials), so a
+UNC destination needs a task you register yourself with a credential. The household runbook, including the open decisions
+(destination, key custody, cadence) and the restore drill, is `docs/operations/backup-restore.md` in the Misumi repository.
