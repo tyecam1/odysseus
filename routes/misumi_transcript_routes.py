@@ -26,7 +26,7 @@ import logging
 import os
 import socket
 import time
-from typing import Callable, Optional, Tuple
+from typing import Literal, Callable, Optional, Tuple
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import JSONResponse, PlainTextResponse
@@ -61,6 +61,10 @@ class WakeRequest(BaseModel):
 class PolicyRequest(BaseModel):
     transcript_archive: Optional[bool] = None
     transcript_retention_days: Optional[int] = Field(default=None, ge=1, le=svc.RETENTION_MAX_DAYS)
+    # 'permanent' = accepted transcript rows never expire (raw audio is never retained in any mode).
+    transcript_retention_mode: Optional[Literal["finite", "permanent"]] = None
+    # Required to switch a permanent archive to a finite window that would expire existing rows.
+    confirm_expire_existing: bool = False
 
 
 class ImportRequest(BaseModel):
@@ -362,9 +366,17 @@ def setup_misumi_transcript_routes(
         _require_api_scope(request, "misumi:execute")
         require_enabled()
         owner = _owner(request)
-        return with_db(lambda db: svc.set_policy(
-            db, owner, transcript_archive=body.transcript_archive,
-            transcript_retention_days=body.transcript_retention_days))
+        try:
+            return with_db(lambda db: svc.set_policy(
+                db, owner, transcript_archive=body.transcript_archive,
+                transcript_retention_days=body.transcript_retention_days,
+                transcript_retention_mode=body.transcript_retention_mode,
+                confirm_expire_existing=body.confirm_expire_existing))
+        except svc.RetentionChangeRefused as exc:
+            return JSONResponse(status_code=exc.status_code, content={
+                "state": exc.code, "detail": str(exc), "would_expire": exc.would_expire})
+        except svc.TranscriptError as exc:
+            return JSONResponse(status_code=exc.status_code, content={"state": exc.code, "detail": str(exc)})
 
     @router.post("/purge")
     def purge(request: Request):
@@ -375,8 +387,10 @@ def setup_misumi_transcript_routes(
 
         def run(db):
             removed = svc.purge_expired(db, owner, max_batches=50)
+            policy = svc.get_policy(db, owner)
             return {"removed": removed,
-                    "retention_days": svc.get_policy(db, owner)["transcript_retention_days"]}
+                    "retention_days": policy["transcript_retention_days"],
+                    "retention_mode": policy["transcript_retention_mode"]}
 
         return with_db(run)
 

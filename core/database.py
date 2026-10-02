@@ -1174,15 +1174,20 @@ class MisumiRetentionPolicy(TimestampMixin, Base):
     """Per-owner retention policy for the dimensions the server itself enforces.
 
     Transcript archive defaults OFF (nothing is stored until explicitly enabled)
-    and retention is finite (1-90 days, default 14). Raw-audio retention is fixed
-    at "off". Conversation-history, semantic-promotion and artifact retention are
-    enforced per request on /misumi/respond, not here.
+    and transcript retention defaults to a finite window (1-90 days, default 14).
+    `transcript_retention_mode` makes "never expire" an explicit state, not a huge
+    day count: 'finite' uses `transcript_retention_days`, 'permanent' keeps every
+    accepted transcript row (the stored day count is only what a later switch back
+    to 'finite' would use). Raw-audio retention is fixed at "off" in every mode.
+    Conversation-history, semantic-promotion and artifact retention are enforced
+    per request on /misumi/respond, not here.
     """
     __tablename__ = "misumi_retention_policies"
 
     owner                     = Column(String, primary_key=True)   # "" = local/no-auth owner
     transcript_archive        = Column(Boolean, nullable=False, default=False)
     transcript_retention_days = Column(Integer, nullable=False, default=14)
+    transcript_retention_mode = Column(String, nullable=False, default="finite", server_default="finite")
     raw_audio_retention       = Column(String, nullable=False, default="off")
 
 
@@ -2608,6 +2613,25 @@ def _migrate_add_estate_execution_worker_columns_postgresql():
         logging.getLogger(__name__).warning(f"estate_executions worker migration (postgresql) failed: {e}")
 
 
+def _migrate_add_transcript_retention_mode_column():
+    """Additive, re-runnable, dialect-neutral: existing policy rows gain
+    `transcript_retention_mode` = 'finite', i.e. exactly the behaviour they had."""
+    try:
+        from sqlalchemy import inspect as sa_inspect
+        inspector = sa_inspect(engine)
+        if not inspector.has_table("misumi_retention_policies"):
+            return
+        if "transcript_retention_mode" in {c["name"] for c in inspector.get_columns("misumi_retention_policies")}:
+            return
+        with engine.begin() as conn:
+            conn.execute(text(
+                "ALTER TABLE misumi_retention_policies "
+                "ADD COLUMN transcript_retention_mode VARCHAR NOT NULL DEFAULT 'finite'"
+            ))
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"misumi retention mode migration failed: {e}")
+
+
 class LeaseSerializationBusy(RuntimeError):
     """The serialized transaction could not take its lock within the
     bounded busy timeout. Retryable; the operation never proceeds unlocked."""
@@ -2704,6 +2728,7 @@ def init_db():
     _migrate_add_routing_delegation_columns()
     _migrate_add_estate_execution_worker_columns()
     _migrate_add_estate_execution_worker_columns_postgresql()
+    _migrate_add_transcript_retention_mode_column()
     # Lock the DB file (and any SQLite sidecars) to 0o600 — it holds bearer-token
     # + bcrypt hashes and encrypted provider keys. POSIX only; safe_chmod no-ops
     # on Windows (ACL-restricted profile dir) and the path helper returns None for
