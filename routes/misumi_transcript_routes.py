@@ -51,6 +51,17 @@ class TranscriptEventRequest(BaseModel):
     persona: Optional[str] = Field(default=None, max_length=48)
 
 
+class DeleteRequest(BaseModel):
+    event_ids: list[str] = Field(min_length=1, max_length=svc.MAX_DELETE_IDS)
+
+
+BACKUP_NOTICE = (
+    "Deleted from the live archive. Older backup snapshots can still contain this text until they are invalidated "
+    "(odysseus-backup prune --all, or the backup task's Invalidate action, which then takes a fresh verified snapshot) "
+    "or age out of retention. The interface box's local recovery copy (7 days at most) is separate."
+)
+
+
 class WakeRequest(BaseModel):
     matched: bool
     intent: Optional[str] = Field(default=None, max_length=64)
@@ -402,6 +413,36 @@ def setup_misumi_transcript_routes(
         owner = _owner(request)
         return with_db(lambda db: svc.import_box_lines(
             db, owner=owner, lines=body.lines, domain=DOMAIN, box_id=body.box_id))
+
+    @router.post("/delete")
+    def delete_selected(request: Request, body: DeleteRequest):
+        """Explicit user deletion of selected transcript rows (any retention mode, including permanent)."""
+        _require_api_scope(request, "misumi:execute")
+        require_enabled()
+        owner = _owner(request)
+
+        def run(db):
+            try:
+                result = svc.delete_events(db, owner, DOMAIN, body.event_ids)
+            except svc.TranscriptError as exc:
+                return JSONResponse(status_code=exc.status_code, content={"state": exc.code, "detail": str(exc)})
+            return {**result, "backup_notice": BACKUP_NOTICE}
+
+        return with_db(run)
+
+    @router.delete("/{event_id}")
+    def delete_one(request: Request, event_id: str):
+        _require_api_scope(request, "misumi:execute")
+        require_enabled()
+        owner = _owner(request)
+
+        def run(db):
+            result = svc.delete_events(db, owner, DOMAIN, [event_id])
+            if not result["deleted"]:
+                raise HTTPException(404, {"state": "event_not_found"})
+            return {**result, "backup_notice": BACKUP_NOTICE}
+
+        return with_db(run)
 
     @router.get("/{event_id}")
     def get_event(request: Request, event_id: str):

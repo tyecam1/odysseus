@@ -189,6 +189,20 @@ def _deep_check(archive: Path, expect_sqlite: "set[str] | None" = None) -> dict:
     return {"members": len(members), "databases": databases, "problems": problems}
 
 
+def _check_recipients_public(path: Path) -> None:
+    """The recipients file must hold PUBLIC recipients only. An age private identity (``AGE-SECRET-KEY-``) must
+    live in a password manager and an offline copy, never on this host, in Git or at the backup destination."""
+    if not path.is_file():
+        fail(f"no recipients file at {path}")
+    try:
+        content = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        fail(f"cannot read the recipients file: {exc}")
+    if "AGE-SECRET-KEY-" in content:
+        fail("the recipients file contains an AGE-SECRET-KEY (a private identity); refusing. Keep only public "
+             "recipients on this host and the private identity in a password manager plus an offline copy")
+
+
 def _find_age() -> str:
     exe = shutil.which("age")
     if not exe:
@@ -247,9 +261,8 @@ def cmd_snapshot(args):
         fail(f"no data dir at {_DATA_DIR}")
     recipients = getattr(args, "encrypt_recipients", None)
     if recipients:
+        _check_recipients_public(Path(recipients))  # a private identity is refused before anything else
         _find_age()  # fail closed BEFORE anything is written
-        if not Path(recipients).is_file():
-            fail(f"no recipients file at {recipients}")
     excludes = list(getattr(args, "exclude", None) or [])
     if getattr(args, "exclude_rebuildable", False):
         excludes += list(_REBUILDABLE_DIRS)
@@ -562,7 +575,9 @@ def cmd_prune(args):
         if m and p.is_file():
             snaps.append((datetime.strptime(m.group(1) + m.group(2), "%Y%m%d%H%M%S"), p))
     snaps.sort(key=lambda s: s[0], reverse=True)
-    keep = _gfs_keep(snaps, args.keep_daily, args.keep_weekly, args.keep_monthly)
+    # --all keeps nothing (not even the newest): used to honour an explicit deletion of live data, after which a
+    # fresh verified snapshot is taken.
+    keep = {} if getattr(args, "all", False) else _gfs_keep(snaps, args.keep_daily, args.keep_weekly, args.keep_monthly)
     doomed = [p for _, p in snaps if p not in keep]
     deleted = []
     if args.yes:
@@ -620,6 +635,8 @@ def _build_parser():
     pp.add_argument("--keep-daily", type=int, default=7)
     pp.add_argument("--keep-weekly", type=int, default=4)
     pp.add_argument("--keep-monthly", type=int, default=12)
+    pp.add_argument("--all", action="store_true",
+                    help="delete EVERY snapshot (the newest too), to honour a deletion of live data; then take a fresh one")
     pp.add_argument("--yes", action="store_true", help="actually delete (default: dry run)")
     pp.set_defaults(func=cmd_prune)
 
