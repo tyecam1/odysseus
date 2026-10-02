@@ -75,6 +75,27 @@ nodes:
     parent_version: 2
     path: docs/initialising-prompts/misumi-long-horizon-programme-v3.md
     status: active
+  - id: application:2026-10-02-misumi-long-horizon-programme-03
+    type: application
+    application_id: 2026-10-02-misumi-long-horizon-programme-03
+    trace_path: evals/prompt-applications/misumi-long-horizon-programme/2026-10-02-misumi-long-horizon-programme-03.yaml
+    rating:
+      agent_overall: 4.0
+      goal_progress: 4
+      correctness_verification: 4
+      authority_scope_discipline: 5
+      routing_resource_efficiency: 3
+      continuity_handoff_quality: 4
+    failure_tags:
+      - shell_and_api_transport_pitfalls_recurred_despite_v3_checklist
+  - id: evolution:2026-10-02-misumi-long-horizon-programme-03
+    type: evolution_event
+    decision: reinforce
+    evidence_application: 2026-10-02-misumi-long-horizon-programme-03
+    note: >-
+      The deterministic planner returned evolve for the single recurring transport failure tag. Overridden: the failure
+      is a lapse in applying a v3 checklist item that already names it, and the durable fix is tooling, not more prompt
+      text. A fourth consecutive occurrence restructures the fix into a reusable helper instead of adding warnings.
 edges:
   - from: prompt:v1
     to: application:2026-10-01-misumi-long-horizon-programme-01
@@ -94,6 +115,15 @@ edges:
   - from: evolution:2026-10-02-misumi-long-horizon-programme-02
     to: prompt:v3
     type: derived_child
+  - from: prompt:v3
+    to: application:2026-10-02-misumi-long-horizon-programme-03
+    type: applied
+  - from: application:2026-10-02-misumi-long-horizon-programme-03
+    to: evolution:2026-10-02-misumi-long-horizon-programme-03
+    type: observed
+  - from: evolution:2026-10-02-misumi-long-horizon-programme-03
+    to: prompt:v3
+    type: reinforced
 guardrail_validation:
   prompt:v2:
     scope_preserved: true

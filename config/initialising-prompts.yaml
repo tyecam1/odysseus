@@ -202,6 +202,8 @@ prompts:
         status: active
         prompt_path: docs/initialising-prompts/misumi-long-horizon-programme-v3.md
         parent_version: 2
+        application_evidence:
+          - 2026-10-02-misumi-long-horizon-programme-03
         derived_from_applications:
           - 2026-10-02-misumi-long-horizon-programme-02
         evolution_targets:
