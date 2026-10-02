@@ -149,9 +149,9 @@ prompts:
   - prompt_id: misumi-long-horizon-programme
     title: Misumi long-horizon convergence programme initializer
     status: active
-    active_version: 2
-    version: 2
-    prompt_path: docs/initialising-prompts/misumi-long-horizon-programme-v2.md
+    active_version: 3
+    version: 3
+    prompt_path: docs/initialising-prompts/misumi-long-horizon-programme-v3.md
     graph_path: evals/prompt-evolution/misumi-long-horizon-programme.yaml
     created_at: 2026-10-01
     provenance:
@@ -161,7 +161,8 @@ prompts:
         Registered from the 2026-10-01 live Misumi/Odysseus re-entry audit.
         Live repository, runtime, queue and host state always outrank the
         baseline task snapshots embedded in the programme contract. Active head
-        evolved from v1 after the first rated application.
+        evolved from v1 to v2 after the first rated application and from v2 to
+        v3 after the second.
     scope:
       repositories:
         - tyecam1/odysseus
@@ -183,7 +184,7 @@ prompts:
         application_evidence:
           - 2026-10-01-misumi-long-horizon-programme-01
       - version: 2
-        status: active
+        status: superseded
         prompt_path: docs/initialising-prompts/misumi-long-horizon-programme-v2.md
         parent_version: 1
         derived_from_applications:
@@ -195,8 +196,22 @@ prompts:
           - surface likely operator-permission gates together at session start, record exact denials and do not retry them in pieces
           - make resume prompts re-read live state and skip completed steps
           - keep remote-shell transport simple (files over stdin or encoded commands, local JSON parsing, no cleanup verbs in command text)
+        application_evidence:
+          - 2026-10-02-misumi-long-horizon-programme-02
+      - version: 3
+        status: active
+        prompt_path: docs/initialising-prompts/misumi-long-horizon-programme-v3.md
+        parent_version: 2
+        derived_from_applications:
+          - 2026-10-02-misumi-long-horizon-programme-02
+        evolution_targets:
+          - before any hand-back that reports a stop, classify every remaining contract item as human-only gate, environment condition or executable, and continue while an executable item exists; a denied merge, deploy or credential action blocks only that action
+          - persist the application trace and evolution event before a hand-back that reports a stop, without waiting to be asked
+          - add merging to a protected branch, when no explicit merge authority is on record, to the permission gates surfaced together at session start
+          - restructure the recurring shell and API transport guidance into a checklist (probe the host's default shell, pass structured API bodies as files, decide success from exit codes, assert replacement anchors match once, keep cleanup verbs out of command text)
     supersedes:
       - 1
+      - 2
     retirement_condition: >-
       Retire only when an evidence-derived child passes the protected-invariant
       gate or the Misumi convergence programme reaches its governed completion
