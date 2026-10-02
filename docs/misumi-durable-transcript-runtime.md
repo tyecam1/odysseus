@@ -177,7 +177,9 @@ What permanent does **not** mean:
 ## Backup and restore drill
 
 `tests/test_misumi_transcript_backup_restore_drill.py` drives the existing `scripts/odysseus-backup` (snapshot, verify,
-restore) against a disposable file-backed archive. It adds no store, tool or mechanism. On every run it proves:
+restore) against a disposable file-backed archive, in both layouts: `<repo>/data` and an external directory named by
+`ODYSSEUS_DATA_DIR` (how the household deployment runs; before Odysseus PR #65 the tool ignored that variable). It adds no
+store, tool or mechanism. On every run it proves:
 
 - snapshot, destroy the live database, restore: every row comes back identical in every column (including `seq` and the
   timestamps), with the same per-owner counts, the retention policies and a passing SQLite integrity check;
