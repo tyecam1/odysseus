@@ -7,7 +7,7 @@ status: inbox
 priority: high
 task_type: architecture-convergence
 created_by: migrated-from-obsidian-phd
-updated_at: 2026-09-23T15:26:00+01:00
+updated_at: 2026-10-02T15:20:00+01:00
 executor: ""
 execution_mode: review-first
 requires_remote_compute: false
@@ -27,6 +27,44 @@ notes: "Migrated as shared backend/cross-repository work. Original body preserve
 ---
 
 # Build Aoteru central memory and universal assistant
+
+## 2026-10-02 Phase 4 re-grounding (proposed disposition; the original body below is preserved)
+
+Misumi long-horizon programme, application `2026-10-02-misumi-long-horizon-programme-02`. A bounded Opus architecture gate
+was run against live evidence. Its conclusions are recorded as a **Proposed** ADR, `docs/memory-architecture.md` in
+`tyecam1/misumi` (PR #45), and take effect only when the operator ratifies it. This task is **not closed** because two of
+its items are real; the rest is obsolete or already satisfied.
+
+Evidence that changes the premises: the design document this task cites
+(`automation/review/architecture/2026-08-19-aoteru-central-memory-and-agent-fabric.md`) does not exist in the repository;
+Odysseus code has no Mem0, no memory broker and no `aoteru-memory` MCP (they appear only in planning documents); the
+transcript archive is now a permanent, single-writer store on the home host; the registry, ParkLease, `memory_server.py`,
+`memory_provider`, `MemoryRelation` and `source_events` already exist; and a Graphiti-style temporal memory was already
+rejected as a second authority.
+
+| Tranche item | Disposition |
+| --- | --- |
+| 1 Audit | Satisfied by the Phase 4 evidence pass |
+| 2 Provenance event schema | Obsolete as a new schema: provenance already lives in `MemoryRelation` (`derived_from`, `supersedes`) and `source_events`; `memories` rows are thin (`category`, `source`, `owner`, `session_id`), and a gap there is closed by extending those owners |
+| 3 Memory Broker with an append-only ledger | Obsolete: a second router and store; the transcript archive is the ledger |
+| 4 Self-hosted Mem0 pilot | Obsolete: a new store behind a new broker |
+| 5 `aoteru-memory` MCP | Obsolete: `mcp_servers/memory_server.py` exists |
+| 6 Claude Code lifecycle hooks | **Deferred, not obsolete:** read-only bounded retrieval may be real later; candidate capture would be a second write path and risks crossing the PhD boundary, so it needs a domain-scoping design first |
+| 7 Incremental ChatGPT export ingestion | **Deferred, not obsolete:** a separate ingestion item under `config/memory-sources.yaml`, after an owner privacy decision |
+| 8 Repo registry, parking lease, launcher | Satisfied (`config/repositories.yaml`, ParkLease) |
+| 9 Benchmark local models | Subordinate to `2026-09-13-operating-contract-model-role-evaluation-system` (PR #62); not memory work |
+| 10 Home-primary memory with lab warm replica and read failover | **Rejected:** contradicts the single-writer design and the rule that the lab is never a second writer; replaced by an encrypted verified scheduled backup and a drilled restore with a stated recovery point |
+
+| Acceptance criterion | Disposition |
+| --- | --- |
+| Park the active session from the laptop; no dual-write from two machines | Satisfied |
+| Repository knowledge retrieved from its authority, not copied into memory | Real; delivered through the Misumi `context-portability-hygiene` drift check |
+| Identity and bounded memory at Claude Code start in any repository | Partly satisfied (`CLAUDE.md` and `aoteru-estate-routing`); the rest deferred |
+| One broker for Claude, Codex and local models; ChatGPT import | Obsolete (broker); deferred (import) |
+| Memory read-only from the lab if home is down | Obsolete: replaced by restore within a measured time |
+| Local model defaults from measured results; local extraction by default | Owned by the model-role evaluation task |
+
+Retiring the obsolete rows is a consequence of ratifying the ADR; this note does not change the task's status.
 
 ## Goal
 
