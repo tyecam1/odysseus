@@ -2454,8 +2454,9 @@ def _migrate_add_estate_execution_worker_columns():
     """Multihost Stage 6 migration (S6.1/S6.5/S6.7/S6.8/S6.10): add the
     worker columns, backfill `worktree_resolution`, and recreate both
     partial unique indexes with their Stage 6 predicates. SQLite only,
-    like every other migration in this module; PostgreSQL deployments get
-    the predicates from `create_all` (both dialect predicates declared)."""
+    like most migrations in this module; the PostgreSQL counterpart is
+    `_migrate_add_estate_execution_worker_columns_postgresql` (`create_all`
+    only creates missing tables, never columns or replacement indexes)."""
     db_path = _sqlite_db_path(engine.url)
     if db_path is None or not os.path.exists(db_path):
         return
@@ -2509,6 +2510,102 @@ def _migrate_add_estate_execution_worker_columns():
     finally:
         if conn:
             conn.close()
+
+
+_ESTATE_EXECUTION_WORKER_COLUMNS_PG = tuple(
+    (name, ddl.replace("DATETIME", "TIMESTAMP")) for name, ddl in _ESTATE_EXECUTION_WORKER_COLUMNS
+)
+# Arbitrary constant: serialises concurrent starts so two processes never run the DDL at once.
+_PG_MIGRATION_LOCK_KEY = 0x0D155E06
+
+
+def _pg_recreate_partial_unique_index(conn, *, table, index, column, predicate, duplicate_sql) -> bool:
+    """PostgreSQL counterpart of `_recreate_partial_unique_index`.
+
+    PostgreSQL stores an index predicate in its own normalised form (casts, parentheses, `= ANY (ARRAY[...])`),
+    so comparing text with the declared predicate is unreliable. Idempotence is recorded instead as a comment
+    on the index carrying the predicate it was built with: an index with that comment is left alone, anything
+    else (a pre-Stage-6 index, or one `create_all` built) is replaced once, unless rows already violate the new
+    predicate -- then log, keep the old index and return False (the in-Python rule still blocks; the next start
+    retries), exactly like the SQLite path."""
+    log = logging.getLogger(__name__)
+    marker = "predicate: " + " ".join(predicate.split())
+    current = conn.execute(text(
+        "SELECT obj_description(c.oid, 'pg_class') FROM pg_class c "
+        "JOIN pg_namespace n ON n.oid = c.relnamespace "
+        "WHERE c.relname = :index AND c.relkind = 'i' AND n.nspname = current_schema()"
+    ), {"index": index}).scalar()
+    if current == marker:
+        return True
+    duplicates = conn.execute(text(duplicate_sql)).fetchall()
+    if duplicates:
+        log.error(
+            "%s: cannot recreate %s with predicate %r -- duplicates %r; keeping the "
+            "old index, affected leases stay blocked until recovery",
+            table, index, predicate, [tuple(row) for row in duplicates],
+        )
+        return False
+    conn.execute(text(f"DROP INDEX IF EXISTS {index}"))
+    conn.execute(text(f"CREATE UNIQUE INDEX {index} ON {table} ({column}) WHERE {predicate}"))
+    conn.execute(text(f"COMMENT ON INDEX {index} IS '{marker.replace(chr(39), chr(39) * 2)}'"))
+    return True
+
+
+def _migrate_add_estate_execution_worker_columns_postgresql():
+    """Multihost Stage 6 migration for PostgreSQL: the same columns, backfill and partial-index predicates as
+    the SQLite migration. `create_all` only creates MISSING TABLES -- on an existing pre-Stage-6 database it never
+    adds columns or replaces an index -- so without this a PostgreSQL deployment would keep the pre-Stage-6
+    schema and the write lane would fail at runtime.
+
+    Additive and re-runnable: `ADD COLUMN IF NOT EXISTS`, the backfill only when `worktree_resolution` is being
+    added, and index replacement guarded by the predicate comment. One transaction (PostgreSQL DDL is
+    transactional) under an advisory lock. A no-op on any other dialect."""
+    if engine.dialect.name != "postgresql":
+        return
+    from sqlalchemy import inspect as sa_inspect
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": _PG_MIGRATION_LOCK_KEY})
+            inspector = sa_inspect(conn)
+            if not inspector.has_table("estate_executions"):
+                return
+            existing = {column["name"] for column in inspector.get_columns("estate_executions")}
+            adding_resolution = "worktree_resolution" not in existing
+            for name, ddl in _ESTATE_EXECUTION_WORKER_COLUMNS_PG:
+                conn.execute(text(f"ALTER TABLE estate_executions ADD COLUMN IF NOT EXISTS {name} {ddl}"))
+            if adding_resolution:
+                # S6.1 backfill: a row whose lease is not currently active is legacy_closed; every other row
+                # stays unresolved (blocking).
+                conn.execute(text(
+                    "UPDATE estate_executions SET worktree_resolution = 'legacy_closed' "
+                    "WHERE lease_id IS NULL OR lease_id NOT IN "
+                    "(SELECT id FROM park_leases WHERE status = 'active')"
+                ))
+            # `index=True` on the model only builds this when the table is created, never on an existing one.
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_estate_executions_worktree_resolution "
+                "ON estate_executions (worktree_resolution)"
+            ))
+            _pg_recreate_partial_unique_index(
+                conn, table="estate_executions", index="ix_estate_executions_active_lease_unique",
+                column="lease_id", predicate=ESTATE_EXECUTION_UNRESOLVED_PREDICATE,
+                duplicate_sql=(
+                    "SELECT lease_id, string_agg(id::text, ',') FROM estate_executions "
+                    "WHERE worktree_resolution = 'unresolved' AND lease_id IS NOT NULL "
+                    "GROUP BY lease_id HAVING count(*) > 1"
+                ),
+            )
+            if inspector.has_table("park_leases"):
+                _pg_recreate_partial_unique_index(
+                    conn, table="park_leases", index="ix_park_leases_active_repo_unique",
+                    column="repo_id", predicate=PARK_LEASE_SLOT_PREDICATE,
+                    duplicate_sql=(
+                        "SELECT repo_id, string_agg(id::text, ',') FROM park_leases "
+                        "WHERE status IN ('active', 'preparing') GROUP BY repo_id HAVING count(*) > 1"
+                    ),
+                )
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"estate_executions worker migration (postgresql) failed: {e}")
 
 
 class LeaseSerializationBusy(RuntimeError):
@@ -2606,6 +2703,7 @@ def init_db():
     Base.metadata.create_all(bind=engine)
     _migrate_add_routing_delegation_columns()
     _migrate_add_estate_execution_worker_columns()
+    _migrate_add_estate_execution_worker_columns_postgresql()
     # Lock the DB file (and any SQLite sidecars) to 0o600 — it holds bearer-token
     # + bcrypt hashes and encrypted provider keys. POSIX only; safe_chmod no-ops
     # on Windows (ACL-restricted profile dir) and the path helper returns None for

@@ -111,3 +111,25 @@ The filter (ported from the interface box, then broadened after retrospective re
 ## Known gap (tracked)
 
 The Stage 6 estate-execution columns (PR #44) are migrated only for SQLite. An existing PostgreSQL deployment would need an explicit migration before the write lane is used there; every current deployment is SQLite. Tracked as `2026-10-01-postgres-estate-migration`.
+
+## PostgreSQL
+
+SQLite is the supported deployment database. PostgreSQL is **not yet a supported general target**; what has been
+built and tested against a real PostgreSQL 16 schema is narrow:
+
+- A **fresh** PostgreSQL database: `init_db()` runs twice without error and `create_all` builds every table,
+  including `misumi_transcript_events` and `misumi_retention_policy`.
+- The **Stage 6 estate-execution migration** (`_migrate_add_estate_execution_worker_columns_postgresql`): an
+  existing pre-Stage-6 schema gains the seven worker columns (`ADD COLUMN IF NOT EXISTS`), the `legacy_closed`
+  backfill, the `worktree_resolution` index, and both replaced partial unique indexes. It is additive and
+  re-runnable (idempotence is recorded as a comment on each index carrying the predicate it was built with, because
+  PostgreSQL normalises stored predicates and text comparison is unreliable). `create_all` alone never does this: it
+  only creates missing tables.
+  Tests: `tests/test_estate_stage6_pg.py`, skipped unless `ODYSSEUS_TEST_POSTGRES_URL` names a throwaway PostgreSQL
+  (each test uses its own schema). They also drive the write lane (create, admission control, update, recovery read,
+  lease serialisation with `SELECT ... FOR UPDATE`) through the migrated tables.
+
+Not PostgreSQL-ready: the older `_migrate_*` helpers that read `PRAGMA table_info(...)` (session, folder, token and
+similar columns) are SQLite-only and only log a warning on PostgreSQL, so an *existing* PostgreSQL database that
+predates those columns would still lack them; and the BBC store (`src/bbc/store.py`) uses SQLite directly. Treat a
+PostgreSQL move as a separate project until those are ported and tested the same way.

@@ -3,12 +3,12 @@ artifact_type: agent-task
 task_schema: agent-task/v2
 task_id: 2026-10-01-postgres-estate-migration
 title: "Add an explicit PostgreSQL migration for the Stage 6 estate-execution columns"
-status: inbox
+status: review
 priority: medium
 task_type: implementation
 created_by: claude
 created_at: 2026-10-01T19:00:00+01:00
-updated_at: 2026-10-01T19:00:00+01:00
+updated_at: 2026-10-02T02:00:00+01:00
 executor: claude_subscription
 execution_mode: review-first
 architecture: single
@@ -74,3 +74,17 @@ Every current deployment (lab control plane, home household runtime) uses SQLite
 - A pre-Stage-6 PostgreSQL schema migrates cleanly and the write-lane tests pass against it.
 - Re-running the migration is a no-op.
 - Existing SQLite suites unchanged. No new migration framework.
+
+## Resolution (2026-10-02, awaiting review)
+
+Implemented `_migrate_add_estate_execution_worker_columns_postgresql` in `core/database.py` and hooked it into
+`init_db()`. Proven against a real PostgreSQL 16 schema built from the pre-Stage-6 models
+(`tests/test_estate_stage6_pg.py`, 7 tests, skipped without `ODYSSEUS_TEST_POSTGRES_URL`): migrate, backfill,
+both indexes replaced and enforcing, re-run is a no-op (index OIDs unchanged), duplicate rows keep the old index
+and log, a `create_all`-built schema migrates unchanged, other dialects untouched, and the write lane (create,
+admission control, update, recovery read, `lease_serialized_transaction`) runs on the migrated tables. Mutation
+check: with the migration disabled the migration test fails. SQLite suites unchanged.
+
+Scope limit, recorded rather than hidden: the older `PRAGMA table_info(...)` migrations and the BBC store remain
+SQLite-only, so PostgreSQL is still not a supported general target (see
+`docs/misumi-durable-transcript-runtime.md`, section PostgreSQL).
