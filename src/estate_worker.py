@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from src import estate_router, estate_worker_procs, worktree_ops
+from src import estate_router, estate_worker_procs, gpu_admission, worktree_ops
 from src.estate_worker_protocol import PROTOCOL, error_response, validate_request
 from src.park_lease_ops import git_is_clean
 from src.runtime_paths import get_app_root
@@ -333,10 +333,15 @@ def _verb_health(payload: dict) -> dict:
     reachable, _models, ollama_error = _ollama_inventory()
     codex_available, codex_detail = estate_router._codex_available()
     gpu_active, gpu_reason = estate_router.experiment_priority_active()
+    # Raw GPU readings only, and only on a host whose registry entry opts in (worker.gpu_admission); the
+    # router classifies them. No block -> no sampling cost and no behaviour change.
+    gpu_cfg = estate_router.host_gpu_admission_config(estate_router.current_host_id())
+    gpu_load = gpu_admission.sample_gpu() if gpu_cfg is not None and gpu_cfg.get("enabled") is not False else None
     return {
         "ollama": {"reachable": reachable, "base_url": _OLLAMA_BASE, "error": ollama_error},
         "codex": {"available": codex_available, "detail": codex_detail},
         "gpu_yield": {"active": gpu_active, "reason": gpu_reason},
+        "gpu_load": gpu_load,
         "in_flight": _in_flight_execution_ids(),
         "write_prerequisites": _write_prerequisites(),
         "time_utc": _utcnow(),

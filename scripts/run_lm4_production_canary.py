@@ -306,6 +306,22 @@ def run_vision_task(alias: str, task: dict, corpus_id: str, retries: int = 0, tr
     return result
 
 
+def _worker_gpu_gate(host_id: str) -> dict:
+    """Fresh (uncached) GPU admission classification for a worker host. A refusal here means "not run", never
+    a model failure, so an admission problem can not be recorded as a benchmark result (src/gpu_admission.py)."""
+    from src import estate_router, gpu_admission
+    from src.estate_worker_client import WorkerTransportError, call_worker
+
+    cfg = estate_router.host_gpu_admission_config(host_id)
+    if cfg is None or cfg.get("enabled") is False:
+        return {"state": "disabled", "reason": "GPU admission is not configured for this host"}
+    try:
+        health = call_worker(host_id, "health", {}, deadline_s=30)["result"]
+    except WorkerTransportError as exc:
+        return {"state": "unknown", "reason": f"worker unreachable: {exc.code}: {exc}"}
+    return gpu_admission.classify_gpu_load(health.get("gpu_load"), in_flight=health.get("in_flight"), config=cfg)
+
+
 def main(argv: list[str] | None = None):
     import argparse
     parser = argparse.ArgumentParser(description="LM4 production canary (routed) or Stage 7 per-host qualification canary")
@@ -339,10 +355,25 @@ def main(argv: list[str] | None = None):
                 # vision runs the SAME task 3x by design (trial repeats for
                 # broader coverage); every other alias/task pair is unique.
                 if args.worker_host:
+                    gate = _worker_gpu_gate(args.worker_host)
+                    if gate["state"] == "busy":
+                        print(f"[{alias}] {task_id}@{args.worker_host} -> NOT RUN ({gate['reason']})")
+                        summary[alias]["not_run"] = summary[alias].get("not_run", 0) + 1
+                        out_f.write(json.dumps({
+                            "run_id": RUN_ID, "alias": alias, "task_id": task_id,
+                            "status": "not_run", "reason": gate["reason"],
+                        }) + "\n")
+                        continue
                     result = run_text_task_on_worker(args.worker_host, alias, task, corpus_id)
                     if result["status"] != "pass":
-                        print(f"  -> repeating {alias}/{task_id}@{args.worker_host} once")
-                        result = run_text_task_on_worker(args.worker_host, alias, task, corpus_id, retries=1)
+                        after = _worker_gpu_gate(args.worker_host)
+                        if after["state"] == "busy":
+                            # A failure while the GPU is contended is not a model verdict, and is not repeated.
+                            result = {**result, "status": "inconclusive",
+                                      "reason": f"GPU became busy during the run: {after['reason']}"}
+                        else:
+                            print(f"  -> repeating {alias}/{task_id}@{args.worker_host} once")
+                            result = run_text_task_on_worker(args.worker_host, alias, task, corpus_id, retries=1)
                 elif alias == "vision":
                     trial = i + 1
                     if trial > 1:
@@ -365,6 +396,9 @@ def main(argv: list[str] | None = None):
     print(f"run_id={RUN_ID}")
     for alias, counts in summary.items():
         print(f"{alias}: {counts}")
+    if args.worker_host and any(c.get("not_run") or c.get("inconclusive") for c in summary.values()):
+        print("INCONCLUSIVE: the GPU was busy, so these items are not a model verdict. Re-run when it is free.")
+        raise SystemExit(3)
 
 
 if __name__ == "__main__":
