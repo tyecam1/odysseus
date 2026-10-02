@@ -151,3 +151,17 @@ the existing 533 estate, worker, canary and registry tests unchanged. All of it 
 from simulated evidence**: `local-fast` stays unqualified on home until the canary is re-run on the physical RTX 3070
 while it is free, and the admission logic stays unvalidated against a real game until a live read of the busy GPU is
 recorded here. The home worker checkout must be advanced to this change before home reports `gpu_load`.
+
+### Live observation of the admission signal (2026-10-02 14:54Z; observation only)
+
+With the home worker checkout advanced to `6f3135f7` and the game *Orcs Must Die Deathtrap* still running, `call_worker`
+`health` against home from the lab (2.1 s round trip, including three samples inside the worker) returned:
+
+- `gpu_load`: three samples, each `util_pct 98.0`, `mem_used_mib 4962`, `mem_total_mib 8192`; `in_flight: []`;
+- the pre-existing `gpu_yield`: `{"active": false, "reason": "no reservation; no significant non-ollama GPU load"}`. That
+  is the blindness described above, observed live: the old signal reports an idle GPU while a game holds 98% of it;
+- the new classifier with home's registry block (`busy_util_pct: 60`): `busy` - `household GPU busy: 98% utilisation
+  sustained over 3 samples, 4.8 of 8.0 GB VRAM used, no estate work in flight`.
+
+This validates the reading and the classification against the real card and the real game. It is not a benchmark and
+qualifies nothing: `local-fast` is still unqualified on home, and still needs the canary re-run while the GPU is free.

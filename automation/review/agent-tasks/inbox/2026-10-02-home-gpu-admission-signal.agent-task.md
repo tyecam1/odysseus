@@ -97,3 +97,13 @@ failure.
 - Tests cover busy, free, hysteresis, unknown, a host without a GPU, and the canary's "not run" path; the busy-path
   guard is mutation-checked.
 - Evidence is recorded in `docs/aoteru-multihost-execution-evidence.md`.
+
+## Progress (2026-10-02, application `2026-10-02-misumi-long-horizon-programme-02`)
+
+- Implemented in Odysseus PR #66 (merged): `src/gpu_admission.py`, worker `health` `gpu_load`, router withholding in
+  `resolve_alias`, canary `not_run` / `inconclusive`, home opted in through `config/estate.yaml`. 49 new tests,
+  mutation-checked, 533 existing estate tests unchanged.
+- Live observation recorded in `docs/aoteru-multihost-execution-evidence.md`: with the game running, the old `gpu_yield` said
+  `inactive` and the new classifier said `busy`.
+- **Still open (real acceptance):** re-run the `local-fast` canary on the physical RTX 3070 while it is free. Nothing is
+  qualified from simulated evidence. Status stays `inbox` until then.
