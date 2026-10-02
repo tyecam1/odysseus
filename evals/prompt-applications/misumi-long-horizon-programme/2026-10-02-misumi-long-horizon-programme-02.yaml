@@ -92,3 +92,15 @@ revision_reason: >-
   - "tyecam1/misumi docs/memory-architecture.md and docs/operations/backup-restore.md (Proposed, not ratified); dispositions on converged-memory-architecture, misumi-memory-consolidation-and-transparency, context-portability-hygiene and backup-and-restore-memory-store"
   - "Open human gates carried forward: lab sudo fast-forward and restart; physical kiosk acceptance; one sentence of operator decision for a scheduled off-host backup (destination and key custody); legacy audio classification; meaning of permanent retention for deletion; ratification of the Phase 4 ADR. Environment gate: a free home GPU for the local-fast canary and the seed-order live prompts."
   - "Operator ratings: none supplied"
+amendments:
+  - recorded_at: "2026-10-02T17:00:00+01:00"
+    note: >-
+      After the trace was merged the operator asked for the competing game on the
+      home GPU to be stopped and for work to continue autonomously. The game's two
+      processes were stopped, a live admission read showed the GPU free, canary
+      lm4-canary-be6cd25f2a ran through the real worker path (3 pass, attested
+      home) and Odysseus PR #70 qualified home for local-fast and local. The
+      "not done" list in stop_reason is therefore out of date for the local-fast
+      canary only. verify-seed-order-live-runtime remains unrun because it needs
+      the interface box's service token, which is an operator decision. Ratings
+      and the evolution decision above are unchanged.
