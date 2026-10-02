@@ -246,7 +246,9 @@ def test_archive_disabled_is_explicit_and_never_claims_persisted(tmp_path, monke
     assert count_rows(factory) == 0
     assert client.get("/misumi/transcript/policy", headers={"x-test-owner": "alice"}).json() == {
         "transcript_archive": False,
+        "transcript_retention_mode": "finite",
         "transcript_retention_days": 14,
+        "transcript_retention_days_if_finite": 14,
         "raw_audio_retention": "off",
         "request_level": {
             "conversation_history": "history_mode on /misumi/respond",

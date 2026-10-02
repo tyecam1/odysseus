@@ -2,7 +2,12 @@
 ingest SourceEvent adapter contract (P1). No Instagram/WhatsApp parsing here,
 only the neutral idempotent record/revision contract future importers call.
 """
+import os
+
 import pytest
+
+from tests.helpers.import_state import clear_fake_database_modules
+from tests.helpers.sqlite_db import make_temp_sqlite
 
 from src.source_events import (
     MAX_PAYLOAD_REF_BYTES,
@@ -20,7 +25,25 @@ def _cleanup(source, external_id):
 
 
 @pytest.fixture(autouse=True)
-def _clean_test_rows():
+def _isolated_database(monkeypatch):
+    """Own, throwaway database for every test.
+
+    These tests used to run against whatever the process-wide default database was: it passed on a machine whose
+    default database already had `source_events` (the app had run there) and raised `no such table: source_events`
+    on a fresh CI runner, and on every machine it wrote test rows into the real database. `record_source_event`
+    and `get_db_session` both read `core.database.SessionLocal` at call time, so binding it to a temp database
+    isolates the tests completely and makes them independent of test order and of the environment."""
+    clear_fake_database_modules()
+    import core.database as cdb
+    session_local, engine, tmpfile = make_temp_sqlite(cdb.Base.metadata)
+    monkeypatch.setattr(cdb, "SessionLocal", session_local)
+    yield
+    engine.dispose()
+    os.unlink(tmpfile.name)
+
+
+@pytest.fixture(autouse=True)
+def _clean_test_rows(_isolated_database):
     _cleanup("instagram", "test-ext-1")
     _cleanup("whatsapp", "test-ext-2")
     _cleanup("instagram", "test-ext-3")
