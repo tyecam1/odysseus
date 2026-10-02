@@ -156,7 +156,8 @@ nodes:
     type: observed
   - from: evolution:2026-10-02-misumi-long-horizon-programme-04
     to: prompt:v3
-    type: reinforcedguardrail_validation:
+    type: reinforced
+guardrail_validation:
   prompt:v2:
     scope_preserved: true
     authority_preserved: true

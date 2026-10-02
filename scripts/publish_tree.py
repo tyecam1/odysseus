@@ -10,7 +10,7 @@ quoting, JSON bodies on stdin, forgotten deletions). This does the file, encodin
 * A file is added or changed when its git blob sha differs from the base tree; a base file under a prefix that is missing locally
   is deleted (so a move is expressed by having the new file and not the old one). ``__pycache__`` is never touched.
 * Bodies are sent with ``gh api --input <file>`` (never stdin), contents as base64 blobs, so there is no encoding or quoting layer.
-* It creates the branch and the commit only; opening and merging the pull request stays with the caller (``gh pr create``).
+* It creates the branch (or, when NEW_BRANCH equals BASE_BRANCH, fast-forwards that branch) and the commit only; opening and merging the pull request stays with the caller (``gh pr create``).
 """
 
 from __future__ import annotations
@@ -124,7 +124,10 @@ def main(argv: list[str] | None = None) -> int:
     new_tree = _gh("POST", f"repos/{args.repo}/git/trees", {"base_tree": base_tree, "tree": entries})
     message = Path(args.message_file).read_text(encoding="utf-8").rstrip() + "\n\n" + ATTRIBUTION
     commit = _gh("POST", f"repos/{args.repo}/git/commits", {"message": message, "tree": new_tree["sha"], "parents": [base_sha]})
-    _gh("POST", f"repos/{args.repo}/git/refs", {"ref": f"refs/heads/{args.new_branch}", "sha": commit["sha"]})
+    if args.new_branch == args.base_branch:  # commit onto an existing branch (fast-forward only, never forced)
+        _gh("PATCH", f"repos/{args.repo}/git/refs/heads/{args.new_branch}", {"sha": commit["sha"], "force": False})
+    else:
+        _gh("POST", f"repos/{args.repo}/git/refs", {"ref": f"refs/heads/{args.new_branch}", "sha": commit["sha"]})
     print(f"branch {args.new_branch} -> {commit['sha'][:8]} (base {base_sha[:8]})")
     return 0
 
