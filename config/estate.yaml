@@ -167,15 +167,23 @@ hosts:
     identity_verified: true
     identity_evidence: docs/aoteru-p13-laptop-reentry-evidence.md
     worker:
-      enabled: false
+      enabled: true
       transport: ssh
       ssh:
-        target: null
-        host_public_key: null
-        command: null
-      machine_fingerprint: null
-      qualified_executors: []
-      qualification_evidence: null
+        target: User@desktop-in7o23d.tail171792.ts.net
+        # SSH host public key of home; its fingerprint is the already-pinned
+        # SHA256:rmuPA4DUnFnR8UPXBHrksljQbT86l2aZZAztNZ1TIeU (verified 2026-10-02 against
+        # C:\ProgramData\ssh\ssh_host_ed25519_key.pub). SshTransport never accepts
+        # StrictHostKeyChecking=no.
+        host_public_key: ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICweUmDBINBvdWL8vQdTs5SD9bfBGhGfWpH6G0krfoOs
+        # Documentation only (the forced command on home is authoritative): installed
+        # 2026-10-02 into C:\ProgramData\ssh\administrators_authorized_keys for the dedicated
+        # aoteru-worker-lab key (SHA256:uJEKTOnr4qkeT8C+TVMI5+3bk+F8MmGAfpD1ppAHv/0).
+        command: 'cd /d E:\aoteru\odysseus-aoteru && venv\Scripts\python.exe -m src.estate_worker --root E:\aoteru\odysseus-aoteru'
+      machine_fingerprint: 63bcf7a63d612973
+      qualified_executors: [deterministic]
+      qualification_evidence:
+        - docs/aoteru-multihost-execution-evidence.md
     inventoried_at: "2026-08-29"
     notes: >-
       P12.7 home re-entry executed 2026-08-29, first laptop-run session.
