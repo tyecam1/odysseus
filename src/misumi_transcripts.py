@@ -15,8 +15,11 @@ Invariants enforced here rather than documented and hoped for:
 * The owner is stored NOT NULL (``""`` for the local/no-auth owner) so SQLite's
   "NULLs are distinct" behaviour cannot defeat the unique constraint.
 * A row is only reported persisted after the transaction commits.
-* Retention is finite: ``transcript_retention_days`` is clamped to 1..90 and
-  expired rows are purged in bounded batches.
+* Retention is an explicit policy: ``transcript_retention_mode`` is ``finite``
+  (``transcript_retention_days`` clamped to 1..90, expired rows purged in bounded
+  batches) or ``permanent`` (accepted rows never expire; nothing is purged, read
+  filtering is off). Permanent text never makes raw audio permanent: audio is not
+  stored by this module in any mode.
 * Credential-shaped text is refused before storage (defence in depth: the
   interface box applies the same rule before it forwards anything).
 * Raw audio is never stored by this module.
@@ -33,7 +36,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Iterable, Optional
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 
 from core.database import MisumiRetentionPolicy, TranscriptEvent, utcnow_naive
@@ -47,6 +50,9 @@ MAX_EVENT_ID_CHARS = 128
 RETENTION_DEFAULT_DAYS = 14
 RETENTION_MIN_DAYS = 1
 RETENTION_MAX_DAYS = 90
+RETENTION_MODE_FINITE = "finite"
+RETENTION_MODE_PERMANENT = "permanent"
+RETENTION_MODES = (RETENTION_MODE_FINITE, RETENTION_MODE_PERMANENT)
 QUERY_DEFAULT_LIMIT = 50
 QUERY_MAX_LIMIT = 200
 EXPORT_MAX_LIMIT = 1000
@@ -117,6 +123,18 @@ class EventConflict(TranscriptError):
     status_code = 409
 
 
+class RetentionChangeRefused(TranscriptError):
+    """Switching a permanent archive to a finite window would expire rows that exist now.
+    Nothing was changed; repeat with ``confirm_expire_existing`` to accept the loss."""
+
+    code = "would_expire_existing_transcripts"
+    status_code = 409
+
+    def __init__(self, message: str, would_expire: int):
+        super().__init__(message)
+        self.would_expire = would_expire
+
+
 class EventNotFound(TranscriptError):
     code = "event_not_found"
     status_code = 404
@@ -178,12 +196,28 @@ def _commit(db) -> None:
 
 # ---- policy -----------------------------------------------------------------
 
+def retention_mode_of(row: Optional[MisumiRetentionPolicy]) -> str:
+    """The row's mode. Only the literal 'finite' means expiry: a missing row is the default finite policy, but
+    an unreadable stored value fails SAFE (permanent) because deleting text is irreversible."""
+    if row is None:
+        return RETENTION_MODE_FINITE
+    mode = getattr(row, "transcript_retention_mode", None) or RETENTION_MODE_FINITE
+    if mode == RETENTION_MODE_FINITE:
+        return RETENTION_MODE_FINITE
+    if mode != RETENTION_MODE_PERMANENT:
+        logger.warning("unknown transcript_retention_mode %r for owner %r: treating as permanent", mode, row.owner)
+    return RETENTION_MODE_PERMANENT
+
+
 def policy_dict(row: Optional[MisumiRetentionPolicy]) -> dict:
+    mode = retention_mode_of(row)
+    window = clamp_retention_days(row.transcript_retention_days if row else RETENTION_DEFAULT_DAYS)
     return {
         "transcript_archive": bool(row.transcript_archive) if row else False,
-        "transcript_retention_days": clamp_retention_days(
-            row.transcript_retention_days if row else RETENTION_DEFAULT_DAYS
-        ),
+        "transcript_retention_mode": mode,
+        # None means "no expiry"; the stored window is what a switch back to finite would use.
+        "transcript_retention_days": window if mode == RETENTION_MODE_FINITE else None,
+        "transcript_retention_days_if_finite": window,
         # Raw audio is never retained server-side; this is reported, not settable.
         "raw_audio_retention": "off",
         # The other retention dimensions are enforced per request, not here.
@@ -206,8 +240,12 @@ def set_policy(
     *,
     transcript_archive: Optional[bool] = None,
     transcript_retention_days: Optional[int] = None,
+    transcript_retention_mode: Optional[str] = None,
+    confirm_expire_existing: bool = False,
 ) -> dict:
     key = normalize_owner(owner)
+    if transcript_retention_mode is not None and transcript_retention_mode not in RETENTION_MODES:
+        raise TranscriptInvalid("transcript_retention_mode must be 'finite' or 'permanent'")
     row = db.get(MisumiRetentionPolicy, key)
     if row is None:
         row = MisumiRetentionPolicy(
@@ -217,10 +255,28 @@ def set_policy(
             raw_audio_retention="off",
         )
         db.add(row)
+    old_mode = retention_mode_of(row)
+    if transcript_retention_days is not None:
+        window = clamp_retention_days(transcript_retention_days)
+    else:
+        window = clamp_retention_days(row.transcript_retention_days)
+    new_mode = transcript_retention_mode or old_mode
+    if old_mode == RETENTION_MODE_PERMANENT and new_mode == RETENTION_MODE_FINITE and not confirm_expire_existing:
+        # A stray PUT must not turn a permanent archive into one that starts deleting.
+        cutoff = (utcnow_naive() - timedelta(days=window))
+        would_expire = db.execute(
+            select(func.count()).select_from(TranscriptEvent)
+            .where(TranscriptEvent.owner == key, TranscriptEvent.persisted_at < cutoff)
+        ).scalar_one()
+        if would_expire:
+            db.rollback()
+            raise RetentionChangeRefused(
+                f"switching to a {window}-day window would expire {would_expire} existing transcript row(s); "
+                "nothing was changed", would_expire)
     if transcript_archive is not None:
         row.transcript_archive = bool(transcript_archive)
-    if transcript_retention_days is not None:
-        row.transcript_retention_days = clamp_retention_days(transcript_retention_days)
+    row.transcript_retention_days = window
+    row.transcript_retention_mode = new_mode
     _commit(db)
     return policy_dict(row)
 
@@ -241,9 +297,12 @@ def _validate(event_id: str, text: str, capture_mode: str) -> tuple[str, str]:
     return event_id, text
 
 
-def retention_cutoff(db, owner: Optional[str], now: Optional[datetime] = None) -> datetime:
-    """Rows persisted before this instant are expired for this owner."""
+def retention_cutoff(db, owner: Optional[str], now: Optional[datetime] = None) -> Optional[datetime]:
+    """Rows persisted before this instant are expired for this owner; None when the
+    owner's policy is permanent (no row ever expires)."""
     days = get_policy(db, owner)["transcript_retention_days"]
+    if days is None:
+        return None
     return (now or utcnow_naive()) - timedelta(days=days)
 
 
@@ -256,8 +315,9 @@ def find_event(db, owner: Optional[str], domain: str, event_id: str, *,
         TranscriptEvent.domain == domain,
         TranscriptEvent.event_id == event_id,
     )
-    if live_only:
-        stmt = stmt.where(TranscriptEvent.persisted_at >= retention_cutoff(db, owner))
+    cutoff = retention_cutoff(db, owner) if live_only else None
+    if cutoff is not None:
+        stmt = stmt.where(TranscriptEvent.persisted_at >= cutoff)
     return db.execute(stmt).scalar_one_or_none()
 
 
@@ -364,6 +424,8 @@ def purge_expired(db, owner: Optional[str], *, now: Optional[datetime] = None,
     unbounded delete. Returns the number of rows removed."""
     owner_key = normalize_owner(owner)
     cutoff = retention_cutoff(db, owner_key, now)
+    if cutoff is None:  # permanent policy: nothing ever expires, so nothing is purged
+        return 0
     removed = 0
     for _ in range(max(1, max_batches)):
         seqs = [
@@ -436,10 +498,13 @@ def query_events(
     stmt = select(TranscriptEvent).where(
         TranscriptEvent.owner == owner_key,
         TranscriptEvent.domain == domain,
-        # Retention is enforced on read, not only by the purge: expired rows are
-        # never returned even if no ingest has run since the window moved.
-        TranscriptEvent.persisted_at >= retention_cutoff(db, owner_key),
     )
+    # Retention is enforced on read, not only by the purge: expired rows are
+    # never returned even if no ingest has run since the window moved. A permanent
+    # policy has no cutoff, so nothing is hidden.
+    cutoff = retention_cutoff(db, owner_key)
+    if cutoff is not None:
+        stmt = stmt.where(TranscriptEvent.persisted_at >= cutoff)
     since_n, until_n = _as_naive_utc(since), _as_naive_utc(until)
     if since_n is not None:
         stmt = stmt.where(TranscriptEvent.persisted_at >= since_n)
@@ -460,6 +525,7 @@ def query_events(
         "next_cursor": next_cursor,
         "newest_first": newest_first,
         "retention_days": get_policy(db, owner_key)["transcript_retention_days"],
+        "retention_mode": get_policy(db, owner_key)["transcript_retention_mode"],
     }
 
 
@@ -549,8 +615,7 @@ def import_box_lines(
     removed. Credential-shaped lines are refused again here."""
     counts = {"inserted": 0, "duplicates": 0, "filtered": 0, "expired": 0, "invalid": 0,
               "archive_disabled": 0, "conflicts": 0}
-    days = get_policy(db, owner)["transcript_retention_days"]
-    cutoff = (now or utcnow_naive()) - timedelta(days=days)
+    cutoff = retention_cutoff(db, owner, now)  # None for a permanent policy: no record is "too old"
     for raw in lines:
         raw = (raw or "").strip()
         if not raw:
@@ -566,7 +631,7 @@ def import_box_lines(
         if stamp is None or not str(record.get("text") or "").strip():
             counts["invalid"] += 1
             continue
-        if stamp < cutoff:
+        if cutoff is not None and stamp < cutoff:
             counts["expired"] += 1
             continue
         try:

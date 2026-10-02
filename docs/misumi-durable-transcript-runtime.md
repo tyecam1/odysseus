@@ -40,7 +40,7 @@ Transcript rows are operational history. They are not semantic memory (`src/misu
 | `session_id`, `response_request_id` | optional linkage to a Misumi conversation |
 | `state` | `persisted` |
 
-`misumi_retention_policies` (per owner): `transcript_archive` (default **false**), `transcript_retention_days` (default **14**, clamped to 1–90, "keep forever" is not expressible). Retention is enforced **on read** (rows older than the window are never returned, looked up or exported, even if no purge has run, and shortening the window takes effect immediately) and physically removed by bounded drain purges on ingest, on list/export and via `POST /misumi/transcript/purge`, `raw_audio_retention` (fixed `off`).
+`misumi_retention_policies` (per owner): `transcript_archive` (default **false**), `transcript_retention_mode` (**`finite`** by default, or **`permanent`**) and `transcript_retention_days` (the finite window: default **14**, clamped to 1–90; reported as `null` while the mode is `permanent`, with the stored window kept as `transcript_retention_days_if_finite`). Retention is enforced **on read** (rows older than the window are never returned, looked up or exported, even if no purge has run, and shortening the window takes effect immediately) and physically removed by bounded drain purges on ingest, on list/export and via `POST /misumi/transcript/purge`, `raw_audio_retention` (fixed `off`).
 
 ## Endpoints (all owner-scoped; `misumi:execute` to write, `misumi:read` to read)
 
@@ -52,7 +52,7 @@ Transcript rows are operational history. They are not semantic memory (`src/misu
 | `GET /misumi/transcript` | recent/range query, keyset pagination (`before_seq`/`after_seq`), `limit` 1–200. Never unbounded. |
 | `GET /misumi/transcript/{event_id}` | one event. |
 | `GET /misumi/transcript/export` | `jsonl` or `md`, oldest first, bounded (`limit` ≤ 1000). |
-| `GET/PUT /misumi/transcript/policy` | read/set `transcript_archive` and `transcript_retention_days`. |
+| `GET/PUT /misumi/transcript/policy` | read/set `transcript_archive`, `transcript_retention_mode` and `transcript_retention_days`. |
 | `POST /misumi/transcript/purge` | drain this owner's expired rows now (bounded: at most 50 batches per call). |
 | `POST /misumi/transcript/import` | idempotent import of interface-box day-file lines (compat stage A). |
 
@@ -72,7 +72,7 @@ Transcript rows are operational history. They are not semantic memory (`src/misu
 
 ## Retention dimensions
 
-1. **Transcript archive** — this runtime (`transcript_archive`, finite `transcript_retention_days`, bounded purge on every ingest).
+1. **Transcript archive** — this runtime (`transcript_archive`, `transcript_retention_mode` finite or permanent, bounded purge on every ingest while finite).
 2. **Conversation/session history** — `history_mode` on `/misumi/respond`.
 3. **Semantic-memory promotion** — `retention_mode` on `/misumi/respond`. This includes consultation capsules and handoffs: they follow `retention_mode` alone and are never written merely because history is on.
 4. **Artifact creation** — `retention_mode` on `/misumi/respond`.
@@ -90,7 +90,7 @@ The interface box already runs a ratified (2026-07-20) text-only ambient store (
 - **Stage B (next):** the box forwards each stored window to `POST /misumi/transcript/events` with an `event_id`; the nightly pull stays as a reconciliation backstop.
 - **Stage C:** retire the pull once forward and pull agree for a period, and purge `E:` under policy. (`E:` currently has **no purge**; a day file from 2026-07-21 is still held there.)
 
-Properties that hold throughout: ambient never sends audio, mute stays enforced at the box, the credential filter runs on the box and again on ingest, and retention stays finite in every store.
+Properties that hold throughout: ambient never sends audio, mute stays enforced at the box, the credential filter runs on the box and again on ingest, and retention stays bounded in every store except the authoritative Odysseus transcript archive, whose owner policy may be permanent (the box's local recovery copy stays at 7 days maximum and raw audio never persists).
 
 ## Failure semantics
 
@@ -133,3 +133,43 @@ Not PostgreSQL-ready: the older `_migrate_*` helpers that read `PRAGMA table_inf
 similar columns) are SQLite-only and only log a warning on PostgreSQL, so an *existing* PostgreSQL database that
 predates those columns would still lack them; and the BBC store (`src/bbc/store.py`) uses SQLite directly. Treat a
 PostgreSQL move as a separate project until those are ported and tested the same way.
+
+## Permanent transcript retention
+
+Whether accepted transcript text expires is an **explicit policy state**, not a number: `transcript_retention_mode` is
+`finite` (the default; the day window applies exactly as before) or `permanent`. A huge day count is deliberately not
+how "forever" is expressed, and the 1–90 day clamp for the finite window is unchanged.
+
+In `permanent` mode, for that owner only:
+
+- no accepted row expires: read-time filtering is off, the purge removes nothing (`POST /purge` returns
+  `removed: 0`), and query, direct lookup, export, the duplicate pre-check and the box-file importer all see every row;
+- `transcript_retention_days` is reported as `null`; the stored window is kept (`transcript_retention_days_if_finite`)
+  and is what a later switch back to `finite` uses;
+- an unreadable stored mode fails **safe**, as permanent, because deleting text is irreversible.
+
+Safety rails:
+
+- A PUT with only `transcript_retention_days` never changes a permanent archive to finite (the old call shape must not
+  silently start deleting).
+- Switching `permanent` → `finite` is refused with `409 would_expire_existing_transcripts` (and the count of rows it would
+  expire) unless the request carries `confirm_expire_existing: true`. Nothing is changed on refusal. When no existing
+  row would expire the switch needs no confirmation.
+- Existing finite policies are untouched: the new column is added by an additive, re-runnable migration (SQLite and
+  PostgreSQL) with default `finite`.
+
+What permanent does **not** mean:
+
+- Raw audio never becomes permanent. This runtime stores no audio in any mode; `raw_audio_retention` is fixed at `off`.
+- Credential-shaped speech is still refused before storage; it is not an "accepted transcript row".
+- Semantic memory is separate (`retention_mode` on `/misumi/respond`) and is not promoted from transcript rows.
+- The interface box's recovery copy stays bounded at 7 days maximum, and an owner whose archive is switched off stores
+  nothing.
+
+### The guarantee, stated accurately
+
+- Once transcript text is durably committed under a permanent archive policy, it does not expire.
+- While home is unavailable, raw audio is buffered **only** in the interface box's bounded client outbox (100 items,
+  40 MB, 24 hours). An outage longer than that window can cost segments, and the loss is recorded visibly (a durable
+  ledger entry and an `ERROR` archive state), never turned into indefinite raw-audio retention.
+- The outbox is therefore **not** lossless indefinite storage, and must not be described as such.
