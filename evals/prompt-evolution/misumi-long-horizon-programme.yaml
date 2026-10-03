@@ -120,7 +120,8 @@ nodes:
       The transport failure class recurred a fourth time, which application 03 said would move the fix out of prompt text
       into a reusable helper; that is done (scripts/publish_tree.py with tests), so the prompt text is not extended again.
       The new PR-description tag is a one-off convention miss (the repository's PR template is checked by CI) and is not a
-      reason to change the prompt.edges:
+      reason to change the prompt.
+edges:
   - from: prompt:v1
     to: application:2026-10-01-misumi-long-horizon-programme-01
     type: applied
