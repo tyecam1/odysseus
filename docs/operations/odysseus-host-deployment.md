@@ -65,3 +65,31 @@ When `MISUMI_REQUIRED=true`, household, skills, scheduler, and model checks are 
 8. Keep the reference agent on port 4500 as rollback until the read-only eval suite passes.
 
 Rollback restores the previous scheduled task and interface `agentUrl`. Household files are not involved.
+
+## Boot lifecycle, recovery and maintenance
+
+A logon-triggered, interactive task is not a lifecycle: after an unclean reboot on 2026-10-03 the household stack was down for about five hours because it only
+started when someone logged in. The canonical required services are **Odysseus (`:420`) and Ollama (`:11434`)** and nothing else; the legacy host agent (`:4500`)
+and its STT server (`:4600`) are not required by the durable transcript path and are deliberately outside this lifecycle.
+
+```powershell
+# Odysseus: machine-start, no interactive session required (startup trigger + S4U + start-when-available; one instance)
+powershell -ExecutionPolicy Bypass -File .\scripts\windows\odysseus-host.ps1 -Action Install -BootStart <same parameters as before>
+# Ollama task (machine-start, supervised) and the guard (machine start + every 2 minutes)
+powershell -ExecutionPolicy Bypass -File .\scripts\windows\odysseus-guard.ps1 -Action Install
+powershell -ExecutionPolicy Bypass -File .\scripts\windows\odysseus-guard.ps1 -Action Status
+```
+
+Tasks run as the same user with `S4U` (no stored credential, no network credentials, `RunLevel Limited`); nothing runs as SYSTEM. `Status` of the wrapper reports the
+task's triggers and logon type so a regression to a logon-coupled task is visible.
+
+**Recovery.** The guard probes `/api/health` and the Ollama tags endpoint; after two consecutive failures it restarts the corresponding scheduled task (Odysseus through
+`odysseus-host.ps1 -Action Restart`, which follows whichever release the task points at), waits for health, and appends compact evidence to
+`<DataRoot>\guard\guard.jsonl` (`kind` is `recovery`, `suppressed`, `maintenance` or `observed`). A recovery that does not come back healthy is recorded and exits 2.
+
+**Maintenance.** Crash recovery must not fight an intentional outage. `odysseus-guard.ps1 -Action MaintenanceEnter -Reason "<what and why>" -MaintenanceHours N` writes a bounded,
+auto-expiring flag (capped at 6 hours) and stops both services; while the flag is live the guard records `suppressed` and restarts nothing. `-Action MaintenanceRelease`
+removes the flag and brings everything back at once. An expired flag is removed by the next pass, so a forgotten flag cannot leave the household assistant down.
+
+The guard never stops a process other than its own two services and never terminates a user's application: GPU contention is handled by the admission signal
+(refuse, yield or reroute local inference), not by closing a game. Closing a process needs an explicit, current operator instruction.
