@@ -8,7 +8,7 @@ priority: critical
 task_type: orchestration
 created_by: chatgpt
 created_at: 2026-10-01T12:30:00+01:00
-updated_at: 2026-10-01T12:30:00+01:00
+updated_at: 2026-10-03T14:00:00+01:00
 executor: claude_subscription
 execution_mode: staged-loop
 architecture: single-plus-verifier
@@ -353,7 +353,7 @@ Converge:
 - `misumi-memory-consolidation-and-transparency`;
 - `backup-and-restore-memory-store`;
 - `context-portability-hygiene`;
-- `misumi-persona-context-budget-and-focus`;
+- ~~`misumi-persona-context-budget-and-focus`~~ (transferred 2026-10-03 to `2026-10-02-misumi-persona-growth-background-collaboration`; see "Scope transfer" under Phase 5);
 - Odysseus `aoteru-central-memory-and-universal-assistant`.
 
 Required outcomes:
@@ -376,9 +376,9 @@ Goal: measured quality replaces inherited model/persona assumptions.
 Converge:
 
 - model backend evaluation;
-- household evaluation corpus;
-- persona calibration/improvement graph;
-- context budgets;
+- ~~household evaluation corpus~~ (transferred 2026-10-03 to `2026-10-02-misumi-persona-growth-background-collaboration`);
+- ~~persona calibration/improvement graph~~ (transferred 2026-10-03);
+- ~~context budgets~~ (transferred 2026-10-03);
 - runtime health/observability;
 - Odysseus model-role evaluation system;
 - subscription usage attribution;
@@ -389,6 +389,16 @@ Sonnet remains the programme orchestrator. Opus/Sol role assignments are governa
 Use local/home/lab workers wherever measured quality is adequate.
 
 Gate: evaluation evidence supports routing changes; no model role is promoted from anecdote alone.
+
+#### Scope transfer (2026-10-03)
+
+The persona-development criteria in Phases 4 and 5 (persona context budget and focus, the household evaluation corpus, persona
+calibration and the improvement graph, context budgets) are **transferred, not completed**, to the successor programme
+`2026-10-02-misumi-persona-growth-background-collaboration`, which is their single acceptance owner (its section "Transferred acceptance criteria" reproduces every criterion of the
+four Misumi cards verbatim; the cards are `superseded` in `tyecam1/misumi`). This removes a circular dependency: the convergence
+programme can close without those criteria, and the successor activates at that closeout. **Model-role and backend evaluation stays
+in this programme's scope** and is owned by `2026-09-13-operating-contract-model-role-evaluation-system`. Persona work consumes that
+evidence and creates no second model registry.
 
 ### Phase 6: safe household action and Phase B
 
@@ -715,7 +725,7 @@ The programme is complete only when all of the following are true or explicitly 
 - GUI normal mode is low-friction;
 - conversation/transcript/memory/artifact/audio retention policies are distinct;
 - memory/recovery is tested;
-- high-priority model/persona evaluation is evidence-backed;
+- high-priority model evaluation is evidence-backed (persona-development criteria are transferred to `2026-10-02-misumi-persona-growth-background-collaboration` and are not a closeout dependency);
 - Phase-B decision has an explicit status;
 - every pre-existing Misumi unresolved card has a terminal or justified live state;
 - relevant Odysseus child tasks have terminal or justified live state;

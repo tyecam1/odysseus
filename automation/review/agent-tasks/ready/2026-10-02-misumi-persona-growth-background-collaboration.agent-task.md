@@ -8,7 +8,7 @@ priority: critical
 task_type: orchestration
 created_by: chatgpt
 created_at: 2026-10-02T19:03:00+01:00
-updated_at: 2026-10-02T19:03:00+01:00
+updated_at: 2026-10-03T14:00:00+01:00
 executor: claude_subscription
 execution_mode: staged-loop
 architecture: single-plus-verifier
@@ -1165,3 +1165,431 @@ This programme is complete only when:
 13. stale predecessor persona/ingestion tasks are reconciled;
 14. final Opus synthesis and independent Sol review leave no unresolved material issue;
 15. the estate can continue this work as routine background operation rather than requiring a new hand-written programme every time.
+
+
+---
+
+# Transferred acceptance criteria
+
+**Scope transfer on 2026-10-03, not a claim that any of this is complete.** The Misumi long-horizon convergence programme no longer
+owns persona development. The four Misumi cards below were the acceptance owners for the persona-development criteria in its
+Phase 4 (context budget and focus) and Phase 5 (household evaluation corpus, persona calibration and improvement graph, context
+budgets). Each is now `superseded` in `tyecam1/misumi` (`agent-tasks/done/`), pointing here. **This card is the single acceptance
+owner.** Every objective, constraint, expected output and validation criterion of the four cards is reproduced verbatim below (their
+headings are demoted two levels so they nest under this section). When this programme activates, Stage 0 reconciles them with the
+rest of this card instead of recreating them; the criteria below are in addition to the stage exits above, and a duplicate of an
+existing criterion is merged by editing, never by dropping the stricter wording.
+
+Boundary kept: the Odysseus model-role evaluation system (`2026-09-13-operating-contract-model-role-evaluation-system`) remains the
+owner of **model-role** and backend evidence. The persona criteria below consume it. They do not create a second model registry,
+router, queue or memory store (the registry required by the calibration card is the existing Odysseus model registry, extended).
+
+## Calibrate persona models and operationalise the improvement graph (parent)
+
+Source: `tyecam1/misumi:agent-tasks/inbox/2026-08-30-calibrate-persona-models-and-improvement-graph.md` (priority `high`, status was `active`, created 2026-08-30, last updated 2026-08-30).
+
+### Calibrate persona models and operationalise the improvement graph
+
+#### Objective
+
+Ensure each Misumi persona uses the least expensive model that reliably satisfies its actual purpose, and continuously improve model routing, prompts, skills, validators, and escalation behaviour through the existing Misumi/Odysseus improvement frameworks.
+
+The improvement system must be executable, measurable, graph-native, regression-resistant, auditable, and subordinate to the ratified operating law:
+
+`Observe -> Propose -> Review -> Ratify -> Implement -> Log`
+
+#### Architectural rule
+
+Keep these separate:
+
+`persona -> purpose -> task/skill -> capability requirement -> model candidate -> evaluation -> routing decision`
+
+Do not bind persona identity to a named model. Stronger models are justified only by measured capability gaps that cannot be corrected more cheaply through better context, retrieval, prompting, skills/tools, structured outputs, validation, or fallback logic.
+
+#### Persona calibration
+
+Audit every active and dormant persona against its canonical purpose and derive persona-specific evaluation criteria.
+
+##### Aoteru Misumi
+
+Purpose: coherence, routing, prioritisation, and system-level arbitration.
+
+Measure intent classification, routing accuracy, conflict detection, context selection, escalation quality, unnecessary escalation rate, and cross-domain coherence.
+
+##### Lelouch
+
+Purpose: procedural execution.
+
+Measure instruction following, tool selection, precondition checks, sequence correctness, schema adherence, completion reliability, forbidden-action avoidance, and recovery from tool failure.
+
+##### Makise Kurisu
+
+Purpose: evidence, memory, and knowledge integrity.
+
+Measure retrieval precision, provenance preservation, uncertainty preservation, entity resolution, contradiction detection, temporal/freshness handling, summarisation fidelity, and separation of actuality from inference/proposal.
+
+##### Specialist personas
+
+Derive evaluation criteria from their narrow canonical purpose. Default to the cheapest validated model. Promote only when repeated evaluation demonstrates a capability gap. Dormant specialists must not create runtime/model overhead.
+
+#### Canonical procedural graph
+
+Operationalise and test the chain:
+
+`intent -> authority -> preconditions -> context -> skill -> model -> tool -> output -> validator -> fallback -> escalation`
+
+Generic execution semantics belong in Odysseus. This repository retains household/domain-specific personas, policies, permissions, task semantics, preferences, domain skills, and evaluation criteria.
+
+#### Model registry
+
+Create one canonical model registry containing at minimum:
+
+- provider/model identifier;
+- model class;
+- supported capabilities;
+- tool-use support;
+- structured-output reliability;
+- context limits;
+- latency observations;
+- cost/token observations;
+- known failure modes;
+- applicable task classes;
+- evaluation history;
+- current approval state;
+- fallback relationships;
+- last evaluated date;
+- evidence/provenance.
+
+Persona configuration should reference capability requirements or routing policies rather than hard-coded model names wherever possible.
+
+#### Evaluation and improvement graph
+
+Represent at least:
+
+- Persona
+- Purpose
+- TaskClass
+- Skill
+- CapabilityRequirement
+- Model
+- ModelConfiguration
+- Evaluation
+- Metric
+- FailureMode
+- ImprovementCandidate
+- Validator
+- RoutingPolicy
+- Decision
+- Regression
+- Evidence
+
+Minimum relationships:
+
+- persona serves purpose;
+- persona performs task class;
+- task class requires capability;
+- skill implements task class;
+- model satisfies/fails capability;
+- evaluation tests model/configuration against task class;
+- evaluation observes metric/failure mode;
+- improvement candidate addresses failure mode;
+- decision accepts/rejects candidate;
+- routing policy selects model/configuration;
+- validator checks output;
+- fallback handles failure;
+- regression introduced-by change;
+- decision supported-by evidence.
+
+Assertions that influence runtime behaviour require provenance, freshness, and status.
+
+#### Continuous improvement execution
+
+Within the existing authority model, operationalise:
+
+`Observe -> Diagnose -> Propose -> Evaluate -> Review -> Ratify -> Implement -> Verify -> Log`
+
+Diagnosis, evaluation, and verification produce evidence but do not bypass ratification.
+
+##### Observe
+
+Capture task outcome, persona, skill, model/configuration, route, validator result, fallback/escalation, latency/cost, failures, and corrections.
+
+##### Diagnose
+
+Attribute failures before changing models. Distinguish context, retrieval, policy, skill/tool, model capability, validator, orchestration, stale knowledge, and genuine ambiguity failures.
+
+##### Propose
+
+Every improvement candidate must include the Agent Evolution Protocol fields: observed need, proposed change, why existing structure is insufficient, expected benefit, risk, rollback plan, files affected, and ratification required.
+
+##### Evaluate
+
+Replay representative and adversarial task suites against current production behaviour.
+
+##### Review / Ratify
+
+Only evidence-supported candidates progress. Existing Level 5/6 and persona-promotion ratification gates remain intact. Autonomous agents must never invoke or bypass interactive promotion.
+
+##### Implement
+
+Apply the smallest justified ratified change.
+
+##### Verify
+
+Run applicable historical regression suites after implementation.
+
+##### Log
+
+Write outcomes, metrics, graph changes, and rationale back to the canonical improvement/evidence structures.
+
+#### No-backwards-progression gate
+
+Maintain a permanent regression corpus containing:
+
+- current benchmark suite;
+- historical failures;
+- previously fixed regressions;
+- persona-specific golden tasks;
+- cross-persona routing tests;
+- safety/permission tests;
+- provenance tests.
+
+Every candidate must pass both target evaluation and the applicable historical regression corpus. Improvements that trade one metric against another must be represented as trade-offs and require explicit ratification where material.
+
+Never remove historical regression cases merely because the implementation changed.
+
+#### Metrics
+
+Use persona-specific metrics rather than one global quality score. Cross-system metrics should include task success, validator pass rate, routing accuracy, unnecessary escalation rate, correction/retry rate, regression count, cost per successful task, latency per successful task, tool failure recovery, provenance fidelity, and policy violations.
+
+Track distributions and failure classes, not only averages.
+
+#### Graph-integrity audit
+
+Audit for orphaned nodes, duplicate concepts, inconsistent relation names, stale model references, missing provenance/freshness/status, disconnected improvement artefacts, framework documents with no runtime consumer, runtime behaviour with no graph representation, metrics collected but unused, evaluations that do not affect routing, and accepted improvements lacking regression evidence.
+
+A framework is not operationalised because a document describes it. For each continuous-improvement framework identify its trigger, inputs, executable process, responsible agent/persona, outputs, graph writes, validator, decision authority, runtime consumer, evaluation metric, regression gate, and rollback path.
+
+#### Routing policy
+
+For each task class maintain:
+
+`default model -> validation -> fallback model -> escalation condition`
+
+Periodically compare eligible models using accumulated representative tasks. Prefer Pareto improvements: same quality at lower cost, better quality at comparable cost, lower latency without meaningful degradation, or fewer failures/escalations at comparable resource use.
+
+#### Expected output
+
+- audited persona-purpose registry;
+- canonical capability requirements per persona/task class;
+- model registry;
+- persona-specific evaluation suites;
+- historical regression corpus;
+- executable model-routing policy;
+- operational continuous-improvement pipeline;
+- improvement/evaluation graph;
+- graph-integrity checks;
+- provenance/freshness validation;
+- no-backwards-progression gate;
+- automated reporting of routing/evaluation changes;
+- documentation converged to actual runtime behaviour.
+
+#### Validation criteria
+
+Complete only when:
+
+- every enabled persona has explicit purpose and measurable criteria;
+- every model assignment has evaluation evidence;
+- personas are not unnecessarily bound to named models;
+- stronger/specialised models are used only where measured capability gaps justify them;
+- the intent-to-escalation chain is represented and queryable;
+- evaluations can influence routing through the governed improvement process;
+- candidates cannot bypass regression testing or ratification;
+- historical solved failures remain permanently testable;
+- runtime-controlling graph assertions carry provenance, freshness, and status;
+- improvement frameworks have executable triggers, consumers, and outputs;
+- runtime behaviour and graph state agree;
+- improvements/regressions are traceable to causing changes;
+- cost, latency, and quality are evaluated together;
+- failed model/policy changes can be rolled back cleanly;
+- the ratified operating law remains the authority boundary.
+
+#### Autonomous progression
+
+This task is eligible for autonomous observation, diagnosis, evidence gathering, benchmarking, graph audit, candidate generation, regression-suite construction, and implementation planning.
+
+Autonomous agents may initialise and progress subwork that is within existing ratified authority. They must stop at any existing human-ratification gate, including persona promotion, production routing changes that require manual review, Level 5/6 changes, provider/secrets changes, or other explicitly protected actions.
+
+Do not wait for human input when the next step is safely inferable from canonical contracts and evidence. Create focused child work items where useful, keep them small and independently verifiable, and preserve rollback paths.
+
+#### Progress log
+
+##### 2026-08-30 autonomous sweep
+
+Status: `observed` / `proposed`; no production routing or persona promotion performed.
+
+- Read the ratified seed order, protocol register, runtime integration contract, persona registry, evolution gate, Misumi/Odysseus access contract, and Odysseus long-horizon execution contract before mutation.
+- Audited current Odysseus model/routing surfaces. `config/models.yaml` already provides evidence-backed capability aliases and correctly avoids persona/model coupling; `config/routing.yaml` already defines evidence-triggered escalation and deliberately leaves unsupported numeric quality floors null.
+- Identified the principal missing link: `config/misumi_persona_policy.json` defines persona purpose/skills/authority but has no measurable task-class/capability/evaluation layer. There is therefore no evidence-backed persona calibration path yet.
+- Initialised Odysseus branch `agent/persona-model-calibration-20260830` and draft PR #28 against `dev`.
+- Added `docs/misumi-persona-model-calibration.md`: persona-purpose/task-class audit, cheap-capability-first hypotheses, metric definitions, improvement graph contract, framework operationalisation audit, and permanent regression rule.
+- Added `config/misumi_persona_evaluation.json` as explicitly `status: proposed`, `controls_routing: false`. It covers all 11 active personas with task classes, metrics, and candidate capability aliases. It deliberately contains no concrete model names.
+- Added structural tests requiring exact persona coverage, non-routing proposal status, non-empty task/metric/capability definitions, valid capability aliases, and absence of concrete model bindings.
+- No production model assignment, model binding, persona policy, provider, credential, or routing decision was changed.
+- Validation pending: this automation environment has GitHub mutation/read access but no checkout/shell for the Odysseus repo, so the new pytest file has not been executed. PR remains draft and must not merge on this evidence alone.
+
+Next autonomous slice: execute/obtain CI for the structural tests, then extend the existing local-model evaluation harness with the first Aoteru/Lelouch/Kurisu representative + adversarial + uncertainty batteries and graph/evidence records. Production routing remains a separate evidence-backed review gate.
+
+## Run core Misumi persona model calibration on governed Odysseus worker (child of the parent)
+
+Source: `tyecam1/misumi:agent-tasks/odysseus/2026-09-03-run-core-persona-model-calibration.md` (priority `high`, status was `open`, created 2026-09-03, last updated 2026-09-04).
+
+### Run core Misumi persona model calibration on governed Odysseus worker
+
+#### Objective
+
+Execute the missing empirical calibration step for Aoteru, Lelouch, and Makise Kurisu using the governed Odysseus runtime. Measure whether the cheapest eligible capability alias satisfies each declared persona task class before any stronger model is considered.
+
+#### Current observed state
+
+Freshly re-audited 2026-09-04 from canonical GitHub state:
+
+- PR #28 is open, draft, and GitHub currently reports it mergeable.
+- PR head remains `f34143593a96e8f2cb46920e32889447e41d0a5d`.
+- Current `dev` is `268250e5bba7bdabdee12318ed605692fe2940eb`.
+- GitHub compare reports the calibration branch `7` commits ahead and `10` commits behind `dev`, merge base `6252e268b185a4d888836d3a1f40d762edaa3f5c`.
+- All seven PR files are additions, so reconciliation must preserve the current `dev` safeguards while retaining the complete calibration/evidence corpus.
+- CI run `33480336890` has workflow-level conclusion `success`, but its `Python tests (pytest)` job failed specifically at `python -m pytest -q`. Compileall and JS syntax passed. Do not treat the workflow-level result as a clean pytest gate.
+- Dependency review, both container scans, and workflow-security checks passed on the PR head. Secret scan remains failed from the previously identified repository-history debt.
+- No empirical Aoteru/Lelouch/Kurisu model evidence has yet been produced.
+
+#### Governing contracts
+
+Before execution, read and obey current:
+
+- `tyecam1/misumi/AGENTS.md` and `CLAUDE.md`;
+- `docs/core/misumi-seed-order-v0.1.md`, `docs/core/seed-order-runtime-integration.md`, `protocols/register.md`, persona registry and evolution gate;
+- current `tyecam1/odysseus/AGENTS.md`;
+- `docs/aoteru-model-host-routing-contract.md` and any newer execution/lease authority.
+
+Preserve:
+
+`Observe -> Propose -> Review -> Ratify -> Implement -> Log`
+
+Evaluation evidence is not permission to change production routing or promote a persona/model configuration.
+
+#### Required execution sequence
+
+1. Run `aoteru preflight` for this objective and record the returned route/authority evidence.
+2. Claim/lease the work through existing Odysseus authority. Do not duplicate an active lease or calibration run.
+3. Reconcile PR #28 with current `dev` using normal governed branch-update practice. Do not discard historical regression cases or current routing/model-registry safeguards.
+4. Run focused calibration structure tests first:
+
+   ```bash
+   pytest tests/test_misumi_persona_evaluation_config.py tests/test_misumi_persona_calibration_core.py tests/test_misumi_persona_calibration_evidence_schema.py -q
+   ```
+
+5. Run applicable current model-registry, routing, authority, and historical-regression tests. Record exact commands/results.
+6. If the focused/regression gate is acceptable, execute the Aoteru, Lelouch, and Kurisu fixture batteries against the cheapest eligible route first, normally `local-fast` where live registry/quality-floor evidence permits it.
+7. Escalate only on a recorded evidence trigger such as `insufficient_capability`, `quality_floor_not_met`, validator failure, unresolved ambiguity, or context limitation. Never escalate because a persona sounds important.
+8. Emit one evidence record per persona/task-class/model-configuration combination using PR #28's evidence contract, including persona/task class, corpus provenance, capability alias, concrete live-resolved model, runtime configuration, validator outcome/failure class, persona metrics, latency/cost where measurable, fallback/escalation evidence, source commit, timestamp/freshness/status.
+9. Compare against retained historical regressions and previous working behaviour. Represent quality/cost/latency trade-offs explicitly.
+10. Record results on PR #28 and in the parent task. Routing decisions remain `proposed` until separately governed.
+
+#### Constraints
+
+- No production routing changes.
+- No direct concrete-model binding in persona identity/policy.
+- No persona/evolution promotion. Interactive `RATIFY` remains user-only.
+- No provider/API/credential/secrets changes.
+- No Level 5/6 ratification.
+- Do not suppress or weaken regressions to obtain a pass.
+- Do not fabricate model quality, latency, cost, or endpoint results.
+- Do not interpret aggregate workflow green as pytest green.
+- Do not create another child task for the same execution boundary.
+
+#### Execution blocker for GitHub-only controllers
+
+A GitHub-only controller cannot complete this task because Odysseus `AGENTS.md` requires live `aoteru preflight` before bounded evaluation/test work, and empirical calibration requires the governed worker/model estate. Such controllers should update stale factual state only when necessary and must not repeatedly re-diagnose this same blocker or invent benchmark evidence. The next material action belongs to a live Odysseus worker with preflight and lease access.
+
+#### Validation criteria
+
+Complete only when:
+
+- preflight and claim/lease evidence exist;
+- evaluated branch state includes current `dev` safeguards;
+- focused persona tests pass, or every failure is explicitly classified and retained;
+- applicable routing/model-registry/authority regressions are recorded;
+- each evaluated task class has a provenance-bearing evidence record;
+- the cheapest eligible route was evaluated first where supported;
+- every stronger-route evaluation has an observed evidence trigger;
+- no production routing, persona authority, provider configuration, secrets, or promotion gate changed;
+- PR #28 and the parent task accurately state what was and was not validated.
+
+## Misumi persona context budget and focus protocol
+
+Source: `tyecam1/misumi:agent-tasks/inbox/misumi-persona-context-budget-and-focus.md` (priority `high`, status was `open`, created 2026-07-27, last updated 2026-07-27).
+
+### Misumi persona context budget and focus protocol
+
+#### Objective
+
+Specify how seed order, persona voice, household context, memory, skills and tools are selected under a fixed context budget so personality does not crowd out the actual household request.
+
+#### Context
+
+The behavioural charter loads before persona, tools and routing. Odysseus already identifies agent prompt/context bloat as a high-priority defect. This task defines the Misumi-domain requirements and an anti-distraction or “Claude ADHD” behaviour without implementing generic harness code here.
+
+#### Constraints
+
+- Preserve the Misumi seed order and status-label contract.
+- Aoteru remains the default interface voice.
+- Persona flavour cannot widen authority or permissions.
+- The agent must hold one active objective and park adjacent ideas.
+- No giant always-loaded persona or skill catalogue.
+
+#### Expected output
+
+- `docs/context-budget-policy.md` with mandatory, conditional and excluded context layers.
+- Token/character budgets for seed, persona, memory, source excerpts, tools and skills.
+- Trigger rules for loading specialist voices and skills.
+- A focus checkpoint and parking-lot format.
+- Ten household test prompts covering short, ambiguous, emotional, tool-heavy and multi-step requests.
+- A linked Odysseus implementation handoff.
+
+#### Validation criteria
+
+The same test prompts remain correct with and without persona flavour, the active request is visible near the end of assembled context, and irrelevant memories/tools are not loaded.
+
+## Misumi household agent evaluation corpus
+
+Source: `tyecam1/misumi:agent-tasks/inbox/misumi-household-agent-evaluation-corpus.md` (priority `high`, status was `open`, created 2026-07-27, last updated 2026-07-27).
+
+### Misumi household agent evaluation corpus
+
+#### Objective
+
+Create a small, versioned household evaluation corpus that tests answer quality, memory behaviour, authority boundaries, tool selection and graceful degradation against real repo data.
+
+#### Context
+
+Generic agent benchmarks will not expose Misumi's actual failures. The correct benchmark is a bounded set of household tasks with known answers, expected sources and permission outcomes.
+
+#### Constraints
+
+- Use synthetic or non-sensitive fixture data where possible.
+- Do not commit private conversations, credentials or personal secrets.
+- Keep canonical household data separate from test fixtures.
+- Include negative and adversarial cases.
+- Generic evaluator mechanics belong in Odysseus.
+
+#### Expected output
+
+- `tests/fixtures/household-agent-corpus.yaml` or equivalent existing test location.
+- Cases for stock, shopping, recipes, cleaning, records, preferences, memory conflict, no-retention mode, missing data, unsafe writes and PhD-data isolation.
+- Expected source files, permitted tools, expected answer properties and forbidden actions.
+- Baseline results for the current deployment where available.
+
+#### Validation criteria
+
+At least 25 cases are machine-readable, each has an unambiguous pass condition, and a deliberately unsafe or cross-domain agent fails the permission/isolation cases.
