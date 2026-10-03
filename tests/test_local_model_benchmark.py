@@ -183,3 +183,27 @@ def test_persist_stores_raw_output_pointer_and_hash_on_benchmark_result(artifact
         assert row.raw_output_sha256 == hashlib.sha256(b"hello world").hexdigest()
     finally:
         db.close()
+
+
+def test_artifact_directory_is_filesystem_safe_but_the_real_model_id_is_kept(artifact_env):
+    task = {"task_id": "recon-01", "task_class": "repo_reconnaissance", "source_pointer": "x"}
+    model_cfg = {"concrete_model": "qwen3:8b", "runtime": "ollama"}
+    result = {"task_id": "recon-01", "status": "pass", "score": "pass", "raw_output": "out"}
+
+    pointer, _ = write_artifact("run-1", "corpus-x", "qwen3:8b", task, model_cfg, result)
+
+    assert ":" not in pointer
+    assert "qwen3_8b" in pointer
+    data = json.loads((artifact_env / pointer).read_text())
+    assert data["model_key"] == "qwen3:8b"          # the real identifier is retained inside the result data
+    assert data["concrete_model"] == "qwen3:8b"
+
+
+def test_safe_path_component_rejects_every_windows_invalid_character():
+    for bad in '<>:"/\\|?*':
+        assert bad not in bench.safe_path_component(f"a{bad}b")
+    assert bench.safe_path_component("lfm2.5:8b") == "lfm2.5_8b"
+    assert bench.safe_path_component("nemotron-3.5-lightning:30b-a3b") == "nemotron-3.5-lightning_30b-a3b"
+    assert bench.safe_path_component("gemma4-12b") == "gemma4-12b"      # already-safe names are unchanged
+    assert bench.safe_path_component("name. ") == "name"                 # Windows strips trailing dots and spaces
+    assert bench.safe_path_component(":") == "_"

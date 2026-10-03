@@ -63,6 +63,16 @@ RESULTS_DIR = REPO_ROOT / "evals" / "local_models" / "results"
 ARTIFACTS_DIR = RESULTS_DIR / "artifacts"
 FIXTURES_DIR = REPO_ROOT / "evals" / "local_models" / "fixtures"
 
+_UNSAFE_PATH_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+
+def safe_path_component(value: str) -> str:
+    """A directory-name form of ``value`` that is valid on every supported filesystem (Windows rejects ``: < > \" / \\ | ? *``,
+    which model identifiers such as ``qwen3:8b`` contain). Only the path component is changed: the artefact JSON keeps the
+    real identifier in ``model_key``."""
+    cleaned = _UNSAFE_PATH_CHARS.sub("_", str(value)).rstrip(" .")
+    return cleaned or "_"
+
 
 def write_artifact(run_id: str, corpus_id: str, model_key: str, task: dict, model_cfg: dict, result: dict) -> tuple[str, str]:
     """Persist one execution's exact output as an immutable per-run artefact
@@ -90,7 +100,7 @@ def write_artifact(run_id: str, corpus_id: str, model_key: str, task: dict, mode
 
     ctx = result.get("context_point")
     filename = f"{task['task_id']}__{ctx}.json" if ctx else f"{task['task_id']}.json"
-    model_dir = ARTIFACTS_DIR / run_id / model_key
+    model_dir = ARTIFACTS_DIR / safe_path_component(run_id) / safe_path_component(model_key)
     model_dir.mkdir(parents=True, exist_ok=True)
     path = model_dir / filename
 
