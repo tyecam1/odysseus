@@ -213,7 +213,7 @@ switch ($Action) {
     'Install' {
         if (-not (Test-Path -LiteralPath $OllamaExe)) { throw "Ollama executable not found at $OllamaExe" }
         $scriptPath = $MyInvocation.MyCommand.Path
-        $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType S4U -RunLevel Limited
+        $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType S4U -RunLevel Limited
         # Ollama: serve in the foreground so the task supervises it (no untracked child), bound to loopback as before.
         $ollamaAction = New-ScheduledTaskAction -Execute $OllamaExe -Argument 'serve'
         $startup = New-ScheduledTaskTrigger -AtStartup; $startup.Delay = 'PT30S'

@@ -160,7 +160,7 @@ switch ($Action) {
             $startupTrigger = New-ScheduledTaskTrigger -AtStartup
             $startupTrigger.Delay = 'PT30S'
             $triggers = @($startupTrigger, $logonTrigger)
-            $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType S4U -RunLevel Limited
+            $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType S4U -RunLevel Limited
             $settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -RestartCount 10 `
                 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit (New-TimeSpan -Days 3650) `
                 -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
