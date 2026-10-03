@@ -96,6 +96,31 @@ nodes:
       The deterministic planner returned evolve for the single recurring transport failure tag. Overridden: the failure
       is a lapse in applying a v3 checklist item that already names it, and the durable fix is tooling, not more prompt
       text. A fourth consecutive occurrence restructures the fix into a reusable helper instead of adding warnings.
+  - id: application:2026-10-02-misumi-long-horizon-programme-04
+    type: application
+    application_id: 2026-10-02-misumi-long-horizon-programme-04
+    trace_path: evals/prompt-applications/misumi-long-horizon-programme/2026-10-02-misumi-long-horizon-programme-04.yaml
+    rating:
+      agent_overall: 4.0
+      goal_progress: 4
+      correctness_verification: 4
+      authority_scope_discipline: 5
+      routing_resource_efficiency: 3
+      continuity_handoff_quality: 4
+    failure_tags:
+      - shell_and_api_transport_pitfalls_recurred_despite_v3_checklist
+      - pr_description_template_not_read_before_opening
+  - id: evolution:2026-10-02-misumi-long-horizon-programme-04
+    type: evolution_event
+    decision: reinforce
+    evidence_application: 2026-10-02-misumi-long-horizon-programme-04
+    note: >-
+      The deterministic planner returned evolve for the failure tags (its default for any tag); overridden and recorded.
+      The v3 pre-stop rule did its job: the first hand-back was rejected and the executable frontier was then exhausted.
+      The transport failure class recurred a fourth time, which application 03 said would move the fix out of prompt text
+      into a reusable helper; that is done (scripts/publish_tree.py with tests), so the prompt text is not extended again.
+      The new PR-description tag is a one-off convention miss (the repository's PR template is checked by CI) and is not a
+      reason to change the prompt.
 edges:
   - from: prompt:v1
     to: application:2026-10-01-misumi-long-horizon-programme-01
@@ -122,6 +147,15 @@ edges:
     to: evolution:2026-10-02-misumi-long-horizon-programme-03
     type: observed
   - from: evolution:2026-10-02-misumi-long-horizon-programme-03
+    to: prompt:v3
+    type: reinforced
+  - from: prompt:v3
+    to: application:2026-10-02-misumi-long-horizon-programme-04
+    type: applied
+  - from: application:2026-10-02-misumi-long-horizon-programme-04
+    to: evolution:2026-10-02-misumi-long-horizon-programme-04
+    type: observed
+  - from: evolution:2026-10-02-misumi-long-horizon-programme-04
     to: prompt:v3
     type: reinforced
 guardrail_validation:
