@@ -8,7 +8,7 @@ priority: high
 task_type: implementation
 created_by: gpt-5.6-sol
 created_at: 2026-09-03T02:00:00+01:00
-updated_at: 2026-09-03T02:00:00+01:00
+updated_at: 2026-10-03T19:00:00+01:00
 executor: codex_subscription
 execution_mode: review-first
 architecture: single
@@ -119,3 +119,15 @@ A clean bounded integration test must prove all of the following:
 Use a fresh lease and a bounded no-value acceptance objective. Capture request/response timestamps, execution IDs, persisted lifecycle transitions, worker PID/process group and lease history so dispatch creation and reuse can be distinguished exactly.
 
 Do not use repeated dispatch calls as observation. Do not spend paid calls merely to exercise polling behaviour that can be tested deterministically.
+
+## Programme disposition (2026-10-03, convergence Phase 9 reconciliation)
+
+**State: partly delivered; the remainder is Remote Control and LogicalSession handling**
+
+Re-grounded against `dev` on 2026-10-03. **Delivered** (multihost Stage 6, plan section 6): a first-class read-only observation command, `aoteru execution <id> --wait N` (GET only, bounded 0 to 60 s, "cannot start another run"),
+backed by `GET /api/estate/run/{id}?wait=N`; accepted and running responses expose the execution ID and the next status action; dispatch and observation are distinct; ParkLease stays the only write authority and `EstateExecution`
+the only lifecycle authority (no new queue, lease or store). Deterministic coverage includes `test_u16_duplicate_dispatch_reuses_in_flight_execution`, `test_u18_status_observation_without_redispatch` and
+`test_6e_f2_wait_zero_makes_no_worker_call_and_returns_the_snapshot` in `tests/test_estate_stage6_control.py`, plus the lease and joined suites. **Not delivered:** required work item 5 and the session half of item 8
+(`LogicalSession` and Remote Control: held, refused, disconnected or non-responsive peers resolving to explicit bounded outcomes), which the multihost plan lists as a non-goal and leaves to this task. Remaining acceptance
+criterion: "remote-session loss, refusal, disconnection or non-response reaches an explicit bounded outcome" and "session reachability does not substitute for persisted `EstateExecution` state". Decision: keep `ready`, narrowed to
+that remainder. It is not named in the convergence programme's closeout bullets, none of which depends on it, so it does not block closeout. No work in this programme is attributed to it. It stays where it is, with the Odysseus queue as owner.

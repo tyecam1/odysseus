@@ -8,7 +8,7 @@ priority: high
 task_type: staged-implementation
 created_by: gpt-5.6-sol
 created_at: 2026-09-23T12:20:00+01:00
-updated_at: 2026-09-23T12:20:00+01:00
+updated_at: 2026-10-03T19:00:00+01:00
 executor: claude_subscription
 execution_mode: staged-loop
 architecture: single
@@ -211,3 +211,13 @@ Then checkpoint and advance to Stage 7.
 Continue the loop through the remaining plan stages subject to the stop conditions above.
 
 Do not run `/ultrareview` unless explicitly authorized by the operator.
+
+## Programme disposition (2026-10-03, convergence Phase 9 reconciliation)
+
+**State: stages 1 to 8 delivered; Stage 9 compatibility cleanup remains**
+
+Re-grounded against `dev` on 2026-10-03. The immediate Stage 6 contract prerequisites were closed by the `2026-09-23-odysseus-stage6-*` tasks (now in `done/`), and Stages 1 to 8 of
+`docs/aoteru-multihost-execution-implementation-plan.md` are delivered and evidenced: the worker contract, lab execution through it, route selection by live worker health, EstateExecution through the worker with status and wait,
+host-specific qualification (home `local-fast` qualified on a measured canary, PR #70) and the live proof (home enabled for deterministic and local work, PR #61; evidence in `docs/aoteru-multihost-execution-evidence.md`).
+**Remaining:** Stage 9, compatibility cleanup (remove the legacy `verified` fallback, delete `execute_codex_write`, `execute_codex_write_durable` and `_codex_write_authority` once no caller remains, drop legacy
+`resolve_alias(alias, host_id=None)`, move `_ollama_model_live` and `experiment_priority_active` into the worker, update the handbook). The card stays `ready` as the operating contract for that stage. It is not named in the convergence programme's closeout bullets, none of which depends on it, so it does not block closeout. No work in this programme is attributed to it. It stays where it is, with the Odysseus queue as owner.

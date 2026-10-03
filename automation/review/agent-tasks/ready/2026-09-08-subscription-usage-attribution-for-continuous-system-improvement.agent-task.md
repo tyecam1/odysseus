@@ -8,7 +8,7 @@ priority: high
 task_type: system-efficiency-analysis
 created_by: gpt-5.6-sol
 created_at: 2026-09-08T12:54:00+01:00
-updated_at: 2026-09-08T12:54:00+01:00
+updated_at: 2026-10-03T19:00:00+01:00
 executor: claude_subscription
 execution_mode: review-first
 architecture: single-agent-sequential
@@ -284,3 +284,9 @@ Complete when:
 - no secrets or unnecessary private account details are stored;
 - the deterministic continuous-improvement loop remains network-free;
 - implementation changes are routed to separate governed tasks rather than silently applied.
+
+## Programme disposition (2026-10-03, convergence Phase 9 reconciliation)
+
+**State: open roadmap; not implemented**
+
+Re-grounded against `dev` on 2026-10-03: no usage attribution or ledger exists in code or docs. An efficiency dependency for later routing changes only. It is not named in the convergence programme's closeout bullets, none of which depends on it, so it does not block closeout. No work in this programme is attributed to it. It stays where it is, with the Odysseus queue as owner.

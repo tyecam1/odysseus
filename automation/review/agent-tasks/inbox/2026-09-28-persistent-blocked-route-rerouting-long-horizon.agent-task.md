@@ -95,3 +95,11 @@ Implement durable, explainable, **smallest-affected-scope rerouting** within exi
 ## Handoff
 
 Produce a bounded implementation plus test/evidence report with before/after route trace, schema/compatibility notes and remaining constraints. The user-facing J1 example is a fixture only: domain-specific source admission, Opus/Sol scientific acceptance and gates remain in the PhD knowledgebase/contract, not Odysseus. Require independent review before promoting automatic routing behaviour.
+
+## Programme disposition (2026-10-03, convergence Phase 9 reconciliation)
+
+**State: open; not implemented as a mechanism, followed as a process rule**
+
+Re-grounded against `dev` on 2026-10-03: no persistent blocked-route state exists in code. The behaviour it asks for (one blocked route is not a blocked programme; reroute or continue independent work) was applied by this
+programme by hand throughout (for example holding the lab deployment and kiosk acceptance while Phase 4, the backup chain, GPU admission and the Seed Order work proceeded, and recording a denied action instead of retrying it).
+A mechanism that persists that state remains a real, unimplemented item. It is not named in the convergence programme's closeout bullets, none of which depends on it, so it does not block closeout. No work in this programme is attributed to it. It stays where it is, with the Odysseus queue as owner.

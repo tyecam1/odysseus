@@ -8,7 +8,7 @@ priority: high
 task_type: implementation
 created_by: claude
 created_at: 2026-10-01T14:00:00+01:00
-updated_at: 2026-10-01T14:00:00+01:00
+updated_at: 2026-10-03T19:00:00+01:00
 executor: claude_subscription
 execution_mode: review-first
 architecture: single
@@ -94,3 +94,9 @@ A depleted provider must never make the whole host look unavailable, and must al
 - Unparseable reset text falls back to the documented bounded backoff.
 - After `retry_after` and a successful execution the provider returns to `ok`.
 - No change to ParkLease or EstateExecution semantics; existing routing, lease, execution and preflight suites pass.
+
+## Programme disposition (2026-10-03, convergence Phase 9 reconciliation)
+
+**State: open, high priority, executable, not implemented**
+
+Re-grounded against `dev` on 2026-10-03: no quota-state representation exists in routing or preflight. Raised by this programme after a Sol quota incident; it is the prerequisite for truthful usage harvesting. It is executable background work for the Odysseus queue and the successor programme's Stage 1; it does not block convergence closeout because no closeout bullet depends on it.

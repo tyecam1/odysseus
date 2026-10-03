@@ -326,3 +326,9 @@ The task is complete only when all of the following are true:
 Prefer the smallest change that captures the demonstrated advantage.
 
 If an external system is 20% better at one bounded function but requires a new framework, registry, daemon, state model, or control plane, extract the useful mechanism instead of adopting the system wholesale. If a peer system contains a useful skill but this repo has no recurring need for it, do not add it. If the local capability is already competitive and better integrated, retain it. If no material advantage or missing-capability value survives benchmarking and verifier attack, make no change.
+
+## Programme disposition (2026-10-03, convergence Phase 9 reconciliation)
+
+**State: open roadmap; not started**
+
+Re-grounded against `dev` on 2026-10-03: no equivalence audit or recommendation set exists. An evidence task that adds value only when a measured gap names a capability to compare. It is not named in the convergence programme's closeout bullets, none of which depends on it, so it does not block closeout. No work in this programme is attributed to it. It stays where it is, with the Odysseus queue as owner.
