@@ -1,7 +1,7 @@
 # Task: CI gate hygiene — make red mean something again
 
 - **Id:** 2026-10-02-ci-gate-hygiene
-- **Status:** inbox
+- **Status:** done
 - **Origin:** Misumi long-horizon programme, observed while merging PRs #47–#53 (evidence: `automation/review/misumi-long-horizon-programme-evidence.md`)
 
 ## Problem
@@ -17,3 +17,12 @@ Three checks fail on every recent PR for reasons unrelated to the change, so a f
 
 ## Boundaries
 No weakening of secret scanning beyond the verified false positives; repository settings are the operator's to change.
+
+## Closure (2026-10-03)
+
+All three failing checks were fixed on 2026-10-02 and have stayed green since: `gitleaks` (PR #59, an allowlist for only the verified 69 historical `model_key`
+false positives, with planted-token negative tests still reporting), `dependency-review` (PR #60, skips loudly instead of failing where the dependency graph
+is unavailable; it has passed on recent PRs), and `Python tests (pytest)` (PR #58, the `source_events` errors came from the test conftest using an in-memory SQLite
+database lost when the engine is disposed). Docs-only and task-only PRs #74 to #80 were green on all three. One flaky randomised test
+(`test_joined_u75_randomised_stale_finalize_vs_recovery[5]`) failed once on an unrelated PR and passed on re-run; it is not part of this task.
+Enabling the dependency graph remains an operator repository setting.

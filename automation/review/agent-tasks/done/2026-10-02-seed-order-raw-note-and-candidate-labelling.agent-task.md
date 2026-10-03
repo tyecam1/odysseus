@@ -3,12 +3,12 @@ artifact_type: agent-task
 task_schema: agent-task/v2
 task_id: 2026-10-02-seed-order-raw-note-and-candidate-labelling
 title: "Steer the household runtime to preserve raw notes verbatim and label candidates (Seed Order fixtures 2 and 3)"
-status: inbox
+status: done
 priority: medium
 task_type: implementation
 created_by: claude
 created_at: 2026-10-02T18:00:00+01:00
-updated_at: 2026-10-02T18:00:00+01:00
+updated_at: 2026-10-03T15:00:00+01:00
 executor: ""
 execution_mode: review-first
 architecture: single
@@ -90,3 +90,19 @@ The fixtures are valid and the failures consistent, so this is a steering defect
 - Fixtures 1 to 4 all pass in at least 3 consecutive runs each, scored by the Misumi scorer, with persistence checks clean.
 - A unit test pins the steering behaviour (or the deterministic check) for the raw-note and candidate-label cases.
 - The Misumi card is then closed with the run evidence.
+
+## Result (2026-10-03, programme application 05)
+
+- **Change:** Odysseus PR #79. `src/seed_order_enforcement.py` plus two lines in `routes/misumi_routes.py`: the Seed Order output rules are restated in
+  the last system message, directly before the user turn, and enforced deterministically when the model does not comply (the user's own raw
+  span is quoted verbatim and the weakest applicable label, `inferred` or `candidate_pattern`, is applied, never `ratified`). Narrow triggers;
+  every other reply is untouched. No model change and no fixture change.
+- **Unit evidence:** 40 tests pass on the lab (the new file plus the neighbouring Misumi reply, consultation and conversation suites); three mutants
+  (verbatim check removed, candidate label removed, rules block removed) each turn tests red; the tests replay the replies the live model gave on 2026-10-02.
+- **Live evidence, through the interface box's own `/agent` proxy** (`persist_turn:false`, `retention_mode:"off"`, `history_mode:"off"`, token never
+  read), runtime release `a62728a4d9bf`, `qwen3:8b`: all four corrected fixtures pass **6 of 6 each** (two batches of three consecutive runs), every response
+  confirming nothing persisted. Recorded on the Misumi card `verify-seed-order-live-runtime`.
+- **Honest limits:** how much the restated rules achieve without the deterministic step was not measured separately (a direct run on the household
+  host was not permitted). A scorer precision defect (any mention of "ratified" was scored as a claim) was found by reading the replies and fixed with tests
+  in Misumi; fixtures and the model were not changed. The Misumi card stays open only for the clean-clone criterion and one re-run after the operator
+  authorised home clone reconciliation.

@@ -8,7 +8,7 @@ priority: critical
 task_type: implementation
 created_by: chatgpt
 created_at: 2026-10-01T12:00:00+01:00
-updated_at: 2026-10-01T12:00:00+01:00
+updated_at: 2026-10-03T15:00:00+01:00
 executor: claude_subscription
 execution_mode: review-first
 architecture: single-plus-verifier
@@ -300,3 +300,12 @@ Sol is verifier/adjudicator only and must not edit code.
 ## Completion
 
 Complete only when the real Misumi interface can rely on this contract for its outage/restart acceptance tests. Do not close on unit tests alone if live home/lab/interface deployment remains unverified.
+
+## Programme disposition (2026-10-03)
+
+**State: delivered and live; open only for physical acceptance.** The backend contract this task specified is merged and running on the household runtime: the dedicated
+`misumi_transcript_events` model with owner scoping, idempotent `(owner, domain, event_id)` commits, the atomic commit-before-acknowledge path, bounded query/export, separate retention
+dimensions including the `permanent` mode (PR #57), and explicit user deletion (PR #72, deployed 2026-10-02 and again in release `a62728a4d9bf`). Persistence authority is a single writer
+on home; the lab is compute only and there is no replica or automatic failover (ratified Phase 4 architecture), which supersedes the "replica/read-failover" wording in contract section 7.
+The task's own completion rule is "the real Misumi interface can rely on this contract for its outage/restart acceptance tests"; that physical acceptance on the kiosk (microphone,
+outbox, outage) is a human gate and has not been done, so the task is deliberately not closed.

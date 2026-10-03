@@ -3,12 +3,12 @@ artifact_type: agent-task
 task_schema: agent-task/v2
 task_id: 2026-10-02-home-gpu-admission-signal
 title: "Make household GPU contention an up-front routing/admission signal instead of a 120 s inference timeout"
-status: inbox
+status: done
 priority: medium
 task_type: implementation
 created_by: claude
 created_at: 2026-10-02T13:30:00+01:00
-updated_at: 2026-10-02T13:30:00+01:00
+updated_at: 2026-10-03T15:00:00+01:00
 executor: claude_subscription
 execution_mode: review-first
 architecture: single
@@ -107,3 +107,11 @@ failure.
   `inactive` and the new classifier said `busy`.
 - **Still open (real acceptance):** re-run the `local-fast` canary on the physical RTX 3070 while it is free. Nothing is
   qualified from simulated evidence. Status stays `inbox` until then.
+
+## Closure (2026-10-03)
+
+Acceptance is met and recorded. Implemented in PR #66 (merged 2026-10-02): `src/gpu_admission.py`, the worker `health` `gpu_load`, router withholding in
+`resolve_alias`, the canary's `not_run` / `inconclusive` path, and home's opt-in through `config/estate.yaml`; 49 new tests with mutation checks and 533 existing estate
+tests unchanged; evidence in `docs/aoteru-multihost-execution-evidence.md`. It did its job live: with a game holding the GPU the admission signal read busy and
+the home `local-fast` canary was not run (no false model failure); once the game was stopped the canary passed 3 of 3 and home was qualified for `local-fast`
+(PR #70). The status stayed `inbox` only because nobody updated it.
