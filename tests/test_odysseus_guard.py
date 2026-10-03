@@ -103,6 +103,10 @@ def test_the_wrapper_offers_a_boot_start_mode_with_the_required_properties():
     guard = GUARD.read_text(encoding="utf-8")
     assert "SYSTEM" not in guard.split("#>")[1] or "-LogonType S4U" in guard   # least privilege: S4U as the same user, never SYSTEM
     assert "RunLevel Limited" in guard
+    # Registering with DOMAIN\user failed on the household host (HRESULT 0x80070534, no account mapping); the tasks that work there use the plain user name.
+    for text in (guard, HOST.read_text(encoding="utf-8")):
+        assert "USERDOMAIN" not in text
+        assert "-UserId $env:USERNAME" in text
 
 
 def test_healthy_services_cause_no_action(h):
