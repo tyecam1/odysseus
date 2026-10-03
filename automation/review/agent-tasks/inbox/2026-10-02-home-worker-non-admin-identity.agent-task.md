@@ -8,7 +8,7 @@ priority: medium
 task_type: implementation
 created_by: claude
 created_at: 2026-10-02T11:00:00+01:00
-updated_at: 2026-10-02T11:00:00+01:00
+updated_at: 2026-10-03T15:00:00+01:00
 executor: claude_subscription
 execution_mode: review-first
 architecture: single
@@ -93,3 +93,9 @@ bound what the key can start), but it is more privilege than routine repo-writin
 - The worker runs as a non-administrator and still passes `health`, `inventory` and the routing proof from lab.
 - The administrator-backed entry is removed, and `administrators_authorized_keys` is otherwise unchanged.
 - The reviewed access list and the re-run evidence are recorded in `docs/aoteru-multihost-execution-evidence.md`.
+
+## Programme disposition (2026-10-03)
+
+**State: open, deliberately not executed by the agent.** Creating a dedicated non-administrator Windows account on the household host, re-keying the worker and changing how the
+home worker authenticates is a security-sensitive host change that needs the operator's explicit authorisation and a rollback session. Nothing depends on it for convergence: home is
+an eligible worker for `deterministic` and `local` work under the existing administrator-scoped, forced-command key, and `codex-write` stays unqualified until this is done.

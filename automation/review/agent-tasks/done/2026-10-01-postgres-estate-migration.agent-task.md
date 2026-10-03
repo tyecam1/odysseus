@@ -3,12 +3,12 @@ artifact_type: agent-task
 task_schema: agent-task/v2
 task_id: 2026-10-01-postgres-estate-migration
 title: "Add an explicit PostgreSQL migration for the Stage 6 estate-execution columns"
-status: review
+status: done
 priority: medium
 task_type: implementation
 created_by: claude
 created_at: 2026-10-01T19:00:00+01:00
-updated_at: 2026-10-02T02:00:00+01:00
+updated_at: 2026-10-03T15:00:00+01:00
 executor: claude_subscription
 execution_mode: review-first
 architecture: single
@@ -88,3 +88,9 @@ check: with the migration disabled the migration test fails. SQLite suites uncha
 Scope limit, recorded rather than hidden: the older `PRAGMA table_info(...)` migrations and the BBC store remain
 SQLite-only, so PostgreSQL is still not a supported general target (see
 `docs/misumi-durable-transcript-runtime.md`, section PostgreSQL).
+
+## Closure (2026-10-03)
+
+The acceptance in this task is met: the migration landed in PR #55 (merged `1372ef9a`), was proven against a real PostgreSQL 16 schema built from the pre-Stage-6 models (7 tests,
+mutation-checked, re-run is a no-op, SQLite suites unchanged). The "awaiting review" status was the retrospective review, which is non-blocking by operator policy; Sol review 3
+will include it. The recorded scope limit stands: PostgreSQL is not a supported general target (older `PRAGMA`-based migrations and the BBC store remain SQLite-only).
