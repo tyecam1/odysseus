@@ -7,7 +7,7 @@ status: inbox
 priority: high
 task_type: evaluation-observability
 created_by: migrated-from-obsidian-phd
-updated_at: 2026-10-02T10:41:00+01:00
+updated_at: 2026-10-03T19:00:00+01:00
 executor: ""
 execution_mode: review-first
 requires_remote_compute: true
@@ -497,3 +497,12 @@ The October 2026 search identified candidates such as Qwen3.5-class dense models
 - The dual-PC runtime consumes the selected model portfolio rather than maintaining a separate model benchmark authority.
 - Losing/superseded candidate weights are removed after adjudication and rollback requirements are satisfied.
 - Public benchmark claims are linked to the estate task they are intended to predict and are verified by local representative tests before routing changes.
+
+## Programme disposition (2026-10-03, convergence Phase 9 reconciliation)
+
+**State: open; the evaluation system is not built, and this programme made model decisions only on measured evidence**
+
+Re-grounded against `dev` on 2026-10-03: no operating-contract or model-role evaluation system exists (nothing under `src`, `routes` or `config`). Within the convergence programme model decisions were made on
+measured evidence rather than anecdote, which is what its Phase 5 gate requires: home `local-fast` qualified only after a 3 of 3 attested canary on a free GPU, `codex` and `codex-write` left unqualified, and the household model kept as
+an adequate incumbent that a measured result may replace. The convergence contract keeps **model-role and backend evaluation** in this card's scope; the persona-development criteria moved to the persona-growth successor, which consumes this
+card's evidence and creates no second registry. Decision: keep `inbox` as the owner of model-role evidence. It is not named in the convergence programme's closeout bullets, none of which depends on it, so it does not block closeout. No work in this programme is attributed to it. It stays where it is, with the Odysseus queue as owner.

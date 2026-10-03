@@ -4,8 +4,8 @@ task_schema: agent-task/v1
 task_id: 2026-06-19-odysseus-remote-compute-dispatch-guard
 title: Add remote-compute dispatch guard, odysseus doctor, per-job liveness (P2)
 status: blocked
-blocked_reason: Odysseus PR 2 remains draft and its runtime changes are undeployed.
-recheck_condition: PR 2 is reviewed, merged, deployed and attested on the compute box.
+blocked_reason: Odysseus draft PR 2 was closed without merging (verified 2026-10-03); the doctor and liveness remainder has no implementation and no owner.
+recheck_condition: re-scope against the Stage 5 and 6 worker, health and routing contracts, then decide whether a doctor command and liveness window are still wanted.
 priority: medium
 task_type: implementation
 created_by: claude
@@ -92,3 +92,13 @@ Update `current-capabilities.md` + `capability_manifest.json`; run `python -m un
 - `odysseus doctor` returns tunnel/endpoint/heartbeat/schedule/git status in one call.
 - Per-job liveness ping implemented; blind window reduced; tested.
 - Capability docs updated; truth tests pass. No canonical/Zotero mutation.
+
+## Programme disposition (2026-10-03, convergence Phase 9 reconciliation)
+
+**State: stale blocker, superseded in part; the remainder is optional and unowned**
+
+Re-grounded against `dev` on 2026-10-03. The recorded unblock condition can never occur: draft Odysseus PR #2 ("gate DRM jobs and emit liveness") was **closed without merging**.
+The intent of scope item 1 (refuse misrouted `requires_remote_compute` / `requires_local_model` work with a clear reason instead of an executor failure) is met on `dev` by the estate router: `resolve_alias`
+withholds a host with a named reason (not benchmark-qualified, GPU busy, unverified), never falls back silently and never executes on the control-plane host. Scope items 2 and 3 (an `odysseus doctor` command and per-job
+liveness pings with a shorter reclaim window) have **no implementation on `dev`**; worker `health`, `aoteru status` and `aoteru execution --wait` cover part of the diagnostic need but not the liveness window. This card's inputs
+are obsidian-PhD automation paths. Decision: keep `blocked`, with the blocked reason corrected below; re-scope against the Stage 5 and 6 worker and health contracts before any work. It is not named in the convergence programme's closeout bullets, none of which depends on it, so it does not block closeout. No work in this programme is attributed to it. It stays where it is, with the Odysseus queue as owner.

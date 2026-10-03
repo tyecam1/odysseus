@@ -7,7 +7,7 @@ status: inbox
 priority: medium
 task_type: capability-convergence
 created_by: migrated-from-obsidian-phd
-updated_at: 2026-09-23T15:26:00+01:00
+updated_at: 2026-10-03T19:00:00+01:00
 executor: ""
 execution_mode: review-first
 requires_remote_compute: false
@@ -291,3 +291,12 @@ For internal agentic capabilities, define or normalize one registry-driven invoc
 - maintaining separate permanent knowledge systems for each source platform
 - making Odysseus a second vault, second queue, second evidence authority or monolithic implementation dump
 - preserving obsolete architectural boundaries for compatibility alone
+
+## Programme disposition (2026-10-03, convergence Phase 9 reconciliation)
+
+**State: not absorbed by the convergence programme; its Instagram part is owned by the successor**
+
+Re-grounded on 2026-10-03. The convergence contract absorbs this card only if a live transcript or knowledge-ingestion requirement is not already satisfied by the memory and transcript architecture. It is satisfied: the durable transcript
+runtime is merged and live, and the ratified Phase 4 architecture adds no further store. The research-capability convergence and the PhD intake pipeline in this card are therefore not part of the convergence acceptance. The **Instagram
+saved-content importer** (Odysseus PR #35, still open) and saved-content organisation are owned by the persona-growth successor `2026-10-02-misumi-persona-growth-background-collaboration` (its Stage 7), whose reconciliation list names PR #35. Nothing in `dev` implements
+the URL-drop, bookmark or social intake pipeline. Decision: keep `inbox`; the Instagram portion has a single owner (the successor), the rest stays with the Odysseus queue.

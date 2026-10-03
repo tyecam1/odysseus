@@ -7,7 +7,7 @@ status: inbox
 priority: medium
 task_type: resource-orchestration
 created_by: migrated-from-obsidian-phd
-updated_at: 2026-09-23T15:26:00+01:00
+updated_at: 2026-10-03T19:00:00+01:00
 executor: ""
 execution_mode: review-first
 requires_remote_compute: false
@@ -164,3 +164,9 @@ Complete when:
 ## First implementation pass
 
 Start by mapping existing controller/runtime ownership and current usage telemetry. Reuse before building. Produce a short design/diagnostic note before code changes if provider usage visibility is not already explicit.
+
+## Programme disposition (2026-10-03, convergence Phase 9 reconciliation)
+
+**State: open roadmap; not implemented, and depends on reliable usage telemetry**
+
+Re-grounded against `dev` on 2026-10-03: no usage-reset harvesting exists. The contract itself says to do it only once telemetry is reliable, which depends on the usage attribution task and on truthful provider quota state (see `2026-10-01-provider-quota-health-in-routing-preflight`). It is not named in the convergence programme's closeout bullets, none of which depends on it, so it does not block closeout. No work in this programme is attributed to it. It stays where it is, with the Odysseus queue as owner.

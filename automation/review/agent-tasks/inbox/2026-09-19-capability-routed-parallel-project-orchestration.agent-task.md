@@ -312,3 +312,11 @@ If implementation changes real capabilities:
 ## First execution step
 
 Before writing code, produce the architecture design and duplicate-risk audit. Identify which parts belong in `obsidian-PhD` versus the authoritative cross-repository runtime, and enumerate the smallest implementation slices. If an equivalent scheduler/router already exists, extend it rather than building another.
+
+## Programme disposition (2026-10-03, convergence Phase 9 reconciliation)
+
+**State: open roadmap; not implemented**
+
+Re-grounded against `dev` on 2026-10-03: no project-level decomposition, parallel node execution or reconciliation exists in `src`, `routes` or `config` (searched for the orchestration identifiers and found none). The existing estate
+routing, ParkLease and EstateExecution are the substrate it must extend, not replace. The convergence programme's parallelism rule ("only when the existing capability-routed orchestration contract considers units independent") was
+followed as a process rule, not by building this. It is not named in the convergence programme's closeout bullets, none of which depends on it, so it does not block closeout. No work in this programme is attributed to it. It stays where it is, with the Odysseus queue as owner.

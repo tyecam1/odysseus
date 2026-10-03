@@ -7,7 +7,7 @@ status: inbox
 priority: high
 task_type: architecture-convergence
 created_by: migrated-from-obsidian-phd
-updated_at: 2026-10-02T10:41:00+01:00
+updated_at: 2026-10-03T19:00:00+01:00
 executor: ""
 execution_mode: review-first
 requires_remote_compute: false
@@ -372,3 +372,13 @@ Both machines being permanently available should increase resilience, not create
 - creating another task queue or knowledge authority
 - selecting permanent model brands before hardware/task benchmarks
 - using local models for high-stakes evidence promotion without the existing verification gates
+
+## Programme disposition (2026-10-03, convergence Phase 9 reconciliation)
+
+**State: partly delivered; the remainder is optional roadmap**
+
+Re-grounded against `dev` on 2026-10-03. **Delivered in effect:** both PCs are truthful workers (lab as control plane and worker; home enabled for `deterministic` and `local` work, `codex` and `codex-write`
+unqualified by operator decision), routing is by live worker health with fail-closed dispatch, local models are the default for routine work where qualified (`local-fast` qualified on home on a measured canary), GPU contention
+is an admission signal (PR #66), and the laptop reaches everything through the one `aoteru` client. **Not delivered:** a single operator surface beyond `aoteru` (Claude Code as default harness without paid inference to invoke a local
+task), subscription-usage policy for scarce Claude and Codex capacity (see the usage attribution and harvest tasks, unimplemented), and the memory and failover parts of its original text, which the ratified Phase 4
+architecture retires (no replica, no automatic failover). Decision: keep `inbox` as an estate roadmap item. It is not named in the convergence programme's closeout bullets, none of which depends on it, so it does not block closeout. No work in this programme is attributed to it. It stays where it is, with the Odysseus queue as owner.
