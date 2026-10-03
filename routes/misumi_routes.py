@@ -22,6 +22,7 @@ from src.misumi_observability import MisumiEventLog
 from src.misumi_policy import load_persona_policy, normalize_persona, persona_record, policy_summary
 from src.misumi_skills import installed_skill_files, security_review_files, skills_for_persona
 from src.misumi_task_router import MisumiTaskRouter
+from src.seed_order_enforcement import SEED_OUTPUT_RULES, enforce_seed_order
 
 
 logger = logging.getLogger(__name__)
@@ -434,7 +435,7 @@ async def _model_turn(
         capabilities = capability_summary(persona)
         if capabilities:
             system += f"\n\n{capabilities}"
-        system += f"\n{_RATIFICATION_CONSTRAINT}"
+        system += f"\n{_RATIFICATION_CONSTRAINT}\n{SEED_OUTPUT_RULES}"
         messages = list(context_messages or [])
         if not messages:
             seed = _interactive_seed_context()
@@ -461,6 +462,8 @@ async def _model_turn(
         turn = _parse_model_turn(str(raw or ""), prompt)
         if not turn.get("answer"):
             raise RuntimeError("model returned empty content (reasoning-only)")
+        # The model does not reliably quote a raw note or label a candidate on its own (live fixtures 2 and 3, 2026-10-02).
+        turn["answer"], turn["seed_order_enforced"] = enforce_seed_order(prompt, turn["answer"])
         return turn
     except Exception as exc:
         logger.exception("Misumi model reply failed: %s", exc)
