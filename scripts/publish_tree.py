@@ -26,6 +26,7 @@ import tempfile
 from pathlib import Path
 
 ATTRIBUTION = "Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
+DEFAULT_MAX_DELETES = 25
 
 
 def blob_sha(data: bytes) -> str:
@@ -55,6 +56,13 @@ def plan(remote: dict[str, dict], local: dict[str, bytes], prefixes: list[str]) 
         if _wanted(path, prefixes) and path not in local and "__pycache__" not in path:
             actions.append(("delete", path))
     return actions
+
+
+def too_many_deletes(actions: list[tuple[str, str]], limit: int) -> int:
+    """How many deletions the plan holds when it exceeds ``limit`` (else 0). A directory prefix with an incomplete local tree turns every
+    file you did not bring into a deletion; this catches that before anything is published."""
+    deletes = sum(1 for action, _ in actions if action == "delete")
+    return deletes if deletes > limit else 0
 
 
 def _gh(method: str, path: str, body: dict | None = None) -> dict:
@@ -96,6 +104,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("message_file")
     parser.add_argument("--prefix", action="append", required=True, help="path or directory prefix to publish (repeatable)")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--max-deletes", type=int, default=DEFAULT_MAX_DELETES,
+                        help=f"refuse a plan with more deletions than this (default {DEFAULT_MAX_DELETES}); raise it only for a deliberate bulk delete")
     args = parser.parse_args(argv)
 
     base = _gh("GET", f"repos/{args.repo}/branches/{args.base_branch}")
@@ -109,6 +119,10 @@ def main(argv: list[str] | None = None) -> int:
     actions = plan(remote, local, args.prefix)
     for action, path in actions:
         print(f"{action:<6} {path}")
+    excess = too_many_deletes(actions, args.max_deletes)
+    if excess:
+        raise SystemExit(f"refusing to publish: the plan deletes {excess} files (limit {args.max_deletes}). A --prefix that covers a directory "
+                         "you did not fully bring locally deletes everything else in it; use exact file prefixes, or pass --max-deletes for a deliberate bulk delete.")
     if args.dry_run or not actions:
         print("dry run" if args.dry_run else "nothing to publish")
         return 0

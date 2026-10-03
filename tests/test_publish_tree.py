@@ -49,3 +49,12 @@ def test_pycache_is_never_published_or_deleted():
 def test_unchanged_tree_plans_nothing():
     remote = _remote(**{"a.md": b"1"})
     assert publish_tree.plan(remote, {"a.md": b"1"}, ["a.md"]) == []
+
+
+def test_a_plan_that_deletes_a_whole_directory_is_refused():
+    remote = _remote(**{f"tasks/t{i}.md": b"x" for i in range(40)})
+    actions = publish_tree.plan(remote, {"tasks/edited.md": b"new"}, ["tasks/"])
+    assert publish_tree.too_many_deletes(actions, publish_tree.DEFAULT_MAX_DELETES) == 40
+    assert publish_tree.too_many_deletes(actions, 100) == 0                  # a deliberate bulk delete can raise the limit
+    small = publish_tree.plan(_remote(**{"a.md": b"1"}), {}, ["a.md"])
+    assert publish_tree.too_many_deletes(small, publish_tree.DEFAULT_MAX_DELETES) == 0
