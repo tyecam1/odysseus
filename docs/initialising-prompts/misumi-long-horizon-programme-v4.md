@@ -7,6 +7,8 @@ scope: long-horizon-programme-directive
 provenance: operator directive received complete via Dispatch on 2026-10-04 (application -07); recorded verbatim below
 ---
 
+Prompt identity: `misumi-long-horizon-programme@v4`
+
 # Misumi long-horizon programme — application -07 directive (registered as v4)
 
 You are executing the next Misumi long-horizon application.
