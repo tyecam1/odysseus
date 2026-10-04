@@ -1,6 +1,6 @@
 schema_version: 1
 prompt_id: misumi-long-horizon-programme
-active_head: prompt:v3
+active_head: prompt:v4
 nodes:
   - id: prompt:v1
     type: prompt_version
@@ -74,7 +74,33 @@ nodes:
     version: 3
     parent_version: 2
     path: docs/initialising-prompts/misumi-long-horizon-programme-v3.md
+    status: superseded
+  - id: prompt:v4
+    type: prompt_version
+    version: 4
+    parent_version: 3
+    path: docs/initialising-prompts/misumi-long-horizon-programme-v4.md
     status: active
+  - id: application:2026-10-04-misumi-long-horizon-programme-06
+    type: application
+    application_id: 2026-10-04-misumi-long-horizon-programme-06
+    trace_path: evals/prompt-applications/misumi-long-horizon-programme/2026-10-04-misumi-long-horizon-programme-06.yaml
+    rating:
+      agent_overall: 4.0
+      goal_progress: 4
+      correctness_verification: 4
+      authority_scope_discipline: 5
+      routing_resource_efficiency: 3
+      continuity_handoff_quality: 4
+    failure_tags:
+      - box_port_misassumed_first_live_attempt_404
+      - kiosk_bridge_paused_ui_transition_proof_pending_physical
+      - worker_clone_origin_stale_renamed_remote_discovered
+      - fixture2_model_json_leak_preexisting_preserved
+  - id: evolution:2026-10-04-misumi-long-horizon-programme-06
+    type: evolution_event
+    decision: reinforce
+    evidence_application: 2026-10-04-misumi-long-horizon-programme-06
   - id: application:2026-10-02-misumi-long-horizon-programme-03
     type: application
     application_id: 2026-10-02-misumi-long-horizon-programme-03
@@ -211,6 +237,14 @@ edges:
     to: prompt:v3
     type: reinforced
 guardrail_validation:
+  prompt:v4:
+    scope_preserved: true
+    authority_preserved: true
+    evidence_verification_preserved: true
+    stop_gate_not_weakened: true
+    model_identity_discipline_not_weakened: true
+    access_failure_ceiling_preserved: true
+    trace_evolution_required: true
   prompt:v2:
     scope_preserved: true
     authority_preserved: true
