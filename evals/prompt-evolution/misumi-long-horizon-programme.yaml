@@ -121,6 +121,40 @@ nodes:
       into a reusable helper; that is done (scripts/publish_tree.py with tests), so the prompt text is not extended again.
       The new PR-description tag is a one-off convention miss (the repository's PR template is checked by CI) and is not a
       reason to change the prompt.
+  - id: application:2026-10-03-misumi-long-horizon-programme-05
+    type: application
+    application_id: 2026-10-03-misumi-long-horizon-programme-05
+    trace_path: evals/prompt-applications/misumi-long-horizon-programme/2026-10-03-misumi-long-horizon-programme-05.yaml
+    rating:
+      agent_overall: 3.8
+      goal_progress: 4
+      correctness_verification: 4
+      authority_scope_discipline: 5
+      routing_resource_efficiency: 3
+      continuity_handoff_quality: 3
+    failure_tags:
+      - application_trace_not_persisted_before_handback_recurred
+      - reboot_persistence_defect_found_by_household_incident_not_design_review
+      - first_home_cutover_failed_on_userdomain_assumption
+      - first_box_deploy_rolled_back_on_tls_healthcheck_hostname
+      - direct_dev_loop_probe_denied_steering_contribution_left_unmeasured
+  - id: evolution:2026-10-03-misumi-long-horizon-programme-05
+    type: evolution_event
+    decision: reinforce
+    evidence_application: 2026-10-03-misumi-long-horizon-programme-05
+    note: >-
+      The deterministic planner returned evolve for the failure tags (its default for any tag); overridden and recorded.
+      The transport class did not recur: the reusable helpers (publish_tree.py, the deploy scripts' own rollback safety
+      nets) absorbed it - one TLS-hostname mistake was caught by the deploy script's safety net and fixed on re-run,
+      which is the tooling fix working as designed. The genuinely recurring class is trace discipline: v3 already
+      contains the pre-stop rule to persist the trace and evolution event before a hand-back, and the -05 hand-back
+      still left no trace (second occurrence after -02). That is a lapse in applying an existing rule, not missing
+      prompt content; a third occurrence moves the fix out of prompt text into tooling (a publish/stop checklist that
+      fails closed without a trace), as was done for the transport class. The reboot tag records that the defect was
+      found by a household incident rather than by design review of the logon-triggered lifecycle; the corrective
+      machine-start redesign is the outcome, so no new prompt text is added. The coordinator runtime changed
+      mid-application (Sonnet to GLM Flash, a temporary substitution while Claude subscription capacity is exhausted)
+      and is recorded in the trace's models_routes only; the role contract and the Opus-only gates are unchanged.
 edges:
   - from: prompt:v1
     to: application:2026-10-01-misumi-long-horizon-programme-01
@@ -156,6 +190,15 @@ edges:
     to: evolution:2026-10-02-misumi-long-horizon-programme-04
     type: observed
   - from: evolution:2026-10-02-misumi-long-horizon-programme-04
+    to: prompt:v3
+    type: reinforced
+  - from: prompt:v3
+    to: application:2026-10-03-misumi-long-horizon-programme-05
+    type: applied
+  - from: application:2026-10-03-misumi-long-horizon-programme-05
+    to: evolution:2026-10-03-misumi-long-horizon-programme-05
+    type: observed
+  - from: evolution:2026-10-03-misumi-long-horizon-programme-05
     to: prompt:v3
     type: reinforced
 guardrail_validation:
