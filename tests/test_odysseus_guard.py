@@ -174,3 +174,17 @@ def test_maintenance_is_bounded_and_needs_a_reason(h):
     from datetime import datetime
     span = (datetime.fromisoformat(expires[:26]) - datetime.fromisoformat(entered[:26])).total_seconds() / 3600
     assert span <= 6.01                                           # capped at MaxMaintenanceHours
+
+
+def test_status_is_clean_json_with_plain_evidence_lines(h):
+    h.set_up(False, True)
+    h.run("Watch"); h.run("Watch")                                      # leave some evidence behind
+    out = h.run("Status")
+    assert out.returncode == 0, out.stderr
+    status = json.loads(out.stdout)
+    assert status["odysseus_healthy"] is True and status["ollama_healthy"] is True
+    assert status["maintenance"] is None
+    lines = status["recent_evidence"]
+    assert lines and all(isinstance(line, str) for line in lines)      # plain strings, not file-provider objects
+    assert "PSPath" not in out.stdout
+    assert "/Date(" not in out.stdout                                   # dates are ISO strings
