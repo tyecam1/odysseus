@@ -16,10 +16,17 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from core.middleware import require_admin
+from src.constants import DATA_DIR
 from src.misumi_household import HouseholdReadOnlyAdapter, infer_household_domain
 from src.misumi_memory import MisumiMemory
 from src.misumi_observability import MisumiEventLog
 from src.misumi_persona_routing import resolve_auto_lead
+from src.misumi_routing_adaptation import (
+    RoutingAdaptationStore,
+    is_durable_instruction,
+    record_durable_instruction,
+    record_manual_choice,
+)
 from src.misumi_policy import load_persona_policy, normalize_persona, persona_record, policy_summary
 from src.misumi_skills import installed_skill_files, security_review_files, skills_for_persona
 from src.misumi_task_router import MisumiTaskRouter
@@ -706,6 +713,23 @@ async def _apply_retention(
     return result
 
 
+def _named_persona_in_prompt(prompt: str, exclude: Optional[str] = None) -> Optional[str]:
+    """Return a persona explicitly named in the prompt text, if any."""
+    try:
+        order = list(load_persona_policy())
+    except Exception:
+        return None
+    lowered = str(prompt or "").lower()
+    for pid in order:
+        if pid == exclude:
+            continue
+        record = persona_record(pid)
+        display = str(record.get("display_name") or "").lower()
+        if re.search(rf"(?<!\w){re.escape(pid)}(?!\w)", lowered) or (display and display in lowered):
+            return pid
+    return None
+
+
 def setup_misumi_routes(
     skills_manager,
     task_scheduler=None,
@@ -721,6 +745,16 @@ def setup_misumi_routes(
     task_router = MisumiTaskRouter(adapter)
     events = MisumiEventLog()
     memory = MisumiMemory(memory_root)
+    # Experience-driven routing adaptation (application -07). Off switches:
+    # MISUMI_ROUTING_ADAPTATION=0 disables capture AND learned overlays;
+    # MISUMI_ROUTING_STATE_ROOT relocates the state store (tests).
+    _adaptation_flag = (os.getenv("MISUMI_ROUTING_ADAPTATION", "1") or "").strip().lower()
+    adaptation: Optional[RoutingAdaptationStore] = None
+    if _adaptation_flag not in {"0", "false", "no", "off"}:
+        _adaptation_root = (os.getenv("MISUMI_ROUTING_STATE_ROOT") or "").strip()
+        adaptation = RoutingAdaptationStore(
+            Path(_adaptation_root) if _adaptation_root else Path(DATA_DIR) / "misumi" / "routing"
+        )
     if oss_skill_ingestion is None:
         from services.memory.oss_skill_ingestion import OSSSkillIngestion
 
@@ -765,9 +799,50 @@ def setup_misumi_routes(
         interface_context = body.context if isinstance(body.context, str) else ""
         prompt = (body.prompt or interface_context or body.intent or "status").strip()
         routing: Optional[Dict[str, Any]] = None
+        adaptation_note: Optional[Dict[str, Any]] = None
+        owner = _owner(request)
         if auto_route:
             persona, routing = resolve_auto_lead(prompt)
-        owner = _owner(request)
+            if adaptation is not None:
+                base_persona = persona
+                base_reasons = list((routing or {}).get("reasons") or [])
+                persona, learned = adaptation.apply_learned_overlays(prompt, persona, base_reasons)
+                if learned is not None:
+                    routing = {
+                        "method": "routing-contract-v0.1+learned-revision",
+                        "selected": persona,
+                        "reasons": [f"learned:{learned['revision_id']} cue={','.join(learned['cue'])}"],
+                        "base_selected": base_persona,
+                        "base_reasons": base_reasons,
+                        "learned": learned,
+                    }
+                adaptation.note_auto_route(
+                    body.session_id, prompt, persona,
+                    list((routing or {}).get("reasons") or []), request_id,
+                )
+                # A durable instruction may also arrive inside an auto request
+                # ("for X use <persona> from now on").
+                if is_durable_instruction(prompt):
+                    named = _named_persona_in_prompt(prompt, exclude=persona)
+                    if named is not None:
+                        adaptation_note = record_durable_instruction(
+                            adaptation,
+                            prompt=prompt,
+                            named_persona=named,
+                            session_id=body.session_id,
+                            owner=owner,
+                            persist=body.persist_turn,
+                        )
+        elif adaptation is not None and body.persist_turn:
+            # Manual persona choice: durable instructions may create/activate a
+            # mapping; corrections and temporary choices stay shadow-only.
+            adaptation_note = record_manual_choice(
+                adaptation,
+                prompt=prompt,
+                chosen_persona=persona,
+                session_id=body.session_id,
+                owner=owner,
+            )
         domain = infer_household_domain(prompt)
         sources = adapter.search(prompt, domain=domain, limit=4) if adapter.reachable else []
         if not domain:
@@ -929,6 +1004,7 @@ def setup_misumi_routes(
             "persona": persona,
             "persona_source": "auto" if auto_route else "requested",
             "routing": routing,
+            "routing_adaptation": adaptation_note,
             "files_read": sorted({item["path"] for item in sources}),
             "files_changed": files_changed,
             "model": model,
@@ -961,6 +1037,8 @@ def setup_misumi_routes(
         }
         if routing is not None:
             response["routing"] = routing
+        if adaptation_note is not None:
+            response["routing_adaptation"] = adaptation_note
         if _consultation_enabled():
             response.update({
                 "consulted": consulted,

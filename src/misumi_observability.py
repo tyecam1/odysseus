@@ -14,7 +14,7 @@ from src.constants import DATA_DIR
 
 
 EVENT_FIELDS = (
-    "request_id", "persona", "persona_source", "routing",
+    "request_id", "persona", "persona_source", "routing", "routing_adaptation",
     "selected_skill_ids", "selected_tools",
     "blocked_tools", "task_id", "files_read", "files_changed", "model",
     "backend", "latency_ms", "outcome", "error", "blocker", "approval_mode",

@@ -149,9 +149,9 @@ prompts:
   - prompt_id: misumi-long-horizon-programme
     title: Misumi long-horizon convergence programme initializer
     status: active
-    active_version: 3
-    version: 3
-    prompt_path: docs/initialising-prompts/misumi-long-horizon-programme-v3.md
+    active_version: 4
+    version: 4
+    prompt_path: docs/initialising-prompts/misumi-long-horizon-programme-v4.md
     graph_path: evals/prompt-evolution/misumi-long-horizon-programme.yaml
     created_at: 2026-10-01
     provenance:
@@ -161,8 +161,11 @@ prompts:
         Registered from the 2026-10-01 live Misumi/Odysseus re-entry audit.
         Live repository, runtime, queue and host state always outrank the
         baseline task snapshots embedded in the programme contract. Active head
-        evolved from v1 to v2 after the first rated application and from v2 to
-        v3 after the second.
+        evolved from v1 to v2 after the first rated application, from v2 to
+        v3 after the second, and from v3 to v4 when the operator issued the
+        adaptive-behaviour programme directive (received complete via Dispatch
+        2026-10-04 during application -06, whose own copy of the new directive
+        had been truncated; -06 legitimately ran under v3).
     scope:
       repositories:
         - tyecam1/odysseus
@@ -199,14 +202,26 @@ prompts:
         application_evidence:
           - 2026-10-02-misumi-long-horizon-programme-02
       - version: 3
-        status: active
+        status: superseded
         prompt_path: docs/initialising-prompts/misumi-long-horizon-programme-v3.md
         parent_version: 2
         application_evidence:
           - 2026-10-02-misumi-long-horizon-programme-03
           - 2026-10-03-misumi-long-horizon-programme-05
+          - 2026-10-04-misumi-long-horizon-programme-06
         derived_from_applications:
           - 2026-10-02-misumi-long-horizon-programme-02
+      - version: 4
+        status: active
+        prompt_path: docs/initialising-prompts/misumi-long-horizon-programme-v4.md
+        parent_version: 3
+        derived_from_applications:
+          - 2026-10-03-misumi-long-horizon-programme-05
+        evolution_targets:
+          - register the complete programme directive before running an application under it; a directive received truncated is recorded as such and the application states which registered loop it ran under
+          - separate applying ratified contract text (not ratification-gated) from changing ratified contract text (ratification-gated); say which side a change falls on, in the trace
+          - source user evidence from the operator, never synthesize or replay it; a demonstration preference must be a real operator preference or be rolled back
+          - run verification producer and scorer as files across remote shells; an inline remote pipe fails silently
         evolution_targets:
           - before any hand-back that reports a stop, classify every remaining contract item as human-only gate, environment condition or executable, and continue while an executable item exists; a denied merge, deploy or credential action blocks only that action
           - persist the application trace and evolution event before a hand-back that reports a stop, without waiting to be asked
@@ -215,7 +230,8 @@ prompts:
     supersedes:
       - 1
       - 2
+      - 3
     retirement_condition: >-
       Retire only when an evidence-derived child passes the protected-invariant
-      gate or the Misumi convergence programme reaches its governed completion
-      boundary.
+      gate or the Misumi adaptive-behaviour programme reaches its governed
+      completion boundary.
