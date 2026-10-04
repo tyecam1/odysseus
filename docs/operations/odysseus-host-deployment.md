@@ -94,8 +94,8 @@ removes the flag and brings everything back at once. An expired flag is removed 
 The guard never stops a process other than its own two services and never terminates a user's application: GPU contention is handled by the admission signal
 (refuse, yield or reroute local inference), not by closing a game. Closing a process needs an explicit, current operator instruction.
 
-**Testing boot independence on a host that signs in by itself.** On the household host the local account has a blank password, so Windows signs it in automatically about 30 seconds after
-every boot (there is no `AutoAdminLogon` registry value to find; check `Get-LocalUser` and the `4624` logon events). A plain reboot therefore cannot show that the stack starts without a login:
+**Testing boot independence on a host that signs in by itself.** On the household host Windows signs the account in automatically, without a password prompt, about 30 seconds after
+every boot (there is no `AutoAdminLogon` registry value to find; check the `4624` logon events; account details are kept in the private Misumi repository, not here). A plain reboot therefore cannot show that the stack starts without a login:
 the logon trigger races the startup trigger and usually wins. To prove the startup trigger on its own, temporarily set the two tasks to the startup trigger only
 (`Set-ScheduledTask -TaskName <name> -Trigger <startup trigger>`), reboot, and read the Task Scheduler Operational log (enable it with `wevtutil sl Microsoft-Windows-TaskScheduler/Operational /e:true`):
 the household tasks must show "launched ... due to system start-up". Then restore both triggers. The single-instance setting makes the loser of the race a harmless "did not launch ... already running" event.
