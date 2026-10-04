@@ -2,20 +2,20 @@
 artifact_type: agent-task
 task_schema: agent-task/v2
 task_id: 2026-09-13-operating-contract-model-role-evaluation-system
-title: "Build operating-contract, model-role and local-estate evaluation system"
-status: inbox
-priority: high
+title: "Build global model-role efficiency and capability-graph evaluation system"
+status: ready
+priority: critical
 task_type: evaluation-observability
 created_by: migrated-from-obsidian-phd
-updated_at: 2026-10-03T19:00:00+01:00
-executor: ""
-execution_mode: review-first
+updated_at: 2026-10-04T12:45:00+01:00
+executor: glm_flash
+execution_mode: staged-loop
 requires_remote_compute: true
 requires_local_model: true
 requires_zotero: false
 requires_mcp: false
 requires_web: true
-verification_route: V2_HUMAN_VERIFIED
+verification_route: V3_INDEPENDENT_MODEL_ADJUDICATION
 risk_level: medium
 approval_required: true
 source_traceability_required: true
@@ -23,7 +23,7 @@ repo: tyecam1/odysseus
 branch: ""
 migrated_from_repo: tyecam1/obsidian-PhD
 migrated_from_path: 10-inbox/2026-09-13-operating-contract-model-role-evaluation-system.md
-notes: "Migrated as shared backend/cross-repository work. Original body preserved below; re-ground paths against live Odysseus state before execution."
+notes: "Canonical global owner for evidence-driven model/executor selection across Odysseus and Misumi. Activates as a critical background capability after the current convergence programme closes. Reuse existing routing, telemetry and benchmark authorities; do not create a second router or model registry."
 ---
 
 # Build operating-contract and model-role evaluation system
@@ -506,3 +506,305 @@ Re-grounded against `dev` on 2026-10-03: no operating-contract or model-role eva
 measured evidence rather than anecdote, which is what its Phase 5 gate requires: home `local-fast` qualified only after a 3 of 3 attested canary on a free GPU, `codex` and `codex-write` left unqualified, and the household model kept as
 an adequate incumbent that a measured result may replace. The convergence contract keeps **model-role and backend evaluation** in this card's scope; the persona-development criteria moved to the persona-growth successor, which consumes this
 card's evidence and creates no second registry. Decision: keep `inbox` as the owner of model-role evidence. It is not named in the convergence programme's closeout bullets, none of which depends on it, so it does not block closeout. No work in this programme is attributed to it. It stays where it is, with the Odysseus queue as owner.
+
+
+## 2026-10-04 global real-work optimisation and capability-graph extension
+
+The operator requires this task to become the **global evidence owner for selecting model/executor routes across all systems using Odysseus**.
+
+This is not a model playground, benchmark tournament or generic leaderboard project.
+
+The purpose is persistent backend improvement:
+
+> For every recurring real task class and role, identify the smallest, cheapest and fastest route that has demonstrated adequate task completion, while retaining enough meaningful model/provider diversity to discover better routes when real evidence justifies a comparison.
+
+### Global prioritisation rule
+
+For every model-backed task:
+
+1. Prefer deterministic/non-model execution when it can actually complete the task.
+2. Identify the task class, role, operating contract, tool surface, consequence class, privacy/locality constraint and verification requirement.
+3. Filter to routes that are actually available under current host, provider quota, model, tool and compute state.
+4. Discard routes without evidence that they can meet the task's required quality/safety floor.
+5. Among adequate routes, prefer the Pareto-efficient option on:
+   - successful/accepted task completion;
+   - correction/rework burden;
+   - token/provider usage;
+   - paid cost where reliably measurable;
+   - wall-clock latency;
+   - local GPU/CPU time;
+   - VRAM/RAM pressure;
+   - retries/escalations;
+   - operator intervention.
+6. Preserve independent verification where consequence requires it.
+7. Challenge incumbents only when a plausibly capable alternative could materially improve future routing.
+
+The operational principle is:
+
+```text
+quality / safety floor first
+        ↓
+routes proven capable of real task completion
+        ↓
+Pareto efficiency
+        ↓
+incumbent route
+        +
+bounded evidence-driven challenger when justified
+```
+
+A cheaper model that produces more failed tasks, verifier defects, retries or human corrections is not more efficient.
+
+### Actual task completion only
+
+The unit of evidence is **real work completed**, not benchmark score.
+
+A model/route is eligible for comparative evaluation only when it is performing one of:
+
+1. a real dependency-ready work item that would have been executed anyway;
+2. an independent verification/critique pass already justified by the task's consequence class;
+3. a faithful replay of a real previously completed task when a routing uncertainty cannot be resolved from naturalistic evidence;
+4. a small canary derived directly from a demonstrated production failure/capability gap and required to decide whether that route can safely perform real work.
+
+Do **not** spend meaningful local or paid/cloud compute merely to populate a comparison matrix.
+
+Generic benchmark suites, model cards and public leaderboards may be used only as **pre-filtering evidence** to avoid wasting downloads or calls. They cannot establish production capability and do not count as successful task-completion evidence.
+
+A missing cell in the capability graph is not itself a reason to run work.
+
+### Divergent challenger rule
+
+"Divergent and varied models" means **plausibly capable alternatives** that are materially different, for example:
+
+- different model family/architecture;
+- different provider;
+- local versus paid/cloud;
+- dense versus MoE;
+- small/fast versus stronger reasoning model;
+- materially different quantisation/runtime artifact;
+- one strong model versus a cheap worker + verifier composition.
+
+Do not send real work to obviously inadequate models for diversity.
+
+A challenger should be admitted only when:
+
+- it is plausibly capable of completing the task;
+- the task is real work, justified verification, or a bounded replay/canary tied to a real routing uncertainty;
+- locality, privacy, authority and consequence constraints permit it;
+- expected information value could change future routing;
+- expected resource/quota cost is proportionate.
+
+Useful challenger triggers include:
+
+- sparse/stale incumbent evidence;
+- repeated correction/escalation;
+- a meaningful new local or cloud model becomes available;
+- provider quota/cost changes make another route attractive;
+- an important task benefits from independent model-family/provider disagreement;
+- real workload exposes a capability gap.
+
+### Persistent backend-improvement loop
+
+After each real run, capture or derive only the smallest evidence needed to answer:
+
+- did the task actually complete?
+- was the result accepted?
+- what deterministic/independent verification passed or failed?
+- how much correction or downstream rework followed?
+- which model/provider/artifact/host/role/contract performed it?
+- what tokens/provider-native usage were consumed?
+- what paid cost is known?
+- what local compute was consumed?
+- how long did it take?
+- did escalation/retry occur?
+- is there now enough evidence to change routing?
+- is there a real uncertainty worth a future challenger run?
+
+Then:
+
+```text
+real task
+  -> outcome/resource evidence
+  -> capability graph update
+  -> routing recommendation
+  -> governed promotion/demotion if threshold met
+  -> future real tasks use improved route
+  -> continue learning
+```
+
+Run this as persistent background improvement using existing Odysseus execution/scheduling and yield immediately to foreground work.
+
+Do not create a new queue, router, memory system or autonomous model-policy writer.
+
+### Cross-system scope
+
+Apply this evidence/routing improvement across all systems that use Odysseus, including:
+
+- Misumi household interaction;
+- persona execution and team work;
+- speech ASR/TTS model selection where model routing applies;
+- Odysseus planning, coordination, implementation, verification and maintenance;
+- bounded PhD/research work routed through Odysseus;
+- repository/code tasks;
+- document/vision work;
+- extraction/classification/transformation;
+- local foundation models;
+- paid/cloud provider models;
+- future registered systems using the same backend.
+
+The owning domain still defines truth, acceptance criteria and policy.
+
+Odysseus learns **which execution route is most capable and resource-efficient for the task class**. It does not absorb the domain authority.
+
+### Global model-task capability graph
+
+Build a provenance-bearing **derived capability graph** over existing execution, routing, benchmark and verification evidence.
+
+Start with versioned JSON/JSONL and generated views. Do not introduce a graph database unless the file-backed representation is later measured to be inadequate.
+
+Minimum nodes:
+
+- ModelFamily
+- ModelArtifact / exact cloud model revision
+- Provider
+- Runtime
+- Host
+- Role
+- TaskClass
+- Capability
+- OperatingContract
+- PromptVersion
+- ToolSurface
+- LocalityConstraint
+- EvaluationRun
+- Verifier
+- FailureMode
+- ResourceProfile
+- ProviderQuotaState
+- RoutingDecision
+- PromotionDecision
+
+Minimum relationships:
+
+- artifact `member_of` family;
+- artifact `served_by` provider/runtime;
+- artifact `runnable_on` host;
+- artifact/route `qualified_for` task/role/capability;
+- task `requires` capability/tool/locality;
+- role `governed_by` operating contract;
+- run `evaluates` model × role × task × contract;
+- run `executed_on` host/runtime;
+- run `verified_by` verifier;
+- run `observed_failure` failure mode;
+- route `challenger_of` incumbent;
+- route `outperformed` another route on a named metric set;
+- promotion `promotes/demotes/supersedes` route.
+
+Every derived edge must resolve back to real run/evidence IDs and timestamps.
+
+### Metrics retained in the graph
+
+Keep a multidimensional resource/outcome vector rather than one misleading global score:
+
+```text
+quality:
+  actual completion / accepted outcome
+  deterministic score where relevant
+  verifier defect rate
+  correction burden
+
+token/provider:
+  input/output tokens where exposed
+  provider-native usage
+  monetary cost where reliable
+
+compute:
+  GPU time
+  CPU time
+  peak VRAM/RAM
+  model load time
+  power/thermal only where materially measurable
+
+latency:
+  TTFT
+  wall time
+  retries/escalations
+
+operational:
+  provider quota state
+  failure rate
+  host/runtime availability
+  privacy/locality constraints
+```
+
+Do not invent equivalence between provider quota units, currency and local GPU time. Use Pareto comparisons.
+
+### Required graph views
+
+Generate decision-support views such as:
+
+1. model × task-class × role capability/acceptance heatmap with sample count and recency;
+2. quality versus paid-token/cost frontier;
+3. quality versus latency frontier;
+4. quality versus local compute/VRAM frontier;
+5. accepted outcome per token/provider unit;
+6. accepted outcome per GPU-second where measurable;
+7. failure-mode graph;
+8. capability-coverage/uncertainty graph;
+9. model-family/provider diversity view for verifier/routing monoculture;
+10. incumbent/promotion history with evidence and rollback target.
+
+These are derived views only; they are not routing authority.
+
+### Relationship to existing tasks
+
+This remains the **single canonical owner** for global model-role/task evidence.
+
+It should absorb or consume results from, rather than duplicate:
+
+- local model LM1-LM4 benchmark/canary work;
+- `2026-09-08-subscription-usage-attribution-for-continuous-system-improvement`;
+- `2026-10-01-provider-quota-health-in-routing-preflight`;
+- persistent blocked-route rerouting;
+- Misumi persona-growth/model evaluation;
+- Scottish speech/voice-quality model selection;
+- future domain-specific model evaluations.
+
+Domain-specific tasks own their fixtures and acceptance criteria. They publish actual outcome/resource evidence into this owner.
+
+### Promotion and automatic routing boundary
+
+This system may recommend and prepare routing changes, but it must not silently self-modify production routing from weak evidence.
+
+Promote a route only when evidence shows it **actually completes the real task class adequately** and the governed promotion threshold is met.
+
+Public benchmarks or synthetic tests may shortlist a candidate but cannot qualify it for production.
+
+When evidence is sparse, keep the incumbent and mark uncertainty rather than generating artificial workload.
+
+### Global success criterion
+
+Optimise for:
+
+> **verified useful task completion per unit of scarce resource**
+
+subject to quality, safety, authority and locality constraints.
+
+Scarce resources include paid/cloud tokens/quota, local GPU/CPU time, VRAM/RAM, latency, context bandwidth, operator attention, retries and rework.
+
+Do not reduce this to one universal scalar. Task-class-specific Pareto frontiers and promotion decisions are the intended mechanism.
+
+### Additional acceptance criteria
+
+- The task is `ready` and becomes a critical background capability after the current convergence programme closes.
+- Naturalistic real-work evidence is the primary data source.
+- No model is promoted solely from synthetic/public benchmark evidence.
+- No challenger is run solely to fill a graph cell.
+- Local and paid/cloud models are represented in the same task/role evidence system without pretending their resource units are identical.
+- The graph can distinguish runtime model, model family, provider, role contract, task class, host and exact model/artifact revision.
+- At least one real recurring task class demonstrates a routing improvement based on accepted-outcome and efficiency evidence.
+- At least one local-versus-paid or different-provider comparison is captured from justified real work or faithful replay.
+- Failed/rejected/escalated runs remain visible.
+- Existing routing/provider-quota/usage telemetry is extended or referenced rather than replaced.
+- The system persistently updates from real work across Misumi/Odysseus and other registered systems.
+- No private chain-of-thought is captured.
