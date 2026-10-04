@@ -19,6 +19,7 @@ from core.middleware import require_admin
 from src.misumi_household import HouseholdReadOnlyAdapter, infer_household_domain
 from src.misumi_memory import MisumiMemory
 from src.misumi_observability import MisumiEventLog
+from src.misumi_persona_routing import resolve_auto_lead
 from src.misumi_policy import load_persona_policy, normalize_persona, persona_record, policy_summary
 from src.misumi_skills import installed_skill_files, security_review_files, skills_for_persona
 from src.misumi_task_router import MisumiTaskRouter
@@ -757,9 +758,15 @@ def setup_misumi_routes(
             _require_api_scope(request, "misumi:execute")
         started = time.monotonic()
         request_id = events.request_id()
-        persona = normalize_persona(body.persona)
+        # ``persona: "auto"`` delegates the lead-persona choice to the ratified
+        # deterministic routing contract; any other value stays caller-owned.
+        auto_route = str(body.persona or "").strip().lower() == "auto"
+        persona = normalize_persona("aoteru" if auto_route else body.persona)
         interface_context = body.context if isinstance(body.context, str) else ""
         prompt = (body.prompt or interface_context or body.intent or "status").strip()
+        routing: Optional[Dict[str, Any]] = None
+        if auto_route:
+            persona, routing = resolve_auto_lead(prompt)
         owner = _owner(request)
         domain = infer_household_domain(prompt)
         sources = adapter.search(prompt, domain=domain, limit=4) if adapter.reachable else []
@@ -920,6 +927,8 @@ def setup_misumi_routes(
         events.emit({
             "request_id": request_id,
             "persona": persona,
+            "persona_source": "auto" if auto_route else "requested",
+            "routing": routing,
             "files_read": sorted({item["path"] for item in sources}),
             "files_changed": files_changed,
             "model": model,
@@ -939,6 +948,7 @@ def setup_misumi_routes(
             ),
             "node": "odysseus",
             "persona": persona,
+            "persona_source": "auto" if auto_route else "requested",
             "who": persona_record(persona).get("display_name"),
             "audio_url": None,
             "voice": None,
@@ -949,6 +959,8 @@ def setup_misumi_routes(
             "retention": retention,
             "history_persisted": bool(should_persist and session_id),
         }
+        if routing is not None:
+            response["routing"] = routing
         if _consultation_enabled():
             response.update({
                 "consulted": consulted,
