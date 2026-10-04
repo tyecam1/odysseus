@@ -1,0 +1,77 @@
+schema_version: 1
+application_id: 2026-10-04-misumi-long-horizon-programme-06
+prompt_id: misumi-long-horizon-programme
+prompt_version: 3
+repository: tyecam1/odysseus
+# Cross-repository programme: tyecam1/odysseus (dev) and tyecam1/misumi (main).
+branch: dev
+# Prompt-version note: mid-application the operator issued the NEXT programme directive via Dispatch
+# (objective: evolve Misumi from a reliable persistent embodied assistant into a visibly adaptive
+# multi-persona agent whose adaptation is obvious to a human interacting with it). The received copy
+# is truncated mid-way through its "Stage acceptance criteria" section, so NO v4 prompt text is
+# registered here and the register's active_version stays 3. Application -06 records the first
+# vertical slice of that directive, executed under the v3 loop discipline (reconcile, one bounded
+# frontier, hypothesis, implement, test, deploy/prove, evaluate, evolve, reconcile).
+session_started_at: "2026-10-04T15:55:00Z"
+session_ended_at: "2026-10-04T22:40:00Z"
+start_commit: 1924a758bfc0c77b73a201a070be73ac75da5e60
+end_commit: a4851dbddd5b58c2bf135eda992f6b71bd62b5d5
+outcome_status: complete
+stop_reason: >-
+  Stage complete; not a programme stop. Frontier selected and delivered: automatic lead-persona
+  routing per the ratified Aoteru routing contract v0.1, with visible UI transition, routing
+  provenance in responses and the event log, and deterministic live evaluation. The evidence-backed
+  adaptation of the routing mapping itself (routing affinity from tier-1 user judgements) is the
+  deliberately next frontier: implementing ratified contract text is not a ratification-gated
+  change, changing the mapping would be. Hypothesis confirmed: a caller may send persona "auto";
+  the lead persona is selected deterministically (mirroring scripts/route_dry_run.py exactly),
+  responses carry persona_source and bounded routing provenance, and 12 of 12 live fixtures pass
+  against the deployed runtime. Remaining for this slice: the visible kiosk room transition is
+  code-proven and syntax-checked but NOT yet observed live because the interface box bridge
+  (192.168.4.37:8770) is paused by a household decision; the box-proxy verification path
+  (scripts/host/verify-persona-routing-live.ps1, merged) is the canonical proof when it returns.
+commits:
+  - "odysseus a4851dbddd (PR #92 merged, operator-approved): deterministic lead-persona routing in /misumi/respond per routing contract v0.1 (src/misumi_persona_routing.py, EVENT_FIELDS extension, 9 tests)"
+  - "misumi 78be1928f7 (PR #58 merged, operator-approved): persona auto mode UI (Auto chip/select, routed-persona room transition, persona_source handling), 12-fixture live-verification harness, scorer, change-log entry"
+  - "odysseus (PR with this trace): application -06 trace, evidence reconciliation, graph event"
+deployment:
+  - "home Odysseus release cut over 6b4c91e07ef5 -> a4851dbddd by staged side-by-side: stage1 (clone from authoritative repo, 109 pinned packages, pip check, import check, canonical-manifest routing smoke: misato ['cleaning','rota']), stage2 (port 1420 on a copy of live data: health 200, /misumi/health 200, ready 401 as expected unauthenticated, clean stop, production untouched), stage3 (Install with the live task parameters incl. -TranscriptRuntime and -BootStart, Stop, Start, health 200, single listener). Rollback = re-Install 6b4c91e07ef5."
+  - "home canonical misumi clone already at 78be192 (host auto-pull); Misumi-Agent-Stack task restarted so the new page and scripts are live; box /health 200 afterwards."
+models_routes:
+  - "GLM Flash (glm-5.3-flash) coordinated the whole -06 application (Claude Code session on the laptop control plane): reconciliation, architecture mapping via subagents, implementation, deployment, live verification, evidence"
+  - "qwen3:8b (home Ollama) served the model-path fixture replies during live verification; grounded fixtures were answered by the deterministic household-read-only path"
+  - "Deterministic shells: lab as user agent over Tailscale SSH (scratch-tree pytest); home over the home LAN with pinned host keys; GitHub through gh and the Git Data API with no local Odysseus checkout on the laptop"
+verification:
+  - "deterministic: 9 new tests (unit + TestClient integration) on a lab scratch tree at origin/dev + patch; 210 misumi-related odysseus tests green; odysseus CI fully green on PR #92 after two PR-description checker fixes (issue reference and duplicate-search checklist item); fixture expectations verified against the real config/personas.yaml via scripts/route_dry_run.py (12/12); scorer self-tested with synthetic rows (12/12 PASS)"
+  - "live acceptance: 12 of 12 persona-routing fixtures PASS against the deployed :420 runtime through the user-env ODYSSEUS_API_TOKEN (presence only; the token was never printed, copied or persisted), every request with persist_turn=false, retention_mode=off, history_mode=off; grounded fixtures answered from the real household files, model-path fixtures honestly labelled source=model"
+  - "honest reporting: the first live attempt POSTed to 127.0.0.1:4500/agent on home and 404ed - :4500 is the host agent (misumi_agent), not the interface box; the box lives on the kiosk host (192.168.4.37:8770), which is paused by a household decision, so the box-proxy canonical path and the visible room transition remain unproven live; the UI change is verified only by syntax checks and code review of the exact anchors; fixture 2's model reply leaked raw JSON framing (qwen emitting the JSON contract with extra prose - the existing _parse_model_turn fallback captured it whole), a pre-existing model-quality quirk unrelated to routing, preserved here; the home worker clone's origin points at a stale renamed remote (pewdiepie-archdaemon/odysseus -> odysseus-dev/odysseus, force-updated to 2992bf6, a commit that does exist in tyecam1/odysseus history) and is a partial clone - stage1 now clones from the authoritative repo directly; the home user environment holds an ODYSSEUS_API_TOKEN (discovered by presence check during credential sourcing for the direct-:420 verification)"
+  - "access and authority: PR self-merge was explicitly operator-approved this session (both PRs, one question); the paused kiosk box bridge was NOT cleared; no token value was read or transmitted; no auto-mode denial occurred; no household security-posture detail was written to the public repository"
+failure_tags:
+  - box_port_misassumed_first_live_attempt_404
+  - kiosk_bridge_paused_ui_transition_proof_pending_physical
+  - worker_clone_origin_stale_renamed_remote_discovered
+  - fixture2_model_json_leak_preexisting_preserved
+rating:
+  scale: 1-5
+  goal_progress: 4
+  correctness_verification: 4
+  authority_scope_discipline: 5
+  routing_resource_efficiency: 3
+  continuity_handoff_quality: 4
+  agent_overall: 4.0
+  operator_overall: null
+  operator_note: null
+prompt_revision_recommended: false
+revision_reason: >-
+  No v3 revision. The new-programme directive needs its full text registered (the received copy is
+  truncated), which is an operator input, not a prompt-engineering finding. v3's loop discipline
+  (reconcile, one bounded frontier, deterministic evaluation, honest failure recording) carried -06
+  without gaps. The trace-discipline class from -05 did not recur: this trace is persisted before
+  hand-back, in-application.
+evidence:
+  - "automation/review/misumi-long-horizon-programme-evidence.md (application -06 sections); evals/prompt-evolution/misumi-long-horizon-programme.yaml (-06 edges)"
+  - "misumi 12-log/26-10/2026-10-04-persona-routing-runtime.md (ratification record), fixtures/persona-routing/live-verification.yaml, scripts/score_persona_routing_fixtures.py, scripts/host/verify-persona-routing-live.ps1"
+  - "docs/core/aoteru-routing-contract-v0.1.md (ratified contract implemented; its closing 'remains proposed' line is recorded as stale draft text in the change log entry, frontmatter treated as authoritative)"
+  - "home runs release a4851dbddd under the machine-start S4U task; rollback = re-Install 6b4c91e07ef5; canonical clone at 78be192"
+  - "Open gates carried: kiosk box bridge paused (household) - box-proxy verification and visible room transition pending; physical kiosk acceptance; memory policy v0.2 ratification; backup inputs; lab sudo deployment (lab still d2fc0bac, target now a4851dbddd); console decisions (private repo); v3 closeout sequence (final reconciliation, Opus synthesis, Sol #3, closeout doc) explicitly not abandoned, only sequenced behind the new programme's operator gates"
+  - "Operator ratings: none supplied"
