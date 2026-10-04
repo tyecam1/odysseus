@@ -204,6 +204,7 @@ prompts:
         parent_version: 2
         application_evidence:
           - 2026-10-02-misumi-long-horizon-programme-03
+          - 2026-10-03-misumi-long-horizon-programme-05
         derived_from_applications:
           - 2026-10-02-misumi-long-horizon-programme-02
         evolution_targets:
