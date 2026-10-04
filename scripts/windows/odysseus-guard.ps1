@@ -198,7 +198,7 @@ switch ($Action) {
         $flag = Get-MaintenanceFlag
         $tasks = foreach ($n in $OdysseusTaskName, $OllamaTaskName, $GuardTaskName) {
             $t = Get-ScheduledTask -TaskName $n -ErrorAction SilentlyContinue
-            if ($t) { $i = Get-ScheduledTaskInfo -TaskName $n; [ordered]@{ name = $n; state = [string]$t.State; logon = [string]$t.Principal.LogonType; triggers = (@($t.Triggers | ForEach-Object { $_.CimClass.CimClassName -replace 'MSFT_Task|Trigger', '' }) -join ','); last_run = $i.LastRunTime; last_result = $i.LastTaskResult } }
+            if ($t) { $i = Get-ScheduledTaskInfo -TaskName $n; [ordered]@{ name = $n; state = [string]$t.State; logon = [string]$t.Principal.LogonType; triggers = (@($t.Triggers | ForEach-Object { $_.CimClass.CimClassName -replace 'MSFT_Task|Trigger', '' }) -join ','); last_run = $i.LastRunTime.ToString('o'); last_result = $i.LastTaskResult } }
             else { [ordered]@{ name = $n; state = 'not-installed' } }
         }
         [ordered]@{
@@ -207,7 +207,7 @@ switch ($Action) {
             maintenance = $flag
             failure_counts = (Read-State)
             tasks = @($tasks)
-            recent_evidence = @(if (Test-Path $evidencePath) { Get-Content $evidencePath -Tail 8 })
+            recent_evidence = @(if (Test-Path $evidencePath) { Get-Content $evidencePath -Tail 8 | ForEach-Object { [string]$_ } })
         } | ConvertTo-Json -Depth 5
     }
     'Install' {
