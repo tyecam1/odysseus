@@ -181,6 +181,27 @@ nodes:
       machine-start redesign is the outcome, so no new prompt text is added. The coordinator runtime changed
       mid-application (Sonnet to GLM Flash, a temporary substitution while Claude subscription capacity is exhausted)
       and is recorded in the trace's models_routes only; the role contract and the Opus-only gates are unchanged.
+  - id: application:2026-10-05-misumi-long-horizon-programme-07
+    type: application
+    application_id: 2026-10-05-misumi-long-horizon-programme-07
+    trace_path: evals/prompt-applications/misumi-long-horizon-programme/2026-10-05-misumi-long-horizon-programme-07.yaml
+    rating:
+      agent_overall: 4.4
+      goal_progress: 5
+      correctness_verification: 4
+      authority_scope_discipline: 5
+      routing_resource_efficiency: 4
+      continuity_handoff_quality: 4
+    failure_tags:
+      - v4_registration_incomplete_caught_by_register_consistency_ci
+      - promote_lookup_by_cue_key_bug_caught_by_own_tests
+      - shadow_evaluation_phantom_spillover_bug_caught_by_own_tests
+      - deploy_script_freeze_path_regression_aborted_stage1
+      - home_clone_auto_pull_lag_docs_only
+  - id: evolution:2026-10-05-misumi-long-horizon-programme-07
+    type: evolution_event
+    decision: reinforce
+    evidence_application: 2026-10-05-misumi-long-horizon-programme-07
 edges:
   - from: prompt:v1
     to: application:2026-10-01-misumi-long-horizon-programme-01
@@ -235,6 +256,15 @@ edges:
     type: observed
   - from: evolution:2026-10-04-misumi-long-horizon-programme-06
     to: prompt:v3
+    type: reinforced
+  - from: prompt:v4
+    to: application:2026-10-05-misumi-long-horizon-programme-07
+    type: applied
+  - from: application:2026-10-05-misumi-long-horizon-programme-07
+    to: evolution:2026-10-05-misumi-long-horizon-programme-07
+    type: observed
+  - from: evolution:2026-10-05-misumi-long-horizon-programme-07
+    to: prompt:v4
     type: reinforced
 guardrail_validation:
   prompt:v4:
