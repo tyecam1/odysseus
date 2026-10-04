@@ -201,6 +201,15 @@ edges:
   - from: evolution:2026-10-03-misumi-long-horizon-programme-05
     to: prompt:v3
     type: reinforced
+  - from: prompt:v3
+    to: application:2026-10-04-misumi-long-horizon-programme-06
+    type: applied
+  - from: application:2026-10-04-misumi-long-horizon-programme-06
+    to: evolution:2026-10-04-misumi-long-horizon-programme-06
+    type: observed
+  - from: evolution:2026-10-04-misumi-long-horizon-programme-06
+    to: prompt:v3
+    type: reinforced
 guardrail_validation:
   prompt:v2:
     scope_preserved: true
