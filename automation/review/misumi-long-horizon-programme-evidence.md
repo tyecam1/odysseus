@@ -17,6 +17,20 @@ Operator rules attached to the change:
 - Programme-related writes to governed feature/docs branches in `tyecam1/misumi` and `tyecam1/odysseus` are authorised when required by `misumi-long-horizon-programme@v1`, through PRs, leases/worktrees and normal controls. This does not authorise bypassing permission-system denials or destructive or unrelated writes.
 - Home worker enablement (Stage 8) is approved subject to the existing qualification and benchmark gates; being online and reachable is necessary but does not by itself make home worker-eligible.
 
+## Reconciled live state (application -08, verified 2026-10-05)
+
+Where this section conflicts with older reconciliations, this section and the evidence it cites win. The programme now has a materialised queue: `automation/review/MISUMI_PROGRAMME.md`.
+
+| Topic | State now | Evidence / how established |
+| --- | --- | --- |
+| `odysseus@dev` | `ce8d353a8f` (PR #96: governed ratification surface + MISUMI_PROGRAMME.md). | GitHub `branches/dev` (verified -08) |
+| `misumi@main` / home clone | `ad4374a001` (unchanged this application); home clone caught up with the generalisation fixture (auto-pull lag resolved). | GitHub + home probes (verified -08) |
+| Household runtime (home) | `Odysseus-Misumi` Running on release `ce8d353a8f`; staged cutover logs on the host; rollback = re-Install `8f7803acb2`. | live probes (verified -08) |
+| Ratification surface | **Live-proven.** Real store readable on `:420` (`GET /misumi/routing/candidates`: both -07 demo candidates with full provenance, no active revisions). On a labelled side-by-side `:1420` instance with a scratch state root: 4 real correction sequences → `eligible, awaiting: user-ratification`; API promote → revision `rr-d0899f9686a8` (`operator_ratification`, principal `tye`); learned route served (jin, base misato); API rollback → baseline misato; unknown-id promote on `:420` → loud 404, nothing mutated. Reject is test-proven (no real candidate was rejected — that would have been an unapproved household-store mutation). | `demo-08.ps1`/`probe-08.ps1` on the host (verified -08) |
+| Programme queue | `MISUMI_PROGRAMME.md` materialised: P1 done; P2 verification debt carried (Sol lane `ok:false`/`worker_failed` on stale lab backend — blocked with B3); P3 nature-gated; B1-B7 operator/physical/lane gates, each precise. | the queue file (verified -08) |
+| Independent verification | **Debt carried**: no independent model review yet covers -06/-07/-08 (Sol blocked on the lab deploy; Opus synthesis requires Opus availability). Recorded in the queue and the -08 trace; retry after B3. | Sol dispatch output verbatim in trace -08 (verified -08) |
+| Lab | Still `d2fc0bac32`; target now `ce8d353a8f` (operator sudo). | SSH (verified -08) |
+
 ## Reconciled live state (application -07, verified 2026-10-05)
 
 Where this section conflicts with older reconciliations, this section and the evidence it cites win. "verified -07" means measured live on 2026-10-04/05 from the source named. The v4 directive is now **registered complete** (`docs/initialising-prompts/misumi-long-horizon-programme-v4.md`, `active_version: 4`, register-consistency suite green), closing the -06 truncation gap.
@@ -140,6 +154,14 @@ The stage log below is history, written as each stage happened. **Superseded by 
 - Operator authority for the demonstration was obtained, not synthesised: an explicit choice approved the demonstration mapping ("Demo cleaning → Jin, then roll back"). The live chain then ran exactly as approved; end state is the restored baseline with evidence preserved on the host.
 - Live verification: full chain including restart persistence (real Stop/Start) and rollback; the 12 deterministic fixtures re-ran 12/12 on the new release.
 - Carried: physical kiosk acceptance (bridge paused); memory policy v0.2 ratification (no contradictory markers found; routing state explicitly not gated by it — reasoning recorded in the trace); backup inputs; lab sudo deploy; v3 closeout sequence.
+
+### Application -08 (2026-10-05) — governed ratification surface; programme queue materialised
+
+- The standing coordinator directive references `MISUMI_PROGRAMME.md` as the queue to drive to completion; it had never been created. Materialised at `automation/review/MISUMI_PROGRAMME.md`, distilled from the v4 directive's acceptance items, the evidence register's open gates and the programme task cards, with every operator/physical/lane-blocked item recorded precisely (B1-B7).
+- Highest-value executable item was P1: the ratification surface. `odysseus` PR #96 (`ce8d353a8f`): `GET /misumi/routing/candidates` (misumi:read), `POST .../promote` (misumi:execute; `operator_ratification` authorisation with the authenticated principal recorded in the revision and the event log), `POST .../reject` (terminal, refuses active candidates and re-rejection), `POST .../revisions/{id}/rollback`. Gate refusals are loud HTTP 409/404; store gains `reject()` and `get_candidate_by_id()`.
+- Live proof: Part A read the real household store on `:420` (read-only); Part B exercised the whole promote→learned-route→rollback flow on a labelled side-by-side `:1420` instance with a scratch state root — the household store was never mutated by proof activities. Verification: 8 new tests; 48 targeted / 237 misumi-related green on the lab; CI green.
+- Sol (P2) attempted via the lab codex lane and failed truthfully (`ok:false`, `worker_failed`, `code-strong` unresolved on `d2fc0bac`) — independent verification of -06/-07/-08 is carried as explicit debt, blocked with the operator lab deploy (B3).
+- Merged under the standing coordinator directive's merge authority (recorded there; per-session approval practice superseded for this session by that directive).
 
 ## Denials recorded (auto-mode; not bypassed)
 1. "Modify Shared Resources" — a local `git diff` of two scratch docs (cleared by the operator's later authorisation).

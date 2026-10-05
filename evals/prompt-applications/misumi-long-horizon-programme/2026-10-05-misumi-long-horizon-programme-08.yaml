@@ -1,0 +1,61 @@
+schema_version: 1
+application_id: 2026-10-05-misumi-long-horizon-programme-08
+prompt_id: misumi-long-horizon-programme
+prompt_version: 4
+repository: tyecam1/odysseus
+branch: dev
+session_started_at: "2026-10-05T00:40:00Z"
+session_ended_at: "2026-10-05T03:45:00Z"
+start_commit: 3f3119c3930e79e615869347e93d1b1ed77780c1
+end_commit: ce8d353a8f7de87d12a3057fceb47b3f806d61ba
+outcome_status: complete
+stop_reason: >-
+  Stage complete. P1 of the newly materialised MISUMI_PROGRAMME.md queue is
+  delivered and live-proven: the governed ratification surface completes the
+  adaptation loop's authority story - repetition-eligible candidates can be
+  inspected, ratified (principal recorded), rejected, and rolled back through
+  the authenticated Misumi API, with loud gate refusals and the household
+  store untouched by proof activities. The programme queue file itself was
+  materialised (referenced by the standing directive but never previously
+  created). The remaining queue holds no executable items this session: P2 is
+  blocked by the lab-deploy operator gate (Sol lane unresolved on the stale
+  backend), P3 is nature-gated, and B1-B7 are operator/physical/lane gates -
+  each recorded precisely. Terminal state for this session demonstrated in
+  the queue file and this trace.
+commits:
+  - "odysseus ce8d353a8f (PR #96 merged under the standing coordinator directive's merge authority): governed ratification surface (candidates inspect, promote with operator_ratification principal, reject, rollback) + MISUMI_PROGRAMME.md"
+  - "odysseus (PR with this trace): -08 trace, evidence reconciliation, graph application/evolution nodes"
+deployment:
+  - "home Odysseus release cut over 8f7803acb2 -> ce8d353a8f by the staged side-by-side path (logs stage[123]-ce8d353a8f.log on the host); rollback = re-Install 8f7803acb2"
+verification:
+  - "deterministic: 8 new tests (operator ratification promote, principal requirement, terminal rejection, active-rejection refusal, full API flow inspect->gate-refusal->ratify->learned route->rollback->reject, unknown-id 404s, disabled-store 503); 48 targeted and 237 misumi-related tests green on a lab scratch tree; odysseus CI fully green"
+  - "live acceptance on the deployed runtime: Part A - GET /misumi/routing/candidates on :420 read the REAL household store (both -07 demo candidates with full provenance, no active revisions); Part B - on a labelled side-by-side :1420 instance with a SCRATCH routing-state root (household store untouched), four real correction sequences over real HTTP produced an eligible awaiting-user-ratification candidate (4 evidence refs, confidence 4), API promote returned revision rr-d0899f9686a8 with authorisation operator_ratification principal=tye, the next auto request routed jin via routing-contract-v0.1+learned-revision with base_selected misato, API rollback restored the contract route (misato), and the scratch instance was stopped cleanly; a non-mutating promote of an unknown id on :420 answered 404 (endpoint live, gates loud)"
+  - "honest reporting: the reject endpoint was exercised in tests and via 404 live but no real shadow candidate was rejected on the household store (rejecting one would have been a real mutation outside the approved demonstration); the Sol dispatch failed ok:false worker_failed (code-strong has no evidence-backed binding on the stale lab backend d2fc0bac) so the independent review of -06/-07/-08 is carried as explicit verification debt, retry after the operator lab deploy (B3); two transport/consistency slips in this session (a glued respond decorator line caught by pytest collection; the principal requirement surfacing as a 409 in the unauthenticated TestClient) were caught by tests before merge"
+  - "access and authority: PR #96 merged under the standing coordinator directive's explicit merge authority ('merged/deployed... merge under valid authority... immediately continue'); the household store was only read, never mutated by proof activities; no token values read or persisted"
+failure_tags:
+  - sol_lane_unresolved_on_stale_lab_backend_verification_debt_carried
+  - reject_flow_not_live_exercised_on_real_store_tests_only
+  - respond_decorator_edit_glued_line_caught_by_pytest_collection
+  - principal_requirement_surfaced_as_409_in_unauthenticated_testclient
+rating:
+  scale: 1-5
+  goal_progress: 4
+  correctness_verification: 4
+  authority_scope_discipline: 5
+  routing_resource_efficiency: 4
+  continuity_handoff_quality: 4
+  agent_overall: 4.2
+  operator_overall: null
+  operator_note: null
+prompt_revision_recommended: false
+revision_reason: >-
+  Reinforce v4. P1 completed the loop's authority story exactly as the v4
+  directive's promotion policy describes; the failures are first occurrences
+  with existing guards (tests, staged deploy scripts, truthful lane
+  failures). No new prompt text warranted.
+evidence:
+  - "automation/review/MISUMI_PROGRAMME.md (P1 done with live proof; P2 verification debt recorded; B1-B7 operator gates); automation/review/misumi-long-horizon-programme-evidence.md (-08 section); evals/prompt-evolution/misumi-long-horizon-programme.yaml (-08 nodes)"
+  - "home runs release ce8d353a8f (rollback = re-Install 8f7803acb2); demonstration scripts on the host: demo-08.ps1, probe-08.ps1, rollback-07.ps1"
+  - "Sol dispatch failure output recorded verbatim in the -08 trace: ok false, worker_failed, alias code-strong resolved false on lab d2fc0bac"
+  - "Open gates carried: kiosk bridge paused (B1); memory policy v0.2 ratification (B2); lab sudo deploy, target now ce8d353a8f (B3); backup inputs (B4); router weakness changes need contract ratification (B5); console/physical (B6); v3 closeout incl. Opus synthesis and Sol #3 (B7)"
+  - "Operator ratings: none supplied"
