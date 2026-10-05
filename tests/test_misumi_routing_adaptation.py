@@ -423,3 +423,147 @@ def test_adaptation_kill_switch(tmp_path, monkeypatch):
     assert first["persona"] == "misato"
     assert "routing_adaptation" not in second
     assert RoutingAdaptationStore(tmp_path / "routing-state").list_evidence() == []
+
+
+# ---------- ratification surface (application -08, P1) ----------
+
+def test_operator_ratification_promotes_repetition_eligible_candidate(tmp_path: Path):
+    store = _store(tmp_path)
+    for session in ("a", "b", "c"):
+        store._last_auto_route[session] = {
+            "prompt": "Check the cleaning rota", "persona": "misato",
+            "reasons": ["cleaning", "rota"], "request_id": f"r-{session}", "at": time.time(),
+        }
+        record_manual_choice(
+            store, prompt=f"ask Jin about the cleaning rota {session}", chosen_persona="jin",
+            session_id=session, owner=None,
+        )
+    candidate = store.get_candidate(["cleaning", "rota"])
+    assert candidate["status"] == "eligible"
+    revision = store.promote(candidate["candidate_id"], authorisation={
+        "type": "operator_ratification", "via": "api", "principal": "operator",
+    })
+    assert revision["status"] == "active"
+    assert revision["authorisation"]["type"] == "operator_ratification"
+    persona, provenance = store.apply_learned_overlays(
+        "check the cleaning rota", "misato", ["cleaning", "rota"]
+    )
+    assert persona == "jin" and provenance["learned"]
+
+
+def test_operator_ratification_requires_principal(tmp_path: Path):
+    store = _store(tmp_path)
+    record_durable_instruction(
+        store, prompt="For watering questions use Ginko from now on.",
+        named_persona="ginko", session_id="s", owner=None,
+    )
+    candidate = store.get_candidate(["watering"])
+    try:
+        store.promote(candidate["candidate_id"], authorisation={"type": "operator_ratification"})
+        raise AssertionError("principal required")
+    except ValueError:
+        pass
+
+
+def test_reject_is_terminal_and_preserves_history(tmp_path: Path):
+    store = _store(tmp_path)
+    candidate = _correction(store)["candidate"]
+    rejected = store.reject(candidate["candidate_id"], "not wanted")
+    assert rejected["status"] == "rejected"
+    try:
+        store.reject(candidate["candidate_id"], "again")
+        raise AssertionError("re-rejecting a rejected candidate must fail")
+    except ValueError:
+        pass
+    try:
+        store.promote(candidate["candidate_id"], authorisation={"type": "operator_ratification", "principal": "x"})
+        raise AssertionError("rejected candidates must not promote")
+    except ValueError:
+        pass
+    assert len(store.list_evidence()) == 1  # history preserved
+
+
+def test_reject_active_candidate_refused(tmp_path: Path):
+    store = _store(tmp_path)
+    outcome = record_durable_instruction(
+        store, prompt="For watering questions use Ginko from now on.",
+        named_persona="ginko", session_id="s", owner=None,
+    )
+    assert outcome["state"] == "active"
+    candidate = store.get_candidate(outcome["cue"])
+    try:
+        store.reject(candidate["candidate_id"], "no")
+        raise AssertionError("active candidates roll back, they are not rejected")
+    except ValueError:
+        pass
+
+
+def test_routing_api_inspect_promote_rollback(tmp_path, monkeypatch):
+    # Simulate an authenticated operator: the ratification endpoint records the
+    # token owner as the ratifying principal.
+    monkeypatch.setattr("routes.misumi_routes._owner", lambda request: "test-operator")
+    client = _client(tmp_path, monkeypatch)
+    # Seed an eligible candidate through the real interaction path.
+    client.post("/misumi/respond", json={
+        "prompt": "Check the cleaning rota", "persona": "auto", "session_id": "ra-1"})
+    client.post("/misumi/respond", json={
+        "prompt": "no, ask Jin about the cleaning rota", "persona": "jin", "session_id": "ra-1"})
+
+    listed = client.get("/misumi/routing/candidates").json()
+    ids = {c["candidate_id"]: c for c in listed["candidates"]}
+    assert listed["active_revisions"] == []
+    target = next(c for c in ids.values() if c["status"] == "shadow")
+
+    # A shadow candidate cannot be promoted through the API (gate).
+    refused = client.post(f"/misumi/routing/candidates/{target['candidate_id']}/promote")
+    assert refused.status_code == 409
+
+    # Drive it to eligible and ratify through the API.
+    store = RoutingAdaptationStore(tmp_path / "routing-state")
+    for session in ("x", "y", "z"):
+        store._last_auto_route[session] = {
+            "prompt": "Check the cleaning rota", "persona": "misato",
+            "reasons": ["cleaning", "rota"], "request_id": f"r-{session}", "at": time.time()}
+        record_manual_choice(store, prompt=f"ask Jin about the cleaning {session}",
+                             chosen_persona="jin", session_id=session, owner=None)
+    eligible = store.get_candidate(["cleaning", "rota"])
+    assert eligible["status"] == "eligible"
+
+    promoted = client.post(
+        f"/misumi/routing/candidates/{eligible['candidate_id']}/promote")
+    assert promoted.status_code == 200
+    revision_id = promoted.json()["revision"]["revision_id"]
+
+    rerouted = client.post("/misumi/respond", json={
+        "prompt": "the cleaning rota needs updating", "persona": "auto", "session_id": "ra-2"}).json()
+    assert rerouted["persona"] == "jin"
+    assert rerouted["routing"]["learned"]["revision_id"] == revision_id
+
+    rolled = client.post(
+        f"/misumi/routing/revisions/{revision_id}/rollback",
+        json={"reason": "operator rollback via API"})
+    assert rolled.status_code == 200
+    restored = client.post("/misumi/respond", json={
+        "prompt": "the cleaning rota needs updating", "persona": "auto", "session_id": "ra-2"}).json()
+    assert restored["persona"] == "misato"
+
+    rejected = client.post(
+        f"/misumi/routing/candidates/{target['candidate_id']}/reject",
+        json={"reason": "not wanted"})
+    assert rejected.status_code == 200
+    final = client.get("/misumi/routing/candidates").json()
+    statuses = {c["candidate_id"]: c["status"] for c in final["candidates"]}
+    assert statuses[target["candidate_id"]] == "rejected"
+
+
+def test_routing_api_unknown_ids_404(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    assert client.get("/misumi/routing/candidates").status_code == 200
+    assert client.post("/misumi/routing/candidates/aff-nonexistent/promote").status_code == 404
+    assert client.post("/misumi/routing/candidates/aff-nonexistent/reject").status_code == 404
+    assert client.post("/misumi/routing/revisions/rr-nonexistent/rollback").status_code == 404
+
+
+def test_routing_api_disabled_503(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch, adaptation=False)
+    assert client.get("/misumi/routing/candidates").status_code == 503

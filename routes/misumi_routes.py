@@ -781,6 +781,87 @@ def setup_misumi_routes(
             "household_reachable": adapter.reachable,
         }
 
+    @router.get("/routing/candidates")
+    async def routing_candidates(request: Request):
+        """Inspect affinity candidates and active revisions (read-only)."""
+        _require_api_scope(request, "misumi:read")
+        if adaptation is None:
+            raise HTTPException(503, "Routing adaptation is disabled")
+        candidates = sorted(
+            (c for c in adaptation.all_candidates().values() if isinstance(c, dict)),
+            key=lambda c: str(c.get("updated_at") or ""),
+        )
+        return {
+            "candidates": candidates,
+            "active_revisions": adaptation.active_overlays(),
+        }
+
+    @router.post("/routing/candidates/{candidate_id}/promote")
+    async def routing_candidate_promote(request: Request, candidate_id: str):
+        """The operator's ratification act for an eligible candidate."""
+        _require_api_scope(request, "misumi:execute")
+        if adaptation is None:
+            raise HTTPException(503, "Routing adaptation is disabled")
+        try:
+            revision = adaptation.promote(candidate_id, authorisation={
+                "type": "operator_ratification",
+                "via": "authenticated /misumi/routing API",
+                "principal": _owner(request),
+            })
+        except KeyError as exc:
+            raise HTTPException(404, str(exc).strip("'")) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        events.emit({
+            "request_id": events.request_id(),
+            "persona": revision.get("persona"),
+            "persona_source": "auto",
+            "routing": {"method": "routing-revision-promoted", "selected": revision.get("persona"),
+                        "reasons": [f"cue={','.join(revision.get('cue') or [])}"]},
+            "routing_adaptation": {"promotion": revision, "act": "operator_ratification"},
+            "outcome": "routing-promoted",
+            "approval_mode": "operator",
+        })
+        return {"promoted": True, "revision": revision}
+
+    @router.post("/routing/candidates/{candidate_id}/reject")
+    async def routing_candidate_reject(request: Request, candidate_id: str, body: Dict[str, Any] = None):
+        _require_api_scope(request, "misumi:execute")
+        if adaptation is None:
+            raise HTTPException(503, "Routing adaptation is disabled")
+        reason = str((body or {}).get("reason") or "rejected via ratification API")
+        try:
+            candidate = adaptation.reject(candidate_id, reason)
+        except KeyError as exc:
+            raise HTTPException(404, str(exc).strip("'")) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return {"rejected": True, "candidate": candidate}
+
+    @router.post("/routing/revisions/{revision_id}/rollback")
+    async def routing_revision_rollback(request: Request, revision_id: str, body: Dict[str, Any] = None):
+        _require_api_scope(request, "misumi:execute")
+        if adaptation is None:
+            raise HTTPException(503, "Routing adaptation is disabled")
+        reason = str((body or {}).get("reason") or "rolled back via ratification API")
+        try:
+            rollback = adaptation.rollback_revision(revision_id, reason)
+        except KeyError as exc:
+            raise HTTPException(404, str(exc).strip("'")) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        events.emit({
+            "request_id": events.request_id(),
+            "persona": rollback.get("persona"),
+            "persona_source": "auto",
+            "routing": {"method": "routing-revision-rolled-back", "selected": rollback.get("persona"),
+                        "reasons": [f"rolls_back={revision_id}"]},
+            "routing_adaptation": {"rollback": rollback},
+            "outcome": "routing-rolled-back",
+            "approval_mode": "operator",
+        })
+        return {"rolled_back": True, "rollback": rollback}
+
     @router.post("/respond")
     async def respond(request: Request, body: MisumiRespondRequest):
         _require_api_scope(request, "misumi:read")
