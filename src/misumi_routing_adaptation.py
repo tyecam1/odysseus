@@ -270,6 +270,35 @@ class RoutingAdaptationStore:
     def get_candidate(self, cue: list[str]) -> dict[str, Any] | None:
         return self._load_candidates().get("candidates", {}).get(self.cue_key(cue))
 
+    def get_candidate_by_id(self, candidate_id: str) -> dict[str, Any] | None:
+        for candidate in self.all_candidates().values():
+            if isinstance(candidate, dict) and candidate.get("candidate_id") == candidate_id:
+                return candidate
+        return None
+
+    def reject(self, candidate_id: str, reason: str) -> dict[str, Any]:
+        """Reject a shadow/eligible candidate (terminal). Active candidates
+        must be rolled back instead; history is never deleted."""
+        with self._lock:
+            data = self._load_candidates()
+            candidate = next(
+                (c for c in data.get("candidates", {}).values()
+                 if isinstance(c, dict) and c.get("candidate_id") == candidate_id),
+                None,
+            )
+            if candidate is None:
+                raise KeyError(f"unknown candidate: {candidate_id}")
+            if candidate.get("status") == "rejected":
+                raise ValueError("candidate is already rejected (terminal)")
+            if candidate.get("status") == "active":
+                raise ValueError("an active candidate is reverted by rollback, not rejection")
+            candidate["status"] = "rejected"
+            candidate["awaiting"] = None
+            candidate["rejection"] = {"reason": _short(reason, 240), "at": _now()}
+            candidate["updated_at"] = _now()
+            self._save_candidates(data)
+            return candidate
+
     def all_candidates(self) -> dict[str, dict[str, Any]]:
         return self._load_candidates().get("candidates", {})
 
@@ -354,6 +383,11 @@ class RoutingAdaptationStore:
             if authorisation["type"] == "user_instruction":
                 if authorisation.get("evidence_id") not in candidate.get("supporting_evidence", []):
                     raise ValueError("user_instruction authorisation must cite supporting evidence")
+            elif authorisation["type"] == "operator_ratification":
+                # The operator's own authenticated act (the ratification the
+                # seed order requires for repetition-eligible candidates).
+                if not authorisation.get("principal"):
+                    raise ValueError("operator_ratification requires the ratifying principal")
             else:
                 raise ValueError(f"authorisation type not supported: {authorisation['type']!r}")
             previous = self.active_revision_for_cue(candidate["cue"])
