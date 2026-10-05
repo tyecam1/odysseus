@@ -43,3 +43,14 @@ Final live reconciliation → Opus synthesis (requires Opus availability; carrie
 - -08: governed ratification surface for routing candidates + this queue materialised (PR #96; live proof as recorded under P1/P2).
 - -06: deterministic lead-persona routing + auto mode, live 12/12 (PRs #92/#58/#93).
 - -07: shadow-mode adaptation with governed promotion; full causal chain live-proven incl. restart persistence and rollback (PRs #94/#60/#95); v4 directive registered complete.
+
+## Terminal reconciliation (2026-10-05, applications -06 through -08)
+
+**No executable programme items remain this session.** Every remainder is explicitly classified:
+
+- **Operator authority:** B2 (memory policy v0.2 ratification), B3 (lab sudo deploy — also blocks P2's Sol retry and B7's Sol #3), B4 (backup inputs), B5 (router weakness changes — ratified-contract algorithm), B6 (console/physical decisions).
+- **Household/physical:** B1 (kiosk box bridge paused by household decision — box-proxy verification and room-transition observation ready to run the moment it returns).
+- **Lane unavailable (debt carried):** independent verification of -06/-07/-08 — the Sol/codex lane fails on the stale lab backend (recorded verbatim in trace -08); the Opus synthesis for the v3 closeout requires Opus availability (Flash coordinates, role contract unchanged). The dedicated GLM reasoning lane was not separately available this session; consequential designs were validated by the directive text, the ratified contract, deterministic tests and live proof instead — recorded here as reasoning debt alongside the Sol debt.
+- **Nature-gated:** P3 (repetition-derived candidates need real household interactions; inspection endpoint live).
+
+Executable work delivered this arc: -06 (automatic routing, 12/12 live), -07 (adaptation loop, full causal chain incl. restart persistence + rollback), -08 (ratification surface + this queue), each merged, deployed to the home release path, live-proven on the real runtime, and reconciled into the evidence register, traces and evolution graph.
