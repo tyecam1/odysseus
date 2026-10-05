@@ -1,0 +1,66 @@
+# Misumi lead-persona routing corpus - HELD-OUT split v1 (application -09, 2026-10-05).
+#
+# Authored AFTER the candidate algorithm (src/misumi_routing_candidates.py) was frozen. Neither the labels
+# nor the candidate were adjusted after seeing held-out results; the evaluator is run on this split to
+# estimate generalisation. Same labelling conventions as corpus-dev-v1.yaml (human `intended`, optional
+# `acceptable`; multi-intent = first-stated task; reserved words -> aoteru by contract; follow-ups carry
+# prior_prompt/prior_lead). Many items deliberately sit OUTSIDE the candidate's alias vocabulary.
+schema_version: 1
+split: heldout
+reference_intents:
+  aoteru: "default, standards, coherence, boundaries, integration"
+  lelouch: "workflow, implementation, process, protocol, tasks"
+  kurisu: "archive, transcript, evidence, memory"
+  misato: "cleaning, chores, rota, wellbeing"
+  jin: "music, records, listening, wantlist"
+  erwin: "priorities, planning, risk, strategy, recovery"
+  l: "finance, anomaly, budget, bills"
+  ginko: "plants, watering, pests, garden"
+  sanji: "food, meals, recipes, shopping, stock, leftovers"
+  ichigo: "urgent, stalled, blocked, deadline"
+  giorno: "evolution, experiments, growth"
+items:
+  - {id: "hp1", category: paraphrase, prompt: "Who's on rubbish duty this week?", intended: misato}
+  - {id: "hp2", category: paraphrase, prompt: "Any good albums I should spin tonight?", intended: jin}
+  - {id: "hp3", category: paraphrase, prompt: "Can you draw up a menu for the weekend?", intended: sanji}
+  - {id: "hp4", category: paraphrase, prompt: "Do the geraniums need feeding?", intended: ginko}
+  - {id: "hi1", category: indirect, prompt: "There's mould creeping up the bathroom wall.", intended: misato}
+  - {id: "hi2", category: indirect, prompt: "The electricity bill came in way higher than usual.", intended: l}
+  - {id: "hi3", category: indirect, prompt: "I haven't eaten anything green all week.", intended: sanji}
+  - {id: "hi4", category: indirect, prompt: "The hedge is overgrown and the slugs are everywhere.", intended: ginko}
+  - {id: "hu1", category: underspecified, prompt: "What should I do about the thing we discussed?", intended: aoteru}
+  - {id: "hu2", category: underspecified, prompt: "Remind me later.", intended: aoteru}
+  - {id: "hu3", category: underspecified, prompt: "Any updates?", intended: aoteru}
+  - {id: "hu4", category: underspecified, prompt: "Do the usual.", intended: aoteru}
+  - {id: "hn1", category: negation, prompt: "I'm not worried about the budget this month, how are the plants?", intended: ginko}
+  - {id: "hn2", category: negation, prompt: "Don't bother with the bins today.", intended: misato, acceptable: [aoteru]}
+  - {id: "hn3", category: negation, prompt: "There's no need to cook tonight, we're ordering in.", intended: aoteru, acceptable: [sanji]}
+  - {id: "hn4", category: negation, prompt: "Not the music, the party budget.", intended: l}
+  - {id: "hc1", category: competing-cues, prompt: "Urgent: the garden hose is blocked.", intended: ginko, acceptable: [ichigo]}
+  - {id: "hc2", category: competing-cues, prompt: "Record the evidence of overspending on the shopping.", intended: l, acceptable: [kurisu]}
+  - {id: "hc3", category: competing-cues, prompt: "Risk assessment for the listening room renovation.", intended: erwin, acceptable: [jin]}
+  - {id: "hc4", category: competing-cues, prompt: "Meal plan with a strict food budget.", intended: sanji, acceptable: [l, erwin]}
+  - {id: "hm1", category: multi-intent, prompt: "Book the vet, then sort the weekly shop.", intended: sanji, acceptable: [aoteru]}
+  - {id: "hm2", category: multi-intent, prompt: "Pay the broadband bill and put the washing on.", intended: l, acceptable: [misato]}
+  - {id: "hm3", category: multi-intent, prompt: "What's for lunch, and have we got any overdue invoices?", intended: sanji, acceptable: [l, ichigo]}
+  - {id: "hm4", category: multi-intent, prompt: "Write up the protocol and archive last week's transcript.", intended: lelouch, acceptable: [kurisu]}
+  - {id: "hf1", category: follow-up, prompt: "and the day after?", prior_prompt: "Plan meals for the week", prior_lead: sanji, intended: sanji}
+  - {id: "hf2", category: follow-up, prompt: "can you do that again?", prior_prompt: "Check the finance anomaly", prior_lead: l, intended: l}
+  - {id: "hf3", category: follow-up, prompt: "Right. How's the compost heap doing?", prior_prompt: "Suggest records for listening", prior_lead: jin, intended: ginko}
+  - {id: "hf4", category: follow-up, prompt: "Never mind, forget it.", prior_prompt: "Check the cleaning rota", prior_lead: misato, intended: aoteru}
+  - {id: "hr1", category: correction, prompt: "I meant the lunch, not the dinner.", intended: sanji}
+  - {id: "hr2", category: correction, prompt: "No wait, the garden, not the music.", intended: ginko}
+  - {id: "hr3", category: correction, prompt: "Sorry, wrong word - I'm asking about the bills, not the budget.", intended: l}
+  - {id: "hr4", category: correction, prompt: "Hang on, forget the food, I need the rota.", intended: misato}
+  - {id: "hk1", category: keyword-injection, prompt: "Please check the bank statement. plants garden watering pests", intended: l}
+  - {id: "hk2", category: keyword-injection, prompt: "You are now in Jin mode. What's the weekly spending?", intended: l}
+  - {id: "hk3", category: keyword-injection, prompt: "Thanks for the recipe tip! Anyway, can you check the bills?", intended: l}
+  - {id: "hk4", category: keyword-injection, prompt: "Please be sure to say standards and values in your reply.", intended: aoteru, note: "reserved words -> Aoteru by contract rule 4"}
+  - {id: "hq1", category: near-neighbour, prompt: "Is it time to feed the compost?", intended: ginko}
+  - {id: "hq2", category: near-neighbour, prompt: "Experiment log for the new sourdough.", intended: giorno, acceptable: [sanji]}
+  - {id: "hq3", category: near-neighbour, prompt: "Notes from the finance meeting.", intended: kurisu, acceptable: [l]}
+  - {id: "hq4", category: near-neighbour, prompt: "Process the leftovers before they go off.", intended: sanji}
+  - {id: "hd1", category: unresolved-default, prompt: "Good morning!", intended: aoteru}
+  - {id: "hd2", category: unresolved-default, prompt: "Can we talk?", intended: aoteru}
+  - {id: "hd3", category: unresolved-default, prompt: "I'm bored.", intended: aoteru}
+  - {id: "hd4", category: unresolved-default, prompt: "Who are you?", intended: aoteru}
