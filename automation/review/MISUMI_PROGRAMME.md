@@ -1,56 +1,71 @@
-# MISUMI_PROGRAMME — live work-item queue
+# MISUMI_PROGRAMME — authoritative live queue (full roadmap)
 
-Canonical queue for the Misumi/Odysseus long-horizon programme. Created 2026-10-05 (application -08): referenced by the standing coordinator directive but never previously materialised; distilled from the v4 programme directive's acceptance items, `automation/review/misumi-long-horizon-programme-evidence.md` open gates, and the programme-specific agent-task cards. This file is the queue, not an evidence store — the evidence register and application traces remain authoritative for proof.
+Canonical queue for the Misumi/Odysseus long-horizon programme. Expanded 2026-10-05 (application -09 reconciliation): the previous terminal state (after -06..-08) applied only to the then-current executable queue and is explicitly superseded as *roadmap* completion — the full roadmap below restores every expected frontier. Distilled from the standing programme directive, the v4 registered prompt, `automation/review/misumi-long-horizon-programme-evidence.md`, the -06/-07/-08 traces, and the agent-task cards.
 
-Rule of use: at each frontier, reconcile live state, take the highest-value non-blocked item, and update this file. An item may only move to `done` when it is implemented, live-proven where applicable, independently verified where required, merged/deployed, and reconciled into evidence. Failures stay recorded.
+Rule of use: at each frontier reconcile live state, select by `user-visible value × leverage × evidence value × dependency reduction / risk × cost × uncertainty`, implement, test, merge under valid authority, deploy, exercise the real path, preserve failures, reconcile evidence, update this file, continue. Every item carries exactly one disposition: `complete` / `executable` / `dependency-blocked` / `operator-gated` / `household-gated` / `nature-gated` / `verification-debt` / `successor/rejected-with-rationale`.
+
+## Completed foundations
+
+- **-06 deterministic lead-persona routing** — `complete`. Chain proven live: utterance → contract → lead persona → UI leader state → trace (12/12 fixtures; releases through `ce8d353a8f`). PRs #92/#58/#93.
+- **-07 governed persistent routing adaptation** — `complete`. Full causal chain live-proven incl. restart persistence and rollback; immutable evidence; reserved matters protected. PRs #94/#60/#95.
+- **-08 repeated behavioural evidence + ratification surface** — `complete` with an explicit executable remainder split out as **-08b** below (the directive's own unproven-item checklist is honoured there; do not overclaim).
 
 ## Active queue (executable)
 
-### P1 — Governed ratification surface for routing candidates — **done (application -08, PR #96, release ce8d353a8f)**
-Live-proven 2026-10-05: real store readable on `:420` (both -07 demo candidates, full provenance); on a labelled side-by-side `:1420` instance with a scratch state root, four real correction sequences produced an `eligible, awaiting: user-ratification` candidate, the API promote recorded `operator_ratification` with principal, the learned route served (`rr-d0899f9686a8`), the API rollback restored the baseline, and the endpoint's 404/409 gates answered loudly on `:420` without mutating the household store.
-Repeated-behaviour candidates reach `eligible, awaiting: user-ratification` but no authenticated act exists to promote or reject them. Build: `GET /misumi/routing/candidates` (inspectability, misumi:read), `POST /misumi/routing/candidates/{id}/promote` and `/reject` (misumi:execute; provenance records the token owner as the ratifying principal), `POST /misumi/routing/revisions/{id}/rollback`. Acceptance: gate enforcement tested; real store readable on `:420`; promote/reject/rollback exercised on a labelled side-by-side instance (`:1420`) so no synthetic evidence touches the household store; deployed by the staged release path.
+### -08b — residual ratification/adaptation proofs — `executable`
+Unproven items from the -08 checklist, each small and testable: (a) silence/no-response must not promote — add the explicit test (an eligible candidate with no ratification act persists unchanged across restart); (b) contradictory-evidence handling exercised live on a labelled scratch instance (tests exist; live flow not yet run); (c) live reject-path exercise on scratch (tests + 404 live only); (d) conversational/user-facing proposal surface (persona asks the user to ratify an eligible candidate in dialogue, instead of API-only) — design with -12 embodiment, implement in the runtime first.
 
-### P2 — Independent verification: Sol retrospective review of -06/-07/-08 — **open, verification debt carried**
-Attempted 2026-10-05 via the lab codex lane: dispatch returned `ok: false` (`worker_failed`; `code-strong` has no evidence-backed binding on the stale lab backend d2fc0bac). Blocked by the same operator lab-deploy gate as B3. The debt is recorded here and in the -08 trace; retry immediately after B3 lands. All -06/-07/-08 verification is currently Flash-self-verified plus deterministic tests; no independent model review has yet covered them.
+### -09 natural-language routing robustness — `executable` (IN PROGRESS)
+The labelled router weaknesses (negation blindness, indirect phrasing, novel wording) become first-class experimental targets. Build the compact labelled corpus covering all ten directive categories (paraphrase, indirect, underspecified, competing cues, multi-intent, follow-ups, corrections, irrelevant-keyword injection, near-neighbour intents, unresolved/default); preserve the deterministic fixtures byte-identically; commission the GLM redesign reasoning; evaluate candidate algorithms strictly as *proposals* measured against the corpus — **the routing algorithm is ratified-contract behaviour (v0.1), so any algorithm change stops at the precise authority boundary** (contract amendment requires operator ratification). Base-vs-learned distinction maintained throughout.
 
-### P3 — Accumulation of repetition-derived candidates — **open (nature-gated)**
-Eligible-by-repetition candidates only arise from real household interactions. Not buildable; watched via P1's inspection endpoint.
+### -10 bounded persona-state adaptation — `executable` (queued after -09)
+Generalise the proven evidence/candidate/revision machinery to bounded persona state (response depth, technical depth, communication structure, intervention style, project familiarity, domain confidence, collaboration affinity, recurring-task familiarity). Immutable persona identity + foundational role contract never rewritten. Full chain per change: evidence → candidate → evaluation → authority → revision → observable behaviour → rollback. Required demonstration: before/after behaviour, restart persistence, rollback with history. Sol architecture challenge at closeout (or explicit debt).
 
-## Blocked: operator authority (proceed-around recorded)
+### -11 dynamic multi-persona team formation — `executable` (queued)
+Real collaboration on top of the existing deterministic consultation layer (`_consultation_plan`/`_consult_persona`): justified support selection, explicit handover, meaningful disagreement, coherent synthesis, structured per-persona contribution tracing, no-recruitment-when-unneeded. Required demonstration: measurable single-persona baseline vs multi-persona improvement or caught error. GLM-heavy coordination semantics; Sol judges value-vs-theatre.
 
-### B1 — Kiosk box bridge unpause → box-proxy routing verification + visible room-transition observation
-The interface box (192.168.4.37:8770) is paused by a household decision. The moment it returns: run `scripts/host/verify-persona-routing-live.ps1` through the box proxy and observe the auto-mode room transition.
+### -12 embodiment and persona expression — `executable` (software parts) / `household-gated` (physical parts)
+Software: support-persona visual state, handover transitions, `persona → voice profile → TTS` abstraction (decouple from Kokoro), restrained learned-state indication, conversational ratification UI (with -08b). Physical: realistic-environment STT, audibility, latency, speaker correctness, reboot/crash behaviour — `household-gated` until the kiosk bridge returns (B1).
 
-### B2 — Memory policy v0.2 ratification
-Uniformly marked "proposed for ratification with named gaps" (re-inspected -07: no contradictory markers). Operator act.
+## Blocked frontiers (each with its precise gate)
 
-### B3 — Lab deploy (sudo)
-Lab runs `d2fc0bac32`; target `3f3119c393` (re-resolve dev immediately before presenting). Requires operator sudo on `hz2-workstation`.
+### B1 physical kiosk acceptance — `household-gated`
+Box bridge (192.168.4.37:8770) unreachable at 2026-10-05 reconciliation (connection timed out; household pause in force). On return: canonical box-proxy verification + physical audio/latency/reboot acceptance (with -12).
 
-### B4 — Backup inputs
-Provider/path, public age recipient, permission to install `age`. Operator.
+### B2 runtime resilience — partially `complete`; remainder `executable`
+Already proven live (-05): agent kill recovery, whole-service recovery, Ollama recovery, maintenance hold, three real reboots. Not yet proven: TTS failure/recovery drill, network loss/recovery, output-device change, degraded-state reporting from the box side. Queue as bounded drills on the home host.
 
-### B5 — Router weakness improvements (negation, indirect requests)
-The labelled generalisation weaknesses are **ratified-contract behaviour** (v0.1 defines the algorithm); changing it is a contract change requiring operator ratification. Do not "fix" silently.
+### B3 security/console hardening — `operator-gated`
+Blank-password restriction, idle lock, BitLocker, router/tailnet exposure review, unnecessary listeners. Decisions and posture details live in the private misumi repository. Do not break required embodiment for checklist compliance.
 
-### B6 — Console hardening / sign-in decisions, physical kiosk acceptance
-Operator/physical; details in the private misumi repository.
+### B4 backup + restore — `operator-gated` (inputs: provider/path, public age recipient, permission to install `age`)
+When inputs arrive: configure encrypted backup, verify it, then **prove an actual restoration**; record failure behaviour. A backup without restore testing is incomplete.
 
-### B7 — v3 closeout sequence
-Final live reconciliation → Opus synthesis (requires Opus availability; carried as debt while Flash coordinates) → fresh-context Sol #3 → closeout doc → activate the persona-growth successor card (`automation/review/agent-tasks/ready/2026-10-02-misumi-persona-growth-background-collaboration.agent-task.md`). Sequenced behind B1-B4 evidence and P2.
+### B5 lab deployment — `operator-gated` (sudo on hz2-workstation)
+Lab still `d2fc0bac32`; authoritative dev is `ffbef0d740` (re-resolve immediately before presenting). Unblocks the Sol lane (D1) and closes the multihost drift.
 
-## Done (this queue's history)
-- -08: governed ratification surface for routing candidates + this queue materialised (PR #96; live proof as recorded under P1/P2).
-- -06: deterministic lead-persona routing + auto mode, live 12/12 (PRs #92/#58/#93).
-- -07: shadow-mode adaptation with governed promotion; full causal chain live-proven incl. restart persistence and rollback (PRs #94/#60/#95); v4 directive registered complete.
+### B6 memory-policy reconciliation — `operator-gated`
+Policy v0.2 uniformly "proposed for ratification with named gaps" (re-verified -07/-08: no contradictory markers). Behavioural-process routing state remains correctly separated from memory scope.
 
-## Terminal reconciliation (2026-10-05, applications -06 through -08)
+## Verification / reasoning debts (discharge when lanes return; never fabricate)
 
-**No executable programme items remain this session.** Every remainder is explicitly classified:
+### D1 Sol review of -06/-07/-08 — `verification-debt` (blocked with B5)
+Dispatch failed truthfully 2026-10-05: `ok:false`, `worker_failed`, `code-strong` unresolved on the stale lab backend. On B5: provide the accumulated evidence and request genuine retrospective challenge; repair substantive findings.
 
-- **Operator authority:** B2 (memory policy v0.2 ratification), B3 (lab sudo deploy — also blocks P2's Sol retry and B7's Sol #3), B4 (backup inputs), B5 (router weakness changes — ratified-contract algorithm), B6 (console/physical decisions).
-- **Household/physical:** B1 (kiosk box bridge paused by household decision — box-proxy verification and room-transition observation ready to run the moment it returns).
-- **Lane unavailable (debt carried):** independent verification of -06/-07/-08 — the Sol/codex lane fails on the stale lab backend (recorded verbatim in trace -08); the Opus synthesis for the v3 closeout requires Opus availability (Flash coordinates, role contract unchanged). The dedicated GLM reasoning lane was not separately available this session; consequential designs were validated by the directive text, the ratified contract, deterministic tests and live proof instead — recorded here as reasoning debt alongside the Sol debt.
-- **Nature-gated:** P3 (repetition-derived candidates need real household interactions; inspection endpoint live).
+### D2 Sol at -09/-10/-11/-12 stage gates — `verification-debt` (conditional)
+Required at consequential gates; attempt at each stage, carry explicit debt if the lane is down.
 
-Executable work delivered this arc: -06 (automatic routing, 12/12 live), -07 (adaptation loop, full causal chain incl. restart persistence + rollback), -08 (ratification surface + this queue), each merged, deployed to the home release path, live-proven on the real runtime, and reconciled into the evidence register, traces and evolution graph.
+### D3 GLM heavy-reasoning lane — `verification-debt`
+The dedicated heavier GLM lane is not a separately available actor in the current runtime; consequential reasoning this arc was validated by directive text, ratified contracts, deterministic tests and live proof. Attempt the lane for -09's redesign reasoning; record per-attempt outcomes.
+
+### D4 Opus/v3 closeout (Opus synthesis + Sol #3 + closeout doc) — `verification-debt` (lane-gated)
+Sequenced behind B1-B5 evidence per the v3 closeout contract.
+
+### D5 longitudinal adaptation evidence — `nature-gated`
+Repetition-derived candidates and persona-state learning need real household interaction over time; inspection endpoints are live (watch item).
+
+## Other open PRs (not programme-owned)
+#36, #39, #40, #42, #90, #91 (odysseus) predate/parallel this programme and are not merged without their own authority. Recorded, not actionable here.
+
+## Done history
+- -06, -07, -08: see traces 2026-10-04/05 in `evals/prompt-applications/misumi-long-horizon-programme/`; releases `a4851dbddd` → `ce8d353a8f`; PRs #92, #58, #93, #94, #60, #95, #96, #97, #98.
