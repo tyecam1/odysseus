@@ -6,11 +6,12 @@ Rule of use: at each frontier, reconcile live state, take the highest-value non-
 
 ## Active queue (executable)
 
-### P1 — Governed ratification surface for routing candidates — **in progress (application -08)**
+### P1 — Governed ratification surface for routing candidates — **done (application -08, PR #96, release ce8d353a8f)**
+Live-proven 2026-10-05: real store readable on `:420` (both -07 demo candidates, full provenance); on a labelled side-by-side `:1420` instance with a scratch state root, four real correction sequences produced an `eligible, awaiting: user-ratification` candidate, the API promote recorded `operator_ratification` with principal, the learned route served (`rr-d0899f9686a8`), the API rollback restored the baseline, and the endpoint's 404/409 gates answered loudly on `:420` without mutating the household store.
 Repeated-behaviour candidates reach `eligible, awaiting: user-ratification` but no authenticated act exists to promote or reject them. Build: `GET /misumi/routing/candidates` (inspectability, misumi:read), `POST /misumi/routing/candidates/{id}/promote` and `/reject` (misumi:execute; provenance records the token owner as the ratifying principal), `POST /misumi/routing/revisions/{id}/rollback`. Acceptance: gate enforcement tested; real store readable on `:420`; promote/reject/rollback exercised on a labelled side-by-side instance (`:1420`) so no synthetic evidence touches the household store; deployed by the staged release path.
 
-### P2 — Independent verification: Sol retrospective review of -06/-07 — **open**
-The standing directive requires Sol as adversarial verifier at stage gates. Attempt invocation via the lab path (read-only); if the lane is unavailable, record the verification debt explicitly and carry it.
+### P2 — Independent verification: Sol retrospective review of -06/-07/-08 — **open, verification debt carried**
+Attempted 2026-10-05 via the lab codex lane: dispatch returned `ok: false` (`worker_failed`; `code-strong` has no evidence-backed binding on the stale lab backend d2fc0bac). Blocked by the same operator lab-deploy gate as B3. The debt is recorded here and in the -08 trace; retry immediately after B3 lands. All -06/-07/-08 verification is currently Flash-self-verified plus deterministic tests; no independent model review has yet covered them.
 
 ### P3 — Accumulation of repetition-derived candidates — **open (nature-gated)**
 Eligible-by-repetition candidates only arise from real household interactions. Not buildable; watched via P1's inspection endpoint.
@@ -39,5 +40,6 @@ Operator/physical; details in the private misumi repository.
 Final live reconciliation → Opus synthesis (requires Opus availability; carried as debt while Flash coordinates) → fresh-context Sol #3 → closeout doc → activate the persona-growth successor card (`automation/review/agent-tasks/ready/2026-10-02-misumi-persona-growth-background-collaboration.agent-task.md`). Sequenced behind B1-B4 evidence and P2.
 
 ## Done (this queue's history)
+- -08: governed ratification surface for routing candidates + this queue materialised (PR #96; live proof as recorded under P1/P2).
 - -06: deterministic lead-persona routing + auto mode, live 12/12 (PRs #92/#58/#93).
 - -07: shadow-mode adaptation with governed promotion; full causal chain live-proven incl. restart persistence and rollback (PRs #94/#60/#95); v4 directive registered complete.
