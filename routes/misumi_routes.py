@@ -1105,14 +1105,22 @@ def setup_misumi_routes(
         if dialogue is not None:
             return dialogue
         if auto_route:
-            persona, routing = resolve_auto_lead(prompt)
+            # Follow-up carry (contract v0.2) needs the previous lead, and only a PERSISTED previous turn may supply one;
+            # an incognito turn (persist_turn=false) has no prior lead, which is exactly the v0.1 behaviour.
+            prior_lead = None
+            if adaptation is not None and body.persist_turn:
+                previous = adaptation.last_auto_route(body.session_id)
+                if previous and previous.get("persisted"):
+                    prior_lead = previous.get("persona")
+            persona, routing = resolve_auto_lead(prompt, prior_lead=prior_lead)
             if adaptation is not None:
                 base_persona = persona
+                base_method = str((routing or {}).get("method") or "routing-contract-v0.1")
                 base_reasons = list((routing or {}).get("reasons") or [])
                 persona, learned = adaptation.apply_learned_overlays(prompt, persona, base_reasons)
                 if learned is not None:
                     routing = {
-                        "method": "routing-contract-v0.1+learned-revision",
+                        "method": f"{base_method}+learned-revision",
                         "selected": persona,
                         "reasons": [f"learned:{learned['revision_id']} cue={','.join(learned['cue'])}"],
                         "base_selected": base_persona,
@@ -1122,6 +1130,7 @@ def setup_misumi_routes(
                 adaptation.note_auto_route(
                     body.session_id, prompt, persona,
                     list((routing or {}).get("reasons") or []), request_id,
+                    persisted=bool(body.persist_turn),
                 )
                 # A durable instruction may also arrive inside an auto request
                 # ("for X use <persona> from now on").

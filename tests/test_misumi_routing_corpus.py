@@ -18,13 +18,10 @@ from pathlib import Path
 
 import pytest
 
-from src.misumi_persona_routing import RESERVED, resolve_auto_lead
-from src.misumi_routing_candidates import (
-    ALIASES,
-    _cue_table,
-    resolve_candidate_lead,
-    stem,
-)
+from src.misumi_persona_routing import RESERVED, resolve_auto_lead, resolve_auto_lead_v01, routing_algorithm
+from src.misumi_routing_adaptation import RoutingAdaptationStore
+from src.misumi_routing_v02 import cue_table, stem
+from src.misumi_routing_v02 import resolve_lead as resolve_candidate_lead  # the RATIFIED v0.2 algorithm
 
 _EVAL_PATH = Path(__file__).resolve().parents[1] / "scripts" / "misumi_routing_corpus_eval.py"
 _spec = importlib.util.spec_from_file_location("misumi_routing_corpus_eval", _EVAL_PATH)
@@ -113,6 +110,10 @@ def test_reference_intents_match_the_live_manifest_when_one_is_available(split):
     _, corpus, manifest = split
     ours = {pid: rec["routing"]["intents"] for pid, rec in manifest.items()}
     assert list(ours) == list(live) and ours == live, "corpus reference_intents drifted from the live manifest"
+    live_aliases = {pid: list(rec["routing"].get("aliases") or []) for pid, rec in real.items()}
+    if any(live_aliases.values()):  # ratified routing.aliases (2026-10-06): the corpus must mirror production exactly
+        our_aliases = {pid: list(rec["routing"].get("aliases") or []) for pid, rec in manifest.items()}
+        assert our_aliases == live_aliases, "corpus reference_aliases drifted from the live manifest"
 
 
 def test_labels_reference_real_personas_and_followups_carry_context(split):
@@ -161,16 +162,89 @@ def test_production_baseline_measurement_is_pinned():
         assert (result["baseline_correct"], result["n"]) == (correct, n), name
 
 
-def test_production_router_does_not_use_the_candidate():
-    root = Path(ev.ROOT)
-    offenders = []
-    for folder in ("src", "routes", "services"):
-        for path in (root / folder).rglob("*.py"):
-            if path.name == "misumi_routing_candidates.py":
-                continue
-            if "misumi_routing_candidates" in path.read_text(encoding="utf-8", errors="ignore"):
-                offenders.append(str(path.relative_to(root)))
-    assert offenders == [], f"candidate proposal is wired into runtime: {offenders}"
+def test_runtime_uses_v02_by_default_and_the_v01_kill_switch_is_exact(monkeypatch):
+    """Ratified 2026-10-06: v0.2 is the default; MISUMI_ROUTING_ALGORITHM=v0.1 restores v0.1 EXACTLY (the rollback path)."""
+    for name in ev.SPLITS:
+        corpus = ev.load_corpus(ev.CORPUS_DIR / ev.SPLITS[name])
+        manifest = ev.manifest_from(corpus)
+        for item in corpus["items"]:
+            monkeypatch.setenv("MISUMI_ROUTING_ALGORITHM", "v0.1")
+            assert routing_algorithm() == "v0.1"
+            assert resolve_auto_lead(item["prompt"], manifest, item.get("prior_lead")) == resolve_auto_lead_v01(
+                item["prompt"], manifest
+            ), item["id"]
+            monkeypatch.delenv("MISUMI_ROUTING_ALGORITHM", raising=False)
+            persona, prov = resolve_auto_lead(item["prompt"], manifest, item.get("prior_lead"))
+            assert routing_algorithm() == "v0.2" and prov["method"] == "routing-contract-v0.2", item["id"]
+            assert (persona, prov) == resolve_candidate_lead(item["prompt"], manifest, item.get("prior_lead"))
+    for value in ("v0.2", "0.2", "", "garbage"):  # only an explicit v0.1 selects the rollback
+        monkeypatch.setenv("MISUMI_ROUTING_ALGORITHM", value)
+        assert routing_algorithm() == "v0.2", value
+
+
+def test_v01_prompts_without_context_are_unchanged_by_the_switch_in_v01_mode(monkeypatch):
+    monkeypatch.setenv("MISUMI_ROUTING_ALGORITHM", "v0.1")
+    manifest = ev.manifest_from(ev.load_corpus(ev.CORPUS_DIR / ev.SPLITS["dev"]))
+    persona, prov = resolve_auto_lead("and what about tomorrow?", manifest, prior_lead="misato")
+    assert (persona, prov["method"]) == ("aoteru", "routing-contract-v0.1")  # v0.1 has no follow-up carry
+
+
+def test_reasons_are_literal_cues_so_learned_revisions_keep_exact_semantics():
+    """v0.2 provenance names the literal intent/alias that matched (never a stem); learned revisions key on exact
+    keyword_present cues, so they are neither migrated nor reinterpreted by stemming."""
+    for name in ev.SPLITS:
+        corpus = ev.load_corpus(ev.CORPUS_DIR / ev.SPLITS[name])
+        manifest = ev.manifest_from(corpus)
+        literals = {
+            label for _, cues in cue_table(manifest) for _, label in cues.values()
+        }
+        for item in corpus["items"]:
+            _, prov = ev.run_candidate(item, manifest)
+            for reason in prov["reasons"]:
+                assert reason in literals or reason.startswith(("fallback:", "reserved:", "carry:")), (item["id"], reason)
+
+
+# The Misumi repo's scripts/route_dry_run.py is a stdlib port of v0.2 and `fixtures/persona-routing/v02-parity.yaml` pins this
+# runtime's outputs row for row; this digest (the same one recorded in that fixture) makes any behaviour drift visible HERE too.
+V02_PARITY_SHA256 = "2f8aeec256dc82d6927f20f608fe2de48a1834485cae6a01a5611c964e0adfac"
+
+
+def test_v02_outputs_match_the_parity_digest_shared_with_the_misumi_dry_run():
+    import hashlib
+
+    rows = []
+    for name in ev.SPLITS:
+        corpus = ev.load_corpus(ev.CORPUS_DIR / ev.SPLITS[name])
+        manifest = ev.manifest_from(corpus)
+        for item in corpus["items"]:
+            persona, prov = resolve_candidate_lead(item["prompt"], manifest, item.get("prior_lead"))
+            rows.append((item["id"], persona, prov["reasons"]))
+    manifest = ev.manifest_from(ev.load_corpus(ev.CORPUS_DIR / ev.SPLITS["dev"]))
+    for index, (prompt, _expected) in enumerate(DETERMINISTIC_FIXTURES, 1):
+        persona, prov = resolve_candidate_lead(prompt, manifest)
+        rows.append((f"fx{index:02d}", persona, prov["reasons"]))
+    digest = hashlib.sha256(
+        "\n".join(f"{i}|{p}|{','.join(r)}" for i, p, r in sorted(rows)).encode()
+    ).hexdigest()
+    assert digest == V02_PARITY_SHA256, f"v0.2 routing behaviour changed (digest {digest}); update the Misumi parity fixture too"
+
+
+def test_a_learned_revision_does_not_fire_on_a_stem_only_match(tmp_path):
+    """Stemming routes 'cleaned' to misato in v0.2, but a learned cue 'cleaning' is exact: 'cleaned' must not trigger it."""
+    store = RoutingAdaptationStore(tmp_path / "routing-state")
+    store.record_evidence(
+        type="explicit_durable", cue=["cleaning"], previous_persona="misato", proposed_persona="jin",
+        prompt="For cleaning questions use Jin from now on.", session_id="s", owner=None,
+    )
+    candidate = store.get_candidate(["cleaning"])
+    store.promote(candidate["candidate_id"], authorisation={
+        "type": "user_instruction", "evidence_id": candidate["supporting_evidence"][0]})
+    manifest = ev.manifest_from(ev.load_corpus(ev.CORPUS_DIR / ev.SPLITS["dev"]))
+    persona, prov = resolve_candidate_lead("Who cleaned the kitchen?", manifest)
+    assert persona == "misato"  # v0.2 stem match
+    assert store.apply_learned_overlays("Who cleaned the kitchen?", persona, prov["reasons"]) == (persona, None)
+    moved, learned = store.apply_learned_overlays("Check the cleaning rota", "misato", ["cleaning", "rota"])
+    assert moved == "jin" and learned["cue"] == ["cleaning"]  # the exact cue still fires
 
 
 # ---------------------------------------------------------------- candidate acceptance invariants
@@ -225,7 +299,7 @@ def test_candidate_preserves_reserved_matters_everywhere(split):
 def test_candidate_matches_all_twelve_deterministic_fixtures():
     manifest = ev.manifest_from(ev.load_corpus(ev.CORPUS_DIR / ev.SPLITS["dev"]))
     for prompt, expected in DETERMINISTIC_FIXTURES:
-        assert resolve_auto_lead(prompt, manifest)[0] == expected
+        assert resolve_auto_lead_v01(prompt, manifest)[0] == expected
         assert resolve_candidate_lead(prompt, manifest)[0] == expected, prompt
 
 
@@ -233,7 +307,7 @@ def test_candidate_differs_from_pinned_g_suite_only_where_expected():
     manifest = ev.manifest_from(ev.load_corpus(ev.CORPUS_DIR / ev.SPLITS["dev"]))
     diffs = {
         gid for gid, prompt in G_SUITE.items()
-        if resolve_auto_lead(prompt, manifest)[0] != resolve_candidate_lead(prompt, manifest)[0]
+        if resolve_auto_lead_v01(prompt, manifest)[0] != resolve_candidate_lead(prompt, manifest)[0]
     }
     assert diffs == EXPECTED_G_SUITE_DIFFS
 
@@ -308,8 +382,8 @@ def test_stemmer_is_symmetric_on_inflections():
 def test_no_cue_collides_with_a_function_word_or_another_persona():
     manifest = ev.manifest_from(ev.load_corpus(ev.CORPUS_DIR / ev.SPLITS["dev"]))
     owner = {}
-    for pid, cues in _cue_table(manifest):
+    for pid, cues in cue_table(manifest):
         for gram in cues:
             assert not (set(gram) & FUNCTION_WORDS), (pid, gram)
             assert owner.setdefault(gram, pid) == pid, f"cue {gram} claimed by {owner[gram]} and {pid}"
-    assert all(ALIASES.values())
+    assert sum(1 for persona in manifest.values() if persona["routing"].get("aliases")) >= 8

@@ -11,7 +11,7 @@ from src.misumi_routing_adaptation import (
     RoutingAdaptationStore,
     keyword_present,
 )
-from src.misumi_persona_routing import resolve_auto_lead
+from src.misumi_persona_routing import resolve_auto_lead_v01 as resolve_auto_lead  # the pinned BASELINE is routing contract v0.1
 
 # The LIVE manifest's routing.intents (tyecam1/misumi config/personas.yaml @ main 0d5bdb6aec), in manifest order -
 # order is the contract's tie-break. Correction 2026-10-06: this table originally carried a drifted copy (e.g. l had
