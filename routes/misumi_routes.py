@@ -1270,7 +1270,7 @@ def setup_misumi_routes(
                 backend=backend,
                 model=model,
                 context_messages=context_messages,
-                contributions=synthesis_inputs(contributions),  # the lead sees "no issue found" for an OK: support
+                contributions=synthesis_inputs(contributions),  # an OK: support adds nothing for the lead; only RISK:/legacy text
                 style_values=style_values,
             )
             text = str(turn["answer"])

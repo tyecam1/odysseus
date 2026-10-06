@@ -156,11 +156,14 @@ def ok_flag(contribution: str) -> bool:
 
 
 def synthesis_inputs(contributions: list[tuple[str, str]]) -> list[tuple[str, str]]:
-    """What the LEAD sees of each support's contribution.
+    """What the LEAD sees of each support's contribution: only what raised a flag.
 
-    A contribution that explicitly opens with ``OK:`` is summarised as "no issue found": its remaining text is
-    caveat padding that the lead used to relay as concerns (the -11 evaluation v2 measured 41 of 96 false alarms on clean
-    requests with a team vs 0 of 96 solo). ``RISK:`` and legacy-format contributions are passed through verbatim. The raw
-    text is never lost: callers keep the original contributions for the trace, capsules and the ``consulted`` block.
+    A contribution that explicitly opens with ``OK:`` is DROPPED from the lead's input (the raw text is never lost: callers
+    keep the original contributions for the trace, capsules and the ``consulted`` block). Evidence (-11 evaluation v2, qwen3:8b
+    judge validated against an audit): passing the OK text through made the lead relay its caveat padding as false alarms on clean
+    requests (43% vs 0% solo); replacing it with "no issue found" removed the false alarms but also removed the lead's own
+    detection (75% vs 89% solo) because a support that misses about half the real conflicts then reassures the lead. Dropping it
+    leaves the lead exactly as it would be alone where the support found nothing, and adds a support's ``RISK:`` where it did.
+    ``RISK:`` and legacy-format contributions (no marker) pass through verbatim.
     """
-    return [(name, "OK: no issue found." if ok_flag(text) else text) for name, text in contributions]
+    return [(name, text) for name, text in contributions if not ok_flag(text)]
