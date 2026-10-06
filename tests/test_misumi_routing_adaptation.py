@@ -166,6 +166,48 @@ def test_contradictory_evidence_returns_to_shadow(tmp_path: Path):
     assert len(candidate["contradicting_evidence"]) == 1
 
 
+def test_silence_never_promotes_an_eligible_candidate(tmp_path: Path):
+    """-08b(a): an eligible candidate with NO ratification act stays eligible and inert forever.
+
+    Time passing, more unrelated traffic, further routed requests that mention the cue and process
+    restarts must not promote it; only an explicit authorisation act may.
+    """
+    root = tmp_path / "routing-state"
+    store = RoutingAdaptationStore(root)
+    for session in ("a", "b", "c"):
+        store._last_auto_route[session] = {
+            "prompt": "Check the cleaning rota", "persona": "misato",
+            "reasons": ["cleaning", "rota"], "request_id": f"r-{session}", "at": time.time(),
+        }
+        record_manual_choice(
+            store, prompt=f"ask Jin about the cleaning rota {session}", chosen_persona="jin",
+            session_id=session, owner=None,
+        )
+    candidate = store.get_candidate(["cleaning", "rota"])
+    assert candidate["status"] == "eligible" and candidate["awaiting"] == "user-ratification"
+    before = json.dumps(store.all_candidates(), sort_keys=True)
+    evidence_before = len(store.list_evidence())
+
+    for generation in range(3):  # three simulated process restarts
+        revived = RoutingAdaptationStore(root)
+        for _ in range(5):  # repeated auto traffic that mentions the cue, with no ratification
+            persona, provenance = revived.apply_learned_overlays(
+                "Check the cleaning rota", "misato", ["cleaning", "rota"]
+            )
+            assert persona == "misato" and provenance is None
+            revived.apply_learned_overlays("what is for dinner?", "aoteru", ["fallback:aoteru"])
+        assert revived.active_overlays() == [] and revived.all_revisions() == []
+        assert json.dumps(revived.all_candidates(), sort_keys=True) == before, generation
+        assert len(revived.list_evidence()) == evidence_before
+
+    # still promotable by a real authorisation act, which is the only way out of "eligible"
+    promoted = RoutingAdaptationStore(root).promote(
+        candidate["candidate_id"],
+        authorisation={"type": "operator_ratification", "principal": "test-operator", "via": "unit-test"},
+    )
+    assert promoted["status"] == "active"
+
+
 # ---------- explicit durable preference: promotion ----------
 
 def test_explicit_durable_promotes_and_changes_overlay(tmp_path: Path):
