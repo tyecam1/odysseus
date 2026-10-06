@@ -225,12 +225,23 @@ class RoutingAdaptationStore:
             eid = evidence["evidence_id"]
             etype = evidence["type"]
             proposed = evidence.get("proposed_persona")
-            if proposed and proposed != candidate["proposed_persona"] and candidate["supporting_evidence"]:
+            if (
+                etype != "explicit_durable" and proposed
+                and proposed != candidate["proposed_persona"] and candidate["supporting_evidence"]
+            ):
                 # Contradiction: the same cue pulled toward a different persona.
                 candidate["contradicting_evidence"].append(eid)
                 candidate["status"] = "shadow"
                 candidate["awaiting"] = "contradicting-evidence"
             elif etype == "explicit_durable":
+                # The strongest evidence tier: an explicit durable user instruction supersedes earlier
+                # inferred proposals for this cue (they stay in the evidence log; the superseded
+                # proposal is recorded on the candidate). Without this, "use Jin from now on" after
+                # corrections toward Erwin was filed as a contradiction and could never promote.
+                if proposed and proposed != candidate["proposed_persona"] and candidate["supporting_evidence"]:
+                    candidate.setdefault("superseded_proposals", []).append(
+                        {"persona": candidate["proposed_persona"], "by": eid, "at": _now()}
+                    )
                 candidate["supporting_evidence"].append(eid)
                 candidate["proposed_persona"] = proposed
                 candidate["status"] = "eligible"
