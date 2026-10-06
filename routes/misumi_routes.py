@@ -21,6 +21,13 @@ from src.misumi_household import HouseholdReadOnlyAdapter, infer_household_domai
 from src.misumi_memory import MisumiMemory
 from src.misumi_observability import MisumiEventLog
 from src.misumi_persona_routing import resolve_auto_lead
+from src.misumi_persona_state import (
+    GLOBAL_SCOPE,
+    PersonaStateStore,
+    classify_signal,
+    compose_system,
+    detect_style_signals,
+)
 from src.misumi_routing_adaptation import (
     RoutingAdaptationStore,
     is_durable_instruction,
@@ -422,6 +429,7 @@ async def _model_turn(
     model: str,
     context_messages: Optional[List[Dict[str, str]]] = None,
     contributions: Optional[List[Tuple[str, str]]] = None,
+    style_values: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """Generate one synthesized answer plus bounded retention decisions."""
     try:
@@ -444,6 +452,9 @@ async def _model_turn(
         if capabilities:
             system += f"\n\n{capabilities}"
         system += f"\n{_RATIFICATION_CONSTRAINT}\n{SEED_OUTPUT_RULES}"
+        # Bounded persona state (application -10): fixed style sentences appended AFTER every
+        # foundational constraint; the foundation text above is never edited.
+        system = compose_system(system, style_values or {})
         messages = list(context_messages or [])
         if not messages:
             seed = _interactive_seed_context()
@@ -730,6 +741,58 @@ def _named_persona_in_prompt(prompt: str, exclude: Optional[str] = None) -> Opti
     return None
 
 
+def _capture_style_signals(
+    store: PersonaStateStore,
+    prompt: str,
+    signals: List[Dict[str, str]],
+    *,
+    responding: str,
+    named: Optional[str],
+    session_id: Optional[str],
+    owner: Optional[str],
+) -> List[Dict[str, Any]]:
+    """Record evidence for each style signal; promote only on an explicit durable user instruction.
+
+    Scope: a durable instruction that names a persona applies to that persona; one that names none is
+    household-wide. Feedback ("too long") and one-off requests are about the responding persona.
+    """
+    notes: List[Dict[str, Any]] = []
+    for signal in signals:
+        etype = classify_signal(prompt, signal)
+        if etype == "explicit_durable":
+            target = named or GLOBAL_SCOPE
+        else:
+            target = named or responding
+        try:
+            result = store.record_evidence(
+                type=etype, persona=target, dimension=signal["dimension"], value=signal["value"],
+                prompt=prompt, signal=signal["matched"], session_id=session_id, owner=owner,
+            )
+        except ValueError as exc:
+            notes.append({"dimension": signal["dimension"], "value": signal["value"], "refused": str(exc)})
+            continue
+        candidate = result["candidate"]
+        note: Dict[str, Any] = {
+            "dimension": signal["dimension"], "value": signal["value"], "scope": target,
+            "evidence_type": etype, "evidence_id": result["evidence"]["evidence_id"],
+            "candidate_id": candidate.get("candidate_id"), "candidate_status": candidate.get("status"),
+            "state": "shadow-only",
+        }
+        if etype == "explicit_durable" and candidate.get("status") == "eligible":
+            try:
+                revision = store.promote(candidate["candidate_id"], authorisation={
+                    "type": "user_instruction", "evidence_id": note["evidence_id"],
+                })
+                note.update({"state": "active", "revision_id": revision["revision_id"],
+                             "previous_revision_id": revision.get("previous_revision_id")})
+            except (KeyError, ValueError) as exc:
+                note["promotion_refused"] = str(exc)
+        elif candidate.get("status") == "eligible":
+            note["state"] = "eligible-awaiting-ratification"
+        notes.append(note)
+    return notes
+
+
 def setup_misumi_routes(
     skills_manager,
     task_scheduler=None,
@@ -754,6 +817,14 @@ def setup_misumi_routes(
         _adaptation_root = (os.getenv("MISUMI_ROUTING_STATE_ROOT") or "").strip()
         adaptation = RoutingAdaptationStore(
             Path(_adaptation_root) if _adaptation_root else Path(DATA_DIR) / "misumi" / "routing"
+        )
+    # Bounded persona-state adaptation (application -10). Off switches:
+    # MISUMI_PERSONA_STATE=0 disables capture AND applied style; MISUMI_PERSONA_STATE_ROOT relocates the store.
+    persona_state: Optional[PersonaStateStore] = None
+    if (os.getenv("MISUMI_PERSONA_STATE", "1") or "").strip().lower() not in {"0", "false", "no", "off"}:
+        _state_root = (os.getenv("MISUMI_PERSONA_STATE_ROOT") or "").strip()
+        persona_state = PersonaStateStore(
+            Path(_state_root) if _state_root else Path(DATA_DIR) / "misumi" / "persona_state"
         )
     if oss_skill_ingestion is None:
         from services.memory.oss_skill_ingestion import OSSSkillIngestion
@@ -862,6 +933,80 @@ def setup_misumi_routes(
         })
         return {"rolled_back": True, "rollback": rollback}
 
+    @router.get("/persona-state")
+    async def persona_state_inspect(request: Request):
+        """Inspect persona-state candidates and effective revisions (read-only)."""
+        _require_api_scope(request, "misumi:read")
+        if persona_state is None:
+            raise HTTPException(503, "Persona-state adaptation is disabled")
+        candidates = sorted(
+            (c for c in persona_state.all_candidates().values() if isinstance(c, dict)),
+            key=lambda c: str(c.get("updated_at") or ""),
+        )
+        return {"candidates": candidates, "active_revisions": persona_state.active_revisions()}
+
+    @router.post("/persona-state/candidates/{candidate_id}/promote")
+    async def persona_state_promote(request: Request, candidate_id: str):
+        """The operator's ratification act for an eligible persona-state candidate."""
+        _require_api_scope(request, "misumi:execute")
+        if persona_state is None:
+            raise HTTPException(503, "Persona-state adaptation is disabled")
+        try:
+            revision = persona_state.promote(candidate_id, authorisation={
+                "type": "operator_ratification",
+                "via": "authenticated /misumi/persona-state API",
+                "principal": _owner(request),
+            })
+        except KeyError as exc:
+            raise HTTPException(404, str(exc).strip("'")) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        events.emit({
+            "request_id": events.request_id(),
+            "persona": revision.get("persona"),
+            "persona_source": "requested",
+            "persona_state": {"promotion": revision, "act": "operator_ratification"},
+            "outcome": "persona-state-promoted",
+            "approval_mode": "operator",
+        })
+        return {"promoted": True, "revision": revision}
+
+    @router.post("/persona-state/candidates/{candidate_id}/reject")
+    async def persona_state_reject(request: Request, candidate_id: str, body: Dict[str, Any] = None):
+        _require_api_scope(request, "misumi:execute")
+        if persona_state is None:
+            raise HTTPException(503, "Persona-state adaptation is disabled")
+        reason = str((body or {}).get("reason") or "rejected via ratification API")
+        try:
+            candidate = persona_state.reject(candidate_id, reason)
+        except KeyError as exc:
+            raise HTTPException(404, str(exc).strip("'")) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return {"rejected": True, "candidate": candidate}
+
+    @router.post("/persona-state/revisions/{revision_id}/rollback")
+    async def persona_state_rollback(request: Request, revision_id: str, body: Dict[str, Any] = None):
+        _require_api_scope(request, "misumi:execute")
+        if persona_state is None:
+            raise HTTPException(503, "Persona-state adaptation is disabled")
+        reason = str((body or {}).get("reason") or "rolled back via ratification API")
+        try:
+            rollback = persona_state.rollback_revision(revision_id, reason)
+        except KeyError as exc:
+            raise HTTPException(404, str(exc).strip("'")) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        events.emit({
+            "request_id": events.request_id(),
+            "persona": rollback.get("persona"),
+            "persona_source": "requested",
+            "persona_state": {"rollback": rollback},
+            "outcome": "persona-state-rolled-back",
+            "approval_mode": "operator",
+        })
+        return {"rolled_back": True, "rollback": rollback}
+
     @router.post("/respond")
     async def respond(request: Request, body: MisumiRespondRequest):
         _require_api_scope(request, "misumi:read")
@@ -924,6 +1069,20 @@ def setup_misumi_routes(
                 session_id=body.session_id,
                 owner=owner,
             )
+        # Bounded persona state (-10): a style request shapes THIS turn; durable/feedback evidence is
+        # captured only when the turn is persisted (persist_turn=false captures nothing).
+        style_note: Optional[List[Dict[str, Any]]] = None
+        style_values: Dict[str, str] = {}
+        style_applied: List[Dict[str, Any]] = []
+        if persona_state is not None:
+            turn_signals = detect_style_signals(prompt)
+            if turn_signals and body.persist_turn:
+                style_note = _capture_style_signals(
+                    persona_state, prompt, turn_signals, responding=persona,
+                    named=_named_persona_in_prompt(prompt), session_id=body.session_id, owner=owner,
+                )
+            resolved = persona_state.resolve_state(persona, turn_signals)
+            style_values, style_applied = resolved["values"], resolved["provenance"]
         domain = infer_household_domain(prompt)
         sources = adapter.search(prompt, domain=domain, limit=4) if adapter.reachable else []
         if not domain:
@@ -1009,6 +1168,7 @@ def setup_misumi_routes(
                 model=model,
                 context_messages=context_messages,
                 contributions=contributions,
+                style_values=style_values,
             )
             text = str(turn["answer"])
 
@@ -1086,6 +1246,7 @@ def setup_misumi_routes(
             "persona_source": "auto" if auto_route else "requested",
             "routing": routing,
             "routing_adaptation": adaptation_note,
+            "persona_state": {"applied": style_applied, "captured": style_note} if (style_applied or style_note) else None,
             "files_read": sorted({item["path"] for item in sources}),
             "files_changed": files_changed,
             "model": model,
@@ -1120,6 +1281,13 @@ def setup_misumi_routes(
             response["routing"] = routing
         if adaptation_note is not None:
             response["routing_adaptation"] = adaptation_note
+        if style_applied or style_note:
+            # Honest about reach: style only shapes model-written replies, not household-grounded answers.
+            response["persona_state"] = {
+                "applied": style_applied,
+                "effective": outcome == "model",
+                "captured": style_note,
+            }
         if _consultation_enabled():
             response.update({
                 "consulted": consulted,
