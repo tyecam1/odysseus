@@ -546,6 +546,7 @@ class RoutingAdaptationStore:
         persona: str,
         reasons: list[str],
         request_id: str,
+        persisted: bool = True,
     ) -> None:
         if not session_id:
             return
@@ -554,6 +555,7 @@ class RoutingAdaptationStore:
             "persona": persona,
             "reasons": list(reasons),
             "request_id": request_id,
+            "persisted": bool(persisted),  # only a persisted turn may seed v0.2 follow-up carry
             "at": time.time(),
         }
 
@@ -672,7 +674,7 @@ def record_manual_choice(
     if last:
         cue = [
             reason for reason in last.get("reasons") or []
-            if not str(reason).startswith(("fallback:", "reserved:", "learned:"))
+            if not str(reason).startswith(("fallback:", "reserved:", "learned:", "carry:"))
         ]
         if not cue:
             extracted = extract_cue_term(last.get("prompt") or "", routing_intents(chosen_persona))

@@ -5,9 +5,9 @@ Reports, per directive category and overall, how often each router picks the per
 household user would intend (``intended``; ``--lenient`` also accepts ``acceptable``), a mechanical
 failure taxonomy for the baseline, and the regressions a candidate would introduce.
 
-Routers measured:
-  * ``baseline``  - src.misumi_persona_routing.resolve_auto_lead (ratified contract v0.1, what runs today)
-  * ``candidate`` - src.misumi_routing_candidates.resolve_candidate_lead (PROPOSAL, never wired)
+Routers measured (the JSON/report keys keep their original names):
+  * ``baseline``  - src.misumi_persona_routing.resolve_auto_lead_v01 (routing contract v0.1, the retained rollback path)
+  * ``candidate`` - src.misumi_routing_v02.resolve_lead (routing contract v0.2, RATIFIED by the user 2026-10-06)
 
 This script writes nothing; it only prints (text, or JSON with ``--json``).
 """
@@ -26,8 +26,8 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from src.misumi_persona_routing import resolve_auto_lead  # noqa: E402
-from src.misumi_routing_candidates import resolve_candidate_lead  # noqa: E402
+from src.misumi_persona_routing import resolve_auto_lead_v01  # noqa: E402
+from src.misumi_routing_v02 import resolve_lead as resolve_v02  # noqa: E402
 
 CORPUS_DIR = ROOT / "evals" / "misumi-routing"
 SPLITS = {
@@ -46,8 +46,12 @@ def load_corpus(path: Path) -> dict[str, Any]:
 
 
 def manifest_from(corpus: dict[str, Any]) -> dict[str, Any]:
+    aliases = corpus.get("reference_aliases", {})
     return {
-        pid: {"routing": {"intents": [w.strip() for w in intents.split(",")]}}
+        pid: {"routing": {
+            "intents": [w.strip() for w in intents.split(",")],
+            **({"aliases": [w.strip() for w in aliases[pid].split(",")]} if aliases.get(pid) else {}),
+        }}
         for pid, intents in corpus["reference_intents"].items()
     }
 
@@ -64,11 +68,11 @@ def _matched_personas(prompt: str, manifest: dict[str, Any]) -> list[str]:
 
 
 def run_baseline(item: dict[str, Any], manifest: dict[str, Any]) -> tuple[str, dict[str, Any]]:
-    return resolve_auto_lead(item["prompt"], manifest)  # context-free by contract
+    return resolve_auto_lead_v01(item["prompt"], manifest)  # context-free by contract
 
 
 def run_candidate(item: dict[str, Any], manifest: dict[str, Any]) -> tuple[str, dict[str, Any]]:
-    return resolve_candidate_lead(item["prompt"], manifest, item.get("prior_lead"))
+    return resolve_v02(item["prompt"], manifest, item.get("prior_lead"))
 
 
 def ok(item: dict[str, Any], persona: str, lenient: bool) -> bool:
