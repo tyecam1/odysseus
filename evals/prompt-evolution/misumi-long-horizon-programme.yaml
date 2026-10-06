@@ -248,6 +248,27 @@ nodes:
     type: evolution_event
     decision: reinforce
     evidence_application: 2026-10-06-misumi-long-horizon-programme-09
+  - id: application:2026-10-06-misumi-long-horizon-programme-10
+    type: application
+    application_id: 2026-10-06-misumi-long-horizon-programme-10
+    trace_path: evals/prompt-applications/misumi-long-horizon-programme/2026-10-06-misumi-long-horizon-programme-10.yaml
+    rating:
+      agent_overall: 4.0
+      goal_progress: 4
+      correctness_verification: 4
+      authority_scope_discipline: 5
+      routing_resource_efficiency: 3
+      continuity_handoff_quality: 4
+    failure_tags:
+      - wiring_pushed_with_a_test_not_run_locally_ci_failed
+      - preregistered_judge_infeasible_and_substitute_judge_unreliable
+      - first_fix_overcorrected_detection_loss_reassurance_harm
+      - heredoc_windows_path_escape_errors_repeated
+      - production_cutover_declined_by_classifier
+  - id: evolution:2026-10-06-misumi-long-horizon-programme-10
+    type: evolution_event
+    decision: reinforce
+    evidence_application: 2026-10-06-misumi-long-horizon-programme-10
 edges:
   - from: prompt:v1
     to: application:2026-10-01-misumi-long-horizon-programme-01
@@ -328,6 +349,15 @@ edges:
     to: evolution:2026-10-06-misumi-long-horizon-programme-09
     type: observed
   - from: evolution:2026-10-06-misumi-long-horizon-programme-09
+    to: prompt:v4
+    type: reinforced
+  - from: prompt:v4
+    to: application:2026-10-06-misumi-long-horizon-programme-10
+    type: applied
+  - from: application:2026-10-06-misumi-long-horizon-programme-10
+    to: evolution:2026-10-06-misumi-long-horizon-programme-10
+    type: observed
+  - from: evolution:2026-10-06-misumi-long-horizon-programme-10
     to: prompt:v4
     type: reinforced
 guardrail_validation:

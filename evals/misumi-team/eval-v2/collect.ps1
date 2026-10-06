@@ -10,6 +10,7 @@ param(
   [string]$Short = 'REPLACE_SHORT',
   [ValidateSet('solo', 'team')][string]$Condition = 'team',
   [int]$N = 12,
+  [string]$Label = '',   # overrides the `condition` recorded in each row (e.g. 'teamfix' for a re-run after a fix)
   [string]$TasksPath = 'C:\Users\User\eval-v2-tasks.json',
   [string]$OutFile = ''
 )
@@ -17,9 +18,10 @@ $ErrorActionPreference = 'Continue'
 $token = [Environment]::GetEnvironmentVariable('ODYSSEUS_API_TOKEN', 'User')
 if (-not $token) { Write-Error 'ODYSSEUS_API_TOKEN not present'; exit 2 }
 $headers = @{ Authorization = "Bearer $token" }
-if (-not $OutFile) { $OutFile = "C:\Users\User\eval-v2-$Condition.jsonl" }
+$rowCondition = if ($Label) { $Label } else { $Condition }
+if (-not $OutFile) { $OutFile = "C:\Users\User\eval-v2-$rowCondition.jsonl" }
 $REL = "C:\Users\User\odysseus-releases\$Short"
-$scratch = "C:\Users\User\odysseus-releases\evalv2-$Short-$Condition"
+$scratch = "C:\Users\User\odysseus-releases\evalv2-$Short-$(if ($Label) { $Label } else { $Condition })"
 $script:proc = $null
 
 function Body($o) { $b = [Text.Encoding]::UTF8.GetBytes(($o | ConvertTo-Json -Compress -Depth 6)); return ,$b }
@@ -62,7 +64,7 @@ foreach ($j in $jobs) {
   $team = $r.json.team
   $supports = @()
   if ($team) { foreach ($s in $team.supports) { $supports += @{ persona = $s.persona; kind = $s.kind; status = $s.status; raised_risk = [bool]$s.raised_risk; latency_ms = $s.latency_ms } } }
-  $row = @{ condition = $Condition; task = $j.task.id; kind = $j.kind; run = $j.run; lead = $j.task.lead; support = $j.task.support
+  $row = @{ condition = $rowCondition; task = $j.task.id; kind = $j.kind; run = $j.run; lead = $j.task.lead; support = $j.task.support
             http = $r.status; source = $r.json.source; ms = $r.ms; team_decision = $(if ($team) { $team.decision } else { $null }); supports = $supports
             reply = [string]$r.json.text }
   ($row | ConvertTo-Json -Compress -Depth 6) | Add-Content -Path $OutFile -Encoding UTF8

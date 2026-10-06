@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """-11 evaluation v2, step 2 (judging). Blind to condition: the judge sees only the request, the ground truth for that prompt and the reply.
 
-  --backend ollama    qwen3:8b through a local Ollama (run on the host; same family as the subject: SECONDARY judge)
-  --backend aoteru    `reasoning-strong` (local Nemotron, an independent model family) through the aoteru CLI (PRIMARY judge)
+  --backend ollama    a local Ollama model (run on the host): --model qwen3:8b (same family as the subject: SECONDARY judge) or
+                      --model llama3.1:8b (an independent family: the PRIMARY judge actually used - see the results note)
+  --backend aoteru    `reasoning-strong` (local Nemotron via the aoteru CLI): the pre-registered primary judge, abandoned because the
+                      lab backend timed out on cold model loads (see the results note)
 
 Usage: python judge.py --backend ollama|aoteru --rows eval-v2-solo.jsonl eval-v2-team.jsonl --tasks tasks.json --out judged-<backend>.jsonl
 Resumable: rows already present in --out are skipped. Output rows: {condition, task, kind, run, flags_issue, unfounded_concern, raw}.
@@ -13,6 +15,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
@@ -57,10 +60,16 @@ def parse_verdict(text):
     return None
 
 
+OLLAMA_MODEL = "qwen3:8b"
+
+
 def ask_ollama(prompt):
-    body = json.dumps({"model": "qwen3:8b", "stream": False, "think": False, "format": "json",
-                       "options": {"temperature": 0, "num_predict": 80},
-                       "messages": [{"role": "user", "content": prompt}]}).encode()
+    payload = {"model": OLLAMA_MODEL, "stream": False, "format": "json",
+               "options": {"temperature": 0, "num_predict": 80},
+               "messages": [{"role": "user", "content": prompt}]}
+    if "qwen3" in OLLAMA_MODEL:  # thinking models need the flag; other families reject it
+        payload["think"] = False
+    body = json.dumps(payload).encode()
     req = urllib.request.Request("http://127.0.0.1:11434/api/chat", data=body, headers={"Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=120) as resp:
         return json.loads(resp.read().decode())["message"]["content"]
@@ -71,9 +80,10 @@ def ask_aoteru(prompt):
     proc = subprocess.run([sys.executable, script, "auto", prompt, "--capability", "reasoning-strong"],
                           capture_output=True, text=True, timeout=170)
     data = json.loads(proc.stdout)
-    if not data.get("ok"):
-        raise RuntimeError(f"aoteru not ok: {str(data)[:200]}")
-    return data["execution"]["output"]
+    execution = data.get("execution") or {}
+    if not data.get("ok") or "output" not in execution:
+        raise RuntimeError(f"aoteru gave no output: {str(execution or data)[:220]}")  # e.g. a backend 502 timeout under load
+    return execution["output"]
 
 
 def main():
@@ -82,15 +92,18 @@ def main():
     ap.add_argument("--rows", nargs="+", required=True)
     ap.add_argument("--tasks", required=True)
     ap.add_argument("--out", required=True)
-    ap.add_argument("--workers", type=int, default=3)
+    ap.add_argument("--model", default="qwen3:8b", help="Ollama model for --backend ollama (e.g. llama3.1:8b, an independent family)")
+    ap.add_argument("--workers", type=int, default=1, help="1 is right for the aoteru backend (concurrent calls time out)")
     ap.add_argument("--limit", type=int, default=0, help="judge at most N new rows (smoke test)")
     args = ap.parse_args()
     tasks = {t["id"]: t for t in json.load(open(args.tasks, encoding="utf-8-sig"))}
     rows = [r for path in args.rows for r in read_jsonl(path)]
     done = {key(r) for r in read_jsonl(args.out)} if os.path.exists(args.out) else set()
-    todo = [r for r in rows if key(r) not in done]
+    todo = sorted((r for r in rows if key(r) not in done), key=lambda r: (r["run"], r["task"], r["kind"], r["condition"]))  # interleave conditions
     if args.limit:
         todo = todo[: args.limit]
+    global OLLAMA_MODEL
+    OLLAMA_MODEL = args.model
     ask = ask_ollama if args.backend == "ollama" else ask_aoteru
 
     def judge(row):
@@ -99,7 +112,9 @@ def main():
         truth = task["truth"] if row["kind"] == "conflict" else CLEAN_TRUTH
         prompt = RUBRIC.format(request=request, truth=truth, reply=(row.get("reply") or "(no reply)")[:1800])
         raw, verdict = "", None
-        for _ in range(3):
+        for attempt in range(4):
+            if attempt:
+                time.sleep(5 * attempt)  # back off: a busy backend times out rather than queueing
             try:
                 raw = ask(prompt)
                 verdict = parse_verdict(raw)

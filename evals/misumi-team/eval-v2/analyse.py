@@ -95,11 +95,13 @@ def main():
     ap.add_argument("--primary", required=True)
     ap.add_argument("--secondary", required=True)
     ap.add_argument("--json", default="")
+    ap.add_argument("--primary-label", default="PRIMARY (independent family)")
+    ap.add_argument("--secondary-label", default="SECONDARY (same family as subject)")
     args = ap.parse_args()
     rows = [r for p in args.rows for r in read_jsonl(p)]
     result = {"judges": {}}
     lines = []
-    for label, path in (("PRIMARY (Nemotron via aoteru, independent family)", args.primary), ("SECONDARY (qwen3:8b, same family as subject)", args.secondary)):
+    for label, path in ((args.primary_label, args.primary), (args.secondary_label, args.secondary)):
         judged = read_jsonl(path)
         unjudged = sum(1 for r in judged if r["flags_issue"] is None)
         lines.append(f"\n### {label}: {len(judged)} judged rows, {unjudged} unusable verdicts excluded")
@@ -126,7 +128,7 @@ def main():
         lines.append("- per task detection team/solo: " + ", ".join(
             f"{t} {per_task[t]['team'][0]}/{per_task[t]['team'][1]} vs {per_task[t]['solo'][0]}/{per_task[t]['solo'][1]}" for t in sorted(per_task)))
         result["judges"][label] = block
-        if label.startswith("PRIMARY"):
+        if label == args.primary_label:
             primary = block
         result.setdefault("_judged", {})[label[:7]] = judged
     # supports' RISK flag

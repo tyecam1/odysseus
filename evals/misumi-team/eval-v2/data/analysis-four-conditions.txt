@@ -1,0 +1,34 @@
+
+### judge: qwen (768 rows, 0 unusable)
+- solo: detection 85/96 = 89% (95% CI 81-93%); false alarm on clean 0/96 = 0% (95% CI 0-4%)
+- team: detection 93/96 = 97% (95% CI 91-99%); false alarm on clean 41/96 = 43% (95% CI 33-53%)
+- teamfix: detection 72/96 = 75% (95% CI 65-83%); false alarm on clean 0/96 = 0% (95% CI 0-4%)
+- teamdrop: detection 89/96 = 93% (95% CI 86-96%); false alarm on clean 1/96 = 1% (95% CI 0-6%)
+- teamfix minus solo: detection -13.5 pts (95% CI -24.0 to -4.2); false alarm +0.0 pts (95% CI +0.0 to +0.0)
+- teamfix minus team: detection -21.9 pts (95% CI -31.2 to -12.5); false alarm -42.7 pts (95% CI -52.1 to -33.3)
+- teamdrop minus solo: detection +4.2 pts (95% CI -4.2 to +12.5); false alarm +1.0 pts (95% CI +0.0 to +3.1)
+- teamdrop minus team: detection -4.2 pts (95% CI -10.4 to +1.0); false alarm -41.7 pts (95% CI -51.0 to -32.3)
+- teamdrop minus teamfix: detection +17.7 pts (95% CI +7.3 to +28.1); false alarm +1.0 pts (95% CI +0.0 to +3.1)
+
+### judge: llama (768 rows, 0 unusable)
+- solo: detection 17/96 = 18% (95% CI 11-27%); false alarm on clean 52/96 = 54% (95% CI 44-64%)
+- team: detection 42/96 = 44% (95% CI 34-54%); false alarm on clean 79/96 = 82% (95% CI 73-89%)
+- teamfix: detection 31/96 = 32% (95% CI 24-42%); false alarm on clean 39/96 = 41% (95% CI 31-51%)
+- teamdrop: detection 30/96 = 31% (95% CI 23-41%); false alarm on clean 46/96 = 48% (95% CI 38-58%)
+- teamfix minus solo: detection +14.6 pts (95% CI +4.2 to +25.0); false alarm -13.5 pts (95% CI -26.0 to +0.0)
+- teamfix minus team: detection -11.5 pts (95% CI -22.9 to +0.0); false alarm -41.7 pts (95% CI -53.1 to -29.2)
+- teamdrop minus solo: detection +13.5 pts (95% CI +4.2 to +24.0); false alarm -6.2 pts (95% CI -15.6 to +3.1)
+- teamdrop minus team: detection -12.5 pts (95% CI -21.9 to -3.1); false alarm -34.4 pts (95% CI -46.9 to -20.8)
+- teamdrop minus teamfix: detection -1.0 pts (95% CI -10.4 to +8.3); false alarm +7.3 pts (95% CI -6.2 to +20.8)
+
+### supports' own RISK flag and latency
+- solo: median latency 3282 ms
+- team conflict: RISK opened in 44/96 = 46% (95% CI 36-56%) ok consults
+- team clean: RISK opened in 0/96 = 0% (95% CI 0-4%) ok consults
+- team: median latency 4316 ms; non-model replies 0
+- teamfix conflict: RISK opened in 45/96 = 47% (95% CI 37-57%) ok consults
+- teamfix clean: RISK opened in 0/95 = 0% (95% CI 0-4%) ok consults
+- teamfix: median latency 3991 ms; non-model replies 0
+- teamdrop conflict: RISK opened in 48/96 = 50% (95% CI 40-60%) ok consults
+- teamdrop clean: RISK opened in 1/95 = 1% (95% CI 0-6%) ok consults
+- teamdrop: median latency 4558 ms; non-model replies 0
