@@ -21,6 +21,7 @@ from src.misumi_household import HouseholdReadOnlyAdapter, infer_household_domai
 from src.misumi_memory import MisumiMemory
 from src.misumi_observability import MisumiEventLog
 from src.misumi_persona_routing import resolve_auto_lead
+from src.misumi_team_formation import plan_team, risk_flag
 from src.misumi_persona_state import (
     GLOBAL_SCOPE,
     PersonaStateStore,
@@ -229,79 +230,26 @@ def _consultation_enabled() -> bool:
     return value not in {"", "0", "false", "no", "off"}
 
 
-def _term_positions(text: str, terms: List[str]) -> List[int]:
-    positions = []
-    for term in terms:
-        match = re.search(rf"(?<!\w){re.escape(term)}(?!\w)", text, flags=re.I)
-        if match:
-            positions.append(match.start())
-    return positions
+def _team_plan(prompt: str, persona: str, primary_reply: str = "") -> Dict[str, Any]:
+    """Plan the (at most two) support personas for one request; always returns a recorded decision."""
+    from src.persona_capabilities import consult_edges, routing_intents
 
-
-def _intent_score(prompt: str, intents: List[str]) -> int:
-    normalized_prompt = re.sub(r"[-_]", " ", prompt.lower())
-    score = 0
-    for intent in intents:
-        normalized_intent = re.sub(r"[-_]", " ", intent.lower()).strip()
-        terms = [normalized_intent]
-        if " " in normalized_intent:
-            terms.extend(part for part in normalized_intent.split() if len(part) >= 3)
-        if any(re.search(rf"(?<!\w){re.escape(term)}(?!\w)", normalized_prompt) for term in terms):
-            score += 1
-    return score
+    order = list(load_persona_policy())
+    return plan_team(
+        prompt,
+        persona,
+        policy_order=order,
+        display_names={name: str(persona_record(name).get("display_name") or name) for name in order},
+        intents_of=routing_intents,
+        edges_of=consult_edges,
+        primary_reply=primary_reply,
+        enabled=_consultation_enabled(),
+    )
 
 
 def _consultation_plan(prompt: str, primary_reply: str, persona: str) -> List[str]:
-    """Choose at most two synchronous consultation targets deterministically."""
-    if persona != "aoteru" or not _consultation_enabled():
-        return []
-
-    from src.persona_capabilities import consult_edges, routing_intents
-
-    policy_order = list(load_persona_policy())
-    allowed = set(policy_order) - {"aoteru"}
-    edges = [item.lower() for item in (consult_edges("aoteru") or [])]
-    edges = [item for item in edges if item in allowed]
-    intent_scores = {
-        item: _intent_score(prompt, routing_intents(item) or [])
-        for item in policy_order
-        if item in allowed
-    }
-    mention_text = f"{prompt}\n{primary_reply}"
-    mentioned = []
-    for item in policy_order:
-        if item not in allowed:
-            continue
-        record = persona_record(item)
-        terms = list(dict.fromkeys((item, str(record.get("display_name") or item))))
-        if _term_positions(mention_text, terms):
-            mentioned.append(item)
-    # Consultation is work, not ambient theatre. Only invoke a specialist when
-    # the user names one or the request matches that persona's routing intents.
-    complex_request = bool(re.search(
-        r"\b(plan|planning|decide|decision|compare|review|risk|coordinate|approach|strategy|trade-?off)\b",
-        prompt,
-        re.IGNORECASE,
-    ))
-    intent_candidates = (
-        [item for item in policy_order if intent_scores.get(item, 0)]
-        if complex_request else []
-    )
-    candidates = list(dict.fromkeys(mentioned + intent_candidates))
-
-    def rank(item: str) -> tuple[int, int, int, int]:
-        record = persona_record(item)
-        terms = list(dict.fromkeys((item, str(record.get("display_name") or item))))
-        mentions = _term_positions(mention_text, terms)
-        if mentions:
-            return (0, min(mentions), 0, policy_order.index(item))
-        score = intent_scores.get(item, 0)
-        if score:
-            return (1, 0, -score, policy_order.index(item))
-        edge_index = edges.index(item) if item in edges else len(edges)
-        return (2, edge_index, 0, policy_order.index(item))
-
-    return sorted(candidates, key=rank)[:2]
+    """Support persona ids for one request (a specialist lead recruits only along its own consult edges)."""
+    return [item["persona"] for item in _team_plan(prompt, persona, primary_reply)["supports"]]
 
 
 async def _consult_persona(
@@ -309,6 +257,7 @@ async def _consult_persona(
     persona: str,
     backend: str,
     model: str,
+    lead: str = "aoteru",
 ) -> str:
     from src.llm_core import llm_call_async
     from src.persona_capabilities import capability_summary
@@ -316,7 +265,10 @@ async def _consult_persona(
     record = persona_record(persona)
     system = (
         f"You are {persona}, the Misumi {record.get('role')}. Analyze the user's request from your "
-        f"specialist role and give Aoteru concise, practical evidence, critique, or next steps. "
+        f"specialist role and give {'Aoteru' if lead == 'aoteru' else str(persona_record(lead).get('display_name') or lead)} "
+        f"concise, practical evidence, critique, or next steps. "
+        f"Begin with 'RISK:' if you see a conflicting constraint, a factual error or an unsafe assumption in the "
+        f"request; otherwise begin with 'OK:'. "
         f"Do not address the user directly. {_HONESTY_CONSTRAINTS}"
     )
     capabilities = capability_summary(persona)
@@ -455,6 +407,11 @@ async def _model_turn(
         # Bounded persona state (application -10): fixed style sentences appended AFTER every
         # foundational constraint; the foundation text above is never edited.
         system = compose_system(system, style_values or {})
+        if contributions:
+            system += (
+                "\nIf any specialist input begins with RISK:, address that risk explicitly in the answer "
+                "instead of ignoring it."
+            )
         messages = list(context_messages or [])
         if not messages:
             seed = _interactive_seed_context()
@@ -736,7 +693,9 @@ def _named_persona_in_prompt(prompt: str, exclude: Optional[str] = None) -> Opti
             continue
         record = persona_record(pid)
         display = str(record.get("display_name") or "").lower()
-        if re.search(rf"(?<!\w){re.escape(pid)}(?!\w)", lowered) or (display and display in lowered):
+        if re.search(rf"(?<!\w){re.escape(pid)}(?!\w)", lowered) or (
+            display and re.search(rf"(?<!\w){re.escape(display)}(?!\w)", lowered)
+        ):
             return pid
     return None
 
@@ -1089,11 +1048,17 @@ def setup_misumi_routes(
             # General chat belongs to the normal model/RAG path. Lexical matches
             # against task/docs files are too weak to replace a conversational answer.
             sources = []
-        model_required = not domain or bool(_ARTIFACT_REQUEST.search(prompt))
+        # A justified team is itself a reason to use the model (supports need synthesis; household sources
+        # are still passed to it as untrusted context). Without one, domain requests stay grounded lookups.
+        team_plan = _team_plan(prompt, persona)
+        model_required = (
+            not domain or bool(_ARTIFACT_REQUEST.search(prompt)) or team_plan["decision"] == "team"
+        )
         backend = model = None
         turn: Dict[str, Any] = {"memory": None, "artifact": None}
         consulted: List[Dict[str, str]] = []
         contributions: List[Tuple[str, str]] = []
+        consult_trace: Dict[str, Dict[str, Any]] = {}
         capsule_id = None
         handoff_ids: List[str] = []
         if sources and not model_required:
@@ -1114,12 +1079,23 @@ def setup_misumi_routes(
                 logger.warning("Misumi model endpoint unavailable: %s", exc)
                 text = "Odysseus is available, but no working model backend is configured for this request."
             else:
-                targets = _consultation_plan(prompt, "", persona)
+                targets = [item["persona"] for item in team_plan["supports"]]
 
                 async def consult(target: str):
+                    began = time.monotonic()
                     try:
-                        return target, await _consult_persona(prompt, target, backend, model)
+                        contribution = await _consult_persona(prompt, target, backend, model, lead=persona)
+                        consult_trace[target] = {
+                            "status": "ok", "raised_risk": risk_flag(contribution),
+                            "latency_ms": int((time.monotonic() - began) * 1000),
+                            "contribution_chars": len(contribution),
+                        }
+                        return target, contribution
                     except Exception as exc:
+                        consult_trace[target] = {
+                            "status": "failed", "raised_risk": False,
+                            "latency_ms": int((time.monotonic() - began) * 1000), "contribution_chars": 0,
+                        }
                         logger.warning(
                             "Misumi consultation failed for %s: %s", target, exc,
                             exc_info=True,
@@ -1193,7 +1169,7 @@ def setup_misumi_routes(
                     prompt,
                     source="consultation",
                     capsule_type=capsule_type,
-                    persona="aoteru",
+                    persona=persona,
                     meta={
                         "contributions": [
                             {"persona": target, "text": contribution}
@@ -1209,7 +1185,7 @@ def setup_misumi_routes(
             for target, _contribution in (contributions if capsule_id else []):
                 try:
                     handoff = memory.create_handoff(
-                        "aoteru",
+                        persona,
                         target,
                         f"analyze the request from the {persona_record(target).get('role')} perspective",
                         capsule_id,
@@ -1237,6 +1213,25 @@ def setup_misumi_routes(
         if should_persist:
             _persist_conversation_turn(session_manager, session_id, prompt, text, persona)
 
+        team_block: Optional[Dict[str, Any]] = None
+        if team_plan is not None and backend and model and model_required:
+            team_block = {
+                "lead": persona,
+                "decision": team_plan["decision"],
+                "reasons": team_plan["reasons"],
+                "excluded": team_plan["excluded"],
+                "supports": [
+                    {**item, **consult_trace.get(item["persona"], {"status": "not-run"})}
+                    for item in team_plan["supports"]
+                ],
+                "handovers": [
+                    {
+                        "from": persona, "to": item["persona"], "returned_to": persona,
+                        "purpose": f"analyse from the {persona_record(item['persona']).get('role')} perspective",
+                    }
+                    for item in team_plan["supports"]
+                ],
+            }
         files_changed = []
         if retention["artifact"].get("status") == "created":
             files_changed.append(f"document:{retention['artifact']['doc_id']}")
@@ -1247,6 +1242,7 @@ def setup_misumi_routes(
             "routing": routing,
             "routing_adaptation": adaptation_note,
             "persona_state": {"applied": style_applied, "captured": style_note} if (style_applied or style_note) else None,
+            "team": team_block,
             "files_read": sorted({item["path"] for item in sources}),
             "files_changed": files_changed,
             "model": model,
@@ -1288,6 +1284,8 @@ def setup_misumi_routes(
                 "effective": outcome == "model",
                 "captured": style_note,
             }
+        if team_block is not None and team_block["decision"] == "team":
+            response["team"] = team_block
         if _consultation_enabled():
             response.update({
                 "consulted": consulted,
