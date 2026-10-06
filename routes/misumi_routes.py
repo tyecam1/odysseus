@@ -712,8 +712,12 @@ def _capture_style_signals(
     named: Optional[str],
     session_id: Optional[str],
     owner: Optional[str],
+    may_promote: bool = True,
 ) -> List[Dict[str, Any]]:
     """Record evidence for each style signal; promote only on an explicit durable user instruction.
+
+    ``may_promote`` is False for a caller without the execute scope (ratification is an act that needs it everywhere else): the
+    evidence is still recorded, the candidate is not promoted.
 
     Scope: a durable instruction that names a persona applies to that persona; one that names none is
     household-wide. Feedback ("too long") and one-off requests are about the responding persona.
@@ -740,10 +744,13 @@ def _capture_style_signals(
             "candidate_id": candidate.get("candidate_id"), "candidate_status": candidate.get("status"),
             "state": "shadow-only",
         }
-        if etype == "explicit_durable" and candidate.get("status") == "eligible":
+        if etype == "explicit_durable" and candidate.get("status") == "eligible" and not may_promote:
+            note["state"] = "eligible-needs-execute-scope"
+        elif etype == "explicit_durable" and candidate.get("status") == "eligible":
             try:
                 revision = store.promote(candidate["candidate_id"], authorisation={
                     "type": "user_instruction", "evidence_id": note["evidence_id"],
+                    "principal": owner, "principal_authenticated": bool(str(owner or "").strip()),
                 })
                 note.update({"state": "active", "revision_id": revision["revision_id"],
                              "previous_revision_id": revision.get("previous_revision_id")})
@@ -1175,9 +1182,15 @@ def setup_misumi_routes(
         if persona_state is not None:
             turn_signals = detect_style_signals(prompt)
             if turn_signals and body.persist_turn:
+                try:
+                    _require_api_scope(request, "misumi:execute")
+                    may_promote = True
+                except HTTPException:
+                    may_promote = False
                 style_note = _capture_style_signals(
                     persona_state, prompt, turn_signals, responding=persona,
                     named=_named_persona_in_prompt(prompt), session_id=body.session_id, owner=owner,
+                    may_promote=may_promote,
                 )
             resolved = persona_state.resolve_state(persona, turn_signals)
             if is_reserved_turn(prompt):

@@ -251,3 +251,111 @@ def test_promote_refuses_when_its_precondition_fails_under_the_lock(tmp_path):
     store.promote(candidate["candidate_id"], authorisation={"type": "user_instruction", "evidence_id": evidence},
                   precondition=lambda current: True)
     assert store.active_revisions()
+
+
+# --- third review round (Opus re-review) --------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("prompt", [
+    "Don’t keep answers short from now on",
+    "Please don’t keep answers short from now on",
+    "It isn’t too long, it is fine.",
+    "I didn’t say it was too long.",
+    "Wasn’t too long",
+    "Keep answers short from now on, she said.",
+    "She asked me to keep answers short from now on.",
+    "‘keep answers short from now on’ is what the sign says",
+])
+def test_typographic_apostrophes_and_trailing_reported_speech_create_no_signal(prompt):
+    assert detect_style_signals(prompt) == []
+
+
+@pytest.mark.parametrize("prompt", [
+    "Your answers are always too long",
+    "Shorter please, I always forget the ending",
+])
+def test_feedback_is_never_a_standing_instruction_even_with_the_word_always(prompt):
+    (signal,) = detect_style_signals(prompt)
+    assert classify_signal(prompt, signal) != "explicit_durable"
+
+
+@pytest.mark.parametrize("prompt", [
+    "Ignore my previous request to keep answers short from now on",
+    "Can you remove the rule to keep answers short from now on",
+    "How do I tell ChatGPT to keep answers short from now on?",
+    "Should I keep answers short from now on in my essay?",
+    "Translate to German: keep answers short from now on",
+    "Example sentence: keep answers short from now on",
+])
+def test_questions_meta_requests_and_examples_are_never_durable(prompt):
+    for signal in detect_style_signals(prompt):
+        assert classify_signal(prompt, signal) != "explicit_durable", prompt
+
+
+def test_the_users_own_durable_instruction_is_still_durable():
+    for prompt in ("From now on keep answers short", "Always explain in plain English", "Going forward, use bullet points"):
+        (signal,) = detect_style_signals(prompt)
+        assert classify_signal(prompt, signal) == "explicit_durable", prompt
+
+
+def test_detection_stays_fast_on_a_very_long_adversarial_prompt():
+    import time
+    for hostile in ("[a](" * 50000, "[a " * 66000, '"' * 200000, "`" * 200000):
+        started = time.monotonic()
+        detect_style_signals(hostile)
+        assert time.monotonic() - started < 1.0
+
+
+def test_a_caller_without_the_execute_scope_cannot_promote_household_style_by_phrase(tmp_path, monkeypatch):
+    from fastapi import HTTPException
+    client, calls = _client(tmp_path, monkeypatch)
+    monkeypatch.setattr(misumi_routes, "_owner", lambda request: request.headers.get("x-test-owner"))
+    real = misumi_routes._require_api_scope
+
+    def read_only(request, required):
+        if required == "misumi:execute" and request.headers.get("x-test-owner") == "bob":
+            raise HTTPException(403, "missing scope")
+        return real(request, required)
+
+    monkeypatch.setattr(misumi_routes, "_require_api_scope", read_only)
+    body = _as(client, "bob", "From now on keep answers short", "s-bob")
+    assert body["persona_state"]["captured"][0]["state"] == "eligible-needs-execute-scope"
+    assert PersonaStateStore(tmp_path / "persona-state").active_revisions() == []
+    body = _as(client, "alice", "From now on keep answers short", "s-alice")
+    note = body["persona_state"]["captured"][0]
+    assert note["state"] == "active"
+    authorisation = PersonaStateStore(tmp_path / "persona-state").active_revisions()[0]["authorisation"]
+    assert authorisation["principal"] == "alice" and authorisation["principal_authenticated"] is True
+
+
+def _routing_candidate(tmp_path):
+    import time
+    from src.misumi_routing_adaptation import RoutingAdaptationStore, record_manual_choice
+    store = RoutingAdaptationStore(tmp_path / "routing-guard")
+    for session in ("x", "y", "z"):
+        store._last_auto_route[session] = {"prompt": "Check the compost bin", "persona": "misato", "reasons": ["compost"],
+                                           "request_id": f"r-{session}", "at": time.time()}
+        record_manual_choice(store, prompt=f"ask Jin about the compost {session}", chosen_persona="jin", session_id=session, owner=None)
+    return store, record_manual_choice
+
+
+def test_a_rejected_routing_candidate_is_not_made_eligible_again_by_one_more_correction(tmp_path):
+    import time
+    store, record_manual_choice = _routing_candidate(tmp_path)
+    candidate = store.get_candidate(["compost"])
+    assert candidate["status"] == "eligible"
+    store.reject(candidate["candidate_id"], "declined in conversation")
+    store._last_auto_route["w"] = {"prompt": "Check the compost bin", "persona": "misato", "reasons": ["compost"], "request_id": "r-w", "at": time.time()}
+    record_manual_choice(store, prompt="ask Jin about the compost w", chosen_persona="jin", session_id="w", owner=None)
+    assert store.get_candidate(["compost"])["status"] == "rejected"
+
+
+def test_an_active_routing_mapping_is_not_offered_again_by_more_corrections(tmp_path):
+    import time
+    store, record_manual_choice = _routing_candidate(tmp_path)
+    candidate = store.get_candidate(["compost"])
+    eid = candidate["supporting_evidence"][0]
+    store.promote(candidate["candidate_id"], authorisation={"type": "user_instruction", "evidence_id": eid})
+    store._last_auto_route["w"] = {"prompt": "Check the compost bin", "persona": "misato", "reasons": ["compost"], "request_id": "r-w", "at": time.time()}
+    record_manual_choice(store, prompt="ask Jin about the compost w", chosen_persona="jin", session_id="w", owner=None)
+    assert store.get_candidate(["compost"])["status"] == "active"

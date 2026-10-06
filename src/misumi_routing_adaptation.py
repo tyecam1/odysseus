@@ -257,7 +257,9 @@ class RoutingAdaptationStore:
                 corrections = candidate["confidence"].get("corrections", 0) + (etype == "correction")
                 candidate["confidence"]["corrections"] = corrections
                 candidate["confidence"]["durable"] = durable_count + (etype == "explicit_durable")
-                if corrections >= REPEATED_CORRECTIONS_FOR_ELIGIBLE:
+                if corrections >= REPEATED_CORRECTIONS_FOR_ELIGIBLE and candidate.get("status") not in ("active", "rejected"):
+                    # (A rejected inference stays rejected and an active mapping is never offered again: the same guard the
+                    # persona-state store has.)
                     # Repeated behavioural evidence: eligible, but promotion
                     # still needs real user ratification - never automatic.
                     candidate["status"] = "eligible"

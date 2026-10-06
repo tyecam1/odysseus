@@ -93,6 +93,8 @@ EVIDENCE_WEIGHTS = {"explicit_durable": 3, "correction": 1, "temporary_choice": 
 REPEATED_CORRECTIONS_FOR_ELIGIBLE = 3
 _MAX_RENDER_CHARS = 200
 
+_DURABLE_STRONG = re.compile(r"\b(?:from\s+now\s+on|permanently|in\s+future|going\s+forward|from\s+now)\b", re.IGNORECASE)
+_DURABLE_WEAK = re.compile(r"\b(?:always|forever)\b", re.IGNORECASE)
 _DURABLE_PHRASE = re.compile(
     r"\b(?:from\s+now\s+on|always|permanently|in\s+future|going\s+forward|forever|from\s+now)\b",
     re.IGNORECASE,
@@ -107,6 +109,24 @@ _RESERVED_MATTERS = re.compile(
     re.IGNORECASE,
 )
 _CLAUSE_BOUNDARY = re.compile(r"[.;!?\n]")
+# Typographic quotes and apostrophes (phone and kiosk keyboards) are folded to ASCII before any pattern runs, and only the first
+# characters of a prompt are inspected, so a very long prompt cannot make detection slow.
+_TYPOGRAPHIC = str.maketrans({"’": "'", "‘": "'", "‛": "'", "ʼ": "'", "“": '"', "”": '"', "„": '"'})
+_MAX_DETECT_CHARS = 2000
+
+
+def _prep(prompt: object) -> str:
+    return str(prompt or "")[:_MAX_DETECT_CHARS].translate(_TYPOGRAPHIC)
+
+
+# A sentence that talks ABOUT an instruction (asks how, asks to remove or ignore it, translates it, gives it as an example or for
+# someone else) is never the user's own durable instruction.
+_NOT_DURABLE_CONTEXT = re.compile(
+    r"\b(?:ignore|disregard|remove|stop|undo|cancel|revert|translate|example|how\s+do\s+i|should\s+i|"
+    r"tell\s+(?:the|my|your|him|her|them|chatgpt|it)|essay|quote|sentence)\b",
+    re.IGNORECASE,
+)
+_REPORTED_TAIL = re.compile(r"[^.;!?\n]{0,160}\b(?:he|she|they|someone|everyone)\s+(?:said|wrote|says|asked|told\s+me)\b[^.;!?\n]{0,160}", re.IGNORECASE)
 _NEGATION = re.compile(
     r"\b(?:don'?t|do\s+not|didn'?t|did\s+not|wasn'?t|was\s+not|isn'?t|is\s+not|aren'?t|are\s+not|weren'?t|were\s+not"
     r"|can'?t|cannot|won'?t|not|never|no\s+longer|nothing|neither|nor)\b",
@@ -119,7 +139,7 @@ _QUOTE_PATTERNS = tuple(re.compile(pattern, flags) for pattern, flags in (
     (r"`[^`\n]*`", 0),
     (r"`[^\n]*$", re.MULTILINE),
     (r"<(blockquote|q|pre|code)\b[^>]*>[\s\S]*?(?:</\1\s*>|$)", re.IGNORECASE),
-    (r"\[[^\]\n]*\]\([^)\n]*\)", 0),
+    (r"\[[^\]\n]{0,200}\]\([^)\n]{0,300}\)", 0),
     (r"\"[^\"\n]*\"", 0),
     (r"“[^”\n]*”", 0),
     (r"(?<!\w)'[^'\n]+'(?!\w)", 0),
@@ -136,7 +156,7 @@ _REPORTED = re.compile(
 def _strip_quoted(text: str) -> str:
     for pattern in _QUOTE_PATTERNS:
         text = pattern.sub(" ", text)
-    return _REPORTED.sub(" ", text)
+    return _REPORTED.sub(" ", _REPORTED_TAIL.sub(" ", text))
 
 
 def _clause_before(text: str, position: int) -> str:
@@ -147,7 +167,7 @@ def _clause_before(text: str, position: int) -> str:
 def is_reserved_turn(prompt: str) -> bool:
     """True when the prompt is about a reserved matter (safety, medical, emergency, memory retention, standards ...): learned style is
     neither captured from nor applied to such a turn."""
-    return bool(_RESERVED_MATTERS.search(str(prompt or "")))
+    return bool(_RESERVED_MATTERS.search(_prep(prompt)))
 
 
 # (dimension, value, kind, pattern). kind: "feedback" (about the previous answer) | "request".
@@ -202,7 +222,7 @@ def detect_style_signals(prompt: str) -> list[dict[str, str]]:
     ambiguous and dropped. A request or feedback that is negated ("don't make
     it shorter", "I wasn't saying it was too long") is not a signal.
     """
-    text = str(prompt or "")
+    text = _prep(prompt)
     if is_reserved_turn(text):
         return []
     text = _strip_quoted(text)  # an instruction that is only quoted, reported or in code is not the user's own
@@ -224,14 +244,21 @@ def detect_style_signals(prompt: str) -> list[dict[str, str]]:
 
 def classify_signal(prompt: str, signal: dict[str, str]) -> str:
     """Evidence type for one signal: durable instruction / feedback correction / one-off request."""
-    text = _strip_quoted(str(prompt or ""))
+    if signal.get("kind") == "feedback":
+        return "correction"  # "your answers are always too long" describes an answer; it is never a standing instruction
+    text = _strip_quoted(_prep(prompt))
     index = text.lower().find(str(signal.get("matched") or "\0"))
     if index >= 0:
         # the durable phrase must be in the same sentence as the signal it would make durable
         start = max((m.end() for m in _CLAUSE_BOUNDARY.finditer(text, 0, index)), default=0)
         end = next((m.start() for m in _CLAUSE_BOUNDARY.finditer(text, index)), len(text))
+        asks = end < len(text) and text[end] == "?"
         text = text[start:end]
-    if _DURABLE_PHRASE.search(text):
+        if asks or _NOT_DURABLE_CONTEXT.search(text):
+            return "temporary_choice"
+    request_at = text.lower().find(str(signal.get("matched") or "\0"))
+    # "from now on ..." counts anywhere in the sentence; "always"/"forever" only before the request ("always explain ..."), not after it
+    if _DURABLE_STRONG.search(text) or _DURABLE_WEAK.search(text[:request_at] if request_at >= 0 else text):
         return "explicit_durable"
     return "correction" if signal["kind"] == "feedback" else "temporary_choice"
 

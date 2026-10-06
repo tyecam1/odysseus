@@ -139,7 +139,7 @@ class OfferBook:
         A tuple, not a joined string, so no owner/session pair can collide with another by containing a separator; an absent or
         blank owner is one value (None).
         """
-        return ((str(owner).strip() or None) if owner is not None else None, str(session_id or ""))
+        return ((str(owner) if str(owner).strip() else None) if owner is not None else None, str(session_id or ""))
 
     def record_offer(self, session_id: str | None, offer: dict[str, Any], owner: str | None = None) -> None:
         self._last_offered[str(offer["candidate_id"])] = self._clock()
