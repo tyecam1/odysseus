@@ -1,4 +1,13 @@
-# Aoteru routing contract v0.2 - amendment PROPOSAL (not ratified, not active)
+# Aoteru routing contract v0.2 - amendment (RATIFIED 2026-10-06, Option A)
+
+> **Status update 2026-10-06:** the user ratified Option A, with exact learned-cue semantics retained (previously learned routing-revision
+> cues stay on exact `keyword_present` matching and are neither migrated nor reinterpreted by stemming), the optional `routing.aliases`
+> manifest field, the v0.1 kill switch and v0.1 as the immediate rollback path. Option B stays unratified. The contract is
+> `docs/core/aoteru-routing-contract-v0.2.md` in `tyecam1/misumi` (misumi PR #65); the runtime wiring and deployment are recorded in the
+> -09 follow-up evidence. The text below is the original proposal, kept as written (its "not ratified, not active" statements describe
+> the state at the time).
+
+# (original) Aoteru routing contract v0.2 - amendment PROPOSAL (not ratified, not active)
 
 Status: **proposed** (application -09, 2026-10-05). Nothing in this document changes runtime behaviour.
 The runtime still implements the ratified contract v0.1 (`src/misumi_persona_routing.py`).

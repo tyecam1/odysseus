@@ -1,6 +1,11 @@
 """Deterministic lead-persona routing for the Misumi interface.
 
-Implements the ratified Aoteru routing contract v0.1
+Since 2026-10-06 the ratified algorithm is routing contract v0.2 (``src/misumi_routing_v02.py``); this module is the entry
+point and keeps the ratified contract v0.1 below VERBATIM as the immediate rollback path:
+``MISUMI_ROUTING_ALGORITHM=v0.1`` selects exactly v0.1 behaviour (``resolve_auto_lead_v01``). Learned routing revisions are
+independent of both: they key on exact ``keyword_present`` cue words and are never migrated or reinterpreted.
+
+v0.1 text follows. Implements the ratified Aoteru routing contract v0.1
 (docs/core/aoteru-routing-contract-v0.1.md in the canonical knowledgebase):
 
 1. Read persona routes from ``config/personas.yaml`` at
@@ -80,11 +85,36 @@ def load_personas(root: str | os.PathLike[str] | None = None) -> Mapping[str, An
     return personas
 
 
+def routing_algorithm() -> str:
+    """``v0.1`` only when explicitly selected (the kill switch); ratified v0.2 otherwise."""
+    value = (os.getenv("MISUMI_ROUTING_ALGORITHM", "v0.2") or "").strip().lower()
+    return "v0.1" if value in {"v0.1", "0.1", "v01", "1"} else "v0.2"
+
+
 def resolve_auto_lead(
     prompt: str,
     personas: Mapping[str, Any] | None = None,
+    prior_lead: str | None = None,
 ) -> tuple[str, dict[str, Any]]:
-    """Route one auto-persona request to its lead persona deterministically.
+    """Route one auto-persona request to its lead persona under the ratified contract (v0.2; v0.1 via the kill switch).
+
+    ``prior_lead`` is the previous turn's lead and is used ONLY by v0.2's follow-up carry; callers pass it only for a
+    persisted turn (an incognito turn has no prior lead, which is exactly the v0.1 behaviour).
+    """
+    if routing_algorithm() == "v0.1":
+        return resolve_auto_lead_v01(prompt, personas)
+    if personas is None:
+        personas = load_personas()
+    from src.misumi_routing_v02 import resolve_lead
+
+    return resolve_lead(prompt, personas, prior_lead)
+
+
+def resolve_auto_lead_v01(
+    prompt: str,
+    personas: Mapping[str, Any] | None = None,
+) -> tuple[str, dict[str, Any]]:
+    """Route one auto-persona request to its lead persona deterministically (routing contract v0.1, the rollback path).
 
     Returns ``(persona_id, provenance)``. Provenance records the method, the
     selection, and the deterministic reasons so the choice is traceable.

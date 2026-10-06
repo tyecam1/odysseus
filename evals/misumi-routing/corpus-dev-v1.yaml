@@ -34,6 +34,19 @@ reference_intents:
   ichigo: "overdue, urgent, closure, safety, stalled"
   giorno: "ideas, evolution, experiments, opportunities, repurpose"
   kino: "phd, vault, profile, personal, exports, context"
+# RATIFIED 2026-10-06 (routing contract v0.2): routing.aliases in config/personas.yaml, lower-weight everyday words per persona,
+# mirrored here so the corpus is measured against exactly what production reads (minus any word production already lists as an intent).
+reference_aliases:
+  lelouch: "procedure, checklist, runbook, pipeline, sop"
+  kurisu: "notes, minutes, remember, conversation, saved"
+  misato: "bin, bins, dishes, dishwasher, laundry, tidy, mess, hoover, vacuum, mop, washing, housework, chores"
+  jin: "vinyl, album, albums, song, songs, stereo, playlist, band, gig, turntable"
+  erwin: "roadmap, prioritise, prioritize, goals, tradeoff, quarter"
+  l: "spending, charged, payment, invoice, invoices, bank, cost, expense, expenses, subscription, overspend, billing, budget, bills"
+  ginko: "plant, water, herbs, tomatoes, seedlings, leaves, compost, soil, greenhouse, weeds, windowsill, garden"
+  sanji: "dinner, lunch, breakfast, cook, cooking, fridge, groceries, milk, meal, recipe, shop, supper, pantry, ingredients, leftovers"
+  ichigo: "stuck, wedged, asap, emergency, deadline, blocked"
+  giorno: "experiment, evolve, trial, growth"
 items:
   - {id: "p01", category: paraphrase, prompt: "Could you sort out who's doing the dishes and the bins this week?", intended: misato}
   - {id: "p02", category: paraphrase, prompt: "What should we have for dinner tonight?", intended: sanji}

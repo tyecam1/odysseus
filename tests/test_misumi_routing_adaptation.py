@@ -438,7 +438,7 @@ def test_respond_durable_preference_promotes_and_reroutes(tmp_path, monkeypatch)
         json={"prompt": "the cleaning rota needs updating", "persona": "auto", "session_id": "sess-3"},
     ).json()
     assert after["persona"] == "jin"
-    assert after["routing"]["method"] == "routing-contract-v0.1+learned-revision"
+    assert after["routing"]["method"] == "routing-contract-v0.2+learned-revision"
     assert after["routing"]["learned"]["revision_id"] == note["promotion"]["revision_id"]
     assert after["routing"]["base_selected"] == "misato"
 

@@ -37,7 +37,7 @@ def _test_resolve(prompt: str) -> tuple[str, dict]:
 def test_keyword_match_routes_to_best_persona():
     persona, provenance = _test_resolve("Check the cleaning rota")
     assert persona == "misato"
-    assert provenance["method"] == "routing-contract-v0.1"
+    assert provenance["method"] == "routing-contract-v0.2"  # ratified 2026-10-06; v0.1 stays behind the kill switch
     assert provenance["selected"] == "misato"
     assert sorted(provenance["reasons"]) == ["cleaning", "rota"]
 
@@ -160,13 +160,42 @@ def test_respond_auto_routes_lead_persona(tmp_path, monkeypatch):
     ).json()
     assert body["persona"] == "misato"
     assert body["persona_source"] == "auto"
-    assert body["routing"]["method"] == "routing-contract-v0.1"
+    assert body["routing"]["method"] == "routing-contract-v0.2"
     assert "cleaning" in body["routing"]["reasons"]
 
     record = json.loads(event_log.read_text(encoding="utf-8").splitlines()[-1])
     assert record["persona"] == "misato"
     assert record["persona_source"] == "auto"
     assert record["routing"]["selected"] == "misato"
+
+
+def test_respond_kill_switch_restores_v01_exactly(tmp_path, monkeypatch):
+    """MISUMI_ROUTING_ALGORITHM=v0.1 is the immediate rollback: same lead and the v0.1 method string, no v0.2 fields."""
+    monkeypatch.setenv("MISUMI_ROUTING_ALGORITHM", "v0.1")
+    client, _ = _client(tmp_path, monkeypatch)
+    body = client.post(
+        "/misumi/respond", json={"prompt": "Check the cleaning rota", "persona": "auto"}
+    ).json()
+    assert body["persona"] == "misato"
+    assert body["routing"]["method"] == "routing-contract-v0.1"
+    assert body["routing"]["reasons"] == ["cleaning", "rota"]
+    assert "algorithm" not in body["routing"] and "negated" not in body["routing"]
+
+
+def test_respond_follow_up_carries_the_lead_only_from_a_persisted_turn(tmp_path, monkeypatch):
+    client, _ = _client(tmp_path, monkeypatch)
+    first = {"prompt": "Check the cleaning rota", "persona": "auto", "session_id": "carry-1"}
+    follow = {"prompt": "and what about tomorrow?", "persona": "auto", "session_id": "carry-1"}
+    client.post("/misumi/respond", json={**first, "persist_turn": True})
+    carried = client.post("/misumi/respond", json={**follow, "persist_turn": True}).json()
+    assert carried["persona"] == "misato" and carried["routing"]["reasons"] == ["carry:misato"]
+    # an incognito follow-up has no prior lead (exactly the v0.1 behaviour)
+    incognito = client.post("/misumi/respond", json={**follow, "persist_turn": False}).json()
+    assert incognito["persona"] == "aoteru" and incognito["routing"]["reasons"] == ["fallback:aoteru"]
+    # a previous turn that was NOT persisted never seeds a carry
+    client.post("/misumi/respond", json={**first, "session_id": "carry-2", "persist_turn": False})
+    after_incognito = client.post("/misumi/respond", json={**follow, "session_id": "carry-2", "persist_turn": True}).json()
+    assert after_incognito["persona"] == "aoteru"
 
 
 def test_respond_auto_reserved_guard_keeps_aoteru(tmp_path, monkeypatch):
