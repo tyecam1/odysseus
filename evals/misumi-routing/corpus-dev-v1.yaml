@@ -17,18 +17,23 @@
 # corpus-heldout-v1.yaml, authored after the candidate was frozen.
 schema_version: 1
 split: dev
+# CORRECTION 2026-10-06: reference_intents is the LIVE manifest (tyecam1/misumi config/personas.yaml at main 0d5bdb6aec,
+# routing.intents in manifest order, incl. kino). It originally carried the -07 fixture's frozen table, which had drifted
+# from production (e.g. l had budget/bills, misato chores, ichigo deadline/blocked; manifest order differed). Item labels are
+# unchanged; measurements were re-run against the live manifest.
 reference_intents:
   aoteru: "default, standards, coherence, boundaries, integration"
-  lelouch: "workflow, implementation, process, protocol, tasks"
-  kurisu: "archive, transcript, evidence, memory"
-  misato: "cleaning, chores, rota, wellbeing"
-  jin: "music, records, listening, wantlist"
   erwin: "priorities, planning, risk, strategy, recovery"
-  l: "finance, anomaly, budget, bills"
-  ginko: "plants, watering, pests, garden"
-  sanji: "food, meals, recipes, shopping, stock, leftovers"
-  ichigo: "urgent, stalled, blocked, deadline"
-  giorno: "evolution, experiments, growth"
+  lelouch: "workflows, protocols, tasks, process, implementation"
+  misato: "cleaning, rota, care, rest, wellbeing"
+  kurisu: "capture, memory, archive, evidence, transcript"
+  l: "money, finance, anomaly, waste, diagnostics"
+  ginko: "plants, damp, pests, environment, watering"
+  sanji: "food, meals, shopping, stock, recipes"
+  jin: "records, music, gigs, wantlist, listening"
+  ichigo: "overdue, urgent, closure, safety, stalled"
+  giorno: "ideas, evolution, experiments, opportunities, repurpose"
+  kino: "phd, vault, profile, personal, exports, context"
 items:
   - {id: "p01", category: paraphrase, prompt: "Could you sort out who's doing the dishes and the bins this week?", intended: misato}
   - {id: "p02", category: paraphrase, prompt: "What should we have for dinner tonight?", intended: sanji}

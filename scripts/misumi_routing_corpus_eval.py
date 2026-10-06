@@ -30,7 +30,11 @@ from src.misumi_persona_routing import resolve_auto_lead  # noqa: E402
 from src.misumi_routing_candidates import resolve_candidate_lead  # noqa: E402
 
 CORPUS_DIR = ROOT / "evals" / "misumi-routing"
-SPLITS = {"dev": "corpus-dev-v1.yaml", "heldout": "corpus-heldout-v1.yaml"}
+SPLITS = {
+    "dev": "corpus-dev-v1.yaml",
+    "heldout": "corpus-heldout-v1.yaml",  # no longer blind after the live-manifest correction
+    "heldout2": "corpus-heldout-v2.yaml",  # blind generalisation estimate
+}
 
 
 def load_corpus(path: Path) -> dict[str, Any]:
