@@ -2,7 +2,7 @@
 
 Canonical queue for the Misumi/Odysseus long-horizon programme. Expanded 2026-10-05 (application -09 reconciliation): the previous terminal state (after -06..-08) applied only to the then-current executable queue and is explicitly superseded as *roadmap* completion — the full roadmap below restores every expected frontier. Distilled from the standing programme directive, the v4 registered prompt, `automation/review/misumi-long-horizon-programme-evidence.md`, the -06/-07/-08 traces, and the agent-task cards.
 
-Rule of use: at each frontier reconcile live state, select by `user-visible value × leverage × evidence value × dependency reduction / risk × cost × uncertainty`, implement, test, merge under valid authority, deploy, exercise the real path, preserve failures, reconcile evidence, update this file, continue. Every item carries exactly one disposition: `complete` / `executable` / `dependency-blocked` / `operator-gated` / `household-gated` / `nature-gated` / `verification-debt` / `successor/rejected-with-rationale`.
+Rule of use: at each frontier reconcile live state, select by `user-visible value × leverage × evidence value × dependency reduction / risk × cost × uncertainty`, implement, test, merge under valid authority, deploy, exercise the real path, preserve failures, reconcile evidence, update this file, continue. Every item carries exactly one disposition (vocabulary revised 2026-10-06 under the user's standing closeout authority, which retired `operator-gated` and `household-gated` as approval gates): `complete` / `actionable-now` / `credential-bound` / `physically-unavailable` / `human-judgement-required` / `model-lane-unavailable` / `nature-gated` / `verification-debt` / `successor/rejected-with-rationale`.
 
 ## Completed foundations
 
@@ -38,23 +38,23 @@ Remaining software: see "Remaining executable work". Physical (`household-gated`
 ### B7 routing contract v0.2 ratification - `complete` (user-ratified 2026-10-06; wired, deployed, proven)
 Ratified exactly as the user instructed (Option A, exact learned-cue semantics, v0.1 kill switch and rollback); see -09. Nothing remains gated here. Option B (model-assisted classification) was NOT ratified and stays -09b.
 
-### B1 physical kiosk acceptance — `household-gated`
+### B1 physical kiosk acceptance — `human-judgement-required` (machine-measurable parts done 2026-10-06; see "Operational closeout")
 Box bridge (192.168.4.37:8770) unreachable at 2026-10-05 reconciliation (connection timed out; household pause in force). On return: canonical box-proxy verification + physical audio/latency/reboot acceptance (with -12).
 
 ### B2 runtime resilience - `complete` for what can be drilled without the household; remainder `household-gated`
 Proven live earlier (-05): agent kill recovery, whole-service recovery, Ollama recovery, maintenance hold, three real reboots. Proven 2026-10-06 on scratch instances (production untouched; evidence `evals/misumi-resilience/`): **TTS failure and recovery** (healthy WAV in ~1.9 s; Kokoro model removed -> text reply unaffected in 620 ms, `/tts` 503, no audio; real process restart -> audio again), which exposed a real gap - a failed voice and a disabled voice looked identical to the box and the kiosk swallowed failures silently - fixed with an explicit `tts_status` and a kiosk voice label (misumi #64); **model/network loss and recovery** (`2026-10-06-model-loss-recovery-drill.md`).
 Remaining and `household-gated` (need the real kiosk/room): output-device change, perceived latency and audibility, network loss as seen by the real kiosk box, reboot of the kiosk box itself. Deployment note: the host agent keeps old code in memory until restarted via its launcher (`-Stop`, then start).
 
-### B3 security/console hardening — `operator-gated`
+### B3 security/console hardening — `actionable-now` (baselined 2026-10-06; changes prepared but NOT applied: the session's tool-permission classifier declined them; see "Operational closeout")
 Blank-password restriction, idle lock, BitLocker, router/tailnet exposure review, unnecessary listeners. Decisions and posture details live in the private misumi repository. Do not break required embodiment for checklist compliance.
 
-### B4 backup + restore — `operator-gated` (inputs: provider/path, public age recipient, permission to install `age`)
+### B4 backup + restore — local encrypted backup + restore `complete` (2026-10-06); off-site copy `credential-bound` (see "Operational closeout")
 When inputs arrive: configure encrypted backup, verify it, then **prove an actual restoration**; record failure behaviour. A backup without restore testing is incomplete.
 
-### B5 lab deployment — `operator-gated` (sudo on hz2-workstation)
+### B5 lab deployment — `complete` (2026-10-06; the service restart needed no password: a NOPASSWD sudo rule covers it)
 Lab still `d2fc0bac32`; at the 2026-10-06 reconciliation authoritative odysseus dev was `f75eb723a8` and home production runs release `f75eb723a8` (cut over 2026-10-06 on the user's explicit authorisation; rollback = re-Install `1afc1ddedc`) (re-resolve both immediately before presenting - heads move). Unblocks the Sol lane (D1/D2) and closes the multihost drift.
 
-### B6 memory-policy reconciliation — `operator-gated`
+### B6 memory-policy reconciliation — `complete` (policy v0.2 ratified 2026-10-06, misumi #66)
 Policy v0.2 uniformly "proposed for ratification with named gaps" (re-verified -07/-08: no contradictory markers). Behavioural-process routing state remains correctly separated from memory scope.
 
 ## Verification / reasoning debts (discharge when lanes return; never fabricate)
@@ -74,13 +74,13 @@ Sequenced behind B1-B5 evidence per the v3 closeout contract.
 ### D5 longitudinal adaptation evidence — `nature-gated`
 Repetition-derived candidates and persona-state learning need real household interaction over time; inspection endpoints are live (watch item).
 
-## Remaining executable work (explicit)
+## Remaining work that is not executable software (explicit)
 - **-09b** option B (model-assisted routing for open vocabulary): `dependency-blocked` on the GLM/Sol lanes; not ratified.
 - **-10b(i)** familiarity counters (project / recurring task) are `nature-gated`: they only mean something over real household interaction history, so building counters now would produce numbers with no behaviour behind them (the event log already carries the raw material). **-10b(ii)** collaboration affinity is `nature-gated` (needs longitudinal data on which supports helped). **-10b(iii)** domain-confidence adaptation that would change competence claims is `successor/rejected-with-rationale` until a ratified competence-claim policy exists (the -07 boundary forbids learned state touching competence claims).
 - **-12** remaining items are NOT executable software: the larger-N measurement of the `reactive` sentence is `successor/evaluation-debt` (inconclusive so far; a candidate that forbids every question was rejected because it would forbid legitimate clarification); richer support/handover visual states and voice differentiation beyond the voice id (pace/register tuning) are `household-gated` (physical judgement and audibility).
 - **-11** a stronger judge than a keyword checker and a larger N are the open measurement debt.
 
-## Terminal reconciliation (2026-10-06, after the B7 ratification)
+## Terminal reconciliation (2026-10-06, after the B7 ratification; the gate classifications below were SUPERSEDED the same day by "Operational closeout reconciliation")
 
 Live state: odysseus dev `f75eb723a8`; misumi main `29929467fd`; home production release `f75eb723a8` (cut over 2026-10-06 on the user's explicit authorisation after the staged side-by-side check; carries the -11 `teamdrop` harm-reduction repair; rollback preserved: re-Install `1afc1ddedc`, whose release directory is retained) (production regression 177/177, `wrong_method_string` 0, household persona-state and routing stores unchanged before/after, health 200, the task registered from `odysseus-releases\f75eb723a8`, team formed with `RISK:` on planted conflicts and none on clean controls, a turn-scoped style request cut a reply from 63 to 28 words with nothing persisted; routing contract v0.2 default, v0.1 kill switch verified; persona-state, team formation and conversational ratification live; host agent restarted onto the voice-profile/`tts_status` code); lab control plane `d2fc0bac32` (stale, operator sudo); kiosk bridge `192.168.4.37:8770` closed (household pause). No programme PR is open.
 
@@ -105,3 +105,20 @@ Stop condition: every remaining item is operator-, household-, physical-, nature
 - -10 (application, 2026-10-06, after the user's ratification): B7 closed (v0.2 ratified, wired, deployed, regression-proven), -11 evaluation v2, stale head fixed, terminal reconciliation; odysseus #113-#116 (#112 closed) and misumi #65; see the trace `2026-10-06-misumi-long-horizon-programme-10.yaml`.
 - -09 (application, 2026-10-06): -08b, -09, -10, -11 and the software parts of -12 plus two B2 drills; odysseus PRs #99-#108 and misumi #61-#64; see the trace `2026-10-06-misumi-long-horizon-programme-09.yaml`.
 - -06, -07, -08: see traces 2026-10-04/05 in `evals/prompt-applications/misumi-long-horizon-programme/`; releases `a4851dbddd` → `ce8d353a8f`; PRs #92, #58, #93, #94, #60, #95, #96, #97, #98.
+
+## Operational closeout reconciliation (2026-10-06, supersedes the gate labels above)
+
+Authority: the user's standing operational-closeout instruction of 2026-10-06 (reversible, evidence-backed actions that merely awaited approval are authorised; hard boundaries: no fabricated credentials, physical observations, model reviews, restores or judgements). Full evidence: `automation/review/misumi-operational-closeout-2026-10-06.md`. Runtime identifiers are resolved live and not repeated here: production release and rollback are read from the home host's registered task, the lab from `git rev-parse` in its checkout, branch heads from GitHub.
+
+| Item | Was | Now | Basis |
+| --- | --- | --- | --- |
+| B5 lab deployment | operator-gated | **complete** | Lab fast-forwarded from `d2fc0bac32` to the then `dev` head, rollback snapshot taken, service restarted through the existing NOPASSWD rule, health, control plane (home now eligible), model routing and a 6015-pass suite verified. |
+| B6 memory policy v0.2 | operator-gated | **complete** | Ratified in misumi #66 with a ratification record; no clause broadened collection; gaps stay named. |
+| B4 backup/restore | operator-gated | **complete (local encrypted)**; off-site `credential-bound` | `age` installed, dedicated keypair generated on the laptop (private identity never on home), daily task registered and run unattended, encrypted snapshot restored in isolation and served by a scratch app. Home OneDrive client is signed out (sync dormant since 2025-08), so the OneDrive "destination" is NOT off-site until the user signs in. An interim off-site ciphertext copy was placed in the laptop's synced OneDrive. |
+| B1 kiosk acceptance | household-gated | **human-judgement-required** | Box reachable and healthy; real bridge path measured; production TTS measured; STT engine proven in isolation. Spoken input is DOWN: no STT service listens on :4600 since the 2026-10-04 reboot (boot task starts the agent with `-NoStt`). Starting it resumes ambient household capture, a consent matter, so it was not done. |
+| B3 security hardening | operator-gated | **actionable-now (prepared, not applied)** | Baseline recorded; the hardening script was declined by the tool-permission classifier, so no host setting was changed. |
+| D2 Sol | verification-debt | **model-lane-unavailable** | Codex CLI authenticated on lab and laptop; `gpt-5.6-sol` returns a usage limit until 19:57 BST 2026-10-06. Watcher scheduled. No Sol review has happened. |
+| D3 GLM | verification-debt | **model-lane-unavailable** | No `glm` alias, binding, key or CLI configuration exists anywhere in the estate. `reasoning-strong` is local Nemotron (advisory only). |
+| D4 Opus closeout | verification-debt | **verification-debt** (not attempted) | Would need a Claude Opus sub-agent, which the session did not spawn without an explicit instruction. |
+
+New findings from this arc: (1) transcript export silently stopped at 200 rows (odysseus #119); (2) STT service not running (above); (3) a household-read-only answer for a records question returned an irrelevant retrieved line; (4) `odysseus-backup-task.ps1 -Action Install` builds its principal from `$env:USERDOMAIN`, which is `WORKGROUP` in an SSH session, so Install fails there unless the domain is corrected; (5) home OneDrive dormant (above).
