@@ -434,3 +434,54 @@ def test_a_named_list_is_returned_whole_not_cut_at_four(tmp_path, monkeypatch):
 def test_a_queried_field_that_holds_null_is_reported_as_not_recorded(client):
     body = _ask(client, "What quantity of eggs is in stock?", persona="sanji")
     assert "name: eggs" in body["text"] and "quantity: not recorded" in body["text"]
+
+
+# --- fourth review round (Opus re-review) ----------------------------------------------------------------------------------
+
+
+def test_a_field_name_alone_is_not_evidence_for_another_entry(tmp_path):
+    root = _write_root(tmp_path / "hh", {
+        "household/plants/plants.yaml": "plants:\n  - name: basil\n    location: kitchen windowsill\n    last_watered: 2026-10-01\n",
+        "household/food/stock.yaml": "items:\n  - name: eggs\n    category: fresh\n    expiry: 2026-10-09\n",
+    })
+    adapter = HouseholdReadOnlyAdapter(root)
+    assert adapter.search("When was the fern last watered?", domain="plants") == []
+    assert adapter.search("What's the milk expiry in stock?", domain="food") == []
+    assert adapter.search("When was the basil last watered?", domain="plants")  # the right entry is still found
+
+
+def test_a_rota_question_is_answered_from_the_rota_not_the_history_log(tmp_path, monkeypatch):
+    files = dict(FILES)
+    files["household/cleaning/rota.md"] = "# Cleaning rota\n\n| Task | This week | Next week |\n|---|---|---|\n| Bathroom | Alice | Bob |\n"
+    files["household/cleaning/history.md"] = "# Cleaning history\n\n- 2026-09-01: Alice and Bob swapped week because of travel\n"
+    root = _write_root(tmp_path / "hh", files)
+    monkeypatch.setenv("MISUMI_HOUSEHOLD_ROOT", str(root))
+    app = FastAPI()
+    app.include_router(setup_misumi_routes(SkillsManager(str(tmp_path / "data"))))
+    body = TestClient(app).post("/misumi/respond", json={"prompt": "Who is on bathroom cleaning this week?", "persona": "misato"}).json()
+    assert "This week: Alice" in body["text"] and "swapped" not in body["text"]
+
+
+def test_a_long_named_list_is_read_out_whole_or_marked_as_shortened(tmp_path, monkeypatch):
+    items = "".join(f"- [ ] item number {i} of the weekly shop\n" for i in range(1, 26))
+    root = _write_root(tmp_path / "hh", {"household/food/shopping-list.md": "# Shopping list\n\n" + items})
+    monkeypatch.setenv("MISUMI_HOUSEHOLD_ROOT", str(root))
+    app = FastAPI()
+    app.include_router(setup_misumi_routes(SkillsManager(str(tmp_path / "data"))))
+    text = TestClient(app).post("/misumi/respond", json={"prompt": "what is on the shopping list?", "persona": "sanji"}).json()["text"]
+    assert "item number 25" in text or "(list shortened)" in text
+    assert "item number 25" in text  # 25 short items fit in the list limit
+
+
+def test_small_function_words_do_not_make_a_recorded_item_unfindable(household):
+    adapter = HouseholdReadOnlyAdapter(household)
+    assert any("boiler leak" in hit["snippet"] for hit in adapter.search("Is there an urgent repair?", domain="maintenance"))
+
+
+@pytest.mark.parametrize("flag", ["true", "yes", '"true"', "'yes'", "True"])
+def test_every_common_spelling_of_the_example_flag_marks_a_demonstration_entry(tmp_path, flag):
+    root = _write_root(tmp_path / "hh", {
+        "household/food/stock.yaml": f"items:\n  - name: SAMPLE cheese\n    quantity: 99\n    example: {flag}\n  - name: cheddar\n    quantity: 2\n",
+    })
+    hits = HouseholdReadOnlyAdapter(root).search("cheese in stock", domain="food")
+    assert not [hit for hit in hits if "SAMPLE" in (hit.get("context") or hit["snippet"])]

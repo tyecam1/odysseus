@@ -1200,7 +1200,9 @@ def setup_misumi_routes(
             if lead.get("listed") and len(listed) > 1:  # a question that names a list gets the list, not its first line
                 items = "; ".join(str(item.get("context") or item["snippet"]) for item in listed)
                 more = " (list shortened)" if len(named_list) >= 30 else ""
-                text = _short_text(f"From {lead['path']}: {items}{more}")
+                text = f"From {lead['path']}: {items}{more}"
+                if len(text) > 1500:  # a list is read out whole up to a marked limit, never cut mid-item silently
+                    text = text[:1500].rsplit("; ", 1)[0] + " (list shortened)"
             else:
                 text = _short_text(f"From {lead['path']} line {lead['line']}{entry}: {lead.get('context') or lead['snippet']}")
             backend = "household-read-only"

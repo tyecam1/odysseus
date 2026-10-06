@@ -52,6 +52,7 @@ _STOP_TERMS = frozenset({
     "say", "should", "so", "some", "soon", "such", "tell", "than", "that", "the", "them", "then", "there", "they", "this",
     "to", "today", "tomorrow", "tonight", "us", "very", "was", "we", "were", "what", "when", "where", "which", "who",
     "whose", "will", "with", "words", "would", "yesterday", "yet", "you", "your",
+    "an", "as", "at", "be", "by", "if", "up", "just", "also", "go",
 })
 # Words that may accompany a request to show a whole list or table ("what is on the cleaning rota this week").
 _LISTING_FILLER = frozenset({"week", "next", "current"})
@@ -73,7 +74,7 @@ _NOT_BUILT_NOTE = re.compile(
 _TODO = re.compile(r"\bTODO\b|_TODO_")
 _DOC_FILES = frozenset({"readme.md"})  # directory documentation, not household data
 _ENTRY_START = re.compile(r"^(\s*)-\s+([A-Za-z_][\w-]*:(?:\s|$))")
-_EXAMPLE_FLAG = re.compile(r"^example:\s*true\b", re.IGNORECASE)
+_EXAMPLE_FLAG = re.compile(r"^example:\s*[\"']?(?:true|yes|y|1)[\"']?\s*(?:#.*)?$", re.IGNORECASE)
 _ENTRY_KEY = re.compile(r"^(artist|title|name|item|plant|task):\s*(.*?)\s*$", re.IGNORECASE)
 _LABEL_ORDER = ("name", "item", "plant", "task", "title", "artist")
 _ITEM_LINE = re.compile(r"^(?:[-*+]\s|\d+[.)]\s|\||[\w-]+:\s)")
@@ -213,6 +214,14 @@ def _table_context(header: str, row: str) -> str:
     if len(names) != len(cells) or not any(cells):
         return ""
     return "; ".join(f"{name}: {cell}" for name, cell in zip(names, cells) if name and cell)[:300]
+
+
+def _value_part(text: str, structured: bool) -> str:
+    """For a YAML 'key: value' line, the value (field names do not count as evidence); otherwise the whole text."""
+    if not structured:
+        return text
+    found = re.match(r"^(?:-\s+)?[\w-]+:\s*(.*)$", text)
+    return found.group(1) if found else text.lstrip("- ")
 
 
 def _fact_text(line: str, structured: bool, table_header: bool) -> str:
@@ -369,7 +378,7 @@ class HouseholdReadOnlyAdapter:
         if not terms:
             return []
         domain_terms = {_norm(word) for word in DOMAIN_TERMS.get(domain or "", ()) if word not in _STATUS_WORDS}
-        content = [term for term in terms if term not in domain_terms]
+        content = [term for term in terms if term not in domain_terms and term not in _LISTING_FILLER]  # "week" is not evidence
         floor = 1 if len(content) <= 2 else 2
 
         def names_the_file(path: Path) -> bool:
@@ -412,7 +421,7 @@ class HouseholdReadOnlyAdapter:
                 text = _fact_text(line, structured, table_header)
                 if not text:
                     continue
-                line_terms = set(_words(text))
+                line_terms = set(_words(_value_part(text, structured)))  # a field NAME is not evidence, only what it holds
                 matched = sum(1 for term in content if term in line_terms)
                 item = bool(_ITEM_LINE.match(text))
                 if matched < floor and not (listing and _LIST_ITEM.match(text)):
@@ -464,6 +473,7 @@ class HouseholdReadOnlyAdapter:
                     continue
                 span = range(int(entry["start"]), int(entry["end"]))
                 words: set = set()
+                value_words: set = set()
                 best = None
                 matched_lines: List[str] = []
                 for number in span:
@@ -474,14 +484,15 @@ class HouseholdReadOnlyAdapter:
                         continue
                     line_words = set(_words(text))
                     words |= line_words
-                    count = sum(1 for term in content if term in line_words)
+                    value_words |= set(_words(_value_part(text, True)))
+                    count = sum(1 for term in content if term in set(_words(_value_part(text, True))))
                     if count or any(term in line_words for term in terms):
                         matched_lines.append(text)  # what the question mentions at all stays in the answer, scored or not
                     if count and (best is None or count > best[0]):
                         best = (count, number, text)
                 matched = sum(1 for term in content if term in words)
-                if matched < floor or best is None:
-                    continue
+                if matched < floor or best is None or not any(term in value_words for term in content):
+                    continue  # at least one question word must be in what the entry holds, not only in a field name
                 claimed.update(number + 1 for number in span)
                 hit: Dict[str, object] = {
                     "path": rel, "line": best[1] + 1, "snippet": best[2][:500], "score": matched,
