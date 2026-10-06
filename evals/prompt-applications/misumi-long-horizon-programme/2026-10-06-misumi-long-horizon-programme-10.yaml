@@ -1,0 +1,51 @@
+schema_version: 1
+application_id: 2026-10-06-misumi-long-horizon-programme-10
+prompt_id: misumi-long-horizon-programme
+prompt_version: 4
+repository: tyecam1/odysseus
+branch: dev
+session_started_at: "2026-10-06T06:30:00Z"
+session_ended_at: "2026-10-06T13:00:00Z"
+start_commit: b51db41f9ad70687648dca5988cc3c85c87e1550
+end_commit: "f75eb723a8b04e7e4327975bc37a278b37ba91bd"
+outcome_status: partial
+stop_reason: >-
+  The user ratified routing contract v0.2 (B7) and asked for it to be implemented, deployed, regression-proven and kill-switch
+  backed, for one proper -11 evaluation, and for the stale head and terminal reconciliation to be fixed. All of that is done
+  except the final production cutover to release f75eb723a8, which the auto-mode classifier declined as a production deploy
+  (not retried). The programme stops on genuine external gates: kiosk, lab sudo/Sol/GLM lanes, memory policy, security hardening,
+  backup inputs and longitudinal household evidence. -10 then -11 are the priority retrospective reviews when Sol returns.
+commits:
+  - "odysseus #113 routing v0.2 wiring + kill switch (#112 closed after a CI failure); #114 -11 evaluation v2 pre-registration; #115 summarise OK as no issue found; #116 drop OK contributions from the lead's input; plus this evidence/trace PR"
+  - "misumi #65 routing contract v0.2, routing.aliases, dry-run port and parity fixture"
+deployment:
+  - "home production release 1afc1ddedc (routing v0.2 default; kill switch MISUMI_ROUTING_ALGORITHM=v0.1 verified; production regression 177/177, stores unchanged). Releases 98e1f0ebec and f75eb723a8 are built; f75eb723a8 passed the side-by-side check; its production cutover was declined by the classifier and is a pending user/operator step. The lab remains d2fc0bac32."
+verification:
+  - "deterministic: odysseus CI green on #113-#116 (Python tests, compileall, node --check); kill-switch exactness test (full provenance equality with v0.1 on all corpus prompts); literal-reason and stem-only-does-not-fire learned-revision tests; 65 team-formation tests on a fresh dev tree"
+  - "live (home): production regression 177/177; scratch v0.2 177/177; scratch kill switch 178/178 with no v0.2 field leaking; exact-learned-cue proof; -11 evaluation v2 over 4 conditions x 192 replies, judged blind by two local models and validated against a 48-row AI audit"
+  - "honest reporting: pre-registered team verdict was 'sensitivity gained at the price of false alarms'; judge deviations disclosed (Nemotron infeasible, llama3.1:8b unreliable); the first fix (#115) lowered detection below solo; the final variant is not shown to help; all conclusions indicative; Sol, GLM and Opus lanes unavailable and carried as debt"
+  - "access and authority: self-merge of programme PRs used under the user's earlier approval; ratification-gated work proceeded only after the user's explicit ratification; the production cutover was a production deploy declined by the classifier and not worked around"
+failure_tags:
+  - wiring_pushed_with_a_test_not_run_locally_ci_failed
+  - preregistered_judge_infeasible_and_substitute_judge_unreliable
+  - first_fix_overcorrected_detection_loss_reassurance_harm
+  - heredoc_windows_path_escape_errors_repeated
+  - production_cutover_declined_by_classifier
+rating:
+  scale: 1-5
+  goal_progress: 4
+  correctness_verification: 4
+  authority_scope_discipline: 5
+  routing_resource_efficiency: 3
+  continuity_handoff_quality: 4
+  agent_overall: 4.0
+  operator_overall: null
+  operator_note: null
+prompt_revision_recommended: false
+revision_reason: >-
+  Reinforce v4. Practices confirmed: run every new test on the lab tree before pushing; pre-register, then disclose every deviation;
+  measure a fix against both the problem and the baseline (the first fix traded false alarms for false reassurance).
+evidence:
+  - "automation/review/MISUMI_PROGRAMME.md (terminal reconciliation); automation/review/misumi-long-horizon-programme-evidence.md (-10 section)"
+  - "evals/misumi-routing/2026-10-06-v02-ratification-live-proof.md and live/ scripts; evals/misumi-team/eval-v2/ (PREREGISTRATION.md, RESULTS.md, scripts, data)"
+  - "Operator ratings: none supplied"
