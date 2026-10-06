@@ -166,6 +166,34 @@ def test_contradictory_evidence_returns_to_shadow(tmp_path: Path):
     assert len(candidate["contradicting_evidence"]) == 1
 
 
+def test_explicit_durable_supersedes_conflicting_inferred_corrections(tmp_path: Path):
+    """Regression (found in -08b reconciliation): a durable user instruction after corrections toward a
+    DIFFERENT persona used to be filed as contradicting evidence (candidate shadow, unpromotable), so the
+    strongest evidence tier was silently ignored."""
+    store = _store(tmp_path)
+    for session in ("a", "b", "c"):
+        store.record_evidence(
+            type="correction", cue=["cleaning"], previous_persona="misato",
+            proposed_persona="erwin", prompt=f"ask Erwin about the cleaning {session}", session_id=session,
+        )
+    assert store.get_candidate(["cleaning"])["status"] == "eligible"
+    result = store.record_evidence(
+        type="explicit_durable", cue=["cleaning"], previous_persona="misato",
+        proposed_persona="jin", prompt="For cleaning questions use Jin from now on.", session_id="d",
+    )
+    candidate = result["candidate"]
+    assert candidate["status"] == "eligible" and candidate["proposed_persona"] == "jin"
+    assert candidate["superseded_proposals"][0]["persona"] == "erwin"
+    assert len(store.list_evidence()) == 4  # nothing rewritten or deleted
+    revision = store.promote(
+        candidate["candidate_id"],
+        authorisation={"type": "user_instruction", "evidence_id": result["evidence"]["evidence_id"]},
+    )
+    assert revision["persona"] == "jin"
+    persona, provenance = store.apply_learned_overlays("who handles the cleaning?", "misato", ["cleaning"])
+    assert persona == "jin" and provenance["revision_id"] == revision["revision_id"]
+
+
 def test_silence_never_promotes_an_eligible_candidate(tmp_path: Path):
     """-08b(a): an eligible candidate with NO ratification act stays eligible and inert forever.
 
