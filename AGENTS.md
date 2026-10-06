@@ -1,3 +1,13 @@
+# Repository identity
+
+`tyecam1/odysseus` is the Odysseus/Aoteru backend and domain-neutral execution/runtime layer. It owns routing, worker discovery, host/model execution, sessions, leases, dispatch transport, runtime state and telemetry. It is not a durable PhD or flat/personal knowledgebase.
+
+Durable domain authorities remain separate:
+- `tyecam1/obsidian-PhD` is the PhD work and research knowledgebase.
+- `tyecam1/misumi` is the flat knowledgebase for personal/household knowledge and policy.
+
+Execution, indexing, hosting or routing through Odysseus never transfers durable knowledge ownership into this repository. Resolve repository/domain authority before host/model selection, and pass bounded task/evidence pointers and results rather than copying domain truth into the backend.
+
 # Delegation invariant
 
 For every substantive task unit: decompose it, resolve authority and repo,
