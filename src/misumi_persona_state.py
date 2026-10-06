@@ -99,10 +99,22 @@ _DURABLE_PHRASE = re.compile(
 )
 _RESERVED_MATTERS = re.compile(
     r"\b(?:standards?|values?|boundaries|ratif(?:y|ied|ication))\b|"
-    r"\blevel\s*(?:5|five|6|six)\b",
+    r"\blevel\s*(?:5|five|6|six)\b|"
+    # Safety, medical and emergency advice, and memory/retention decisions are never shaped by learned style (independent review).
+    r"\b(?:safety|emergenc\w+|medical|medic(?:ine|ation)s?|allerg\w+|first[- ]aid|poison\w*|overdose|danger\w*)\b|"
+    r"\b(?:retention|privacy)\b|"
+    r"\bmemory\s+(?:retention|decisions?|policy|capture)\b",
     re.IGNORECASE,
 )
-_NEGATED_BEFORE = re.compile(r"\b(?:don'?t|do\s+not|not|never)\s+(?:\w+\s+){0,3}$", re.IGNORECASE)
+_NEGATED_BEFORE = re.compile(
+    r"(?:\b(?:don'?t|do\s+not|didn'?t|did\s+not|wasn'?t|was\s+not|isn'?t|is\s+not|aren'?t|are\s+not|weren'?t|were\s+not"
+    r"|can'?t|cannot|won'?t|not|never|no\s+longer)\s+)(?:\w+\s+){0,3}$",
+    re.IGNORECASE,
+)
+# Text that is quoted, code or a quoted reply is a mention of an instruction, not the user's own instruction.
+_QUOTED_SPANS = re.compile(
+    r"```[\s\S]*?```|`[^`\n]*`|\"[^\"\n]*\"|“[^”\n]*”|(?<!\w)'[^'\n]+'(?!\w)|(?m:^\s*>.*$)"
+)
 
 # (dimension, value, kind, pattern). kind: "feedback" (about the previous answer) | "request".
 _SIGNALS: tuple[tuple[str, str, str, re.Pattern[str]], ...] = tuple(
@@ -150,17 +162,20 @@ def render_value(dimension: str, value: str) -> str:
 def detect_style_signals(prompt: str) -> list[dict[str, str]]:
     """Closed-vocabulary style signals found in one prompt.
 
-    Reserved matters yield nothing. A dimension signalled with two different
-    values in the same prompt is ambiguous and dropped. A request that is
-    negated ("don't make it shorter") is not a signal.
+    Reserved matters (including safety/medical/emergency advice and memory
+    retention) yield nothing. Quoted, code and quote-block text is ignored. A
+    dimension signalled with two different values in the same prompt is
+    ambiguous and dropped. A request or feedback that is negated ("don't make
+    it shorter", "I wasn't saying it was too long") is not a signal.
     """
     text = str(prompt or "")
     if _RESERVED_MATTERS.search(text):
         return []
+    text = _QUOTED_SPANS.sub(" ", text)  # an instruction that is only quoted, reported or in code is not the user's own
     found: dict[str, list[dict[str, str]]] = {}
     for dimension, value, kind, pattern in _SIGNALS:
         for match in pattern.finditer(text):
-            if kind == "request" and _NEGATED_BEFORE.search(text[: match.start()]):
+            if _NEGATED_BEFORE.search(text[: match.start()]):
                 continue
             found.setdefault(dimension, []).append(
                 {"dimension": dimension, "value": value, "kind": kind, "matched": match.group(0).lower()}
@@ -175,7 +190,7 @@ def detect_style_signals(prompt: str) -> list[dict[str, str]]:
 
 def classify_signal(prompt: str, signal: dict[str, str]) -> str:
     """Evidence type for one signal: durable instruction / feedback correction / one-off request."""
-    if _DURABLE_PHRASE.search(str(prompt or "")):
+    if _DURABLE_PHRASE.search(_QUOTED_SPANS.sub(" ", str(prompt or ""))):
         return "explicit_durable"
     return "correction" if signal["kind"] == "feedback" else "temporary_choice"
 

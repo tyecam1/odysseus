@@ -21,7 +21,7 @@ from src.misumi_household import HouseholdReadOnlyAdapter, infer_household_domai
 from src.misumi_memory import MisumiMemory
 from src.misumi_observability import MisumiEventLog
 from src.misumi_persona_routing import resolve_auto_lead
-from src.misumi_ratification_dialogue import OfferBook, build_offer, parse_answer
+from src.misumi_ratification_dialogue import OfferBook, build_offer, candidate_digest, parse_answer
 from src.misumi_team_formation import plan_team, risk_flag, synthesis_inputs
 from src.misumi_persona_state import (
     GLOBAL_SCOPE,
@@ -761,16 +761,16 @@ def _handle_dialogue_answer(
     """Apply a bare yes/no/later/undo to a pending offer. Anything else withdraws the offer (silence never promotes)."""
     sid = body.session_id
     verdict = parse_answer(prompt)
-    pending = offers.pending(sid)
+    pending = offers.pending(sid, owner)
     if verdict == "undo":
-        last = offers.last_revision(sid)
+        last = offers.last_revision(sid, owner)
         if last is None:
             return None
         pending, verdict = None, "undo"
     elif pending is None:
         return None
     elif verdict is None:
-        offers.clear(sid)  # the user moved on: the offer is withdrawn, nothing is promoted
+        offers.clear(sid, owner)  # the user moved on: the offer is withdrawn, nothing is promoted
         return None
     try:
         _require_api_scope(request, "misumi:execute")
@@ -783,7 +783,7 @@ def _handle_dialogue_answer(
         if verdict == "undo":
             store = store_for.get(last["kind"])
             rollback = store.rollback_revision(last["revision_id"], "undone in conversation") if store else None
-            offers.forget_revision(sid)
+            offers.forget_revision(sid, owner)
             outcome.update({"state": "rolled-back", "revision_id": last["revision_id"]})
             text = "Undone: that change is rolled back." if rollback else ""
         else:
@@ -791,7 +791,12 @@ def _handle_dialogue_answer(
             store = store_for.get(offer["kind"])
             candidate = store.get_candidate_by_id(offer["candidate_id"]) if store else None
             if store is None or candidate is None or candidate.get("status") != "eligible":
-                offers.clear(sid)
+                offers.clear(sid, owner)
+                return None
+            if offer.get("digest") and candidate_digest(candidate) != offer["digest"]:
+                # The candidate changed after it was offered (new evidence, another status): an answer to the old offer
+                # must never ratify the new state.
+                offers.clear(sid, owner)
                 return None
             context = f"answer to offer {offer['candidate_id']}: {offer['summary']}"
             if verdict == "affirm":
@@ -809,8 +814,9 @@ def _handle_dialogue_answer(
                     )
                 revision = store.promote(offer["candidate_id"], authorisation={
                     "type": "user_instruction", "evidence_id": recorded["evidence"]["evidence_id"],
+                    "principal": owner, "principal_authenticated": bool(owner), "offer_digest": offer.get("digest"),
                 })
-                offers.remember_revision(sid, offer["kind"], revision["revision_id"])
+                offers.remember_revision(sid, offer["kind"], revision["revision_id"], owner)
                 outcome.update({"state": "active", "kind": offer["kind"], "revision_id": revision["revision_id"],
                                 "candidate_id": offer["candidate_id"]})
                 text = f"Done: {offer['summary']}. Say 'undo that' to reverse it."
@@ -822,10 +828,10 @@ def _handle_dialogue_answer(
                 offers.snooze(offer["candidate_id"])
                 outcome.update({"state": "snoozed", "kind": offer["kind"], "candidate_id": offer["candidate_id"]})
                 text = "Okay, I will leave it for now."
-            offers.clear(sid)
+            offers.clear(sid, owner)
     except (KeyError, ValueError) as exc:
         logger.warning("Misumi dialogue ratification refused: %s", exc)
-        offers.clear(sid)
+        offers.clear(sid, owner)
         return None
     if not text:
         return None
@@ -1420,7 +1426,7 @@ def setup_misumi_routes(
         ):
             offer = _dialogue_offer(persona_state, adaptation, offers)
             if offer is not None:
-                offers.record_offer(offer_sid, offer)
+                offers.record_offer(offer_sid, offer, owner)
                 response["text"] = f"{text}\n\n{offer['question']}"
                 response["ratification_offer"] = {
                     key: offer[key] for key in ("kind", "candidate_id", "summary", "question", "answers")
