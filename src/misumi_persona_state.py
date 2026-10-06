@@ -66,9 +66,12 @@ DEFAULTS: dict[str, str] = {
     "structure": "prose",
     "intervention_style": "suggestive",
 }
-# The ONLY text a revision can ever add to a persona prompt. Default values render nothing.
+# The ONLY text a revision can ever add to a persona prompt. Default values render nothing. Wording is measured, not
+# guessed (evals/misumi-team/style-placement-experiment.py, 2026-10-06, qwen3:8b, n=12 per variant): the original brief
+# sentence left replies at 0.76 of baseline length, "at most two sentences" at 0.47. A sentence must never ask a persona
+# to drop caveats or safety information (a stronger variant that did was rejected for that reason).
 RENDER: dict[tuple[str, str], str] = {
-    ("response_depth", "brief"): "Keep answers brief: lead with the answer in one to three sentences and add detail only if asked.",
+    ("response_depth", "brief"): "Keep answers short: at most two sentences unless the user asks for more.",
     ("response_depth", "thorough"): "Give thorough answers: explain the reasoning and cover relevant detail and caveats.",
     ("technical_depth", "plain"): "Use plain everyday language; avoid jargon and explain any technical term you must use.",
     ("technical_depth", "technical"): "Assume technical fluency; precise terminology is fine and preferred.",

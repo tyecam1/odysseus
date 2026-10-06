@@ -6,6 +6,7 @@ constants so the foundation text is the one production sends. Variants for style
   system      appended to the persona system prompt (what -10 ships)
   late        a separate system message immediately before the user message
   user        the fixed sentence appended to the user turn
+  wording-A / wording-B   alternative fixed sentences (system placement) to test whether the WORDING, not the placement, is the lever
 Counts words over N runs per prompt. Indicative only (small model, small N); the measurement decides the placement.
 Run on the host with the release venv:  python style-placement-experiment.py <release-dir> [N]
 """
@@ -37,8 +38,17 @@ def foundation(persona="misato"):
     return system + f"\n{mr._RATIFICATION_CONSTRAINT}\n{SEED_OUTPUT_RULES}"
 
 
+ALT = {
+    "wording-A": "Keep answers short: at most two sentences unless the user asks for more.",
+    "wording-B": "Answer in at most two short sentences. Do not add background or caveats unless asked.",
+}
+
+
 def build(variant, prompt):
     base = foundation()
+    if variant in ALT:
+        block = STYLE_HEADER + "\n- " + ALT[variant]
+        return [{"role": "system", "content": base + "\n\n" + block}, {"role": "user", "content": prompt}]
     if variant == "system":
         return [{"role": "system", "content": compose_system(base, VALUES)}, {"role": "user", "content": prompt}]
     if variant == "late":
@@ -63,7 +73,7 @@ def ask(messages):
 
 
 results = {}
-for variant in ("none", "system", "late", "user"):
+for variant in (sys.argv[3].split(",") if len(sys.argv) > 3 else ("none", "system", "late", "user")):
     counts = []
     for prompt in PROMPTS:
         for _ in range(n):
