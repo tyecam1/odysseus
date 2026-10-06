@@ -204,7 +204,7 @@ def test_specialist_lead_recruits_support_traces_it_and_attributes_handoff_to_th
     assert support["contribution_chars"] > 0 and support["latency_ms"] >= 0
     assert team["handovers"] == [{"from": "sanji", "to": "l", "returned_to": "sanji",
                                   "purpose": "analyse from the detective-financer perspective"}]
-    assert "Begin with 'RISK:'" in seen["consult_system"] and "Sanji" in seen["consult_system"]
+    assert "Begin with 'RISK:' ONLY if you can quote" in seen["consult_system"] and "Missing detail is not a risk" in seen["consult_system"] and "Sanji" in seen["consult_system"]
     assert "address that risk explicitly" in seen["final_system"]
     assert [c["persona"] for c in body["consulted"]] == ["l"]
     capsules, _ = memory.capsules()
