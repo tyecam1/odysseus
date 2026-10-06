@@ -60,5 +60,5 @@ post-hoc variants on the same tasks; no frontier-model judging (Sol, GLM and Opu
 
 ## Decision
 
-`teamdrop` (#116) is the evidence-best variant and is the behaviour on dev. Specialist-lead teams stay available (`MISUMI_CONSULT=0` still disables them), with no claim that they improve answers.
+`teamdrop` (#116) is the evidence-best variant, is the behaviour on dev, and is in production since 2026-10-06. It is a harm-reduction repair for the false-alarm cost, not evidence that multi-persona teams improve answer quality: benefit remains unproven. Specialist-lead teams stay available (`MISUMI_CONSULT=0` still disables them), with no claim that they improve answers.
 A frontier-model re-judge and a human audit of a sample are the next evidence steps when Sol or the lab returns; this evaluation is the first priority retrospective review (with -10).
