@@ -148,3 +148,19 @@ def plan_team(
 def risk_flag(contribution: str) -> bool:
     """True when a support opened its contribution with the RISK: marker (a flagged conflict or error)."""
     return str(contribution or "").lstrip().upper().startswith("RISK")
+
+
+def ok_flag(contribution: str) -> bool:
+    """True when a support opened its contribution with the OK: marker (it found no conflict)."""
+    return str(contribution or "").lstrip().upper().startswith("OK")
+
+
+def synthesis_inputs(contributions: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """What the LEAD sees of each support's contribution.
+
+    A contribution that explicitly opens with ``OK:`` is summarised as "no issue found": its remaining text is
+    caveat padding that the lead used to relay as concerns (the -11 evaluation v2 measured 41 of 96 false alarms on clean
+    requests with a team vs 0 of 96 solo). ``RISK:`` and legacy-format contributions are passed through verbatim. The raw
+    text is never lost: callers keep the original contributions for the trace, capsules and the ``consulted`` block.
+    """
+    return [(name, "OK: no issue found." if ok_flag(text) else text) for name, text in contributions]

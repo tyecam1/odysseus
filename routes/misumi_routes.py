@@ -22,7 +22,7 @@ from src.misumi_memory import MisumiMemory
 from src.misumi_observability import MisumiEventLog
 from src.misumi_persona_routing import resolve_auto_lead
 from src.misumi_ratification_dialogue import OfferBook, build_offer, parse_answer
-from src.misumi_team_formation import plan_team, risk_flag
+from src.misumi_team_formation import plan_team, risk_flag, synthesis_inputs
 from src.misumi_persona_state import (
     GLOBAL_SCOPE,
     PersonaStateStore,
@@ -1270,7 +1270,7 @@ def setup_misumi_routes(
                 backend=backend,
                 model=model,
                 context_messages=context_messages,
-                contributions=contributions,
+                contributions=synthesis_inputs(contributions),  # the lead sees "no issue found" for an OK: support
                 style_values=style_values,
             )
             text = str(turn["answer"])
