@@ -79,18 +79,20 @@ def describe_candidate(kind: str, candidate: dict[str, Any], display_name: str |
     return f"send {cue} questions to {target}" if cue and target else ""
 
 
-def candidate_digest(candidate: dict[str, Any]) -> str:
-    """A fingerprint of what an offer put in front of the user: the candidate's identity, proposal and evidence set.
+def candidate_digest(candidate: dict[str, Any], kind: str = "", ignore_evidence: Any = ()) -> str:
+    """A fingerprint of what an offer put in front of the user: the offer kind, the candidate's identity, proposal and evidence set.
 
-    An affirmation is only applied if the candidate still has the digest it had when it was offered, so a stale or changed
-    candidate can never be ratified by an answer given to an earlier offer.
+    An affirmation is only applied if the candidate still has the digest it had when it was offered, so a stale or changed candidate
+    can never be ratified by an answer given to an earlier offer. ``ignore_evidence`` drops evidence ids from the set (the affirmation
+    itself is recorded as evidence before promotion and must not change the digest it is checked against).
     """
+    skip = {str(item) for item in ignore_evidence}
     material = {
         key: candidate.get(key)
-        for key in ("candidate_id", "status", "awaiting", "kind", "persona", "dimension", "proposed_value", "proposed_persona",
-                    "base_persona", "cue")
+        for key in ("candidate_id", "status", "persona", "dimension", "proposed_value", "proposed_persona", "base_persona", "cue")
     }
-    material["evidence"] = sorted(str(item) for item in (candidate.get("supporting_evidence") or []))
+    material["offer_kind"] = kind
+    material["evidence"] = sorted(str(item) for item in (candidate.get("supporting_evidence") or []) if str(item) not in skip)
     return hashlib.sha256(json.dumps(material, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:20]
 
 
@@ -105,7 +107,7 @@ def build_offer(kind: str, candidate: dict[str, Any], display_name: str | None =
     return {
         "kind": kind,
         "candidate_id": candidate.get("candidate_id"),
-        "digest": candidate_digest(candidate),
+        "digest": candidate_digest(candidate, kind),
         "persona": candidate.get("persona") if kind == "persona-state" else candidate.get("proposed_persona"),
         "summary": summary,
         "question": (
@@ -122,18 +124,22 @@ class OfferBook:
 
     def __init__(self, clock=None):
         self._clock = clock or (lambda: time.time())  # late-bound so tests can move time
-        self._pending: dict[str, dict[str, Any]] = {}
+        self._pending: dict[tuple[str | None, str], dict[str, Any]] = {}
         self._last_offered: dict[str, float] = {}
-        self._last_revision: dict[str, dict[str, Any]] = {}
+        self._last_revision: dict[tuple[str | None, str], dict[str, Any]] = {}
 
     def may_offer(self, candidate_id: str) -> bool:
         last = self._last_offered.get(candidate_id)
         return last is None or self._clock() - last >= REOFFER_AFTER_S
 
     @staticmethod
-    def _key(session_id: str | None, owner: str | None) -> str:
-        """Offers and undo pointers belong to (owner, session): another owner's identical session id never reaches them."""
-        return f"{owner or ''}\x1f{session_id or ''}"
+    def _key(session_id: str | None, owner: str | None) -> tuple[str | None, str]:
+        """Offers and undo pointers belong to (owner, session): another owner's identical session id never reaches them.
+
+        A tuple, not a joined string, so no owner/session pair can collide with another by containing a separator; an absent or
+        blank owner is one value (None).
+        """
+        return ((str(owner).strip() or None) if owner is not None else None, str(session_id or ""))
 
     def record_offer(self, session_id: str | None, offer: dict[str, Any], owner: str | None = None) -> None:
         self._last_offered[str(offer["candidate_id"])] = self._clock()

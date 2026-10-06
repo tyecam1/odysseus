@@ -370,11 +370,12 @@ class RoutingAdaptationStore:
 
     # ---------- revisions ----------
 
-    def promote(self, candidate_id: str, *, authorisation: dict[str, Any]) -> dict[str, Any]:
+    def promote(self, candidate_id: str, *, authorisation: dict[str, Any], precondition: Any = None) -> dict[str, Any]:
         """Activate a candidate as a routing revision - gate-checked.
 
         The gate: the candidate must be ``eligible`` AND carry an explicit
-        authorisation dict. Confidence alone never promotes.
+        authorisation dict. Confidence alone never promotes. ``precondition``
+        (optional) runs under the store lock; a falsy result refuses promotion.
         """
         with self._lock:
             data = self._load_candidates()
@@ -390,6 +391,8 @@ class RoutingAdaptationStore:
                 raise ValueError(
                     f"candidate {candidate_id} is {candidate.get('status')!r}, not eligible"
                 )
+            if precondition is not None and not precondition(candidate):
+                raise ValueError(f"candidate {candidate_id} changed since it was offered")
             if not authorisation or not authorisation.get("type"):
                 raise ValueError("promotion requires explicit authorisation")
             if authorisation["type"] == "user_instruction":

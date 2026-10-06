@@ -106,15 +106,49 @@ _RESERVED_MATTERS = re.compile(
     r"\bmemory\s+(?:retention|decisions?|policy|capture)\b",
     re.IGNORECASE,
 )
-_NEGATED_BEFORE = re.compile(
-    r"(?:\b(?:don'?t|do\s+not|didn'?t|did\s+not|wasn'?t|was\s+not|isn'?t|is\s+not|aren'?t|are\s+not|weren'?t|were\s+not"
-    r"|can'?t|cannot|won'?t|not|never|no\s+longer)\s+)(?:\w+\s+){0,3}$",
+_CLAUSE_BOUNDARY = re.compile(r"[.;!?\n]")
+_NEGATION = re.compile(
+    r"\b(?:don'?t|do\s+not|didn'?t|did\s+not|wasn'?t|was\s+not|isn'?t|is\s+not|aren'?t|are\s+not|weren'?t|were\s+not"
+    r"|can'?t|cannot|won'?t|not|never|no\s+longer|nothing|neither|nor)\b",
     re.IGNORECASE,
 )
-# Text that is quoted, code or a quoted reply is a mention of an instruction, not the user's own instruction.
-_QUOTED_SPANS = re.compile(
-    r"```[\s\S]*?```|`[^`\n]*`|\"[^\"\n]*\"|“[^”\n]*”|(?<!\w)'[^'\n]+'(?!\w)|(?m:^\s*>.*$)"
+# Text that is quoted, code, markup, a link label or reported speech is a mention of an instruction, not the user's own instruction.
+# Unclosed quotes, fences and backticks run to the end of the line (or text), so an attacker cannot escape by not closing them.
+_QUOTE_PATTERNS = tuple(re.compile(pattern, flags) for pattern, flags in (
+    (r"```[\s\S]*?(?:```|$)", 0),
+    (r"`[^`\n]*`", 0),
+    (r"`[^\n]*$", re.MULTILINE),
+    (r"<(blockquote|q|pre|code)\b[^>]*>[\s\S]*?(?:</\1\s*>|$)", re.IGNORECASE),
+    (r"\[[^\]\n]*\]\([^)\n]*\)", 0),
+    (r"\"[^\"\n]*\"", 0),
+    (r"“[^”\n]*”", 0),
+    (r"(?<!\w)'[^'\n]+'(?!\w)", 0),
+    (r"\"[^\n]*$", re.MULTILINE),
+    (r"“[^\n]*$", re.MULTILINE),
+    (r"^\s*>.*$", re.MULTILINE),
+))
+_REPORTED = re.compile(
+    r"\b(?:wrote|writes|written|said|says|quotes?|quoted|reads|claims?|claimed|reported|states?|stated|texted|emailed|messaged)\b[^.!?\n]*",
+    re.IGNORECASE,
 )
+
+
+def _strip_quoted(text: str) -> str:
+    for pattern in _QUOTE_PATTERNS:
+        text = pattern.sub(" ", text)
+    return _REPORTED.sub(" ", text)
+
+
+def _clause_before(text: str, position: int) -> str:
+    start = max((m.end() for m in _CLAUSE_BOUNDARY.finditer(text, 0, position)), default=0)
+    return text[start:position]
+
+
+def is_reserved_turn(prompt: str) -> bool:
+    """True when the prompt is about a reserved matter (safety, medical, emergency, memory retention, standards ...): learned style is
+    neither captured from nor applied to such a turn."""
+    return bool(_RESERVED_MATTERS.search(str(prompt or "")))
+
 
 # (dimension, value, kind, pattern). kind: "feedback" (about the previous answer) | "request".
 _SIGNALS: tuple[tuple[str, str, str, re.Pattern[str]], ...] = tuple(
@@ -169,14 +203,14 @@ def detect_style_signals(prompt: str) -> list[dict[str, str]]:
     it shorter", "I wasn't saying it was too long") is not a signal.
     """
     text = str(prompt or "")
-    if _RESERVED_MATTERS.search(text):
+    if is_reserved_turn(text):
         return []
-    text = _QUOTED_SPANS.sub(" ", text)  # an instruction that is only quoted, reported or in code is not the user's own
+    text = _strip_quoted(text)  # an instruction that is only quoted, reported or in code is not the user's own
     found: dict[str, list[dict[str, str]]] = {}
     for dimension, value, kind, pattern in _SIGNALS:
         for match in pattern.finditer(text):
-            if _NEGATED_BEFORE.search(text[: match.start()]):
-                continue
+            if _NEGATION.search(_clause_before(text, match.start())):
+                continue  # negated anywhere earlier in its own clause ("I don't think the answer was too long")
             found.setdefault(dimension, []).append(
                 {"dimension": dimension, "value": value, "kind": kind, "matched": match.group(0).lower()}
             )
@@ -190,7 +224,14 @@ def detect_style_signals(prompt: str) -> list[dict[str, str]]:
 
 def classify_signal(prompt: str, signal: dict[str, str]) -> str:
     """Evidence type for one signal: durable instruction / feedback correction / one-off request."""
-    if _DURABLE_PHRASE.search(_QUOTED_SPANS.sub(" ", str(prompt or ""))):
+    text = _strip_quoted(str(prompt or ""))
+    index = text.lower().find(str(signal.get("matched") or "\0"))
+    if index >= 0:
+        # the durable phrase must be in the same sentence as the signal it would make durable
+        start = max((m.end() for m in _CLAUSE_BOUNDARY.finditer(text, 0, index)), default=0)
+        end = next((m.start() for m in _CLAUSE_BOUNDARY.finditer(text, index)), len(text))
+        text = text[start:end]
+    if _DURABLE_PHRASE.search(text):
         return "explicit_durable"
     return "correction" if signal["kind"] == "feedback" else "temporary_choice"
 
@@ -440,8 +481,12 @@ class PersonaStateStore:
         return {row["dimension"]: row for row in self.active_revisions() if row.get("persona") == persona}
 
     def promote(self, candidate_id: str, *, authorisation: dict[str, Any],
-                foundation: str = "FOUNDATION") -> dict[str, Any]:
-        """Activate a candidate as a revision - evaluated, gate-checked, authorised."""
+                foundation: str = "FOUNDATION", precondition: Any = None) -> dict[str, Any]:
+        """Activate a candidate as a revision - evaluated, gate-checked, authorised.
+
+        ``precondition`` (optional) is called with the candidate while the store lock is held; a falsy result refuses the promotion,
+        so a check made earlier cannot go stale between the check and the promotion.
+        """
         evaluation = self.evaluate_candidate(candidate_id, foundation)
         with self._lock:
             data = self._load_candidates()
@@ -451,6 +496,8 @@ class PersonaStateStore:
                 raise KeyError(f"unknown candidate: {candidate_id}")
             if candidate.get("status") != "eligible":
                 raise ValueError(f"candidate {candidate_id} is {candidate.get('status')!r}, not eligible")
+            if precondition is not None and not precondition(candidate):
+                raise ValueError(f"candidate {candidate_id} changed since it was offered")
             if not authorisation or not authorisation.get("type"):
                 raise ValueError("promotion requires explicit authorisation")
             if authorisation["type"] == "user_instruction":

@@ -29,6 +29,7 @@ from src.misumi_persona_state import (
     classify_signal,
     compose_system,
     detect_style_signals,
+    is_reserved_turn,
 )
 from src.misumi_routing_adaptation import (
     RoutingAdaptationStore,
@@ -793,7 +794,7 @@ def _handle_dialogue_answer(
             if store is None or candidate is None or candidate.get("status") != "eligible":
                 offers.clear(sid, owner)
                 return None
-            if offer.get("digest") and candidate_digest(candidate) != offer["digest"]:
+            if offer.get("digest") and candidate_digest(candidate, offer["kind"]) != offer["digest"]:
                 # The candidate changed after it was offered (new evidence, another status): an answer to the old offer
                 # must never ratify the new state.
                 offers.clear(sid, owner)
@@ -812,10 +813,15 @@ def _handle_dialogue_answer(
                         proposed_persona=candidate["proposed_persona"], prompt=prompt, context=context,
                         session_id=sid, owner=owner,
                     )
+                evidence_id = recorded["evidence"]["evidence_id"]
                 revision = store.promote(offer["candidate_id"], authorisation={
-                    "type": "user_instruction", "evidence_id": recorded["evidence"]["evidence_id"],
-                    "principal": owner, "principal_authenticated": bool(owner), "offer_digest": offer.get("digest"),
-                })
+                    "type": "user_instruction", "evidence_id": evidence_id,
+                    "principal": owner, "principal_authenticated": bool(str(owner or "").strip()),
+                    "offer_digest": offer.get("digest"),
+                }, precondition=lambda current: (
+                    not offer.get("digest")
+                    or candidate_digest(current, offer["kind"], ignore_evidence=(evidence_id,)) == offer["digest"]
+                ))
                 offers.remember_revision(sid, offer["kind"], revision["revision_id"], owner)
                 outcome.update({"state": "active", "kind": offer["kind"], "revision_id": revision["revision_id"],
                                 "candidate_id": offer["candidate_id"]})
@@ -1174,6 +1180,8 @@ def setup_misumi_routes(
                     named=_named_persona_in_prompt(prompt), session_id=body.session_id, owner=owner,
                 )
             resolved = persona_state.resolve_state(persona, turn_signals)
+            if is_reserved_turn(prompt):
+                resolved = {"values": {}, "provenance": []}  # learned style never shapes safety, medical or retention turns
             style_values, style_applied = resolved["values"], resolved["provenance"]
         domain = infer_household_domain(prompt)
         sources = adapter.search(prompt, domain=domain, limit=4) if adapter.reachable else []
