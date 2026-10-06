@@ -65,6 +65,11 @@ $ErrorActionPreference = 'Stop'
 
 function Get-StatusPath { Join-Path $StagingDir 'backup-status.json' }
 
+# The task principal is the account actually running this script (MACHINE\user or DOMAIN\user, read from the Windows token).
+# $env:USERDOMAIN is not trusted: in an SSH session it can read WORKGROUP, and registering a task as WORKGROUP\user fails
+# with HRESULT 0x80070534 (no account mapping).
+function Get-TaskIdentity { [Security.Principal.WindowsIdentity]::GetCurrent().Name }
+
 function Write-Status([hashtable]$Status) {
     New-Item -ItemType Directory -Force -Path $StagingDir | Out-Null
     $json = $Status | ConvertTo-Json -Depth 6
@@ -168,10 +173,11 @@ switch ($Action) {
         $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$self`"", '-Action', 'Run') + (Get-RunArgs)
         $taskAction = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument ($argList -join ' ')
         $trigger = New-ScheduledTaskTrigger -Daily -At $At
-        $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType S4U -RunLevel Limited
+        $taskIdentity = Get-TaskIdentity
+        $principal = New-ScheduledTaskPrincipal -UserId $taskIdentity -LogonType S4U -RunLevel Limited
         $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -MultipleInstances IgnoreNew `
             -ExecutionTimeLimit (New-TimeSpan -Hours 1) -AllowStartIfOnBatteries
-        Write-Output "Task:      $TaskName (daily at $At, as $env:USERDOMAIN\$env:USERNAME, S4U)"
+        Write-Output "Task:      $TaskName (daily at $At, as $taskIdentity, S4U)"
         Write-Output "Command:   powershell.exe $($argList -join ' ')"
         Write-Output "Staging:   $StagingDir"
         Write-Output ("Copy to:   " + $(if ($DestinationDir) { $DestinationDir } else { '(none: local staging only)' }))
