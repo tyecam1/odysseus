@@ -71,6 +71,9 @@ _ARTIFACT_REQUEST = re.compile(
     r"\b(create|make|write|save|draft|document)\b",
     re.IGNORECASE,
 )
+_RECOMMENDATION_REQUEST = re.compile(
+    r"\b(?:should\s+(?:i|we)|recommend\w*|suggest\w*|what\s+to\s+\w+|what\s+do\s+you\s+think)\b", re.IGNORECASE
+)
 _INTERACTIVE_SEED_LIMIT = 6000
 _INTERACTIVE_SEED_SECTION_EXCERPT = 320
 
@@ -1170,7 +1173,9 @@ def setup_misumi_routes(
             resolved = persona_state.resolve_state(persona, turn_signals)
             style_values, style_applied = resolved["values"], resolved["provenance"]
         domain = infer_household_domain(prompt)
-        sources = adapter.search(prompt, domain=domain, limit=4) if adapter.reachable else []
+        found = adapter.search(prompt, domain=domain, limit=30) if adapter.reachable else []
+        named_list = [item for item in found if item.get("listed")]
+        sources = named_list if named_list else found[:4]
         if not domain:
             # General chat belongs to the normal model/RAG path. Lexical matches
             # against task/docs files are too weak to replace a conversational answer.
@@ -1190,12 +1195,27 @@ def setup_misumi_routes(
         handoff_ids: List[str] = []
         if sources and not model_required:
             lead = sources[0]
-            text = _short_text(f"From {lead['path']} line {lead['line']}: {lead['snippet']}")
+            listed = [item for item in sources if item.get("listed") and item["path"] == lead["path"]]
+            entry = f" ({lead['entry']})" if lead.get("entry") else ""
+            if lead.get("listed") and len(listed) > 1:  # a question that names a list gets the list, not its first line
+                items = "; ".join(str(item.get("context") or item["snippet"]) for item in listed)
+                more = " (list shortened)" if len(named_list) >= 30 else ""
+                text = f"From {lead['path']}: {items}{more}"
+                if len(text) > 1500:  # a list is read out whole up to a marked limit, never cut mid-item silently
+                    text = text[:1500].rsplit("; ", 1)[0] + " (list shortened)"
+            else:
+                text = _short_text(f"From {lead['path']} line {lead['line']}{entry}: {lead.get('context') or lead['snippet']}")
             backend = "household-read-only"
         elif domain and not model_required:
             present = any(item["id"] == domain and item["present"] for item in adapter.domains())
             if present:
                 text = f"No matching {domain} fact was found in the canonical household repository."
+                if _RECOMMENDATION_REQUEST.search(prompt):
+                    text += (
+                        " That reads as a request for a recommendation; I answer household questions only from recorded"
+                        " entries, and none matched. Name something recorded (a title, item or mood) to look up, or add"
+                        " the entries to the repository."
+                    )
             else:
                 text = f"The canonical household repository has no {domain} data surface yet."
             backend = "household-read-only"
