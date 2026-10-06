@@ -10,7 +10,7 @@ from routes import misumi_routes
 from services.memory.skills import SkillsManager
 from src import endpoint_resolver, llm_core, seed_order_context
 from src.misumi_memory import MisumiMemory
-from src.misumi_team_formation import plan_team, risk_flag
+from src.misumi_team_formation import ok_flag, plan_team, risk_flag, synthesis_inputs
 
 ORDER = ["aoteru", "lelouch", "kurisu", "misato", "jin", "sanji", "l", "ginko", "ichigo", "giorno", "erwin"]
 EDGES = {
@@ -268,3 +268,30 @@ def test_kill_switch_removes_teams_entirely(tmp_path, monkeypatch):
         "prompt": "Explain how a rainbow forms", "persona": "sanji"}).json()
     assert open_ended["text"] == "Legacy." and "team" not in open_ended and "consulted" not in open_ended
     assert memory.capsules() == ([], 0)
+
+
+def test_synthesis_inputs_replace_ok_padding_but_keep_risk_and_legacy_text():
+    raw = [("l", "OK: fits, though you might double-check the staging plan and add a rollback step."),
+           ("erwin", "RISK: the email goes out Wednesday but the migration ends Thursday."),
+           ("kurisu", "Record the assumptions. Then review evidence.")]
+    shown = dict(synthesis_inputs(raw))
+    assert shown["l"] == "OK: no issue found." and ok_flag(raw[0][1]) and not ok_flag(raw[1][1])
+    assert shown["erwin"] == raw[1][1] and shown["kurisu"] == raw[2][1]  # RISK and legacy format verbatim
+    assert raw[0][1].startswith("OK: fits")  # the originals are untouched (trace/capsules keep them)
+
+
+def test_ok_support_text_never_reaches_the_lead_but_stays_in_the_trace(tmp_path, monkeypatch):
+    seen = {"final": ""}
+
+    async def llm_call(url, model, messages, **kwargs):
+        if _is_consult(messages):
+            return "OK: looks fine, but consider adding a staged testing phase and a rollback contingency."
+        seen["final"] = " ".join(str(m.get("content")) for m in messages)
+        return '{"answer":"Plan confirmed.","memory":null,"artifact":null}'
+
+    client, memory = _client(tmp_path, monkeypatch, llm_call)
+    body = client.post("/misumi/respond", json={
+        "prompt": "Plan the meals for Saturday within the budget", "persona": "sanji"}).json()
+    assert "staged testing" not in seen["final"] and "OK: no issue found." in seen["final"]
+    assert body["consulted"][0]["contribution"].startswith("OK: looks fine")  # raw text kept for the trace
+    assert body["text"] == "Plan confirmed."
