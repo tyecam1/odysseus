@@ -211,6 +211,7 @@ class PersonaStateStore:
             "dimension": dimension,
             "value": value,
             "signal": _short(fields.get("signal"), 80),
+            "context": _short(fields.get("context"), 240),
             "prompt_excerpt": _short(prompt, 240),
             "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
             "session_id": fields.get("session_id"),

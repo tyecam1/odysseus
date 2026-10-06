@@ -21,6 +21,7 @@ from src.misumi_household import HouseholdReadOnlyAdapter, infer_household_domai
 from src.misumi_memory import MisumiMemory
 from src.misumi_observability import MisumiEventLog
 from src.misumi_persona_routing import resolve_auto_lead
+from src.misumi_ratification_dialogue import OfferBook, build_offer, parse_answer
 from src.misumi_team_formation import plan_team, risk_flag
 from src.misumi_persona_state import (
     GLOBAL_SCOPE,
@@ -752,6 +753,116 @@ def _capture_style_signals(
     return notes
 
 
+def _handle_dialogue_answer(
+    request: Request, body, prompt: str, owner: Optional[str], request_id: str,
+    persona_state, adaptation, offers: OfferBook, events,
+) -> Optional[Dict[str, Any]]:
+    """Apply a bare yes/no/later/undo to a pending offer. Anything else withdraws the offer (silence never promotes)."""
+    sid = body.session_id
+    verdict = parse_answer(prompt)
+    pending = offers.pending(sid)
+    if verdict == "undo":
+        last = offers.last_revision(sid)
+        if last is None:
+            return None
+        pending, verdict = None, "undo"
+    elif pending is None:
+        return None
+    elif verdict is None:
+        offers.clear(sid)  # the user moved on: the offer is withdrawn, nothing is promoted
+        return None
+    try:
+        _require_api_scope(request, "misumi:execute")
+    except HTTPException:
+        return None  # answering is a ratification act: it needs the same scope as the ratification API
+    store_for = {"persona-state": persona_state, "routing": adaptation}
+    outcome: Dict[str, Any] = {"verdict": verdict}
+    text = ""
+    try:
+        if verdict == "undo":
+            store = store_for.get(last["kind"])
+            rollback = store.rollback_revision(last["revision_id"], "undone in conversation") if store else None
+            offers.forget_revision(sid)
+            outcome.update({"state": "rolled-back", "revision_id": last["revision_id"]})
+            text = "Undone: that change is rolled back." if rollback else ""
+        else:
+            offer = pending
+            store = store_for.get(offer["kind"])
+            candidate = store.get_candidate_by_id(offer["candidate_id"]) if store else None
+            if store is None or candidate is None or candidate.get("status") != "eligible":
+                offers.clear(sid)
+                return None
+            context = f"answer to offer {offer['candidate_id']}: {offer['summary']}"
+            if verdict == "affirm":
+                if offer["kind"] == "persona-state":
+                    recorded = store.record_evidence(
+                        type="explicit_durable", persona=candidate["persona"], dimension=candidate["dimension"],
+                        value=candidate["proposed_value"], prompt=prompt, context=context,
+                        session_id=sid, owner=owner,
+                    )
+                else:
+                    recorded = store.record_evidence(
+                        type="explicit_durable", cue=candidate["cue"], previous_persona=candidate.get("base_persona"),
+                        proposed_persona=candidate["proposed_persona"], prompt=prompt, context=context,
+                        session_id=sid, owner=owner,
+                    )
+                revision = store.promote(offer["candidate_id"], authorisation={
+                    "type": "user_instruction", "evidence_id": recorded["evidence"]["evidence_id"],
+                })
+                offers.remember_revision(sid, offer["kind"], revision["revision_id"])
+                outcome.update({"state": "active", "kind": offer["kind"], "revision_id": revision["revision_id"],
+                                "candidate_id": offer["candidate_id"]})
+                text = f"Done: {offer['summary']}. Say 'undo that' to reverse it."
+            elif verdict == "decline":
+                store.reject(offer["candidate_id"], "declined in conversation")
+                outcome.update({"state": "rejected", "kind": offer["kind"], "candidate_id": offer["candidate_id"]})
+                text = "Understood. I will not make that change."
+            else:  # later
+                offers.snooze(offer["candidate_id"])
+                outcome.update({"state": "snoozed", "kind": offer["kind"], "candidate_id": offer["candidate_id"]})
+                text = "Okay, I will leave it for now."
+            offers.clear(sid)
+    except (KeyError, ValueError) as exc:
+        logger.warning("Misumi dialogue ratification refused: %s", exc)
+        offers.clear(sid)
+        return None
+    if not text:
+        return None
+    persona = normalize_persona((pending or {}).get("persona") or "aoteru")
+    events.emit({
+        "request_id": request_id, "persona": persona, "persona_source": "requested",
+        "ratification_dialogue": outcome, "outcome": "ratification-dialogue", "approval_mode": "user-in-dialogue",
+    })
+    return {
+        "text": text, "state": "speaking", "mood": body.mood or "focused", "source": "ratification-dialogue",
+        "node": "odysseus", "persona": persona, "persona_source": "requested",
+        "who": persona_record(persona).get("display_name"), "audio_url": None, "voice": None,
+        "tts_provider": None, "request_id": request_id, "sources": [], "session_id": sid,
+        "retention": {"memory": {"status": "none"}, "artifact": {"status": "none"}},
+        "history_persisted": False, "ratification": outcome,
+    }
+
+
+def _dialogue_offer(persona_state, adaptation, offers: OfferBook) -> Optional[Dict[str, Any]]:
+    """The one offerable eligible-awaiting-ratification candidate (persona state first), or None."""
+    pools = []
+    if persona_state is not None:
+        pools.append(("persona-state", persona_state.all_candidates().values()))
+    if adaptation is not None:
+        pools.append(("routing", adaptation.all_candidates().values()))
+    for kind, candidates in pools:
+        for candidate in sorted((c for c in candidates if isinstance(c, dict)), key=lambda c: str(c.get("updated_at"))):
+            cid = str(candidate.get("candidate_id") or "")
+            if not cid or not offers.may_offer(cid):
+                continue
+            target = candidate.get("persona") if kind == "persona-state" else candidate.get("proposed_persona")
+            offer = build_offer(kind, candidate, str(persona_record(str(target)).get("display_name") or target)
+                                if target and target != "*" else None)
+            if offer is not None:
+                return offer
+    return None
+
+
 def setup_misumi_routes(
     skills_manager,
     task_scheduler=None,
@@ -785,6 +896,7 @@ def setup_misumi_routes(
         persona_state = PersonaStateStore(
             Path(_state_root) if _state_root else Path(DATA_DIR) / "misumi" / "persona_state"
         )
+    offers = OfferBook()  # conversational ratification offers (process-local; stores hold the truth)
     if oss_skill_ingestion is None:
         from services.memory.oss_skill_ingestion import OSSSkillIngestion
 
@@ -986,6 +1098,11 @@ def setup_misumi_routes(
         routing: Optional[Dict[str, Any]] = None
         adaptation_note: Optional[Dict[str, Any]] = None
         owner = _owner(request)
+        dialogue = _handle_dialogue_answer(
+            request, body, prompt, owner, request_id, persona_state, adaptation, offers, events,
+        ) if (body.persist_turn and (persona_state is not None or adaptation is not None)) else None
+        if dialogue is not None:
+            return dialogue
         if auto_route:
             persona, routing = resolve_auto_lead(prompt)
             if adaptation is not None:
@@ -1286,6 +1403,18 @@ def setup_misumi_routes(
             }
         if team_block is not None and team_block["decision"] == "team":
             response["team"] = team_block
+        offer_sid = session_id or body.session_id
+        if (
+            offer_sid and body.persist_turn and outcome in {"model", "grounded", "absent"}
+            and (persona_state is not None or adaptation is not None)
+        ):
+            offer = _dialogue_offer(persona_state, adaptation, offers)
+            if offer is not None:
+                offers.record_offer(offer_sid, offer)
+                response["text"] = f"{text}\n\n{offer['question']}"
+                response["ratification_offer"] = {
+                    key: offer[key] for key in ("kind", "candidate_id", "summary", "question", "answers")
+                }
         if _consultation_enabled():
             response.update({
                 "consulted": consulted,
