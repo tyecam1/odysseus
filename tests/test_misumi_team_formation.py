@@ -270,14 +270,15 @@ def test_kill_switch_removes_teams_entirely(tmp_path, monkeypatch):
     assert memory.capsules() == ([], 0)
 
 
-def test_synthesis_inputs_replace_ok_padding_but_keep_risk_and_legacy_text():
+def test_synthesis_inputs_drop_ok_but_keep_risk_and_legacy_text():
     raw = [("l", "OK: fits, though you might double-check the staging plan and add a rollback step."),
            ("erwin", "RISK: the email goes out Wednesday but the migration ends Thursday."),
            ("kurisu", "Record the assumptions. Then review evidence.")]
     shown = dict(synthesis_inputs(raw))
-    assert shown["l"] == "OK: no issue found." and ok_flag(raw[0][1]) and not ok_flag(raw[1][1])
+    assert "l" not in shown and ok_flag(raw[0][1]) and not ok_flag(raw[1][1])
     assert shown["erwin"] == raw[1][1] and shown["kurisu"] == raw[2][1]  # RISK and legacy format verbatim
     assert raw[0][1].startswith("OK: fits")  # the originals are untouched (trace/capsules keep them)
+    assert synthesis_inputs([("l", "OK: fine."), ("erwin", "ok - also fine")]) == []
 
 
 def test_ok_support_text_never_reaches_the_lead_but_stays_in_the_trace(tmp_path, monkeypatch):
@@ -292,6 +293,7 @@ def test_ok_support_text_never_reaches_the_lead_but_stays_in_the_trace(tmp_path,
     client, memory = _client(tmp_path, monkeypatch, llm_call)
     body = client.post("/misumi/respond", json={
         "prompt": "Plan the meals for Saturday within the budget", "persona": "sanji"}).json()
-    assert "staged testing" not in seen["final"] and "OK: no issue found." in seen["final"]
+    assert "staged testing" not in seen["final"] and "Internal specialist input to reconcile" not in seen["final"]  # lead is left alone
+    assert "address that risk explicitly" not in seen["final"]  # no RISK instruction either: nothing was flagged
     assert body["consulted"][0]["contribution"].startswith("OK: looks fine")  # raw text kept for the trace
     assert body["text"] == "Plan confirmed."
