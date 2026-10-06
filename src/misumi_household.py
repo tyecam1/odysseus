@@ -55,15 +55,19 @@ _STOP_TERMS = frozenset({
 })
 # Words that may accompany a request to show a whole list or table ("what is on the cleaning rota this week").
 _LISTING_FILLER = frozenset({"week", "next", "current"})
+# Domain indicator words that are also what a question asks about ("what tasks are blocked?"): they stay evidence terms.
+_STATUS_WORDS = frozenset({"blocked", "backlog", "urgent", "open-loop", "open-loops", "broken", "repair", "repairs", "maintenance"})
 _TERM = re.compile(r"[A-Za-z0-9_]{2,}")
 _LINK = re.compile(r"\[([^\]]+)\]\(([^)\s]+)\)")
 _TABLE_SEPARATOR = re.compile(r"^\|?[\s:|-]*-[\s:|-]*\|?$")
 _HEADING = re.compile(r"^#{1,6}\s")
+_FILE_METADATA = re.compile(r"^(?:status|updated|created|version|schema|source)\s*:", re.IGNORECASE)  # file-level, at column 0
 _EMPTY_YAML_VALUE = re.compile(r"^(?:-\s+)?[\w-]+:\s*(?:\[\]|\{\}|null|~|\"\"|'')?\s*$", re.IGNORECASE)
 # Lines that describe the repository rather than state a household fact: notes about views/features that do not exist yet and
 # unfilled template text.
 _NOT_BUILT_NOTE = re.compile(
-    r"\bfuture[- ](?:views?|facing|features?)\b|\b(?:is|are|will be)\s+(?:a\s+)?future\b|\bfuture:|\bYYYY-MM-DD\b|_populate\b[^_]*_",
+    r"\bfuture[- ](?:views?|facing|features?)\b|\b(?:is|are|will be)\s+(?:a\s+)?future\b|\bfuture:|\bcoming\s+soon\b"
+    r"|\bnot\s+yet\s+(?:built|implemented|available|supported)\b|\bplanned:|\bYYYY-MM-DD\b|_populate\b[^_]*_",
     re.IGNORECASE,
 )
 _TODO = re.compile(r"\bTODO\b|_TODO_")
@@ -143,6 +147,46 @@ def _yaml_entries(lines: List[str]) -> List[Dict[str, object]]:
     return entries
 
 
+def _entry_text(lines: List[str], entry: Dict[str, object]) -> str:
+    """The recorded facts of one YAML entry as one short string ('name: tomatoes; quantity: "1 carton"; moods: late night, focused')."""
+    parts: List[str] = []
+    key = ""
+    nested: List[str] = []
+
+    def flush() -> None:
+        if key and nested:
+            parts.append(f"{key}: " + ", ".join(nested))
+        nested.clear()
+
+    for number in range(int(entry["start"]), int(entry["end"])):
+        text = _fact_text(lines[number], True, False)
+        raw = lines[number].strip()
+        bare = re.match(r"^(?:-\s+)?([\w-]+):\s*(?:#.*)?$", raw)
+        if bare:
+            flush()
+            key = bare.group(1)
+            continue
+        if not text or text.lstrip("- ").lower().startswith("example:"):
+            continue
+        if text.startswith("- ") and key and not re.match(r"^-\s+[\w-]+:\s", text):
+            nested.append(text[2:].strip().strip("\"'"))
+            continue
+        flush()
+        key = ""
+        parts.append(text[2:].strip() if text.startswith("- ") else text)
+    flush()
+    return "; ".join(parts)[:300]
+
+
+def _table_context(header: str, row: str) -> str:
+    """A table row with its column names ('Task: Bathroom; This week: Alice; Next week: Bob'), or '' when they do not line up."""
+    names = [cell.strip() for cell in header.strip().strip("|").split("|")]
+    cells = [cell.strip() for cell in row.strip().strip("|").split("|")]
+    if len(names) != len(cells) or not any(cells):
+        return ""
+    return "; ".join(f"{name}: {cell}" for name, cell in zip(names, cells) if name and cell)[:300]
+
+
 def _fact_text(line: str, structured: bool, table_header: bool) -> str:
     """The part of a line that states a household fact, or '' when the line is structure, a placeholder or a note about the repository."""
     text = line.strip()
@@ -152,7 +196,7 @@ def _fact_text(line: str, structured: bool, table_header: bool) -> str:
         if text.startswith("#"):
             return ""
         text = re.sub(r"\s+#.*$", "", text).strip()
-        if not text or _EMPTY_YAML_VALUE.match(text):
+        if not text or _EMPTY_YAML_VALUE.match(text) or (_FILE_METADATA.match(line) and not line[:1].isspace()):
             return ""
     else:
         if _HEADING.match(text) or _TABLE_SEPARATOR.match(text) or table_header:
@@ -296,7 +340,7 @@ class HouseholdReadOnlyAdapter:
                 terms.append(term)
         if not terms:
             return []
-        domain_terms = {_norm(word) for word in DOMAIN_TERMS.get(domain or "", ())}
+        domain_terms = {_norm(word) for word in DOMAIN_TERMS.get(domain or "", ()) if word not in _STATUS_WORDS}
         content = [term for term in terms if term not in domain_terms]
         floor = 1 if len(content) <= 2 else 2
 
@@ -324,6 +368,7 @@ class HouseholdReadOnlyAdapter:
             path_bonus = len(path_terms & set(terms))
             structured = path.suffix.lower() in {".yaml", ".yml"}
             entries = _yaml_entries(lines) if structured else []
+            table_head = ""
             for number, line in enumerate(lines, 1):
                 covering = [item for item in entries if item["start"] <= number - 1 < item["end"]]
                 if any(item["example"] for item in covering):
@@ -332,6 +377,10 @@ class HouseholdReadOnlyAdapter:
                     not structured and line.lstrip().startswith("|")
                     and number < len(lines) and bool(_TABLE_SEPARATOR.match(lines[number].strip()))
                 )
+                if table_header:
+                    table_head = line
+                elif not line.lstrip().startswith("|"):
+                    table_head = ""
                 text = _fact_text(line, structured, table_header)
                 if not text:
                     continue
@@ -346,6 +395,16 @@ class HouseholdReadOnlyAdapter:
                 label = next((str(entry["label"]) for entry in covering if entry["label"]), "")
                 if label:
                     hit["entry"] = label
+                if covering:
+                    context = _entry_text(lines, covering[0])
+                elif table_head and text.startswith("|"):
+                    context = _table_context(table_head, text)
+                else:
+                    context = ""
+                if context and context != text:
+                    hit["context"] = context
+                if listing and matched < floor:
+                    hit["listed"] = True  # included because the question names this list, not because of a word match
                 hits.append(hit)
         # Best match first; among equals prefer recorded items (list entries, table rows, key: value) over prose.
         hits.sort(key=lambda row: (-int(row["score"]), -int(row["_path"]), not row["_item"], str(row["path"]), int(row["line"])))

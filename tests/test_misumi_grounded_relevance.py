@@ -328,3 +328,58 @@ def test_a_trailing_todo_comment_does_not_hide_the_value_it_follows(household):
     adapter = HouseholdReadOnlyAdapter(household)
     hits = adapter.search("tomatoes carton", domain="food", limit=5)
     assert any(hit["snippet"] == 'quantity: "1 carton"' for hit in hits)
+
+
+# --- the answer is the whole entry or table row, not one bare line (second review round) ---------------------------------
+
+
+def test_a_quantity_question_returns_the_entry_that_holds_the_quantity(client):
+    body = _ask(client, "What quantity of tomatoes is in stock?", persona="sanji")
+    assert "1 carton" in body["text"] and "name: tomatoes" in body["text"]
+    assert "TODO" not in body["text"]
+
+
+def test_a_mood_question_returns_the_record_with_its_moods(client):
+    body = _ask(client, "Which records are late night?")
+    assert "Kind of Blue" in body["text"] and "late night" in body["text"] and "EXAMPLE" not in body["text"]
+
+
+def test_a_question_that_names_the_list_returns_all_its_items_together(client):
+    body = _ask(client, "what is on the shopping list?", persona="sanji")
+    assert "desk" in body["text"] and "tv stand" in body["text"]
+
+
+def test_a_populated_rota_row_is_answered_with_its_column_names(tmp_path, monkeypatch):
+    files = dict(FILES)
+    files["household/cleaning/rota.md"] = (
+        "# Cleaning rota\n\n| Task | This week | Next week |\n|---|---|---|\n| Bathroom | Alice | Bob |\n| Kitchen | Bob | Alice |\n"
+    )
+    root = _write_root(tmp_path / "hh", files)
+    monkeypatch.setenv("MISUMI_HOUSEHOLD_ROOT", str(root))
+    app = FastAPI()
+    app.include_router(setup_misumi_routes(SkillsManager(str(tmp_path / "data"))))
+    body = TestClient(app).post("/misumi/respond", json={"prompt": "Who is cleaning the bathroom this week?", "persona": "misato"}).json()
+    assert "Task: Bathroom" in body["text"] and "This week: Alice" in body["text"] and "Next week: Bob" in body["text"]
+    assert "Kitchen" not in body["text"]
+
+
+def test_notes_that_say_coming_soon_and_registry_status_metadata_are_not_evidence(tmp_path):
+    root = _write_root(tmp_path / "hh", {
+        "household/plants/README-notes.md": "Coming soon: mood-based plant browser over the registry.\nNot yet built: watering reminders.\n",
+        "household/plants/plants.yaml": "status: proposed\nupdated: 2026-07-11\nplants:\n  - name: basil\n    watering: every 3 days\n",
+    })
+    adapter = HouseholdReadOnlyAdapter(root)
+    assert adapter.search("plant browser", domain="plants") == []
+    assert adapter.search("watering reminders", domain="plants") == []
+    assert adapter.search("registry status proposed", domain="plants") == []
+    hits = adapter.search("how often is basil watering", domain="plants")
+    assert hits and "every 3 days" in (hits[0].get("context") or hits[0]["snippet"])
+
+
+def test_blocked_tasks_in_frontmatter_are_found(tmp_path):
+    root = _write_root(tmp_path / "hh", {
+        "agent-tasks/inbox/fix-boiler.md": "---\ntitle: Fix the boiler\nstatus: blocked\n---\nWaiting on the landlord.\n",
+        "agent-tasks/inbox/buy-desk.md": "---\ntitle: Buy a desk\nstatus: open\n---\n",
+    })
+    hits = HouseholdReadOnlyAdapter(root).search("What tasks are blocked?", domain="tasks")
+    assert hits and hits[0]["path"].endswith("fix-boiler.md") and "blocked" in hits[0]["snippet"]

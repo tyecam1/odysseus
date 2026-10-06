@@ -1193,8 +1193,13 @@ def setup_misumi_routes(
         handoff_ids: List[str] = []
         if sources and not model_required:
             lead = sources[0]
+            listed = [item for item in sources if item.get("listed") and item["path"] == lead["path"]]
             entry = f" ({lead['entry']})" if lead.get("entry") else ""
-            text = _short_text(f"From {lead['path']} line {lead['line']}{entry}: {lead['snippet']}")
+            if lead.get("listed") and len(listed) > 1:  # a question that names a list gets the list, not its first line
+                items = "; ".join(str(item.get("context") or item["snippet"]) for item in listed)
+                text = _short_text(f"From {lead['path']}: {items}")
+            else:
+                text = _short_text(f"From {lead['path']} line {lead['line']}{entry}: {lead.get('context') or lead['snippet']}")
             backend = "household-read-only"
         elif domain and not model_required:
             present = any(item["id"] == domain and item["present"] for item in adapter.domains())
