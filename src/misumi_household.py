@@ -147,8 +147,22 @@ def _yaml_entries(lines: List[str]) -> List[Dict[str, object]]:
     return entries
 
 
-def _entry_text(lines: List[str], entry: Dict[str, object]) -> str:
-    """The recorded facts of one YAML entry as one short string ('name: tomatoes; quantity: "1 carton"; moods: late night, focused')."""
+_NULL_FIELD = re.compile(r"^(?:-\s+)?([\w-]+):\s*(?:null|~|\"\"|''|\[\])\s*(?:#.*)?$", re.IGNORECASE)
+_ENTRY_TEXT_LIMIT = 300
+
+
+def _entry_text(lines: List[str], entry: Dict[str, object], entries: List[Dict[str, object]], asked: Iterable[str] = (),
+                matched: Iterable[str] = ()) -> str:
+    """The recorded facts of one YAML entry as one short string ('name: tomatoes; quantity: "1 carton"; moods: late night, focused').
+
+    Nested demonstration entries are left out, a field the question asked about that holds null is reported as 'not recorded', and the
+    matched facts are always kept (and listed first) even when the entry is long enough to be shortened.
+    """
+    asked = set(asked)
+    skip: set = set()
+    for other in entries:
+        if other is not entry and other["example"] and entry["start"] <= other["start"] and other["end"] <= entry["end"]:
+            skip.update(range(int(other["start"]), int(other["end"])))
     parts: List[str] = []
     key = ""
     nested: List[str] = []
@@ -159,8 +173,16 @@ def _entry_text(lines: List[str], entry: Dict[str, object]) -> str:
         nested.clear()
 
     for number in range(int(entry["start"]), int(entry["end"])):
-        text = _fact_text(lines[number], True, False)
+        if number in skip:
+            continue
         raw = lines[number].strip()
+        empty = _NULL_FIELD.match(re.sub(r"\s+#.*$", "", raw))
+        if empty and _norm(empty.group(1)) in asked:
+            flush()
+            key = ""
+            parts.append(f"{empty.group(1)}: not recorded")
+            continue
+        text = _fact_text(lines[number], True, False)
         bare = re.match(r"^(?:-\s+)?([\w-]+):\s*(?:#.*)?$", raw)
         if bare:
             flush()
@@ -175,7 +197,13 @@ def _entry_text(lines: List[str], entry: Dict[str, object]) -> str:
         key = ""
         parts.append(text[2:].strip() if text.startswith("- ") else text)
     flush()
-    return "; ".join(parts)[:300]
+    joined = "; ".join(parts)
+    if len(joined) > _ENTRY_TEXT_LIMIT:
+        wanted = {(item[2:] if item.startswith("- ") else item).strip() for item in matched}
+        parts = [part for part in parts if part in wanted] + [part for part in parts if part not in wanted]
+        joined = "; ".join(parts)
+        joined = joined[:_ENTRY_TEXT_LIMIT - 1].rstrip() + "…"
+    return joined
 
 
 def _table_context(header: str, row: str) -> str:
@@ -396,7 +424,7 @@ class HouseholdReadOnlyAdapter:
                 if label:
                     hit["entry"] = label
                 if covering:
-                    context = _entry_text(lines, covering[0])
+                    context = _entry_text(lines, covering[0], entries, terms, [text])
                 elif table_head and text.startswith("|"):
                     context = _table_context(table_head, text)
                 else:
@@ -406,12 +434,67 @@ class HouseholdReadOnlyAdapter:
                 if listing and matched < floor:
                     hit["listed"] = True  # included because the question names this list, not because of a word match
                 hits.append(hit)
+        hits = self._entry_level(hits, files, content, floor, terms) if content else hits
         # Best match first; among equals prefer recorded items (list entries, table rows, key: value) over prose.
         hits.sort(key=lambda row: (-int(row["score"]), -int(row["_path"]), not row["_item"], str(row["path"]), int(row["line"])))
         for row in hits:
             row.pop("_item")
             row.pop("_path")
         return hits[:max(1, min(int(limit), 50))]
+
+    def _entry_level(self, hits: List[Dict[str, object]], files: List[Path], content: List[str], floor: int,
+                     terms: List[str]) -> List[Dict[str, object]]:
+        """Score each YAML entry as one unit: words spread over its fields (name: basil, location: kitchen, health: thriving)
+        count together, and an entry yields one hit (its best line) instead of one per line."""
+        result = [hit for hit in hits if not str(hit["path"]).lower().endswith((".yaml", ".yml"))]
+        for path in files:
+            if path.suffix.lower() not in {".yaml", ".yml"}:
+                continue
+            rel = path.relative_to(self.root).as_posix()
+            try:
+                lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+            except OSError:
+                continue
+            entries = _yaml_entries(lines)
+            file_hits = [hit for hit in hits if hit["path"] == rel]
+            outer = [e for e in entries if not any(o is not e and o["start"] <= e["start"] and e["end"] <= o["end"] for o in entries)]
+            claimed: set = set()
+            for entry in outer:
+                if entry["example"]:
+                    continue
+                span = range(int(entry["start"]), int(entry["end"]))
+                words: set = set()
+                best = None
+                matched_lines: List[str] = []
+                for number in span:
+                    if any(o is not entry and o["example"] and o["start"] <= number < o["end"] for o in entries):
+                        continue
+                    text = _fact_text(lines[number], True, False)
+                    if not text:
+                        continue
+                    line_words = set(_words(text))
+                    words |= line_words
+                    count = sum(1 for term in content if term in line_words)
+                    if count or any(term in line_words for term in terms):
+                        matched_lines.append(text)  # what the question mentions at all stays in the answer, scored or not
+                    if count and (best is None or count > best[0]):
+                        best = (count, number, text)
+                matched = sum(1 for term in content if term in words)
+                if matched < floor or best is None:
+                    continue
+                claimed.update(number + 1 for number in span)
+                hit: Dict[str, object] = {
+                    "path": rel, "line": best[1] + 1, "snippet": best[2][:500], "score": matched,
+                    "_item": True, "_path": len(set(_words(path.stem)) & set(terms)),
+                }
+                if entry["label"]:
+                    hit["entry"] = entry["label"]
+                context = _entry_text(lines, entry, entries, terms, matched_lines)
+                if context and context != best[2]:
+                    hit["context"] = context
+                result.append(hit)
+            result.extend(hit for hit in file_hits if int(hit["line"]) not in claimed)
+        return result
 
     def git_state(self) -> Dict[str, object]:
         if not self.root:

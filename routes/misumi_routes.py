@@ -1173,7 +1173,9 @@ def setup_misumi_routes(
             resolved = persona_state.resolve_state(persona, turn_signals)
             style_values, style_applied = resolved["values"], resolved["provenance"]
         domain = infer_household_domain(prompt)
-        sources = adapter.search(prompt, domain=domain, limit=4) if adapter.reachable else []
+        found = adapter.search(prompt, domain=domain, limit=30) if adapter.reachable else []
+        named_list = [item for item in found if item.get("listed")]
+        sources = named_list if named_list else found[:4]
         if not domain:
             # General chat belongs to the normal model/RAG path. Lexical matches
             # against task/docs files are too weak to replace a conversational answer.
@@ -1197,7 +1199,8 @@ def setup_misumi_routes(
             entry = f" ({lead['entry']})" if lead.get("entry") else ""
             if lead.get("listed") and len(listed) > 1:  # a question that names a list gets the list, not its first line
                 items = "; ".join(str(item.get("context") or item["snippet"]) for item in listed)
-                text = _short_text(f"From {lead['path']}: {items}")
+                more = " (list shortened)" if len(named_list) >= 30 else ""
+                text = _short_text(f"From {lead['path']}: {items}{more}")
             else:
                 text = _short_text(f"From {lead['path']} line {lead['line']}{entry}: {lead.get('context') or lead['snippet']}")
             backend = "household-read-only"

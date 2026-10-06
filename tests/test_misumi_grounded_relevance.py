@@ -327,7 +327,8 @@ def test_a_real_todo_item_a_linked_fact_and_future_work_are_still_evidence(house
 def test_a_trailing_todo_comment_does_not_hide_the_value_it_follows(household):
     adapter = HouseholdReadOnlyAdapter(household)
     hits = adapter.search("tomatoes carton", domain="food", limit=5)
-    assert any(hit["snippet"] == 'quantity: "1 carton"' for hit in hits)
+    assert any('quantity: "1 carton"' in (hit.get("context") or hit["snippet"]) for hit in hits)
+    assert not any("TODO" in (hit.get("context") or hit["snippet"]) for hit in hits)
 
 
 # --- the answer is the whole entry or table row, not one bare line (second review round) ---------------------------------
@@ -383,3 +384,53 @@ def test_blocked_tasks_in_frontmatter_are_found(tmp_path):
     })
     hits = HouseholdReadOnlyAdapter(root).search("What tasks are blocked?", domain="tasks")
     assert hits and hits[0]["path"].endswith("fix-boiler.md") and "blocked" in hits[0]["snippet"]
+
+
+# --- third review round ------------------------------------------------------------------------------------------------------
+
+
+def test_a_nested_demonstration_entry_never_leaks_into_its_parents_answer(tmp_path):
+    root = _write_root(tmp_path / "hh", {
+        "household/plants/plants.yaml": (
+            "plants:\n  - name: basil\n    care:\n      - name: EXAMPLE pesticide\n        dosage: 99 ml\n        example: true\n"
+            "    watering: weekly\n"
+        ),
+    })
+    (hit,) = HouseholdReadOnlyAdapter(root).search("basil", domain="plants")
+    assert "EXAMPLE" not in hit["context"] and "99 ml" not in hit["context"] and "watering: weekly" in hit["context"]
+
+
+def test_words_spread_over_the_fields_of_one_entry_count_together(tmp_path):
+    root = _write_root(tmp_path / "hh", {
+        "household/plants/plants.yaml": (
+            "plants:\n  - name: basil\n    location: kitchen\n    health: thriving\n  - name: mint\n    location: balcony\n    health: wilting\n"
+        ),
+    })
+    hits = HouseholdReadOnlyAdapter(root).search("Is basil in the kitchen thriving?", domain="plants")
+    assert len(hits) == 1 and hits[0]["entry"] == "basil"
+    assert "location: kitchen" in hits[0]["context"] and "health: thriving" in hits[0]["context"]
+
+
+def test_a_long_entry_keeps_the_fact_that_matched(tmp_path):
+    notes = "".join(f"    note{i}: {'x' * 40}\n" for i in range(12))
+    root = _write_root(tmp_path / "hh", {
+        "household/plants/plants.yaml": f"plants:\n  - name: basil\n{notes}    watering: every 3 days\n",
+    })
+    (hit,) = HouseholdReadOnlyAdapter(root).search("basil watering", domain="plants")
+    assert "watering: every 3 days" in hit["context"] and len(hit["context"]) <= 300
+
+
+def test_a_named_list_is_returned_whole_not_cut_at_four(tmp_path, monkeypatch):
+    items = "".join(f"- [ ] item{i}\n" for i in range(1, 8))
+    root = _write_root(tmp_path / "hh", {"household/food/shopping-list.md": f"# Shopping list\n\n{items}"})
+    monkeypatch.setenv("MISUMI_HOUSEHOLD_ROOT", str(root))
+    app = FastAPI()
+    app.include_router(setup_misumi_routes(SkillsManager(str(tmp_path / "data"))))
+    body = TestClient(app).post("/misumi/respond", json={"prompt": "what is on the shopping list?", "persona": "sanji"}).json()
+    for number in range(1, 8):
+        assert f"item{number}" in body["text"]
+
+
+def test_a_queried_field_that_holds_null_is_reported_as_not_recorded(client):
+    body = _ask(client, "What quantity of eggs is in stock?", persona="sanji")
+    assert "name: eggs" in body["text"] and "quantity: not recorded" in body["text"]
