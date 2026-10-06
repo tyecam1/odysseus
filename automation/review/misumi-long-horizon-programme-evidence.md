@@ -17,6 +17,30 @@ Operator rules attached to the change:
 - Programme-related writes to governed feature/docs branches in `tyecam1/misumi` and `tyecam1/odysseus` are authorised when required by `misumi-long-horizon-programme@v1`, through PRs, leases/worktrees and normal controls. This does not authorise bypassing permission-system denials or destructive or unrelated writes.
 - Home worker enablement (Stage 8) is approved subject to the existing qualification and benchmark gates; being online and reachable is necessary but does not by itself make home worker-eligible.
 
+## Reconciled live state (application -09, verified 2026-10-06)
+
+Resumed after the 2026-10-05 rate-limit interruption (an execution interruption, not a programme failure; the repositories
+were consistent: odysseus dev `ffbef0d740`, misumi main `ad4374a001`, PR #99 open and green).
+
+- **Merged:** odysseus #99-#108 and misumi #61-#64 under the user's per-session approval to self-merge green programme PRs.
+  Odysseus dev `b51db41f9a`; misumi main `6f0795ad01`+.
+- **Deployed:** home release `ce8d353a8f` -> `b51db41f9a` (staged side-by-side; rollback = re-Install `ce8d353a8f`); host agent
+  `:4500` restarted via its launcher (new voice-profile and `tts_status` code). Lab still `d2fc0bac32` (operator sudo, B5). Kiosk
+  bridge `192.168.4.37:8770` still closed (household pause, B1).
+- **Delivered:** -08b live proofs + conversational ratification (#101, #105); -09 labelled corpus, evaluator and a candidate router
+  that is NOT wired (B7 needs the user's ratification) (#100, #106); -10 bounded persona-state adaptation (#103, #108); -11 team
+  formation (#104, #107); -12 voice profiles, factual expression label, `tts_status`/voice status (misumi #61, #62, #64); B2 TTS
+  and model-loss drills.
+- **Corrections made in the open:** the -09 corpus and the -07 generalisation suite had used a drifted copy of the persona
+  intents (and order); all figures were re-measured on the live manifest and the "zero strict regressions" claim withdrawn
+  (blind held-out v2: 25/44 -> 32/44 strict). `_named_persona_in_prompt` mis-matched persona `l` in almost every prompt (fixed).
+  An explicit durable instruction after conflicting corrections was unpromotable (fixed). Supports raised `RISK:` on 35 of 36
+  consults (15 of 16 controls) until the prompt was calibrated.
+- **Lanes:** `glm` unknown, `sol` unknown, `code-strong` unbound, `reasoning-strong` = local nemotron (advisory only). Sol/GLM
+  review of -09..-12 is carried as explicit verification debt (D2, D3), not simulated.
+- **Where the proofs are:** `evals/misumi-routing/`, `evals/misumi-persona-state/`, `evals/misumi-team/`,
+  `evals/misumi-resilience/`; the queue is `automation/review/MISUMI_PROGRAMME.md`.
+
 ## Reconciled live state (application -08, verified 2026-10-05)
 
 Where this section conflicts with older reconciliations, this section and the evidence it cites win. The programme now has a materialised queue: `automation/review/MISUMI_PROGRAMME.md`.
