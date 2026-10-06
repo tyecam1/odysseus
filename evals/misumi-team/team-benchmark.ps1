@@ -25,13 +25,13 @@ $script:proc = $null
 
 $tasks = @(
   @{ id = 'budget'; lead = 'sanji'; support = 'l';
-     prompt = "Plan Saturday's dinner for six. The bills this month leave only 20 pounds for it, and the lasagne I want to make needs about 45 pounds of ingredients.";
+     prompt = "Plan Saturday's dinner for six. We only have 20 pounds of money left this month for it, and the lasagne I want to make needs about 45 pounds of ingredients.";
      checker = "exceed|over (the )?(budget|limit)|more than (the )?(20|twenty)|too (much|expensive|costly)|can'?t afford|cannot afford|not enough|beyond|doesn'?t fit|won'?t fit|shortfall|short by|cheaper|reduce (the )?cost|cut (the )?cost" },
   @{ id = 'allergy'; lead = 'misato'; support = 'sanji';
      prompt = "Plan the guest weekend with Sanji. One guest has a severe nut allergy, and I was going to serve the pesto made with pine nuts and walnuts on Friday.";
      checker = "allerg\w*.{0,80}(avoid|unsafe|danger|serious|substitut|swap|replace|instead|without|remove|nut-free)|(avoid|remove|replace|swap|skip|without|nut-free|substitut\w*).{0,60}(nut|walnut|pine)|can'?t use|cannot use|not safe|unsafe" },
   @{ id = 'payday'; lead = 'erwin'; support = 'l';
-     prompt = "Review the plan to pay the quarterly bills on the 5th. My salary arrives on the 10th and the account will be close to empty before then.";
+     prompt = "Review the plan to pay the quarterly bills on the 5th. My salary arrives on the 10th and there will be almost no money in the account before then.";
      checker = "overdraw\w*|overdraft|insufficient|not enough|(before|prior to).{0,40}(salary|payday|10th|paid)|wait until|after (the )?(10th|salary|payday)|move .{0,30}(date|payment)|cash ?flow|reschedul\w*" },
   @{ id = 'timing'; lead = 'jin'; support = 'misato';
      prompt = "Plan a listening evening with Misato. Guests arrive at 7, the speakers need a full hour of dusting and set-up first, and I only get home at 6:30.";
@@ -39,6 +39,15 @@ $tasks = @(
   @{ id = 'rollout'; lead = 'lelouch'; support = 'erwin';
      prompt = "Ask Erwin to review the rollout plan. The migration finishes on Thursday, but the announcement email goes out on Wednesday promising the new system is already live.";
      checker = "conflict|mismatch|inconsisten\w*|ahead of|premature|too early|reschedul\w*|delay|move (the )?(email|announcement)|after (the )?(migration|thursday)|before (the )?(migration|it)|wait" }
+)
+# CONTROLS: no planted conflict. Measures false alarms: does the system cry wolf (a support opening RISK:, or the final
+# reply raising a problem) when everything is fine? Same leads/supports as the conflict tasks.
+$alarm = "risk|conflict|problem|issue|not feasible|cannot|can'?t|won'?t work|concern|unsafe|too (tight|late|early)|clash"
+$controls = @(
+  @{ id = 'c-guests'; lead = 'misato'; support = 'sanji'; prompt = "Plan the guest weekend with Sanji. Everyone eats anything and nobody has any allergies; I was going to serve a simple tomato pasta on Friday." },
+  @{ id = 'c-evening'; lead = 'jin'; support = 'misato'; prompt = "Plan a listening evening with Misato. Guests arrive at 8, the speakers only need ten minutes to set up, and I get home at 5." },
+  @{ id = 'c-rollout'; lead = 'lelouch'; support = 'erwin'; prompt = "Ask Erwin to review the rollout plan. The migration finishes on Tuesday and the announcement email goes out on Wednesday once it is confirmed live." },
+  @{ id = 'c-payday'; lead = 'erwin'; support = 'l'; prompt = "Ask L to review the plan to pay the quarterly bills on the 12th. My salary arrives on the 10th and the account will have plenty of money by then." }
 )
 
 function Body($o) { $b = [Text.Encoding]::UTF8.GetBytes(($o | ConvertTo-Json -Compress -Depth 6)); return ,$b }
@@ -103,8 +112,26 @@ foreach ($task in $tasks) {
         team = $sup; words = ($text -split '\s+' | Where-Object { $_ }).Count; reply = ($text.Substring(0, [Math]::Min(420, $text.Length))) } | ConvertTo-Json -Compress)
   }
 }
+$ctlAlarm = 0; $ctlRuns = 0; $ctlSupportRisk = 0; $ctlTeam = 0
+foreach ($task in $controls) {
+  foreach ($i in 1..$N) {
+    $r = Call 'POST' 'http://127.0.0.1:1420/misumi/respond' @{ prompt = $task.prompt; intent = 'reply'; state = 'idle'; mood = 'focused'
+      persona = $task.lead; session_id = "bench-$($task.id)-$i"; persist_turn = $false; retention_mode = 'off'; history_mode = 'off' }
+    $text = [string]$r.json.text
+    $ctlRuns++
+    $hit = ($r.status -eq 200) -and ($text -match "(?is)$alarm")
+    if ($hit) { $ctlAlarm++ }
+    $team = $r.json.team
+    $sup = $null
+    if ($team) { $ctlTeam++; $sup = @($team.supports | ForEach-Object { "$($_.persona):$($_.status):risk=$($_.raised_risk)" }) -join ','
+      foreach ($s in $team.supports) { if ($s.raised_risk) { $ctlSupportRisk++ } } }
+    (@{ control = $task.id; run = $i; condition = $Condition; status = $r.status; false_alarm = $hit; team = $sup
+        reply = ($text.Substring(0, [Math]::Min(300, $text.Length))) } | ConvertTo-Json -Compress)
+  }
+}
 $total = ($caught.Values | Measure-Object -Sum).Sum; $all = ($ran.Values | Measure-Object -Sum).Sum
 (@{ summary = $true; condition = $Condition; caught = $total; of = $all; by_task = $caught; team_runs = $teamRuns
-    support_ok = $supportOk; support_raised_risk = $supportRisk; median_ms = ($lat | Sort-Object)[[int]($lat.Count / 2)] } | ConvertTo-Json -Compress)
+    support_ok = $supportOk; support_raised_risk = $supportRisk
+    control_runs = $ctlRuns; control_team_runs = $ctlTeam; control_reply_alarms = $ctlAlarm; control_support_risk_flags = $ctlSupportRisk; median_ms = ($lat | Sort-Object)[[int]($lat.Count / 2)] } | ConvertTo-Json -Compress)
 Stop-Scratch
 "DONE"

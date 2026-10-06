@@ -268,8 +268,9 @@ async def _consult_persona(
         f"You are {persona}, the Misumi {record.get('role')}. Analyze the user's request from your "
         f"specialist role and give {'Aoteru' if lead == 'aoteru' else str(persona_record(lead).get('display_name') or lead)} "
         f"concise, practical evidence, critique, or next steps. "
-        f"Begin with 'RISK:' if you see a conflicting constraint, a factual error or an unsafe assumption in the "
-        f"request; otherwise begin with 'OK:'. "
+        f"Begin with 'RISK:' ONLY if you can quote, in your first sentence, two facts stated in the request that "
+        f"conflict with each other, or a stated plan that is unsafe; otherwise begin with 'OK:'. Missing detail is "
+        f"not a risk. "
         f"Do not address the user directly. {_HONESTY_CONSTRAINTS}"
     )
     capabilities = capability_summary(persona)
