@@ -585,10 +585,20 @@ def export_events(
 ) -> str:
     """Stable, bounded export (oldest first) for the caller's own rows only."""
     limit = max(1, min(int(limit), EXPORT_MAX_LIMIT))
-    page = query_events(
-        db, owner, domain, since=since, until=until, limit=limit, newest_first=False
-    )
-    events = page["events"]
+    # query_events is hard-bounded to QUERY_MAX_LIMIT per call, so a single call silently
+    # truncated every export to 200 rows even though EXPORT_MAX_LIMIT is larger. Page by keyset
+    # (oldest first) until the requested limit or the end of the archive.
+    events: list = []
+    cursor: Optional[int] = None
+    while len(events) < limit:
+        page = query_events(
+            db, owner, domain, since=since, until=until, after_seq=cursor,
+            limit=min(QUERY_MAX_LIMIT, limit - len(events)), newest_first=False,
+        )
+        events.extend(page["events"])
+        cursor = page["next_cursor"]
+        if cursor is None:
+            break
     if fmt == "md":
         lines = ["# Misumi transcript export", ""]
         for item in events:
