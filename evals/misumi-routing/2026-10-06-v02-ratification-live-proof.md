@@ -90,3 +90,8 @@ L10-after-rollback {"method":"routing-contract-v0.2","base":null,"learned":false
 L11-after-rollback-stem-only {"method":"routing-contract-v0.2","base":null,"learned":false,"reasons":["cleaning"],"persona":"misato"}
 DONE (household stores untouched)
 ```
+
+## Correction (2026-10-06 evening, Sol review)
+
+The claim above that a learned revision "fires only on its exact cue" is imprecise. Learned cues are matched over the closed variant set `keyword_variants` (plural, `-ing`/`-e`; from -07), so `clean rota` fires a revision stored as `cleaning`; v0.2's base stemming is not applied to learned cues. The proof showed that `cleaned` does not fire; it did not test every variant. The v0.1 kill switch (`MISUMI_ROUTING_ALGORITHM=v0.1`) restores the v0.1 base router only; the 178/178 kill-switch run used empty learned stores, so it did not test active overlays, which have their own switch (`MISUMI_ROUTING_ADAPTATION=0`). 177/177 is a deployment-conformance result (expected values come from the same implementation and manifest, and one follow-up row is skipped when its precondition disagrees), not an independent accuracy measurement.
+

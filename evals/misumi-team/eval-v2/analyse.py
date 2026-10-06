@@ -3,6 +3,9 @@
 
 Usage: python analyse.py --rows solo.jsonl team.jsonl --primary judged-aoteru.jsonl --secondary judged-ollama.jsonl [--json out.json]
 
+NOTE (2026-10-06): the paired-bootstrap intervals below resample flat task x run cells, which understates uncertainty with only 8 tasks; the
+pre-registered reading (resample tasks, then runs) is implemented in reanalyse_hierarchical.py and its output supersedes these intervals.
+
 Reports per judge: detection on CONFLICT prompts and false-alarm on CLEAN prompts per condition (Wilson 95% intervals), the
 team-minus-solo differences with paired-bootstrap 95% intervals (resampling task x run cells), the supports' own RISK-flag rate on
 conflict vs clean, per-task detection, median latency, and Cohen's kappa between the two judges. Unjudged rows (judge failure) are
