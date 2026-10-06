@@ -11,26 +11,28 @@ end_commit: "f75eb723a8b04e7e4327975bc37a278b37ba91bd"
 outcome_status: partial
 stop_reason: >-
   The user ratified routing contract v0.2 (B7) and asked for it to be implemented, deployed, regression-proven and kill-switch
-  backed, for one proper -11 evaluation, and for the stale head and terminal reconciliation to be fixed. All of that is done
-  except the final production cutover to release f75eb723a8, which the auto-mode classifier declined as a production deploy
-  (not retried). The programme stops on genuine external gates: kiosk, lab sudo/Sol/GLM lanes, memory policy, security hardening,
-  backup inputs and longitudinal household evidence. -10 then -11 are the priority retrospective reviews when Sol returns.
+  backed, for one proper -11 evaluation, and for the stale head and terminal reconciliation to be fixed. All done, including the
+  production cutover to release f75eb723a8 (explicitly authorised by the user after the classifier had declined it). The programme
+  stops on genuine external gates: kiosk, lab sudo/Sol/GLM lanes, memory policy, security hardening, backup inputs and
+  longitudinal household evidence. -10 then -11 are the priority retrospective reviews when Sol returns. The larger-N reactive
+  measurement is successor/evaluation debt; handover visuals and voice tuning are household-gated.
 commits:
   - "odysseus #113 routing v0.2 wiring + kill switch (#112 closed after a CI failure); #114 -11 evaluation v2 pre-registration; #115 summarise OK as no issue found; #116 drop OK contributions from the lead's input; plus this evidence/trace PR"
   - "misumi #65 routing contract v0.2, routing.aliases, dry-run port and parity fixture"
 deployment:
-  - "home production release 1afc1ddedc (routing v0.2 default; kill switch MISUMI_ROUTING_ALGORITHM=v0.1 verified; production regression 177/177, stores unchanged). Releases 98e1f0ebec and f75eb723a8 are built; f75eb723a8 passed the side-by-side check; its production cutover was declined by the classifier and is a pending user/operator step. The lab remains d2fc0bac32."
+  - "home production release cut over 1afc1ddedc -> f75eb723a8 on 2026-10-06 (staged side-by-side path, user-authorised; stage3-f75eb723a8.log on the host); rollback = re-Install 1afc1ddedc (directory retained). Post-cutover proof on the deployed :420: health 200, task registered from odysseus-releases\\f75eb723a8, regression 177/177 (wrong_method_string 0, one follow-up row skipped because its prior turn routed differently), household persona-state and routing stores identical before/after, team formed on specialist-led planted conflicts (RISK on conflict, none on clean), turn-scoped style request 63 -> 28 words. teamdrop is a harm-reduction repair, not evidence of team benefit. The lab remains d2fc0bac32."
 verification:
   - "deterministic: odysseus CI green on #113-#116 (Python tests, compileall, node --check); kill-switch exactness test (full provenance equality with v0.1 on all corpus prompts); literal-reason and stem-only-does-not-fire learned-revision tests; 65 team-formation tests on a fresh dev tree"
   - "live (home): production regression 177/177; scratch v0.2 177/177; scratch kill switch 178/178 with no v0.2 field leaking; exact-learned-cue proof; -11 evaluation v2 over 4 conditions x 192 replies, judged blind by two local models and validated against a 48-row AI audit"
   - "honest reporting: pre-registered team verdict was 'sensitivity gained at the price of false alarms'; judge deviations disclosed (Nemotron infeasible, llama3.1:8b unreliable); the first fix (#115) lowered detection below solo; the final variant is not shown to help; all conclusions indicative; Sol, GLM and Opus lanes unavailable and carried as debt"
-  - "access and authority: self-merge of programme PRs used under the user's earlier approval; ratification-gated work proceeded only after the user's explicit ratification; the production cutover was a production deploy declined by the classifier and not worked around"
+  - "access and authority: self-merge of programme PRs used under the user's earlier approval; ratification-gated work proceeded only after the user's explicit ratification; the production cutover was first declined by the classifier as a production deploy and not worked around; it was performed only after the user's explicit authorisation"
 failure_tags:
   - wiring_pushed_with_a_test_not_run_locally_ci_failed
   - preregistered_judge_infeasible_and_substitute_judge_unreliable
   - first_fix_overcorrected_detection_loss_reassurance_harm
   - heredoc_windows_path_escape_errors_repeated
-  - production_cutover_declined_by_classifier
+  - production_cutover_declined_by_classifier_then_user_authorised
+  - programme_patch_left_unsubstituted_placeholder_in_merged_file
 rating:
   scale: 1-5
   goal_progress: 4

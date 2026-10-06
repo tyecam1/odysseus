@@ -264,7 +264,8 @@ nodes:
       - preregistered_judge_infeasible_and_substitute_judge_unreliable
       - first_fix_overcorrected_detection_loss_reassurance_harm
       - heredoc_windows_path_escape_errors_repeated
-      - production_cutover_declined_by_classifier
+      - production_cutover_declined_by_classifier_then_user_authorised
+      - programme_patch_left_unsubstituted_placeholder_in_merged_file
   - id: evolution:2026-10-06-misumi-long-horizon-programme-10
     type: evolution_event
     decision: reinforce
