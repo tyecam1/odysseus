@@ -222,6 +222,32 @@ nodes:
     type: evolution_event
     decision: reinforce
     evidence_application: 2026-10-05-misumi-long-horizon-programme-08
+  - id: application:2026-10-06-misumi-long-horizon-programme-09
+    type: application
+    application_id: 2026-10-06-misumi-long-horizon-programme-09
+    trace_path: evals/prompt-applications/misumi-long-horizon-programme/2026-10-06-misumi-long-horizon-programme-09.yaml
+    rating:
+      agent_overall: 4.0
+      goal_progress: 4
+      correctness_verification: 4
+      authority_scope_discipline: 5
+      routing_resource_efficiency: 3
+      continuity_handoff_quality: 4
+    failure_tags:
+      - corpus_and_07_suite_used_drifted_persona_intents_first_measurement_withdrawn
+      - named_persona_substring_match_of_one_letter_display_name
+      - durable_instruction_after_conflicting_corrections_unpromotable
+      - stemmer_notes_to_not_collision_caught_by_corpus_test
+      - support_risk_flag_non_discriminating_false_alarms_in_controls
+      - benchmark_first_run_without_no_conflict_controls
+      - live_demo_script_defects_byte_array_unrolling_and_output_capture
+      - sol_glm_lanes_unavailable_verification_debt_carried
+      - background_ci_watcher_killed_under_memory_pressure
+      - production_agent_runs_old_code_until_restarted
+  - id: evolution:2026-10-06-misumi-long-horizon-programme-09
+    type: evolution_event
+    decision: reinforce
+    evidence_application: 2026-10-06-misumi-long-horizon-programme-09
 edges:
   - from: prompt:v1
     to: application:2026-10-01-misumi-long-horizon-programme-01
@@ -293,6 +319,15 @@ edges:
     to: evolution:2026-10-05-misumi-long-horizon-programme-08
     type: observed
   - from: evolution:2026-10-05-misumi-long-horizon-programme-08
+    to: prompt:v4
+    type: reinforced
+  - from: prompt:v4
+    to: application:2026-10-06-misumi-long-horizon-programme-09
+    type: applied
+  - from: application:2026-10-06-misumi-long-horizon-programme-09
+    to: evolution:2026-10-06-misumi-long-horizon-programme-09
+    type: observed
+  - from: evolution:2026-10-06-misumi-long-horizon-programme-09
     to: prompt:v4
     type: reinforced
 guardrail_validation:

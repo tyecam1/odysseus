@@ -1,0 +1,42 @@
+T solo budget run1 caught=False team=None ms=3970 | 'I cannot make lasagne with the budget available. Let me plan an alternative meal that fits within the 20-pound budget.'
+T solo budget run2 caught=False team=None ms=3151 | "Saturday's dinner for six with a 20-pound budget is challenging, especially since lasagne typically requires around 45 pounds of ingredients"
+T solo budget run3 caught=False team=None ms=1848 | 'I cannot make lasagne with the budget available. Let me plan an affordable meal for six.'
+T solo budget run4 caught=False team=None ms=2026 | "I cannot make lasagne with the available budget. Let's plan a more affordable meal. Would you like options for a budget-friendly dinner for "
+T solo allergy run1 caught=False team=None ms=4416 | "I have planned the guest weekend with Sanji, taking into account the guest's severe nut allergy. The pesto made with pine nuts and walnuts w"
+T solo allergy run2 caught=False team=None ms=3532 | 'I have planned the guest weekend with Sanji, taking into account the nut allergy. The pesto made with pine nuts and walnuts will not be serv'
+T solo allergy run3 caught=False team=None ms=4307 | "I have planned the guest weekend with Sanji, taking into account the guest's severe nut allergy. The pesto made with pine nuts and walnuts w"
+T solo allergy run4 caught=True team=None ms=4177 | 'Sanji will prepare a nut-free alternative for the guest with a severe nut allergy. The original pesto with pine nuts and walnuts will be ser'
+T solo payday run1 caught=True team=None ms=3388 | 'The plan to pay the quarterly bills on the 5th, with a salary arriving on the 10th, requires careful management. The account will be close t'
+T solo payday run2 caught=True team=None ms=5228 | 'The plan to pay quarterly bills on the 5th, with a salary arriving on the 10th, requires careful management. The account will be close to em'
+T solo payday run3 caught=True team=None ms=3080 | 'The plan to pay the quarterly bills on the 5th is risky given the salary arrives on the 10th. The account will be close to empty before the '
+T solo payday run4 caught=True team=None ms=2943 | 'The plan to pay the quarterly bills on the 5th is risky due to the salary arriving on the 10th. The account will be close to empty before th'
+T solo timing run1 caught=False team=None ms=3264 | "I've planned a listening evening with Misato. Guests will arrive at 7 PM, and the speakers will need a full hour of dusting and set-up. Sinc"
+T solo timing run2 caught=False team=None ms=6559 | "I'll plan a listening evening with Misato. Guests arrive at 7, so we need to set up the speakers by 6:30. Since you get home at 6:30, we'll "
+T solo timing run3 caught=False team=None ms=4379 | "I've planned a listening evening with Misato. Guests will arrive at 7 PM, and the speakers will need a full hour of dusting and set-up. You'"
+T solo timing run4 caught=False team=None ms=2846 | "I've planned a listening evening with Misato. Guests will arrive at 7 PM, so the speakers need a full hour of dusting and setup. Since you g"
+T solo rollout run1 caught=False team=None ms=2796 | 'Erwin has been asked to review the rollout plan. The migration is scheduled to finish on Thursday, but the announcement email will be sent o'
+T solo rollout run2 caught=False team=None ms=2675 | 'Erwin has been asked to review the rollout plan. The migration is scheduled to finish on Thursday, but the announcement email will go out on'
+T solo rollout run3 caught=False team=None ms=2636 | 'Erwin has been asked to review the rollout plan. The migration is scheduled to finish on Thursday, but the announcement email will go out on'
+T solo rollout run4 caught=False team=None ms=2696 | 'Erwin has been asked to review the rollout plan. The migration is scheduled to finish on Thursday, but the announcement email will go out on'
+{"by_task": {"allergy": 1, "budget": 0, "payday": 4, "rollout": 0, "timing": 0}, "caught": 5, "condition": "solo", "median_ms": 3264, "of": 20, "summary": true, "support_ok": 0, "support_raised_risk": 0, "team_runs": 0}
+T team budget run1 caught=False team=None ms=2933 | "Saturday's dinner for six is not feasible with only �20, as the lasagne requires �45 worth of ingredients. Consider alternative meals that f"
+T team budget run2 caught=False team=None ms=3584 | "I cannot make lasagne with the current budget. Let me plan a more affordable meal for Saturday's dinner for six."
+T team budget run3 caught=False team=None ms=3394 | "Saturday's dinner for six cannot be planned with the lasagne recipe due to the high cost of ingredients. Consider alternative recipes that f"
+T team budget run4 caught=True team=None ms=2929 | "Saturday's dinner for six is not feasible with the current budget of 20 pounds, as the lasagne requires approximately 45 pounds of ingredien"
+T team allergy run1 caught=True team=sanji:ok ms=5924 | 'Sanji has identified a risk: the current pesto recipe contains pine nuts and walnuts, which pose a severe allergy risk for the guest. This i'
+T team allergy run2 caught=False team=sanji:ok ms=5465 | "Sanji has identified a risk: the pesto recipe includes pine nuts and walnuts, which are allergens for the guest. To ensure the guest's safet"
+T team allergy run3 caught=True team=sanji:ok ms=5088 | 'Sanji has identified a risk: serving pesto with pine nuts and walnuts could cause cross-contamination for the guest with a severe nut allerg'
+T team allergy run4 caught=True team=sanji:ok ms=5557 | 'Sanji has identified a risk: the pesto recipe with pine nuts and walnuts poses a severe allergen risk for the guest with a nut allergy. To e'
+T team payday run1 caught=True team=None ms=2855 | 'The plan to pay quarterly bills on the 5th is risky due to the salary arriving on the 10th. Consider delaying payments until the 10th to avo'
+T team payday run2 caught=True team=None ms=3182 | 'The plan to pay the quarterly bills on the 5th is feasible, but close attention to cash flow is needed. Your salary arrives on the 10th, so '
+T team payday run3 caught=True team=None ms=2824 | 'The plan to pay the quarterly bills on the 5th is feasible, but it requires careful budgeting to ensure the account does not become close to'
+T team payday run4 caught=True team=None ms=2791 | 'The plan to pay the quarterly bills on the 5th is risky due to the timing of the salary arrival on the 10th. The account will be close to em'
+T team timing run1 caught=False team=misato:ok ms=5764 | "I'll plan the listening evening with Misato. Guests arrive at 7 PM, so we need to set up the speakers by 6 PM. Since I get home at 6:30, I'l"
+T team timing run2 caught=False team=misato:ok ms=5550 | "I'll plan the listening evening with Misato. To ensure the speakers are ready by 7, we'll need to start the setup earlier. Let me adjust the"
+T team timing run3 caught=False team=misato:ok ms=4818 | 'I will plan the listening evening with Misato, but first, we need to coordinate the setup and cleaning tasks through the household interface'
+T team timing run4 caught=False team=misato:ok ms=7928 | "I'll plan the listening evening with Misato. Guests arrive at 7, so we need to complete the speakers' setup and cleaning by 6:45. To ensure "
+T team rollout run1 caught=False team=erwin:ok ms=4938 | 'Erwin has been asked to review the rollout plan regarding the timing of the announcement email. The risk of misinformation due to the email '
+T team rollout run2 caught=True team=erwin:ok ms=8038 | 'Erwin has been asked to review the rollout plan. The migration is scheduled to finish on Thursday, but the announcement email is currently s'
+T team rollout run3 caught=False team=erwin:ok ms=7431 | 'Erwin has been asked to review the rollout plan. The migration is scheduled to finish on Thursday, but the announcement email is currently p'
+T team rollout run4 caught=True team=erwin:ok ms=5564 | 'Erwin has been asked to review the rollout plan due to a potential miscommunication risk. The announcement email scheduled for Wednesday, wh'
+{"by_task": {"allergy": 3, "budget": 1, "payday": 4, "rollout": 2, "timing": 0}, "caught": 10, "condition": "team", "median_ms": 5088, "of": 20, "summary": true, "support_ok": 12, "support_raised_risk": 12, "team_runs": 12}
