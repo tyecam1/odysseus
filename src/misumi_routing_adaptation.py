@@ -159,6 +159,7 @@ class RoutingAdaptationStore:
             "persistence_eligible": bool(fields.get("persistence_eligible", True)),
             "source_authority": fields.get("source_authority", "user"),
             "previous_auto_route_id": fields.get("previous_auto_route_id"),
+            "context": _short(fields.get("context"), 240),
         }
         if record["type"] not in EVIDENCE_TYPES:
             raise ValueError(f"unknown evidence type: {record['type']!r}")
