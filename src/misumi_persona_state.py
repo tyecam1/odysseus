@@ -93,16 +93,82 @@ EVIDENCE_WEIGHTS = {"explicit_durable": 3, "correction": 1, "temporary_choice": 
 REPEATED_CORRECTIONS_FOR_ELIGIBLE = 3
 _MAX_RENDER_CHARS = 200
 
+_DURABLE_STRONG = re.compile(r"\b(?:from\s+now\s+on|permanently|in\s+future|going\s+forward|from\s+now)\b", re.IGNORECASE)
+_DURABLE_WEAK = re.compile(r"\b(?:always|forever)\b", re.IGNORECASE)
 _DURABLE_PHRASE = re.compile(
     r"\b(?:from\s+now\s+on|always|permanently|in\s+future|going\s+forward|forever|from\s+now)\b",
     re.IGNORECASE,
 )
 _RESERVED_MATTERS = re.compile(
     r"\b(?:standards?|values?|boundaries|ratif(?:y|ied|ication))\b|"
-    r"\blevel\s*(?:5|five|6|six)\b",
+    r"\blevel\s*(?:5|five|6|six)\b|"
+    # Safety, medical and emergency advice, and memory/retention decisions are never shaped by learned style (independent review).
+    r"\b(?:safety|emergenc\w+|medical|medic(?:ine|ation)s?|allerg\w+|first[- ]aid|poison\w*|overdose|danger\w*)\b|"
+    r"\b(?:retention|privacy)\b|"
+    r"\bmemory\s+(?:retention|decisions?|policy|capture)\b",
     re.IGNORECASE,
 )
-_NEGATED_BEFORE = re.compile(r"\b(?:don'?t|do\s+not|not|never)\s+(?:\w+\s+){0,3}$", re.IGNORECASE)
+_CLAUSE_BOUNDARY = re.compile(r"[.;!?\n]")
+# Typographic quotes and apostrophes (phone and kiosk keyboards) are folded to ASCII before any pattern runs, and only the first
+# characters of a prompt are inspected, so a very long prompt cannot make detection slow.
+_TYPOGRAPHIC = str.maketrans({"’": "'", "‘": "'", "‛": "'", "ʼ": "'", "“": '"', "”": '"', "„": '"'})
+_MAX_DETECT_CHARS = 2000
+
+
+def _prep(prompt: object) -> str:
+    return str(prompt or "")[:_MAX_DETECT_CHARS].translate(_TYPOGRAPHIC)
+
+
+# A sentence that talks ABOUT an instruction (asks how, asks to remove or ignore it, translates it, gives it as an example or for
+# someone else) is never the user's own durable instruction.
+_NOT_DURABLE_CONTEXT = re.compile(
+    r"\b(?:ignore|disregard|remove|stop|undo|cancel|revert|translate|example|how\s+do\s+i|should\s+i|"
+    r"tell\s+(?:the|my|your|him|her|them|chatgpt|it)|essay|quote|sentence)\b",
+    re.IGNORECASE,
+)
+_REPORTED_TAIL = re.compile(r"[^.;!?\n]{0,160}\b(?:he|she|they|someone|everyone)\s+(?:said|wrote|says|asked|told\s+me)\b[^.;!?\n]{0,160}", re.IGNORECASE)
+_NEGATION = re.compile(
+    r"\b(?:don'?t|do\s+not|didn'?t|did\s+not|wasn'?t|was\s+not|isn'?t|is\s+not|aren'?t|are\s+not|weren'?t|were\s+not"
+    r"|can'?t|cannot|won'?t|not|never|no\s+longer|nothing|neither|nor)\b",
+    re.IGNORECASE,
+)
+# Text that is quoted, code, markup, a link label or reported speech is a mention of an instruction, not the user's own instruction.
+# Unclosed quotes, fences and backticks run to the end of the line (or text), so an attacker cannot escape by not closing them.
+_QUOTE_PATTERNS = tuple(re.compile(pattern, flags) for pattern, flags in (
+    (r"```[\s\S]*?(?:```|$)", 0),
+    (r"`[^`\n]*`", 0),
+    (r"`[^\n]*$", re.MULTILINE),
+    (r"<(blockquote|q|pre|code)\b[^>]*>[\s\S]*?(?:</\1\s*>|$)", re.IGNORECASE),
+    (r"\[[^\]\n]{0,200}\]\([^)\n]{0,300}\)", 0),
+    (r"\"[^\"\n]*\"", 0),
+    (r"“[^”\n]*”", 0),
+    (r"(?<!\w)'[^'\n]+'(?!\w)", 0),
+    (r"\"[^\n]*$", re.MULTILINE),
+    (r"“[^\n]*$", re.MULTILINE),
+    (r"^\s*>.*$", re.MULTILINE),
+))
+_REPORTED = re.compile(
+    r"\b(?:wrote|writes|written|said|says|quotes?|quoted|reads|claims?|claimed|reported|states?|stated|texted|emailed|messaged)\b[^.!?\n]*",
+    re.IGNORECASE,
+)
+
+
+def _strip_quoted(text: str) -> str:
+    for pattern in _QUOTE_PATTERNS:
+        text = pattern.sub(" ", text)
+    return _REPORTED.sub(" ", _REPORTED_TAIL.sub(" ", text))
+
+
+def _clause_before(text: str, position: int) -> str:
+    start = max((m.end() for m in _CLAUSE_BOUNDARY.finditer(text, 0, position)), default=0)
+    return text[start:position]
+
+
+def is_reserved_turn(prompt: str) -> bool:
+    """True when the prompt is about a reserved matter (safety, medical, emergency, memory retention, standards ...): learned style is
+    neither captured from nor applied to such a turn."""
+    return bool(_RESERVED_MATTERS.search(_prep(prompt)))
+
 
 # (dimension, value, kind, pattern). kind: "feedback" (about the previous answer) | "request".
 _SIGNALS: tuple[tuple[str, str, str, re.Pattern[str]], ...] = tuple(
@@ -150,18 +216,21 @@ def render_value(dimension: str, value: str) -> str:
 def detect_style_signals(prompt: str) -> list[dict[str, str]]:
     """Closed-vocabulary style signals found in one prompt.
 
-    Reserved matters yield nothing. A dimension signalled with two different
-    values in the same prompt is ambiguous and dropped. A request that is
-    negated ("don't make it shorter") is not a signal.
+    Reserved matters (including safety/medical/emergency advice and memory
+    retention) yield nothing. Quoted, code and quote-block text is ignored. A
+    dimension signalled with two different values in the same prompt is
+    ambiguous and dropped. A request or feedback that is negated ("don't make
+    it shorter", "I wasn't saying it was too long") is not a signal.
     """
-    text = str(prompt or "")
-    if _RESERVED_MATTERS.search(text):
+    text = _prep(prompt)
+    if is_reserved_turn(text):
         return []
+    text = _strip_quoted(text)  # an instruction that is only quoted, reported or in code is not the user's own
     found: dict[str, list[dict[str, str]]] = {}
     for dimension, value, kind, pattern in _SIGNALS:
         for match in pattern.finditer(text):
-            if kind == "request" and _NEGATED_BEFORE.search(text[: match.start()]):
-                continue
+            if _NEGATION.search(_clause_before(text, match.start())):
+                continue  # negated anywhere earlier in its own clause ("I don't think the answer was too long")
             found.setdefault(dimension, []).append(
                 {"dimension": dimension, "value": value, "kind": kind, "matched": match.group(0).lower()}
             )
@@ -175,7 +244,21 @@ def detect_style_signals(prompt: str) -> list[dict[str, str]]:
 
 def classify_signal(prompt: str, signal: dict[str, str]) -> str:
     """Evidence type for one signal: durable instruction / feedback correction / one-off request."""
-    if _DURABLE_PHRASE.search(str(prompt or "")):
+    if signal.get("kind") == "feedback":
+        return "correction"  # "your answers are always too long" describes an answer; it is never a standing instruction
+    text = _strip_quoted(_prep(prompt))
+    index = text.lower().find(str(signal.get("matched") or "\0"))
+    if index >= 0:
+        # the durable phrase must be in the same sentence as the signal it would make durable
+        start = max((m.end() for m in _CLAUSE_BOUNDARY.finditer(text, 0, index)), default=0)
+        end = next((m.start() for m in _CLAUSE_BOUNDARY.finditer(text, index)), len(text))
+        asks = end < len(text) and text[end] == "?"
+        text = text[start:end]
+        if asks or _NOT_DURABLE_CONTEXT.search(text):
+            return "temporary_choice"
+    request_at = text.lower().find(str(signal.get("matched") or "\0"))
+    # "from now on ..." counts anywhere in the sentence; "always"/"forever" only before the request ("always explain ..."), not after it
+    if _DURABLE_STRONG.search(text) or _DURABLE_WEAK.search(text[:request_at] if request_at >= 0 else text):
         return "explicit_durable"
     return "correction" if signal["kind"] == "feedback" else "temporary_choice"
 
@@ -425,8 +508,12 @@ class PersonaStateStore:
         return {row["dimension"]: row for row in self.active_revisions() if row.get("persona") == persona}
 
     def promote(self, candidate_id: str, *, authorisation: dict[str, Any],
-                foundation: str = "FOUNDATION") -> dict[str, Any]:
-        """Activate a candidate as a revision - evaluated, gate-checked, authorised."""
+                foundation: str = "FOUNDATION", precondition: Any = None) -> dict[str, Any]:
+        """Activate a candidate as a revision - evaluated, gate-checked, authorised.
+
+        ``precondition`` (optional) is called with the candidate while the store lock is held; a falsy result refuses the promotion,
+        so a check made earlier cannot go stale between the check and the promotion.
+        """
         evaluation = self.evaluate_candidate(candidate_id, foundation)
         with self._lock:
             data = self._load_candidates()
@@ -436,6 +523,8 @@ class PersonaStateStore:
                 raise KeyError(f"unknown candidate: {candidate_id}")
             if candidate.get("status") != "eligible":
                 raise ValueError(f"candidate {candidate_id} is {candidate.get('status')!r}, not eligible")
+            if precondition is not None and not precondition(candidate):
+                raise ValueError(f"candidate {candidate_id} changed since it was offered")
             if not authorisation or not authorisation.get("type"):
                 raise ValueError("promotion requires explicit authorisation")
             if authorisation["type"] == "user_instruction":

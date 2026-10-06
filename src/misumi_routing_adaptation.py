@@ -257,7 +257,9 @@ class RoutingAdaptationStore:
                 corrections = candidate["confidence"].get("corrections", 0) + (etype == "correction")
                 candidate["confidence"]["corrections"] = corrections
                 candidate["confidence"]["durable"] = durable_count + (etype == "explicit_durable")
-                if corrections >= REPEATED_CORRECTIONS_FOR_ELIGIBLE:
+                if corrections >= REPEATED_CORRECTIONS_FOR_ELIGIBLE and candidate.get("status") not in ("active", "rejected"):
+                    # (A rejected inference stays rejected and an active mapping is never offered again: the same guard the
+                    # persona-state store has.)
                     # Repeated behavioural evidence: eligible, but promotion
                     # still needs real user ratification - never automatic.
                     candidate["status"] = "eligible"
@@ -370,11 +372,12 @@ class RoutingAdaptationStore:
 
     # ---------- revisions ----------
 
-    def promote(self, candidate_id: str, *, authorisation: dict[str, Any]) -> dict[str, Any]:
+    def promote(self, candidate_id: str, *, authorisation: dict[str, Any], precondition: Any = None) -> dict[str, Any]:
         """Activate a candidate as a routing revision - gate-checked.
 
         The gate: the candidate must be ``eligible`` AND carry an explicit
-        authorisation dict. Confidence alone never promotes.
+        authorisation dict. Confidence alone never promotes. ``precondition``
+        (optional) runs under the store lock; a falsy result refuses promotion.
         """
         with self._lock:
             data = self._load_candidates()
@@ -390,6 +393,8 @@ class RoutingAdaptationStore:
                 raise ValueError(
                     f"candidate {candidate_id} is {candidate.get('status')!r}, not eligible"
                 )
+            if precondition is not None and not precondition(candidate):
+                raise ValueError(f"candidate {candidate_id} changed since it was offered")
             if not authorisation or not authorisation.get("type"):
                 raise ValueError("promotion requires explicit authorisation")
             if authorisation["type"] == "user_instruction":
