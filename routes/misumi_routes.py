@@ -71,6 +71,9 @@ _ARTIFACT_REQUEST = re.compile(
     r"\b(create|make|write|save|draft|document)\b",
     re.IGNORECASE,
 )
+_RECOMMENDATION_REQUEST = re.compile(
+    r"\b(?:should\s+(?:i|we)|recommend\w*|suggest\w*|what\s+to\s+\w+|what\s+do\s+you\s+think)\b", re.IGNORECASE
+)
 _INTERACTIVE_SEED_LIMIT = 6000
 _INTERACTIVE_SEED_SECTION_EXCERPT = 320
 
@@ -1190,12 +1193,19 @@ def setup_misumi_routes(
         handoff_ids: List[str] = []
         if sources and not model_required:
             lead = sources[0]
-            text = _short_text(f"From {lead['path']} line {lead['line']}: {lead['snippet']}")
+            entry = f" ({lead['entry']})" if lead.get("entry") else ""
+            text = _short_text(f"From {lead['path']} line {lead['line']}{entry}: {lead['snippet']}")
             backend = "household-read-only"
         elif domain and not model_required:
             present = any(item["id"] == domain and item["present"] for item in adapter.domains())
             if present:
                 text = f"No matching {domain} fact was found in the canonical household repository."
+                if _RECOMMENDATION_REQUEST.search(prompt):
+                    text += (
+                        " That reads as a request for a recommendation; I answer household questions only from recorded"
+                        " entries, and none matched. Name something recorded (a title, item or mood) to look up, or add"
+                        " the entries to the repository."
+                    )
             else:
                 text = f"The canonical household repository has no {domain} data surface yet."
             backend = "household-read-only"

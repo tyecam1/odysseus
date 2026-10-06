@@ -43,6 +43,62 @@ DOMAIN_TERMS = {
 }
 
 
+# Words that carry no evidence on their own: a line that shares only these with a question is not an answer to it.
+_STOP_TERMS = frozenset({
+    "about", "after", "all", "and", "answer", "any", "are", "can", "could", "current", "currently", "data", "did", "does",
+    "exists", "explain", "fewer", "for", "from", "has", "have", "how", "in", "into", "is", "its", "language", "may", "more",
+    "now", "of", "on", "only", "or", "our", "over", "plain", "please", "reply", "say", "should", "soon", "tell", "than",
+    "that", "the", "them", "then", "there", "they", "this", "to", "today", "tomorrow", "tonight", "was", "were", "what",
+    "when", "where", "which", "who", "will", "with", "words", "would", "yesterday", "you", "your",
+})
+_TERM = re.compile(r"[A-Za-z0-9_]{2,}")
+# Lines that describe the repository rather than state a household fact: placeholders and to-dos, notes about views or
+# features that do not exist yet, and navigation pointers to another file. They are never evidence for an answer.
+_NON_FACT_LINE = re.compile(r"\bTODO\b|_TODO_|\bYYYY-MM-DD\b|\bfuture[- ](?:views?|facing|work|features?)\b", re.IGNORECASE)
+_POINTER_LINE = re.compile(r"\]\([^)\s]+\.(?:md|ya?ml|csv|tsv|json|txt)\)", re.IGNORECASE)
+_DOC_FILES = frozenset({"readme.md"})  # directory documentation, not household data
+_ENTRY_START = re.compile(r"^(\s*)-\s+[A-Za-z_][\w-]*:(?:\s|$)")
+_EXAMPLE_FLAG = re.compile(r"^\s*(?:-\s+)?example:\s*true\b", re.IGNORECASE)
+_ENTRY_KEY = re.compile(r"^\s*(?:-\s+)?(artist|title|name|item|plant|task):\s*(.*?)\s*$", re.IGNORECASE)
+_LABEL_ORDER = ("name", "item", "plant", "task", "title", "artist")
+
+
+def _norm(term: str) -> str:
+    """Case-fold and drop a plural 's' so 'records' matches 'record' (applied to question and line alike)."""
+    term = term.lower()
+    return term[:-1] if len(term) > 3 and term.endswith("s") and not term.endswith("ss") else term
+
+
+def _yaml_entries(lines: List[str]) -> List[Dict[str, object]]:
+    """List entries of a YAML file ('- key: value' blocks): line span, display label and whether it is a demonstration entry."""
+    starts = [(index, len(match.group(1))) for index, line in enumerate(lines) if (match := _ENTRY_START.match(line))]
+    entries = []
+    for start, indent in starts:
+        end = len(lines)
+        for index in range(start + 1, len(lines)):
+            line = lines[index]
+            if not line.strip() or line.lstrip().startswith("#"):
+                continue
+            if len(line) - len(line.lstrip()) <= indent:
+                end = index
+                break
+        keys: Dict[str, str] = {}
+        for line in lines[start:end]:
+            found = _ENTRY_KEY.match(line)
+            if found and found.group(1).lower() not in keys:
+                keys[found.group(1).lower()] = found.group(2).strip().strip("\"'")
+        label = ""
+        if keys.get("artist") and keys.get("title"):
+            label = f"{keys['artist']} - {keys['title']}"
+        else:
+            label = next((keys[key] for key in _LABEL_ORDER if keys.get(key)), "")
+        entries.append({
+            "start": start, "end": end, "label": label,
+            "example": any(_EXAMPLE_FLAG.match(line) for line in lines[start:end]),
+        })
+    return entries
+
+
 def infer_household_domain(query: str) -> Optional[str]:
     """Return the narrow canonical domain most explicitly named by a request."""
     terms = set(re.findall(r"[A-Za-z0-9_-]{2,}", (query or "").lower()))
@@ -155,28 +211,50 @@ class HouseholdReadOnlyAdapter:
         }
 
     def search(self, query: str, domain: Optional[str] = None, limit: int = 10) -> List[Dict[str, object]]:
-        terms = [term.lower() for term in re.findall(r"[A-Za-z0-9_]{2,}", query or "")]
-        stop = {
-            "and", "answer", "are", "current", "currently", "data", "does", "exists", "explain",
-            "fewer", "from", "have", "in", "is", "language", "of", "on", "only", "or", "plain", "reply", "that",
-            "the", "there", "this", "to", "what", "when", "where", "which", "with", "words",
-        }
-        terms = [term for term in terms if term not in stop]
+        """Lexical lookup over household files that returns evidence or nothing.
+
+        A line qualifies only if it states a household fact (not a placeholder, a note about an unbuilt view, a pointer to
+        another file, a comment, or a demonstration entry) and shares enough of the question's content words with it: one
+        word for a question of one or two content words, otherwise two.
+        """
+        terms: List[str] = []
+        for raw in _TERM.findall(query or ""):
+            if raw.lower() in _STOP_TERMS:
+                continue
+            term = _norm(raw)
+            if term not in terms:
+                terms.append(term)
         if not terms:
             return []
+        floor = 1 if len(terms) <= 2 else 2
         hits = []
         for path in self.iter_files(domain):
+            if path.name.lower() in _DOC_FILES:
+                continue
             rel = path.relative_to(self.root).as_posix()
             try:
                 lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
             except OSError:
                 continue
+            structured = path.suffix.lower() in {".yaml", ".yml"}
+            entries = _yaml_entries(lines) if structured else []
             for number, line in enumerate(lines, 1):
-                line_terms = set(term.lower() for term in re.findall(r"[A-Za-z0-9_]{2,}", line))
-                score = sum(1 for term in terms if term in line_terms)
-                if not score:
+                stripped = line.strip()
+                if not stripped or (structured and stripped.startswith("#")):
                     continue
-                hits.append({"path": rel, "line": number, "snippet": line.strip()[:500], "score": score})
+                if _NON_FACT_LINE.search(line) or _POINTER_LINE.search(line):
+                    continue
+                entry = next((item for item in entries if item["start"] <= number - 1 < item["end"]), None)
+                if entry is not None and entry["example"]:
+                    continue
+                line_terms = {_norm(term) for term in _TERM.findall(line)}
+                matched = sum(1 for term in terms if term in line_terms)
+                if matched < floor:
+                    continue
+                hit: Dict[str, object] = {"path": rel, "line": number, "snippet": stripped[:500], "score": matched}
+                if entry is not None and entry["label"]:
+                    hit["entry"] = entry["label"]
+                hits.append(hit)
         hits.sort(key=lambda item: (-int(item["score"]), str(item["path"]), int(item["line"])))
         return hits[:max(1, min(int(limit), 50))]
 
