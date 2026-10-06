@@ -13,20 +13,24 @@ from src.misumi_routing_adaptation import (
 )
 from src.misumi_persona_routing import resolve_auto_lead
 
+# The LIVE manifest's routing.intents (tyecam1/misumi config/personas.yaml @ main 0d5bdb6aec), in manifest order -
+# order is the contract's tie-break. Correction 2026-10-06: this table originally carried a drifted copy (e.g. l had
+# budget/bills, misato chores, ichigo deadline/blocked), so g13 pinned a route production never takes.
 MANIFEST = {
     pid: {"routing": {"intents": intents}}
     for pid, intents in {
         "aoteru": ["default", "standards", "coherence", "boundaries", "integration"],
-        "lelouch": ["workflow", "implementation", "process", "protocol", "tasks"],
-        "kurisu": ["archive", "transcript", "evidence", "memory"],
-        "misato": ["cleaning", "chores", "rota", "wellbeing"],
-        "jin": ["music", "records", "listening", "wantlist"],
         "erwin": ["priorities", "planning", "risk", "strategy", "recovery"],
-        "l": ["finance", "anomaly", "budget", "bills"],
-        "ginko": ["plants", "watering", "pests", "garden"],
-        "sanji": ["food", "meals", "recipes", "shopping", "stock", "leftovers"],
-        "ichigo": ["urgent", "stalled", "blocked", "deadline"],
-        "giorno": ["evolution", "experiments", "growth"],
+        "lelouch": ["workflows", "protocols", "tasks", "process", "implementation"],
+        "misato": ["cleaning", "rota", "care", "rest", "wellbeing"],
+        "kurisu": ["capture", "memory", "archive", "evidence", "transcript"],
+        "l": ["money", "finance", "anomaly", "waste", "diagnostics"],
+        "ginko": ["plants", "damp", "pests", "environment", "watering"],
+        "sanji": ["food", "meals", "shopping", "stock", "recipes"],
+        "jin": ["records", "music", "gigs", "wantlist", "listening"],
+        "ichigo": ["overdue", "urgent", "closure", "safety", "stalled"],
+        "giorno": ["ideas", "evolution", "experiments", "opportunities", "repurpose"],
+        "kino": ["phd", "vault", "profile", "personal", "exports", "context"],
     }.items()
 }
 
@@ -44,7 +48,7 @@ SUITE = [
     ("g10", "follow-up", "and what about tomorrow?", "aoteru"),  # known_weakness
     ("g11", "novel-wording", "bin rotation is slipping again", "aoteru"),  # known_weakness
     ("g12", "paraphrase", "Which records should I put on tonight?", "jin"),
-    ("g13", "mixed-domain", "Water the plants while reviewing the bills.", "l"),
+    ("g13", "mixed-domain", "Water the plants while reviewing the bills.", "ginko"),  # was "l" under the drifted table
     ("g14", "competing-cues", "Draft a recovery plan for the stalled garden project.", "erwin"),
     ("g15", "negation", "Stop reminding me about the rota.", "misato"),  # known_weakness
 ]

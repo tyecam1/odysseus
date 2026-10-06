@@ -37,8 +37,11 @@ METHOD = "routing-candidate-v0.2-proposal"
 FALLBACK = "aoteru"
 ALIAS_WEIGHT = 0.75
 BARE_LIST_WEIGHT = 0.2
+BARE_LIST_CAP = 0.5  # a stuffed keyword list in total can never outvote ONE real cue (aliases are 0.75)
 
-# Household vocabulary beyond the ratified intents. Deliberately general
+# Household vocabulary beyond the ratified intents (live manifest, 2026-10-06: several everyday words an earlier,
+# drifted reference table had as intents - budget, bills, garden, chores, leftovers, deadline, blocked, growth -
+# are not production intents, so they are restored here as lower-weight aliases). Deliberately general
 # (not derived item-by-item from the corpus) and lower weight than intents.
 # Generic verbs ("plan", "charge") and nouns ("document") are excluded: they hijack the
 # domain noun that should lead ("plan meals" must not route on "plan" - corpus item c05).
@@ -46,18 +49,18 @@ ALIASES: dict[str, list[str]] = {
     "lelouch": ["procedure", "checklist", "runbook", "pipeline", "sop"],
     "kurisu": ["notes", "minutes", "remember", "conversation", "saved"],
     "misato": ["bin", "bins", "dishes", "dishwasher", "laundry", "tidy", "mess",
-               "hoover", "vacuum", "mop", "washing", "housework"],
+               "hoover", "vacuum", "mop", "washing", "housework", "chores"],
     "jin": ["vinyl", "album", "albums", "song", "songs", "stereo", "playlist",
             "band", "gig", "turntable"],
     "erwin": ["roadmap", "prioritise", "prioritize", "goals", "tradeoff", "quarter"],
     "l": ["spending", "charged", "payment", "invoice", "invoices", "bank",
-          "money", "cost", "expense", "expenses", "subscription", "overspend", "billing"],
+          "money", "cost", "expense", "expenses", "subscription", "overspend", "billing", "budget", "bills"],
     "ginko": ["plant", "water", "herbs", "tomatoes", "seedlings", "leaves", "compost",
-              "soil", "greenhouse", "weeds", "windowsill"],
+              "soil", "greenhouse", "weeds", "windowsill", "garden"],
     "sanji": ["dinner", "lunch", "breakfast", "cook", "cooking", "fridge", "groceries",
-              "milk", "meal", "recipe", "shop", "supper", "pantry", "ingredients"],
-    "ichigo": ["stuck", "wedged", "asap", "overdue", "emergency"],
-    "giorno": ["experiment", "evolve", "trial"],
+              "milk", "meal", "recipe", "shop", "supper", "pantry", "ingredients", "leftovers"],
+    "ichigo": ["stuck", "wedged", "asap", "overdue", "emergency", "deadline", "blocked"],
+    "giorno": ["experiment", "evolve", "trial", "growth"],
 }
 
 _TOKEN = re.compile(r"[a-z0-9]+(?:'[a-z]+)?")
@@ -172,6 +175,7 @@ def resolve_candidate_lead(
         bare_list = len(stems) >= 3 and len(covered) == len(stems)
         for pid, cues in table:
             seen: set[tuple[str, ...]] = set()
+            clause_total = 0.0
             for gram, base in cues.items():
                 for i in range(len(stems) - len(gram) + 1):
                     if tuple(stems[i:i + len(gram)]) != gram or gram in seen:
@@ -181,7 +185,11 @@ def resolve_candidate_lead(
                     if any(g in negated for g in gram):
                         negated_seen.append(label)
                         continue
-                    scores[pid] += base * (BARE_LIST_WEIGHT if bare_list else 1.0)
+                    add = base * (BARE_LIST_WEIGHT if bare_list else 1.0)
+                    if bare_list:
+                        add = max(0.0, min(add, BARE_LIST_CAP - clause_total))
+                    clause_total += add
+                    scores[pid] += add
                     reasons[pid].append(label)
 
     best_id, best_score = FALLBACK, 0.0

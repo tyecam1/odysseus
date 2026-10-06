@@ -7,25 +7,43 @@ evidence-backed request for that decision.
 
 ## 1. Why amend
 
-The v0.1 router is a context-free exact-keyword matcher. Application -07 labelled its weaknesses; application
--09 measured them against a human-labelled corpus (`evals/misumi-routing/`, 78 dev + 44 held-out items across
-the ten directive categories plus negation; `intended` = what a sensible household user expects, never router output).
+The v0.1 router is a context-free exact-keyword matcher. Application -07 labelled its weaknesses; application -09
+measured them against a human-labelled corpus (`evals/misumi-routing/`: 78 dev + 44 held-out v1 + 44 blind held-out v2
+items across the ten directive categories plus negation; `intended` = what a sensible household user expects, never
+router output).
 
-| Split (strict, intended only) | v0.1 baseline | v0.2 candidate | regressions (strict) |
+**Correction (2026-10-06) - read this first.** The first measurements (dev 43/78 -> 72/78, held-out 14/44 -> 28/44,
+"zero strict regressions") were taken against a *drifted* copy of the persona intents inherited from the -07
+generalisation fixture (e.g. `l` had `budget, bills`; `misato` had `chores`; `ichigo` had `deadline, blocked`;
+manifest order differed - and order is the contract's tie-break). Production's `config/personas.yaml` has different
+intents, so those figures did not describe production. Everything below is re-measured against the LIVE manifest in
+its real order. The -07 generalisation suite had the same drift (it mis-pinned `g13`; fixed alongside).
+A guard test now compares the corpus's reference intents to the live manifest wherever one is reachable.
+
+| Strict scoring (intended only) | v0.1 baseline | v0.2 candidate | strict regressions |
 | --- | --- | --- | --- |
-| dev (78, candidate tuned here) | 43 (55%) | 72 (92%) | 0 |
-| held-out (44, authored after freezing) | 14 (32%) | 28 (64%) | 0 |
+| dev, 78 (candidate tuned here) | 39 (50%) | 72 (92%) | 2 (c05, m03) |
+| held-out v1, 44 (no longer blind: its failures guided two revisions) | 15 (34%) | 29 (66%) | 0 |
+| **held-out v2, 44 (blind: authored after freezing, evaluated once)** | **25 (57%)** | **32 (73%)** | **3 (vn2, vm1, vq2)** |
 
-Lenient scoring (also accepts `acceptable` leads): dev 51 -> 75, held-out 22 -> 35. One lenient regression is
-preserved as a negative finding (`c05`: "Plan meals for the week and stay inside the budget." - the stemmer makes
-`plan` hit `planning`, a 3-way tie resolved to `erwin` by manifest order; the baseline's acceptable answer was
-right only by manifest-order luck). The 12 deterministic live fixtures are identical under v0.1 and the candidate;
-against the 15-item pinned g-suite the candidate differs on exactly g02, g03, g08, g11 (four labelled weaknesses
-fixed) and g13 (l -> ginko, first-stated task).
+Lenient scoring (also accepts `acceptable` leads): dev 48 -> 76, held-out v1 22 -> 36, **held-out v2 28 -> 36**; the only
+lenient regression is `c05`. **The blind v2 gain (+7 strict, +8 lenient of 44) is the honest generalisation estimate**;
+dev is optimistic by construction. v2 also leans on production's own intent words more than v1 did, which flatters the
+baseline - the two held-out splits bracket the true effect.
 
-The dev -> held-out gap (92% -> 64%) is the honest generalisation estimate: the candidate is tuned to dev.
-Held-out disclosure: an alias-hygiene change (dropping the generic `plan`/`document`/`charge` aliases after dev item
-c05) was made *after* the held-out run; held-out numbers were identical before and after.
+Preserved negative findings: `c05` ("Plan meals ... inside the budget": stemming makes `plan` hit `planning`, a 3-way
+tie resolved by manifest order); `m03` ("Order some records and then find a recipe": stemming lets `recipe` hit
+`recipes`, a tie that manifest order gives to sanji over the first-stated jin); `vn2` (negation demotes the rota,
+Aoteru, where the label intends misato); `vm1` (the `bin` alias pulls misato where the baseline fell back to Aoteru);
+`vq2` (`plant` ties with `repurpose`; manifest order picks ginko). All three v2 regressions are acceptable under
+lenient labels. The 12 deterministic fixtures are identical under v0.1 and the candidate on the live manifest; against
+the 15-item pinned g-suite the candidate differs on exactly g02, g03, g08, g11 (four labelled weaknesses fixed).
+
+Two candidate revisions followed the correction and are disclosed as post-hoc, dev/v1-guided: restoring everyday words
+the live manifest does not list as lower-weight aliases (budget, bills, garden, chores, leftovers, deadline, blocked,
+growth), and capping a bare keyword list's *total* contribution below any single real cue (a stuffed list of four
+cues had outvoted one genuine alias). A stemmer bug (`notes` -> the word `not`) and two generic aliases (`plan`,
+`charge`) were fixed earlier by the same process.
 
 ## 2. What the candidate is (deterministic, stdlib-only, no model calls)
 
@@ -47,10 +65,10 @@ c05) was made *after* the held-out run; held-out numbers were identical before a
 
 ## 3. Known limits (do not oversell)
 
-* Open vocabulary: rubbish, geraniums, mould, menu, hedge, slugs ... fall back to Aoteru. A hand-written lexicon
-  cannot close this; 16 of 44 held-out items still fail, 6 of them on vocabulary alone (hp1, hp3, hp4,
-  hi1, hi3, hi4 - the dev split has none because the lexicon was built beside it).
-* Cue conflicts are still decided by count then manifest order (c03, c04, c05, m02, hc1, hc2, hc3, hq3, hq4).
+* Open vocabulary: rubbish, geraniums, mould, menu, hedge, slugs, ferns, eggs ... fall back to Aoteru. A hand-written
+  lexicon cannot close this: on blind v2 the `indirect` category stays 0/4 for the candidate (the dev split has none
+  failing only because the lexicon was built beside it).
+* Cue conflicts are still decided by count then manifest order (c03, c04, c05, m02, m03, hc1, hc2, hq3, hq4, vq2).
 * Negation covers a closed phrase set ("not worried about the budget", "don't bother with the bins" are missed).
 * Keyword-injection of a *plausible* cue list inside a sentence (k05) still routes on the cues.
 * Stateful carry makes routing depend on the previous turn; it must stay off when history is off.
