@@ -337,8 +337,7 @@ def _routing_candidate(tmp_path):
     from src.misumi_routing_adaptation import RoutingAdaptationStore, record_manual_choice
     store = RoutingAdaptationStore(tmp_path / "routing-guard")
     for session in ("x", "y", "z"):
-        store._last_auto_route[session] = {"prompt": "Check the compost bin", "persona": "misato", "reasons": ["compost"],
-                                           "request_id": f"r-{session}", "at": time.time()}
+        store.note_auto_route(session, "Check the compost bin", "misato", ["compost"], f"r-{session}", persisted=True, owner=None)
         record_manual_choice(store, prompt=f"ask Jin about the compost {session}", chosen_persona="jin", session_id=session, owner=None)
     return store, record_manual_choice
 
@@ -349,7 +348,7 @@ def test_a_rejected_routing_candidate_is_not_made_eligible_again_by_one_more_cor
     candidate = store.get_candidate(["compost"])
     assert candidate["status"] == "eligible"
     store.reject(candidate["candidate_id"], "declined in conversation")
-    store._last_auto_route["w"] = {"prompt": "Check the compost bin", "persona": "misato", "reasons": ["compost"], "request_id": "r-w", "at": time.time()}
+    store.note_auto_route("w", "Check the compost bin", "misato", ["compost"], "r-w", persisted=True, owner=None)
     record_manual_choice(store, prompt="ask Jin about the compost w", chosen_persona="jin", session_id="w", owner=None)
     assert store.get_candidate(["compost"])["status"] == "rejected"
 
@@ -360,6 +359,6 @@ def test_an_active_routing_mapping_is_not_offered_again_by_more_corrections(tmp_
     candidate = store.get_candidate(["compost"])
     # Round 4: a user_instruction must cite explicit_durable evidence (a yes); citing a correction is refused, so ratify as operator.
     store.promote(candidate["candidate_id"], authorisation={"type": "operator_ratification", "principal": "test-operator"})
-    store._last_auto_route["w"] = {"prompt": "Check the compost bin", "persona": "misato", "reasons": ["compost"], "request_id": "r-w", "at": time.time()}
+    store.note_auto_route("w", "Check the compost bin", "misato", ["compost"], "r-w", persisted=True, owner=None)
     record_manual_choice(store, prompt="ask Jin about the compost w", chosen_persona="jin", session_id="w", owner=None)
     assert store.get_candidate(["compost"])["status"] == "active"

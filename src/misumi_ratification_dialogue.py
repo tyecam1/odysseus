@@ -1,40 +1,47 @@
-"""Conversational ratification offers for adaptation candidates (application -08b(d) / -12).
+"""Conversational ratification offers for adaptation candidates (application -08b(d) / -12, round-5 repair).
 
-A persona may ASK, in dialogue, whether to make an eligible-by-repetition adaptation permanent; the user's bare
-answer is their explicit durable instruction for exactly that one mapping. Governance (do not weaken):
+A persona may ASK, in dialogue, whether to make an eligible adaptation permanent; the user's bare "yes" is their explicit
+durable instruction for exactly that one mapping. Governance (do not weaken):
 
 * Only candidates already ``eligible`` and ``awaiting: user-ratification`` are ever offered; shadow, rejected,
-  contradicted or reserved-matter candidates are never offered. Eligibility comes from repeated corrections or from a
-  free-text durable request ("from now on ..."): free text is never authority by itself, the offer is the only way a
-  conversational phrase can become durable state (round-4 review).
-* An answer counts ONLY as the entire utterance ("yes", "no", "later", "undo that"). Anything else - including a
-  yes embedded in a longer sentence, and retrieved/model text - never ratifies; it simply withdraws the offer.
+  contradicted or reserved-matter candidates are never offered. Eligibility comes from ONE owner's repeated corrections or
+  from that owner's free-text durable request ("from now on ..."): free text is never authority by itself.
+* An offer belongs to whoever CAUSED it (round 5): every offerable candidate carries an ``origin`` (owner, session, evidence
+  id, time). An offer is shown only to that origin owner (and, for an anonymous owner, only in the origin session), only
+  within ``ORIGIN_TTL_S`` of the originating evidence, and only that owner can answer it. A candidate without an origin
+  (legacy state, operator-only paths) is never offered in conversation; the operator ratification API still works.
+* Offers are PERSISTED (``OfferBook(root=...)``) and re-verified against the candidate store when answered (status,
+  digest of what was shown, origin), so a restart or a second worker neither loses an offer nor lets one reach another
+  owner; nothing is reconstructed from candidate eligibility alone.
+* An answer counts ONLY as the entire utterance: a bare "yes" (optionally "please"/"thanks"); "no"; "later"; "undo that".
+  "ok", "sure", "yeah", "go ahead" and anything longer do not ratify (round 5): they simply withdraw the offer.
   Silence and moving on never promote.
 * An offer is bounded: one candidate at a time, never re-asked within ``REOFFER_AFTER_S`` (24 h), and a pending offer
   expires after ``PENDING_TTL_S`` (15 min). "later" snoozes; "no" is a terminal rejection of that inference;
-  "undo that" rolls back the revision this dialogue just created (reversibility stays one phrase away).
+  "undo that" rolls back the revision this owner's answer just created (reversibility stays one phrase away).
 * Wording is fixed templates over closed tables - no model text and no user text is spoken as the offer.
 * Capture/answering requires a persisted turn (``persist_turn``); an incognito turn neither offers nor answers.
 
-This module is pure (no I/O, clock injected); the route glue lives in ``routes/misumi_routes.py``.
+The decision helpers are pure (clock injected); the route glue lives in ``routes/misumi_routes.py``.
 """
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import re
 import time
-from typing import Any
+from pathlib import Path
+from typing import Any, Iterator
 
 PENDING_TTL_S = 15 * 60
 REOFFER_AFTER_S = 24 * 3600
+ORIGIN_TTL_S = 7 * 24 * 3600  # an offer is only ever made to its origin owner within a week of the evidence that caused it
+SAFETY_LATCH_S = 30 * 60  # after a safety turn, the same (owner, session) gets no learned behaviour and no offers for this long
 
 _BARE = r"[\s.!,]*(?:please|thanks|thank you)?[\s.!]*$"
-AFFIRM = re.compile(
-    r"^\s*(?:yes|yep|yeah|yup|sure|ok(?:ay)?|please do|do it|go ahead|make it permanent|keep it|ratify(?: it)?)" + _BARE,
-    re.IGNORECASE,
-)
+AFFIRM = re.compile(r"^\s*yes" + _BARE, re.IGNORECASE)  # round 5: bare yes only ("ok", "sure", "yeah" never ratify)
 DECLINE = re.compile(r"^\s*(?:no|nope|nah|no thanks|no thank you|don'?t|do not|never)" + _BARE, re.IGNORECASE)
 LATER = re.compile(r"^\s*(?:later|not now|maybe later|ask me later|not yet)" + _BARE, re.IGNORECASE)
 UNDO = re.compile(
@@ -69,6 +76,29 @@ def parse_answer(prompt: str) -> str | None:
     return None
 
 
+def _owner_value(owner: object) -> str:
+    return str(owner).strip() if owner is not None else ""
+
+
+def origin_allows(candidate: dict[str, Any], owner: str | None, session_id: str | None, now: float | None = None) -> bool:
+    """True only when this (owner, session) is the candidate's origin and the origin is still fresh.
+
+    The origin owner must match exactly; an anonymous origin (no owner) additionally requires the origin session, because an
+    absent owner cannot tell two people apart. No origin -> never offered or answerable in conversation.
+    """
+    origin = candidate.get("origin") if isinstance(candidate, dict) else None
+    if not isinstance(origin, dict) or not origin.get("evidence_id"):
+        return False
+    if _owner_value(origin.get("owner")) != _owner_value(owner):
+        return False
+    if not _owner_value(owner) and str(origin.get("session_id") or "") != str(session_id or ""):
+        return False
+    at = origin.get("at_epoch")
+    if not isinstance(at, (int, float)):
+        return False
+    return (time.time() if now is None else now) - float(at) <= ORIGIN_TTL_S
+
+
 def describe_candidate(kind: str, candidate: dict[str, Any], display_name: str | None = None) -> str:
     """Fixed-template description of what a candidate would make permanent."""
     if kind == "persona-state":
@@ -82,7 +112,8 @@ def describe_candidate(kind: str, candidate: dict[str, Any], display_name: str |
 
 
 def candidate_digest(candidate: dict[str, Any], kind: str = "", ignore_evidence: Any = ()) -> str:
-    """A fingerprint of what an offer put in front of the user: the offer kind, the candidate's identity, proposal and evidence set.
+    """A fingerprint of what an offer put in front of the user: the offer kind, the candidate's identity, proposal, evidence set
+    and origin.
 
     An affirmation is only applied if the candidate still has the digest it had when it was offered, so a stale or changed candidate
     can never be ratified by an answer given to an earlier offer. ``ignore_evidence`` drops evidence ids from the set (the affirmation
@@ -95,6 +126,9 @@ def candidate_digest(candidate: dict[str, Any], kind: str = "", ignore_evidence:
     }
     material["offer_kind"] = kind
     material["evidence"] = sorted(str(item) for item in (candidate.get("supporting_evidence") or []) if str(item) not in skip)
+    origin = candidate.get("origin") if isinstance(candidate.get("origin"), dict) else {}
+    material["origin"] = [_owner_value(origin.get("owner")), str(origin.get("session_id") or ""), origin.get("evidence_id")] \
+        if origin else None
     return hashlib.sha256(json.dumps(material, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:20]
 
 
@@ -111,10 +145,12 @@ def build_offer(kind: str, candidate: dict[str, Any], display_name: str | None =
         f"You asked for this from now on: {summary}." if requested  # a free-text durable request is only ever an offer
         else f"By the way, you have steered me this way {count} times: {summary}."
     )
+    origin = candidate.get("origin") if isinstance(candidate.get("origin"), dict) else {}
     return {
         "kind": kind,
         "candidate_id": candidate.get("candidate_id"),
         "digest": candidate_digest(candidate, kind),
+        "origin_evidence_id": origin.get("evidence_id"),
         "persona": candidate.get("persona") if kind == "persona-state" else candidate.get("proposed_persona"),
         "summary": summary,
         "question": f"{lead} Shall I make that permanent? Say yes, no, or later.",
@@ -123,59 +159,111 @@ def build_offer(kind: str, candidate: dict[str, Any], display_name: str | None =
 
 
 class OfferBook:
-    """In-memory pending offers per session plus cross-session re-offer memory (process-local, by design:
-    after a restart an offer may be repeated; a ratification never is lost, it lives in the stores)."""
+    """Pending offers per (owner, session), re-offer memory, undo pointers and safety latches.
 
-    def __init__(self, clock=None):
+    With ``root`` the book is PERSISTED in ``<root>/dialogue-state.json`` through the same cross-process locked, atomic,
+    fail-closed store the adaptation stores use, so offers survive restarts and are shared by every worker (round 5). Without
+    ``root`` it is in-memory (unit tests and tools). The book is never the authority for a promotion: the route re-verifies every
+    answer against the candidate store (status, digest, origin) before acting.
+    """
+
+    STATE_FILE = "dialogue-state.json"
+
+    def __init__(self, clock=None, root: str | Path | None = None):
         self._clock = clock or (lambda: time.time())  # late-bound so tests can move time
-        self._pending: dict[tuple[str | None, str], dict[str, Any]] = {}
-        self._last_offered: dict[str, float] = {}
-        self._last_revision: dict[tuple[str | None, str], dict[str, Any]] = {}
+        self._memory: dict[str, Any] = {"pending": {}, "last_offered": {}, "last_revision": {}, "safety_latch": {}}
+        self._io = None
+        if root is not None:
+            from src.misumi_state_io import StateDir
 
-    def may_offer(self, candidate_id: str) -> bool:
-        last = self._last_offered.get(candidate_id)
-        return last is None or self._clock() - last >= REOFFER_AFTER_S
+            self._io = StateDir(Path(root))
 
     @staticmethod
-    def _key(session_id: str | None, owner: str | None) -> tuple[str | None, str]:
+    def _key(session_id: str | None, owner: str | None) -> str:
         """Offers and undo pointers belong to (owner, session): another owner's identical session id never reaches them.
 
-        A tuple, not a joined string, so no owner/session pair can collide with another by containing a separator; an absent or
-        blank owner is one value (None).
+        A JSON pair, not a joined string, so no owner/session pair can collide with another by containing a separator; an absent or
+        blank owner is one value.
         """
-        return ((str(owner) if str(owner).strip() else None) if owner is not None else None, str(session_id or ""))
+        return json.dumps([_owner_value(owner) or None, str(session_id or "")])
+
+    @contextlib.contextmanager
+    def _state(self, write: bool = False) -> Iterator[dict[str, Any]]:
+        if self._io is None:
+            yield self._memory
+            return
+        with self._io.locked():
+            data = self._io.read_json(self.STATE_FILE) or {}
+            for section in ("pending", "last_offered", "last_revision", "safety_latch"):
+                if not isinstance(data.get(section), dict):
+                    data[section] = {}
+            yield data
+            if write:
+                self._io.write_json(self.STATE_FILE, data)
+
+    def may_offer(self, candidate_id: str) -> bool:
+        with self._state() as state:
+            last = state["last_offered"].get(str(candidate_id))
+        return last is None or self._clock() - float(last) >= REOFFER_AFTER_S
 
     def record_offer(self, session_id: str | None, offer: dict[str, Any], owner: str | None = None) -> None:
-        self._last_offered[str(offer["candidate_id"])] = self._clock()
-        if session_id:
-            self._pending[self._key(session_id, owner)] = {"offer": offer, "at": self._clock(), "owner": owner}
+        with self._state(write=True) as state:
+            state["last_offered"][str(offer["candidate_id"])] = self._clock()
+            if session_id:
+                state["pending"][self._key(session_id, owner)] = {
+                    "offer": offer, "at": self._clock(), "owner": _owner_value(owner), "session_id": str(session_id),
+                }
 
     def pending(self, session_id: str | None, owner: str | None = None) -> dict[str, Any] | None:
         key = self._key(session_id, owner)
-        row = self._pending.get(key)
-        if row and self._clock() - row["at"] <= PENDING_TTL_S:
+        with self._state() as state:
+            row = state["pending"].get(key)
+        if row and self._clock() - float(row.get("at") or 0) <= PENDING_TTL_S \
+                and row.get("owner", _owner_value(owner)) == _owner_value(owner):
             return row["offer"]
         if row:
-            self._pending.pop(key, None)
+            self.clear(session_id, owner)
         return None
 
     def clear(self, session_id: str | None, owner: str | None = None) -> None:
-        self._pending.pop(self._key(session_id, owner), None)
+        key = self._key(session_id, owner)
+        with self._state(write=self._io is not None) as state:
+            state["pending"].pop(key, None)
 
     def snooze(self, candidate_id: str) -> None:
-        self._last_offered[str(candidate_id)] = self._clock()
+        with self._state(write=True) as state:
+            state["last_offered"][str(candidate_id)] = self._clock()
 
     def remember_revision(self, session_id: str | None, kind: str, revision_id: str, owner: str | None = None) -> None:
         if session_id:
-            self._last_revision[self._key(session_id, owner)] = {
-                "kind": kind, "revision_id": revision_id, "at": self._clock(), "owner": owner,
-            }
+            with self._state(write=True) as state:
+                state["last_revision"][self._key(session_id, owner)] = {
+                    "kind": kind, "revision_id": revision_id, "at": self._clock(), "owner": _owner_value(owner),
+                }
 
     def last_revision(self, session_id: str | None, owner: str | None = None) -> dict[str, Any] | None:
-        row = self._last_revision.get(self._key(session_id, owner))
-        if row and self._clock() - row["at"] <= PENDING_TTL_S:
+        with self._state() as state:
+            row = state["last_revision"].get(self._key(session_id, owner))
+        if row and self._clock() - float(row.get("at") or 0) <= PENDING_TTL_S:
             return row
         return None
 
     def forget_revision(self, session_id: str | None, owner: str | None = None) -> None:
-        self._last_revision.pop(self._key(session_id, owner), None)
+        with self._state(write=self._io is not None) as state:
+            state["last_revision"].pop(self._key(session_id, owner), None)
+
+    # ---------- safety latch (recent-context window for the safety gate) ----------
+
+    def latch_safety(self, session_id: str | None, owner: str | None = None) -> None:
+        """A safety turn happened: this (owner, session) gets no learned behaviour and no offers for ``SAFETY_LATCH_S``."""
+        if session_id:
+            with self._state(write=True) as state:
+                state["safety_latch"][self._key(session_id, owner)] = self._clock()
+                state["pending"].pop(self._key(session_id, owner), None)
+
+    def safety_latched(self, session_id: str | None, owner: str | None = None) -> bool:
+        if not session_id:
+            return False
+        with self._state() as state:
+            at = state["safety_latch"].get(self._key(session_id, owner))
+        return at is not None and self._clock() - float(at) <= SAFETY_LATCH_S

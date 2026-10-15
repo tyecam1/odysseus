@@ -141,10 +141,7 @@ def test_repeated_corrections_eligible_but_not_promoted(tmp_path: Path):
     for session in ("a", "b", "c"):
         # Simulate the session state respond() would have noted: an auto
         # route to Misato just before the user manually chose Jin.
-        store._last_auto_route[session] = {
-            "prompt": "Check the cleaning rota", "persona": "misato",
-            "reasons": ["cleaning", "rota"], "request_id": f"r-{session}", "at": time.time(),
-        }
+        store.note_auto_route(session, "Check the cleaning rota", "misato", ["cleaning", "rota"], f"r-{session}", persisted=True, owner=None)
         record_manual_choice(
             store, prompt=f"ask Jin about the cleaning rota {session}", chosen_persona="jin",
             session_id=session, owner=None,
@@ -218,10 +215,7 @@ def test_silence_never_promotes_an_eligible_candidate(tmp_path: Path):
     root = tmp_path / "routing-state"
     store = RoutingAdaptationStore(root)
     for session in ("a", "b", "c"):
-        store._last_auto_route[session] = {
-            "prompt": "Check the cleaning rota", "persona": "misato",
-            "reasons": ["cleaning", "rota"], "request_id": f"r-{session}", "at": time.time(),
-        }
+        store.note_auto_route(session, "Check the cleaning rota", "misato", ["cleaning", "rota"], f"r-{session}", persisted=True, owner=None)
         record_manual_choice(
             store, prompt=f"ask Jin about the cleaning rota {session}", chosen_persona="jin",
             session_id=session, owner=None,
@@ -517,10 +511,7 @@ def test_adaptation_kill_switch(tmp_path, monkeypatch):
 def test_operator_ratification_promotes_repetition_eligible_candidate(tmp_path: Path):
     store = _store(tmp_path)
     for session in ("a", "b", "c"):
-        store._last_auto_route[session] = {
-            "prompt": "Check the cleaning rota", "persona": "misato",
-            "reasons": ["cleaning", "rota"], "request_id": f"r-{session}", "at": time.time(),
-        }
+        store.note_auto_route(session, "Check the cleaning rota", "misato", ["cleaning", "rota"], f"r-{session}", persisted=True, owner=None)
         record_manual_choice(
             store, prompt=f"ask Jin about the cleaning rota {session}", chosen_persona="jin",
             session_id=session, owner=None,
@@ -605,9 +596,7 @@ def test_routing_api_inspect_promote_rollback(tmp_path, monkeypatch):
     # Drive it to eligible and ratify through the API.
     store = RoutingAdaptationStore(tmp_path / "routing-state")
     for session in ("x", "y", "z"):
-        store._last_auto_route[session] = {
-            "prompt": "Check the cleaning rota", "persona": "misato",
-            "reasons": ["cleaning", "rota"], "request_id": f"r-{session}", "at": time.time()}
+        store.note_auto_route(session, "Check the cleaning rota", "misato", ["cleaning", "rota"], f"r-{session}", persisted=True, owner=None)
         record_manual_choice(store, prompt=f"ask Jin about the cleaning {session}",
                              chosen_persona="jin", session_id=session, owner=None)
     eligible = store.get_candidate(["cleaning", "rota"])

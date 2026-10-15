@@ -38,9 +38,13 @@ Authority model (same as routing; do not weaken):
 - a one-off request ("shorter please") is a ``temporary_choice``: it shapes
   THAT turn only and never creates durable state;
 - reserved matters (standards, values, boundaries, ratification, Level 5/6)
-  and safety turns (a broad lexicon that errs towards "safety": gas, fire,
-  poisoning, medicines and dosing, breathing/chest/collapse, self-harm ...)
-  are never captured and never shaped by learned style;
+  and any turn the shared fail-safe gate (``src.misumi_safety_gate``) does
+  not call positively benign are never captured and never shaped by learned
+  style or learned routing (round 5: one gate, whole turn scanned);
+- an offerable candidate records its ``origin`` (owner, session, evidence);
+  only that owner is offered it and can answer (round 5);
+- the store is cross-process safe and fails closed on corruption
+  (``src.misumi_state_io``);
 - every promotion first passes a deterministic evaluation (enum validity,
   bounded fixed render, foundation intact, no unresolved contradiction).
 
@@ -53,14 +57,16 @@ selection, and need their own evidence semantics.
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import re
-import threading
 import time
 import uuid
 from pathlib import Path
 from typing import Any
+
+from src.misumi_safety_gate import is_reserved_turn as _gate_is_reserved
+from src.misumi_safety_gate import safety_matter as _gate_safety_matter
+from src.misumi_state_io import StateCorruptError, StateDir  # noqa: F401  (StateCorruptError re-exported for callers)
 
 logger = logging.getLogger(__name__)
 
@@ -120,14 +126,19 @@ _RESERVED_MATTERS = re.compile(
     re.IGNORECASE,
 )
 _CLAUSE_BOUNDARY = re.compile(r"[.;!?\n]")
-# Typographic quotes and apostrophes (phone and kiosk keyboards) are folded to ASCII before any pattern runs, and only the first
-# characters of a prompt are inspected, so a very long prompt cannot make detection slow.
+# Typographic quotes and apostrophes (phone and kiosk keyboards) are folded to ASCII before any pattern runs. Style SIGNALS are only
+# ever read from the user's own head text (the first line), so signal detection inspects a bounded prefix; anything that can only
+# WITHHOLD adaptation (the safety gate, data/third-party detection) scans the whole turn (round 5).
 _TYPOGRAPHIC = str.maketrans({"’": "'", "‘": "'", "‛": "'", "ʼ": "'", "“": '"', "”": '"', "„": '"'})
 _MAX_DETECT_CHARS = 2000
 
 
 def _prep(prompt: object) -> str:
     return str(prompt or "")[:_MAX_DETECT_CHARS].translate(_TYPOGRAPHIC)
+
+
+def _full(prompt: object) -> str:
+    return str(prompt or "").translate(_TYPOGRAPHIC)
 
 
 # A sentence that talks ABOUT an instruction (asks how, asks to remove or ignore it, translates it, gives it as an example or for
@@ -175,44 +186,17 @@ def _clause_before(text: str, position: int) -> str:
     return text[start:position]
 
 
-# Safety lexicon (round 4). A keyword list alone missed gas smells, fires, button batteries, child dosing, chest pain and self-harm.
-# This is broader on purpose and errs towards "safety": a false positive only means learned style is not applied and nothing is
-# captured on that turn (harmless); a false negative lets learned brevity shape emergency advice. The only carve-outs are cheap and
-# unambiguous ("fire up the oven", "fire off an email").
-_SAFETY_DOMAINS: tuple[tuple[str, re.Pattern[str]], ...] = tuple((domain, re.compile(pattern, re.IGNORECASE)) for domain, pattern in (
-    ("gas-co", r"\bsmel\w*\s+(?:of\s+)?gas\b|\bgas\s+(?:leak\w*|smell\w*|escape)|\bleak\w*\s+gas\b|\bcarbon\s+monoxide\b|\bco\s+(?:alarm|detector)\b"),
-    ("fire", r"\bfire\b(?!\s+(?:up|off|away)\b)|\bon\s+fire\b|\bcaught\s+fire\b|\bflames?\b|\bsmoke\s+(?:alarm|detector)\b|"
-             r"\bsmel\w*\s+(?:of\s+)?(?:burning|smoke)\b|\bburning\s+smell\b"),
-    ("poisoning", r"\bswallow\w*|\b(?:button|coin)[- ]?(?:cell|batter(?:y|ies))\b|\bpoison\w*|\bingest\w*|\bbleach\b|\bantifreeze\b|"
-                  r"\b(?:drank|drunk|ate|eaten)\b[^.!?\n]{0,40}\b(?:cleaner|detergent|chemicals?|pods?|tablets|pills|medicine)\b|\bdetergent\s+pods?\b"),
-    ("medicine-dosing", r"\b(?:paracetamol|acetaminophen|ibuprofen|calpol|nurofen|aspirin|tylenol|codeine|antihistamines?|insulin|inhaler|"
-                        r"epi-?pens?|antibiotics?|medicines?|medications?|meds)\b|\b(?:doses?|dosage|dosing|overdos\w*|mg|milligrams?)\b|"
-                        r"\b(?<!dishwasher\s)(?:pills?|tablets?|capsules?)\b|\btoo\s+many\b[^.!?\n]{0,20}\b(?:pills|tablets|paracetamol)\b"),
-    ("medical-emergency", r"\bchest\s+(?:pains?|tight\w*|pressure)\b|\b(?:pain|tight\w*|pressure)\s+in\s+(?:my|his|her|their|the)\s+chest\b|"
-                          r"\b(?:can'?t|cannot|can\s+not|struggl\w*\s+to|difficulty|trouble)\s+breath\w*|\bnot\s+breathing\b|"
-                          r"\bshort(?:ness)?\s+of\s+breath\b|\bheart\s+attack\b|\bstroke\b|\bseizures?\b|\bunconscious\b|\bunresponsive\b|"
-                          r"\bpassed\s+out\b|\bfaint\w*|\bbleed\w*|\banaphyla\w*|\bchok(?:e|ed|es|ing)\b|\bconcussion\b|\bhead\s+injur\w*|"
-                          r"\bnumb(?:ness)?\b|\bambulance\b|\b(?:999|911|112|111)\b|\ba\s*&\s*e\b|\bhospital\b|\bparamedics?\b|\bcpr\b|"
-                          r"\binjur\w*|\bwounds?\b|\bbroken\s+(?:bone|arm|leg|wrist|ankle)\b|\bburn(?:ed|t)\s+(?:my|his|her|their)\w*\b|"
-                          r"\bfevers?\b|\bhigh\s+temperature\b|\bvomit\w*|\bsymptoms?\b"),
-    ("self-harm", r"\bsuicid\w*|\bkill(?:ing)?\s+(?:my|him|her|them)sel(?:f|ves)\b|\bend(?:ing)?\s+(?:my|his|her|their)\s+(?:own\s+)?life\b|"
-                  r"\bself[- ]?harm\w*|\bhurt(?:ing)?\s+(?:my|him|her|them)sel(?:f|ves)\b|\bcut(?:ting)?\s+(?:my|him|her)sel(?:f|ves)\b|"
-                  r"\bwant(?:s)?\s+to\s+die\b|\bdon'?t\s+want\s+to\s+(?:live|be\s+alive|be\s+here)\b|\bno\s+reason\s+to\s+live\b|"
-                  r"\bbetter\s+off\s+dead\b"),
-    ("danger", r"\b(?:emergenc\w*|urgent\w*|danger\w*|unsafe|abus\w*|assault\w*|violen\w*|threaten\w*|police|intruder|break[- ]?in)\b"),
-))
+def safety_matter(prompt: str, context: Any = ()) -> str | None:
+    """The safety domain a turn touches ('gas-co', 'fire-smoke', 'poisoning', ...), or None. Delegates to the ONE shared gate
+    (``src.misumi_safety_gate``), which scans the whole turn and any context given - never a prefix."""
+    return _gate_safety_matter(prompt, context)
 
 
-def safety_matter(prompt: str) -> str | None:
-    """The safety domain a turn touches ('gas-co', 'fire', 'poisoning', ...), or None. Errs towards a match."""
-    text = _prep(prompt)
-    return next((domain for domain, pattern in _SAFETY_DOMAINS if pattern.search(text)), None)
-
-
-def is_reserved_turn(prompt: str) -> bool:
-    """True when the prompt is about a reserved matter (safety, medical, emergency, memory retention, standards ...): learned style is
-    neither captured from nor applied to such a turn. Fail-safe: any match of the broad safety lexicon counts."""
-    return bool(_RESERVED_MATTERS.search(_prep(prompt))) or safety_matter(prompt) is not None
+def is_reserved_turn(prompt: str, context: Any = ()) -> bool:
+    """True unless the turn is POSITIVELY benign by the shared fail-safe gate (safety lexicons, reserved governance matters,
+    near-miss typos, unassessable scripts, over-long text). Learned style is neither captured from nor applied to such a turn;
+    learned routing uses the same function (round 5: one gate for both)."""
+    return bool(_RESERVED_MATTERS.search(str(prompt or "").translate(_TYPOGRAPHIC))) or _gate_is_reserved(prompt, context)
 
 
 # Third-party data (round 4). A turn whose primary intent is to process someone else's text carries that text as DATA, so nothing in
@@ -233,16 +217,74 @@ _QUESTION_START = re.compile(
 )
 
 
+# Third-party text (round 5): a message written by or to someone else, pasted in. "Hi all, from now on keep answers short. Cheers,
+# Bob" is Bob's message to a group, not this user's instruction. Markers: a greeting to a group or to a named non-persona person, a
+# sign-off with a name, mail/chat headers and forward/signature furniture, or addressing a group. Errs towards "third party".
+_GROUP = r"(?:all|everyone|everybody|team|folks|guys|y'?all|both|gang|people|lads|ladies|friends|colleagues|family)"
+_THIRD_PARTY = (
+    re.compile(r"^\W*(?:hi|hello|hey|hiya|dear|morning|evening|afternoon|good\s+(?:morning|afternoon|evening)|greetings)\b[\s,]+"
+               r"(?:" + _GROUP + r")\b", re.IGNORECASE),
+    re.compile(r"^\s*(?:-{1,2}|~)\s*[A-Z][a-zA-Z'-]+\s*$", re.MULTILINE),
+    re.compile(r"\bsent\s+from\s+my\b|^\s*(?:from|to|subject|cc|bcc|date|sent)\s*:|\b(?:fwd?|re)\s*:|-{2,}\s*original\s+message|"
+               r"\bbegin\s+forwarded\b|\bon\s+.{1,80}\bwrote\b|(?<![\w.])@[a-z]\w{1,30}\b", re.IGNORECASE | re.MULTILINE),
+    re.compile(r"\b(?:everyone|everybody|all\s+of\s+you|you\s+all|y'?all|you\s+guys|team)\b[^.!?\n]{0,40}\b(?:please|should|must|"
+               r"need\s+to|from\s+now\s+on|going\s+forward)\b|\b(?:from\s+now\s+on|going\s+forward)\b[^.!?\n]{0,10}\b(?:everyone|everybody|"
+               r"all\s+of\s+you|you\s+all|team)\b", re.IGNORECASE),
+)
+
+
+_GREETING_NAME = re.compile(r"^\W*(?:hi|hello|hey|hiya|dear)\s+([A-Za-z][\w'-]*)\b", re.IGNORECASE)
+_SIGN_OFF_NAME = re.compile(
+    r"(?:^|[.!?\n,]\s*)(?i:cheers|thanks|thank\s+you|thx|regards|best|best\s+wishes|kind\s+regards|warm\s+regards|many\s+thanks|"
+    r"sincerely|yours|love|ta|all\s+the\s+best|speak\s+soon|br|xx+)\s*[,.!-]*\s*([A-Z][a-zA-Z'-]+)\.?\s*(?:x+)?\s*$"
+)
+
+
+def _is_assistant_name(name: str) -> bool:
+    name = name.lower()
+    if name in {"misumi", "assistant"}:
+        return True
+    try:
+        from src.misumi_policy import DISPLAY_NAMES, load_persona_policy
+
+        known = set(load_persona_policy()) | {str(v).lower() for v in DISPLAY_NAMES.values()}
+    except Exception:  # noqa: BLE001 - without the persona list every name is treated as a third party
+        known = set()
+    return name in known
+
+
+def is_third_party_text(prompt: str) -> bool:
+    """True when the turn looks like someone else's message: a greeting to a group or to a named person who is not one of the
+    assistant's personas ("Hi Bob," but not "Hi Misato,"), a sign-off with a name ("Cheers, Bob"), mail/chat headers, forward or
+    signature furniture, or addressing a group ("everyone should ..."). Errs towards True."""
+    text = _full(prompt)
+    if len(text) > _MAX_DETECT_CHARS:
+        return True  # too long to judge cheaply: treat as someone else's text (it only withholds capture)
+    stripped = text.strip()
+    if any(pattern.search(stripped) for pattern in _THIRD_PARTY):
+        return True
+    for pattern in (_GREETING_NAME, _SIGN_OFF_NAME):
+        match = pattern.search(stripped) if pattern is _SIGN_OFF_NAME else pattern.match(stripped)
+        if match and match.group(1).lower() != "there" and not _is_assistant_name(match.group(1)):
+            return True
+    return False
+
+
 def own_instruction(prompt: str) -> dict[str, Any]:
     """The part of a turn the user typed as their own instruction, and whether the turn is a data-processing task.
 
     Own text = the first line, before any colon, with quoted/code/reported spans removed. Everything after a newline or colon is
-    treated as possibly third-party content. ``data_task`` is True when the turn (anywhere, after quote removal) asks to process
-    someone else's text; such a turn yields no captured or durable signal.
+    treated as possibly third-party content. ``data_task`` is True when the turn (anywhere - the WHOLE turn, after quote removal)
+    asks to process someone else's text, or looks like someone else's message (``is_third_party_text``); such a turn yields no
+    captured or durable signal. A turn too long to scan is data.
     """
+    full = _full(prompt)
     text = _strip_quoted(_prep(prompt))
     own = text.split("\n", 1)[0].split(":", 1)[0]
-    return {"text": own, "data_task": bool(_DATA_TASK.search(text)), "partial": own.strip() != text.strip()}
+    # A turn longer than the detection window is treated as DATA (fail-safe): nothing in it can create durable state, so no
+    # part of a long paste can be missed by a bounded scan. (The safety gate still scans all of it.)
+    data = len(full) > _MAX_DETECT_CHARS or bool(_DATA_TASK.search(text)) or is_third_party_text(prompt)
+    return {"text": own, "data_task": data, "partial": own.strip() != text.strip() or len(full) > len(text)}
 
 
 def _clause_bounds(text: str, index: int) -> tuple[int, int]:
@@ -373,15 +415,37 @@ def classify_signal(prompt: str, signal: dict[str, str]) -> str:
     return "correction" if signal["kind"] == "feedback" else "temporary_choice"
 
 
+def owner_key(owner: object) -> str:
+    """One canonical value per principal ('' for an absent or blank owner)."""
+    return str(owner).strip() if owner is not None else ""
+
+
+def evidence_origin(evidence: dict[str, Any], kind: str) -> dict[str, Any]:
+    """Who caused a candidate to become offerable: the originating owner, session and evidence (round 5, H1)."""
+    return {
+        "owner": owner_key(evidence.get("owner")),
+        "session_id": str(evidence.get("session_id") or ""),
+        "evidence_id": evidence.get("evidence_id"),
+        "at": evidence.get("created_at"),
+        "at_epoch": evidence.get("created_epoch"),
+        "kind": kind,
+    }
+
+
 class PersonaStateStore:
-    """File-backed, restart-safe store for persona-state evidence, candidates and revisions."""
+    """File-backed, restart-safe, multi-process-safe store for persona-state evidence, candidates and revisions.
+
+    All I/O goes through :class:`src.misumi_state_io.StateDir`: a cross-process lock around every read-modify-write, atomic
+    candidate writes, single-write JSONL appends, and FAIL-CLOSED corruption handling (quarantine + ``StateCorruptError``; a
+    damaged file is never read as empty, so a later write can never wipe rejections).
+    """
 
     def __init__(self, root: str | Path):
         self.root = Path(root)
         self.evidence_path = self.root / "evidence.jsonl"
         self.candidates_path = self.root / "candidates.json"
         self.revisions_path = self.root / "revisions.jsonl"
-        self._lock = threading.Lock()
+        self._io = StateDir(self.root)
 
     # ---------- evidence ----------
 
@@ -390,7 +454,7 @@ class PersonaStateStore:
         return f"{persona}|{dimension}"
 
     def record_evidence(self, **fields: Any) -> dict[str, Any]:
-        """Append one immutable evidence event and fold it into candidate state."""
+        """Append one immutable evidence event and fold it into candidate state (one locked unit across processes)."""
         persona = str(fields.get("persona") or "").strip().lower()
         dimension, value = fields.get("dimension"), fields.get("value")
         if not persona:
@@ -405,6 +469,7 @@ class PersonaStateStore:
         record = {
             "evidence_id": f"ps-ev-{uuid.uuid4().hex[:12]}",
             "created_at": _now(),
+            "created_epoch": time.time(),
             "type": fields["type"],
             "persona": persona,
             "dimension": dimension,
@@ -418,11 +483,12 @@ class PersonaStateStore:
             "runtime": fields.get("runtime", "odysseus-misumi"),
             "source_authority": fields.get("source_authority", "user"),
         }
-        with self._lock:
-            self.root.mkdir(parents=True, exist_ok=True)
-            with self.evidence_path.open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
-        return {"evidence": record, "candidate": self._update_candidate(record)}
+        with self._io.locked():
+            self._io.check_healthy()
+            self._load_candidates()  # fail closed BEFORE appending if the candidate file is already damaged
+            self._io.append_jsonl(self.evidence_path.name, record)
+            candidate = self._update_candidate(record)
+        return {"evidence": record, "candidate": candidate}
 
     def list_evidence(self, persona: str | None = None, dimension: str | None = None) -> list[dict[str, Any]]:
         rows = self._read_jsonl(self.evidence_path)
@@ -435,22 +501,21 @@ class PersonaStateStore:
     # ---------- candidates ----------
 
     def _load_candidates(self) -> dict[str, Any]:
-        try:
-            data = json.loads(self.candidates_path.read_text(encoding="utf-8"))
-            return data if isinstance(data, dict) else {"candidates": {}}
-        except (OSError, json.JSONDecodeError):
+        data = self._io.read_json(self.candidates_path.name)
+        if data is None:
             return {"candidates": {}}
+        if not isinstance(data.get("candidates", {}), dict):
+            raise StateCorruptError("candidates.json has no candidates object")
+        return data
 
     def _save_candidates(self, data: dict[str, Any]) -> None:
-        self.root.mkdir(parents=True, exist_ok=True)
-        self.candidates_path.write_text(
-            json.dumps(data, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8"
-        )
+        self._io.write_json(self.candidates_path.name, data)
 
     def _update_candidate(self, evidence: dict[str, Any]) -> dict[str, Any]:
         key = self.candidate_key(evidence["persona"], evidence["dimension"])
         eid, etype, value = evidence["evidence_id"], evidence["type"], evidence["value"]
-        with self._lock:
+        from_user = evidence.get("source_authority", "user") == "user"
+        with self._io.locked():
             data = self._load_candidates()
             candidates = data.setdefault("candidates", {})
             candidate = candidates.get(key)
@@ -462,13 +527,15 @@ class PersonaStateStore:
                     "proposed_value": value,
                     "supporting_evidence": [],
                     "contradicting_evidence": [],
-                    "confidence": {"score": 0, "corrections": 0,
-                                   "basis": "count of supporting evidence by type (durable=3, correction=1, temporary=0), minus contradictions; never bypasses ratification"},
+                    "confidence": {"score": 0, "corrections": 0, "corrections_by_owner": {},
+                                   "basis": "count of supporting evidence by type (durable=3, correction=1, temporary=0), minus contradictions; "
+                                            "eligibility by repetition counts ONE owner's corrections; never bypasses ratification"},
                     "rationale": "",
                     "created_at": _now(),
                     "updated_at": _now(),
                     "status": "shadow",
                     "awaiting": None,
+                    "origin": None,
                 }
                 candidates[key] = candidate
             status = candidate["status"]
@@ -487,8 +554,8 @@ class PersonaStateStore:
                 candidate["rationale"] = "explicit durable user instruction directly authorises this value"
                 candidate.pop("rejection", None)
             elif etype == "durable_request":
-                # A free-text durable phrase is NOT authority: it makes the candidate eligible and offerable, and only a bare
-                # "yes" from the same owner and session (or the operator API) can promote it. Already in force -> nothing to offer.
+                # A free-text durable phrase is NOT authority: it makes the candidate eligible and offerable - to the user who
+                # asked, in the session they asked in (``origin``) - and only their bare "yes" (or the operator API) can promote it.
                 candidate["supporting_evidence"].append(eid)
                 if not (status == "active" and value == candidate["proposed_value"]):
                     if value != candidate["proposed_value"] and len(candidate["supporting_evidence"]) > 1:
@@ -499,6 +566,7 @@ class PersonaStateStore:
                     candidate["status"] = "eligible"
                     candidate["awaiting"] = "user-ratification"
                     candidate["requested_by"] = eid
+                    candidate["origin"] = evidence_origin(evidence, "request") if from_user else None
                     candidate["rationale"] = "the user asked for this from now on; it needs their yes to an offer (or operator ratification)"
                     candidate.pop("promotion_authorised_by", None)
                     candidate.pop("rejection", None)
@@ -507,17 +575,24 @@ class PersonaStateStore:
                 if status not in ("active", "rejected"):
                     candidate["status"] = "shadow"
                     candidate["awaiting"] = "contradicting-evidence"
+                    candidate["origin"] = None
             else:
                 candidate["supporting_evidence"].append(eid)
+                by_owner = candidate["confidence"].setdefault("corrections_by_owner", {})
+                who = owner_key(evidence.get("owner"))
                 if etype == "correction":
                     candidate["confidence"]["corrections"] = candidate["confidence"].get("corrections", 0) + 1
+                    by_owner[who] = int(by_owner.get(who, 0)) + 1
                 if (
-                    status not in ("active", "rejected")
-                    and candidate["confidence"].get("corrections", 0) >= REPEATED_CORRECTIONS_FOR_ELIGIBLE
+                    etype == "correction" and from_user
+                    and status not in ("active", "rejected")
+                    and by_owner.get(who, 0) >= REPEATED_CORRECTIONS_FOR_ELIGIBLE
                     and not candidate["contradicting_evidence"]
                 ):
+                    # Eligible by ONE owner's repeated corrections; the offer belongs to that owner (round 5, H1).
                     candidate["status"] = "eligible"
                     candidate["awaiting"] = "user-ratification"
+                    candidate["origin"] = evidence_origin(evidence, "corrections")
                 candidate["rationale"] = (
                     f"{candidate['confidence'].get('corrections', 0)} consistent correction(s) toward this value"
                 )
@@ -542,7 +617,7 @@ class PersonaStateStore:
 
     def reject(self, candidate_id: str, reason: str) -> dict[str, Any]:
         """Reject a shadow/eligible candidate (terminal for inferred evidence). Active -> rollback."""
-        with self._lock:
+        with self._io.locked():
             data = self._load_candidates()
             candidate = next((c for c in data.get("candidates", {}).values()
                               if isinstance(c, dict) and c.get("candidate_id") == candidate_id), None)
@@ -576,7 +651,7 @@ class PersonaStateStore:
         return {"passed": all(item["ok"] for item in checks), "checks": checks, "at": _now()}
 
     def evaluate_candidate(self, candidate_id: str, foundation: str = "FOUNDATION") -> dict[str, Any]:
-        with self._lock:
+        with self._io.locked():
             data = self._load_candidates()
             candidate = next((c for c in data.get("candidates", {}).values()
                               if isinstance(c, dict) and c.get("candidate_id") == candidate_id), None)
@@ -598,16 +673,8 @@ class PersonaStateStore:
     # ---------- revisions ----------
 
     def _read_jsonl(self, path: Path) -> list[dict[str, Any]]:
-        try:
-            rows = []
-            for line in path.read_text(encoding="utf-8").splitlines():
-                if line.strip():
-                    value = json.loads(line)
-                    if isinstance(value, dict):
-                        rows.append(value)
-            return rows
-        except (OSError, json.JSONDecodeError):
-            return []
+        """All records of one of this store's logs. A damaged log raises StateCorruptError (fail closed), never []."""
+        return self._io.read_jsonl(Path(path).name)
 
     def all_revisions(self) -> list[dict[str, Any]]:
         return self._read_jsonl(self.revisions_path)
@@ -640,8 +707,8 @@ class PersonaStateStore:
         ``precondition`` (optional) is called with the candidate while the store lock is held; a falsy result refuses the promotion,
         so a check made earlier cannot go stale between the check and the promotion.
         """
-        evaluation = self.evaluate_candidate(candidate_id, foundation)
-        with self._lock:
+        with self._io.locked():
+            evaluation = self.evaluate_candidate(candidate_id, foundation)
             data = self._load_candidates()
             candidate = next((c for c in data.get("candidates", {}).values()
                               if isinstance(c, dict) and c.get("candidate_id") == candidate_id), None)
@@ -686,15 +753,13 @@ class PersonaStateStore:
             candidate["status"] = "active"
             candidate["awaiting"] = None
             candidate["updated_at"] = _now()
+            self._io.append_jsonl(self.revisions_path.name, revision)  # the log first: a crash leaves the revision, not a lie
             self._save_candidates(data)
-            self.root.mkdir(parents=True, exist_ok=True)
-            with self.revisions_path.open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps(revision, ensure_ascii=False, sort_keys=True) + "\n")
             return revision
 
     def rollback_revision(self, revision_id: str, reason: str) -> dict[str, Any]:
         """Deactivate one revision by recording its rollback. Nothing is deleted."""
-        with self._lock:
+        with self._io.locked():
             revisions = self.all_revisions()
             target = next((row for row in revisions if row.get("revision_id") == revision_id), None)
             if target is None:
@@ -716,14 +781,14 @@ class PersonaStateStore:
                 "status": "rolled_back",
                 "rolls_back": revision_id,
             }
-            with self.revisions_path.open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps(rollback, ensure_ascii=False, sort_keys=True) + "\n")
             data = self._load_candidates()
+            self._io.append_jsonl(self.revisions_path.name, rollback)
             candidate = data.get("candidates", {}).get(self.candidate_key(target["persona"], target["dimension"]))
             if candidate is not None and candidate.get("status") == "active" \
                     and self.active_revision(target["persona"], target["dimension"]) is None:
                 candidate["status"] = "shadow"
                 candidate["awaiting"] = "rolled-back"
+                candidate["origin"] = None
                 candidate["updated_at"] = _now()
                 self._save_candidates(data)
             return rollback
