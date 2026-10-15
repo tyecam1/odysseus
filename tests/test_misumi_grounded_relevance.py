@@ -325,8 +325,11 @@ def test_a_real_todo_item_a_linked_fact_and_future_work_are_still_evidence(house
 
 
 def test_a_trailing_todo_comment_does_not_hide_the_value_it_follows(household):
+    # Round 5: the query was the bare word pair "tomatoes carton", which only the word-overlap fallback answered from the stock
+    # record. Stock records are now reached only through entity resolution (where "tomatoes carton" is correctly NOT the record
+    # "tomatoes"), so the same property is checked with a question that names the item.
     adapter = HouseholdReadOnlyAdapter(household)
-    hits = adapter.search("tomatoes carton", domain="food", limit=5)
+    hits = adapter.search("How many tomatoes do we have?", domain="food", limit=5)
     assert any('quantity: "1 carton"' in (hit.get("context") or hit["snippet"]) for hit in hits)
     assert not any("TODO" in (hit.get("context") or hit["snippet"]) for hit in hits)
 
@@ -336,7 +339,7 @@ def test_a_trailing_todo_comment_does_not_hide_the_value_it_follows(household):
 
 def test_a_quantity_question_returns_the_entry_that_holds_the_quantity(client):
     body = _ask(client, "What quantity of tomatoes is in stock?", persona="sanji")
-    assert "1 carton" in body["text"] and "name: tomatoes" in body["text"]
+    assert "1 carton" in body["text"] and 'name: "tomatoes"' in body["text"]  # round 5: recorded values are quoted data
     assert "TODO" not in body["text"]
 
 
@@ -433,7 +436,7 @@ def test_a_named_list_is_returned_whole_not_cut_at_four(tmp_path, monkeypatch):
 
 def test_a_queried_field_that_holds_null_is_reported_as_not_recorded(client):
     body = _ask(client, "What quantity of eggs is in stock?", persona="sanji")
-    assert "name: eggs" in body["text"] and "quantity: not recorded" in body["text"]
+    assert 'name: "eggs"' in body["text"] and "quantity: not recorded" in body["text"]  # round 5: values are quoted data
 
 
 # --- fourth review round (Opus re-review) ----------------------------------------------------------------------------------

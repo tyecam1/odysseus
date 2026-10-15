@@ -1,0 +1,63 @@
+# Misumi household item vocabulary: general words and the specific items they cover, plus synonym groups.
+#
+# Used ONLY to stop a false "no": when a stock or shopping question names an item that no record names exactly, records related
+# through this table are offered as candidates ("Not confirmed: ... recorded items that may match: brie, Parmigiano Reggiano").
+# A relation here never turns a question into a confident "yes": only a record's own name or its own `aliases:` can do that.
+#
+# Format (all entries lower case, singular or plural - they are normalised the same way as item names):
+#   kinds:    general word -> specific items that are a kind of it (one level; looked up in both directions)
+#   synonyms: groups of names for the same thing
+# Tested by tests/test_misumi_item_resolution.py (the file must load, and every relation must be symmetric where promised).
+version: 1
+
+kinds:
+  cheese: [brie, camembert, cheddar, parmesan, parmigiano, parmigiano reggiano, grana padano, pecorino, mozzarella, burrata,
+           feta, halloumi, gouda, edam, emmental, gruyere, comte, stilton, roquefort, gorgonzola, manchego, ricotta, mascarpone,
+           paneer, cream cheese, cottage cheese, goat cheese, red leicester, wensleydale]
+  pasta: [spaghetti, rigatoni, penne, fusilli, farfalle, linguine, tagliatelle, fettuccine, pappardelle, macaroni, lasagne,
+          lasagna, lasagne sheets, orzo, conchiglie, orecchiette, gnocchi, tortellini, ravioli, bucatini, ziti, vermicelli]
+  noodles: [udon, soba, ramen, rice noodles, egg noodles, glass noodles, vermicelli, instant noodles]
+  rice: [basmati, basmati rice, jasmine rice, arborio, risotto rice, sushi rice, brown rice, wild rice, long grain rice]
+  hot sauce: [sriracha, tabasco, chilli sauce, chili sauce, frank's, cholula, valentina, harissa, sambal, gochujang, chilli oil]
+  sauce: [ketchup, mayonnaise, mustard, soy sauce, fish sauce, oyster sauce, hoisin, worcestershire sauce, sriracha, tabasco,
+          barbecue sauce, bbq sauce, pesto, salsa]
+  condiment: [ketchup, mayonnaise, mustard, relish, chutney, pickle, vinegar]
+  spice: [cumin, coriander seed, turmeric, paprika, smoked paprika, cinnamon, nutmeg, cloves, cardamom, star anise, chilli flakes,
+          chilli powder, cayenne, garam masala, curry powder, five spice, fennel seed, mustard seed, saffron, allspice,
+          black pepper, pepper, peppercorns, salt, sea salt, sesame seeds]  # store-cupboard grouping: salt and pepper live here
+  herb: [basil, oregano, thyme, rosemary, sage, parsley, coriander, cilantro, mint, dill, bay leaves, tarragon, chives]
+  dairy: [milk, cream, double cream, single cream, butter, yoghurt, yogurt, cheese, creme fraiche, sour cream, eggs]
+  oil: [olive oil, extra virgin olive oil, sesame oil, vegetable oil, sunflower oil, rapeseed oil, coconut oil, chilli oil]
+  vinegar: [wine vinegar, red wine vinegar, white wine vinegar, balsamic vinegar, apple cider vinegar, cider vinegar, rice vinegar,
+            malt vinegar, sherry vinegar]
+  nuts: [peanuts, almonds, cashews, walnuts, pecans, hazelnuts, pistachios, pine nuts, macadamias, brazil nuts]
+  chilli: [birdseye chillies, bird's eye chillies, finger chillies, jalapeno, scotch bonnet, habanero, red chilli, green chilli]
+  onion: [red onion, white onion, brown onion, spring onion, shallot, scallion, green onion, leek]
+  meat: [pork, beef, chicken, lamb, mince, bacon, ham, sausage, sausages, chorizo, salami, saucisson, pork slices, turkey, duck]
+  bread: [loaf, baguette, sourdough, pitta, pita, naan, tortilla, wraps, bagels, rolls, brioche, ciabatta, focaccia, crumpets]
+  sugar: [brown sugar, caster sugar, icing sugar, granulated sugar, demerara, muscovado]
+  sweetener: [sugar, honey, maple syrup, golden syrup, agave, stevia]
+  fruit: [apple, banana, lime, lemon, orange, avocado, grape, pear, mango, berries, strawberries, blueberries, raspberries]
+  tomatoes: [chopped tomatoes, tinned tomatoes, cherry tomatoes, passata, tomato paste, tomato puree, sun-dried tomatoes]
+  curry paste: [thai red curry paste, thai green curry paste, red curry paste, green curry paste, massaman paste, korma paste]
+  stock: [stock cubes, stock pots, bouillon, chicken stock, vegetable stock, beef stock]
+
+synonyms:
+  - [parmesan, parmigiano, parmigiano reggiano, grana padano]
+  - [aubergine, eggplant, brinjal]
+  - [courgette, zucchini]
+  - [coriander, cilantro]
+  - [rocket, arugula]
+  - [spring onion, scallion, green onion]
+  - [chilli, chili, chile]
+  - [prawn, shrimp]
+  - [mince, ground beef, minced beef]
+  - [tomato paste, tomato puree]
+  - [bicarbonate of soda, baking soda, bicarb]
+  - [cornflour, cornstarch]
+  - [yoghurt, yogurt]
+  - [lasagne, lasagna]
+  - [birdseye chillies, bird's eye chillies, bird eye chillies]
+  - [stock cubes, bouillon cubes]
+  - [hot sauce, chilli sauce, chili sauce]
+  - [peanut butter, peanut paste]

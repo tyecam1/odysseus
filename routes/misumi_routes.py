@@ -1173,9 +1173,17 @@ def setup_misumi_routes(
             resolved = persona_state.resolve_state(persona, turn_signals)
             style_values, style_applied = resolved["values"], resolved["provenance"]
         domain = infer_household_domain(prompt)
-        found = adapter.search(prompt, domain=domain, limit=30) if adapter.reachable else []
+        # A question about one stock or shopping-list item is resolved against the item index whatever words it uses ("do we
+        # have X", "is X running low", "X in the fridge"): the index itself decides that it is a household-inventory question.
+        resolution = adapter.resolve_question(prompt, domain) if adapter.reachable else None
+        if resolution is not None:
+            domain = str(resolution["domain"])
+            found = adapter.resolution_hits(resolution)
+        else:
+            found = adapter.search(prompt, domain=domain, limit=30) if adapter.reachable else []
         named_list = [item for item in found if item.get("listed")]
-        sources = named_list if named_list else found[:4]
+        resolved_records = [item for item in found if item.get("resolution") == "found"]
+        sources = named_list if named_list else resolved_records[:10] if resolved_records else found[:4]
         if not domain:
             # General chat belongs to the normal model/RAG path. Lexical matches
             # against task/docs files are too weak to replace a conversational answer.
@@ -1203,14 +1211,22 @@ def setup_misumi_routes(
                 text = f"From {lead['path']}: {items}{more}"
                 if len(text) > 1500:  # a list is read out whole up to a marked limit, never cut mid-item silently
                     text = text[:1500].rsplit("; ", 1)[0] + " (list shortened)"
+            elif len(resolved_records) > 1:  # the item is recorded more than once (freezer and pantry): every record is read out
+                more = f" (and {len(resolved_records) - 10} more)" if len(resolved_records) > 10 else ""
+                text = f"{len(resolved_records)} records match: " + " | ".join(
+                    f"{item['path']} line {item['line']} ({item['entry']}): {item['context']}" for item in sources
+                ) + more
+                text = _short_text(text, 1500)
             else:
-                text = _short_text(f"From {lead['path']} line {lead['line']}{entry}: {lead.get('context') or lead['snippet']}")
+                text = _short_text(f"From {lead['path']} line {lead['line']}{entry}: {lead.get('context') or lead['snippet']}", 700)
             backend = "household-read-only"
         elif domain and not model_required:
             present = any(item["id"] == domain and item["present"] for item in adapter.domains())
             if present:
                 text = f"No matching {domain} fact was found in the canonical household repository."
-                if _RECOMMENDATION_REQUEST.search(prompt):
+                if resolution is not None and resolution.get("outcome") == "not_present":
+                    text += " " + adapter.not_present_text(resolution)
+                elif _RECOMMENDATION_REQUEST.search(prompt):
                     text += (
                         " That reads as a request for a recommendation; I answer household questions only from recorded"
                         " entries, and none matched. Name something recorded (a title, item or mood) to look up, or add"
