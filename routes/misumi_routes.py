@@ -30,6 +30,7 @@ from src.misumi_persona_state import (
     compose_system,
     detect_style_signals,
     is_reserved_turn,
+    own_instruction,
 )
 from src.misumi_routing_adaptation import (
     RoutingAdaptationStore,
@@ -195,6 +196,22 @@ def _require_api_scope(request: Request, required: str) -> None:
         accepted.add("chat")
     if not scopes.intersection(accepted):
         raise HTTPException(403, f"API token requires {required} scope")
+
+
+def _adaptation_authority(request: Request) -> Optional[Dict[str, Any]]:
+    """The ONE gate for creating or changing adaptation state (routing and persona style) from a conversational turn.
+
+    Returns the principal record when the caller holds the execute scope (the same scope every ratification API requires),
+    else None. A read-only or unscoped caller records no evidence, creates no candidate, is shown no offer and can answer
+    none. Even with authority, a free-text phrase only ever produces an offer; promotion needs a bare "yes" to that offer
+    (same owner, same session) or the ratification API.
+    """
+    try:
+        _require_api_scope(request, "misumi:execute")
+    except HTTPException:
+        return None
+    owner = _owner(request)
+    return {"principal": owner, "principal_authenticated": bool(str(owner or "").strip()), "scope": "misumi:execute"}
 
 
 def _short_text(value: object, limit: int = 420) -> str:
@@ -712,20 +729,20 @@ def _capture_style_signals(
     named: Optional[str],
     session_id: Optional[str],
     owner: Optional[str],
-    may_promote: bool = True,
 ) -> List[Dict[str, Any]]:
-    """Record evidence for each style signal; promote only on an explicit durable user instruction.
+    """Record evidence for each style signal. Never promotes (the caller has already passed ``_adaptation_authority``).
 
-    ``may_promote`` is False for a caller without the execute scope (ratification is an act that needs it everywhere else): the
-    evidence is still recorded, the candidate is not promoted.
+    A durable phrase in the user's own instruction is recorded as ``durable_request``: the candidate becomes eligible and is
+    OFFERED; only a bare "yes" from the same owner and session (or the ratification API) makes it active.
 
-    Scope: a durable instruction that names a persona applies to that persona; one that names none is
+    Scope: a durable request that names a persona applies to that persona; one that names none is
     household-wide. Feedback ("too long") and one-off requests are about the responding persona.
     """
     notes: List[Dict[str, Any]] = []
     for signal in signals:
         etype = classify_signal(prompt, signal)
         if etype == "explicit_durable":
+            etype = "durable_request"  # the user's words ask for a standing change; they are not the authority for one
             target = named or GLOBAL_SCOPE
         else:
             target = named or responding
@@ -744,18 +761,8 @@ def _capture_style_signals(
             "candidate_id": candidate.get("candidate_id"), "candidate_status": candidate.get("status"),
             "state": "shadow-only",
         }
-        if etype == "explicit_durable" and candidate.get("status") == "eligible" and not may_promote:
-            note["state"] = "eligible-needs-execute-scope"
-        elif etype == "explicit_durable" and candidate.get("status") == "eligible":
-            try:
-                revision = store.promote(candidate["candidate_id"], authorisation={
-                    "type": "user_instruction", "evidence_id": note["evidence_id"],
-                    "principal": owner, "principal_authenticated": bool(str(owner or "").strip()),
-                })
-                note.update({"state": "active", "revision_id": revision["revision_id"],
-                             "previous_revision_id": revision.get("previous_revision_id")})
-            except (KeyError, ValueError) as exc:
-                note["promotion_refused"] = str(exc)
+        if candidate.get("status") == "eligible" and etype == "durable_request":
+            note["state"] = "offered"
         elif candidate.get("status") == "eligible":
             note["state"] = "eligible-awaiting-ratification"
         notes.append(note)
@@ -780,9 +787,7 @@ def _handle_dialogue_answer(
     elif verdict is None:
         offers.clear(sid, owner)  # the user moved on: the offer is withdrawn, nothing is promoted
         return None
-    try:
-        _require_api_scope(request, "misumi:execute")
-    except HTTPException:
+    if _adaptation_authority(request) is None:
         return None  # answering is a ratification act: it needs the same scope as the ratification API
     store_for = {"persona-state": persona_state, "routing": adaptation}
     outcome: Dict[str, Any] = {"verdict": verdict}
@@ -863,23 +868,33 @@ def _handle_dialogue_answer(
     }
 
 
-def _dialogue_offer(persona_state, adaptation, offers: OfferBook) -> Optional[Dict[str, Any]]:
-    """The one offerable eligible-awaiting-ratification candidate (persona state first), or None."""
+def _dialogue_offer(
+    persona_state, adaptation, offers: OfferBook, prefer: Tuple[str, ...] = (),
+) -> Optional[Dict[str, Any]]:
+    """The one offerable eligible-awaiting-ratification candidate, or None.
+
+    ``prefer`` holds candidate ids the user asked for in THIS turn ("from now on ..."): they are offered first and are not
+    held back by the re-offer window (the user just asked). Otherwise persona state first, oldest first.
+    """
     pools = []
     if persona_state is not None:
         pools.append(("persona-state", persona_state.all_candidates().values()))
     if adaptation is not None:
         pools.append(("routing", adaptation.all_candidates().values()))
+    wanted = {str(cid) for cid in prefer if cid}
+    ordered = []
     for kind, candidates in pools:
         for candidate in sorted((c for c in candidates if isinstance(c, dict)), key=lambda c: str(c.get("updated_at"))):
-            cid = str(candidate.get("candidate_id") or "")
-            if not cid or not offers.may_offer(cid):
-                continue
-            target = candidate.get("persona") if kind == "persona-state" else candidate.get("proposed_persona")
-            offer = build_offer(kind, candidate, str(persona_record(str(target)).get("display_name") or target)
-                                if target and target != "*" else None)
-            if offer is not None:
-                return offer
+            ordered.append((str(candidate.get("candidate_id") or "") not in wanted, kind, candidate))
+    for _, kind, candidate in sorted(ordered, key=lambda row: row[0]):  # stable: preferred first, else original order
+        cid = str(candidate.get("candidate_id") or "")
+        if not cid or (cid not in wanted and not offers.may_offer(cid)):
+            continue
+        target = candidate.get("persona") if kind == "persona-state" else candidate.get("proposed_persona")
+        offer = build_offer(kind, candidate, str(persona_record(str(target)).get("display_name") or target)
+                            if target and target != "*" else None)
+        if offer is not None:
+            return offer
     return None
 
 
@@ -1118,6 +1133,13 @@ def setup_misumi_routes(
         routing: Optional[Dict[str, Any]] = None
         adaptation_note: Optional[Dict[str, Any]] = None
         owner = _owner(request)
+        # One gate for routing AND persona-state capture (round 4): a persisted turn from an execute-scoped caller, not a
+        # reserved/safety turn, and not a turn that processes third-party text. Anything else records nothing at all.
+        authority = _adaptation_authority(request) if body.persist_turn else None
+        may_capture = (
+            authority is not None and not is_reserved_turn(prompt) and not own_instruction(prompt)["data_task"]
+        )
+        requested: List[str] = []  # candidate ids the user asked for in this turn; offered first
         dialogue = _handle_dialogue_answer(
             request, body, prompt, owner, request_id, persona_state, adaptation, offers, events,
         ) if (body.persist_turn and (persona_state is not None or adaptation is not None)) else None
@@ -1151,9 +1173,9 @@ def setup_misumi_routes(
                     list((routing or {}).get("reasons") or []), request_id,
                     persisted=bool(body.persist_turn),
                 )
-                # A durable instruction may also arrive inside an auto request
-                # ("for X use <persona> from now on").
-                if is_durable_instruction(prompt):
+                # A durable request may also arrive inside an auto request ("for X use <persona> from now on"): it is only
+                # ever OFFERED, never promoted here.
+                if may_capture and is_durable_instruction(prompt):
                     named = _named_persona_in_prompt(prompt, exclude=persona)
                     if named is not None:
                         adaptation_note = record_durable_instruction(
@@ -1164,9 +1186,8 @@ def setup_misumi_routes(
                             owner=owner,
                             persist=body.persist_turn,
                         )
-        elif adaptation is not None and body.persist_turn:
-            # Manual persona choice: durable instructions may create/activate a
-            # mapping; corrections and temporary choices stay shadow-only.
+        elif adaptation is not None and may_capture:
+            # Manual persona choice: a durable request is offered; corrections and temporary choices stay shadow-only.
             adaptation_note = record_manual_choice(
                 adaptation,
                 prompt=prompt,
@@ -1174,6 +1195,8 @@ def setup_misumi_routes(
                 session_id=body.session_id,
                 owner=owner,
             )
+        if adaptation_note is not None and adaptation_note.get("state") == "offered":
+            requested.append(str(adaptation_note.get("candidate_id") or ""))
         # Bounded persona state (-10): a style request shapes THIS turn; durable/feedback evidence is
         # captured only when the turn is persisted (persist_turn=false captures nothing).
         style_note: Optional[List[Dict[str, Any]]] = None
@@ -1181,17 +1204,12 @@ def setup_misumi_routes(
         style_applied: List[Dict[str, Any]] = []
         if persona_state is not None:
             turn_signals = detect_style_signals(prompt)
-            if turn_signals and body.persist_turn:
-                try:
-                    _require_api_scope(request, "misumi:execute")
-                    may_promote = True
-                except HTTPException:
-                    may_promote = False
+            if turn_signals and may_capture:
                 style_note = _capture_style_signals(
                     persona_state, prompt, turn_signals, responding=persona,
                     named=_named_persona_in_prompt(prompt), session_id=body.session_id, owner=owner,
-                    may_promote=may_promote,
                 )
+                requested.extend(str(n.get("candidate_id") or "") for n in style_note if n.get("state") == "offered")
             resolved = persona_state.resolve_state(persona, turn_signals)
             if is_reserved_turn(prompt):
                 resolved = {"values": {}, "provenance": []}  # learned style never shapes safety, medical or retention turns
@@ -1442,10 +1460,10 @@ def setup_misumi_routes(
             response["team"] = team_block
         offer_sid = session_id or body.session_id
         if (
-            offer_sid and body.persist_turn and outcome in {"model", "grounded", "absent"}
+            offer_sid and body.persist_turn and authority is not None and outcome in {"model", "grounded", "absent"}
             and (persona_state is not None or adaptation is not None)
         ):
-            offer = _dialogue_offer(persona_state, adaptation, offers)
+            offer = _dialogue_offer(persona_state, adaptation, offers, prefer=tuple(requested))
             if offer is not None:
                 offers.record_offer(offer_sid, offer, owner)
                 response["text"] = f"{text}\n\n{offer['question']}"

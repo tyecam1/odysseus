@@ -21,8 +21,14 @@ Separation boundaries (enforced structurally, not by convention):
 Authority model (from the seed order and the ratified Aoteru routing contract
 v0.1, not invented here):
 
-- an ``explicit_durable`` user instruction ("use X for Y from now on") is a
-  direct user authorisation for that one mapping and may promote its candidate;
+- active routing changes ONLY by (a) the execute-scoped, principal-recording
+  ratification API or (b) a bare "yes" to an offer from the same owner in the
+  same session (``explicit_durable`` evidence). A free-text instruction ("use X
+  for Y from now on") is a ``durable_request``: it makes the candidate eligible
+  and OFFERED, never active (round-4 review, 2026-10-15). Questions, statements
+  about a persona, negated/quoted phrases, pasted third-party text and
+  reserved/safety turns are not requests at all (``is_durable_instruction``);
+  read-only callers record nothing (the route's single scope gate);
 - corrections and temporary choices create or reinforce *shadow* candidates
   only; repeated consistent corrections make a candidate ``eligible`` but it
   then waits for real user ratification;
@@ -49,9 +55,10 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-EVIDENCE_TYPES = ("correction", "temporary_choice", "explicit_durable", "confirmation")
+# explicit_durable: an authorised act (a bare "yes" to an offer). durable_request: a free-text "from now on use X" - it may only OFFER.
+EVIDENCE_TYPES = ("correction", "temporary_choice", "explicit_durable", "durable_request", "confirmation")
 CANDIDATE_STATUSES = ("shadow", "eligible", "active", "rejected", "superseded")
-EVIDENCE_WEIGHTS = {"explicit_durable": 3, "correction": 1, "confirmation": 1, "temporary_choice": 0}
+EVIDENCE_WEIGHTS = {"explicit_durable": 3, "durable_request": 1, "correction": 1, "confirmation": 1, "temporary_choice": 0}
 REPEATED_CORRECTIONS_FOR_ELIGIBLE = 3
 
 _DURABLE_PHRASE = re.compile(
@@ -68,7 +75,12 @@ _STOPWORDS = frozenset(
     "this that these those it its as by about into over under please question questions "
     "misumi aoteru always now when what who how why where which should would could can may "
     "want wants need needs like prefer prefers put give make letting route routing handle "
-    "deals".split()
+    "deals does did done know knows send sends tell tells keep just also things thing stuff anything "
+    "everything something every time times from going forward permanently future".split()
+)
+# A routing durable request must actually ask for a routing change ("use / send / ask X ..."), not just mention a persona.
+_ROUTING_IMPERATIVE = re.compile(
+    r"\b(?:use|send|route|ask|pass|hand|direct|give|let|have|put|switch\s+to|go\s+to|talk\s+to)\b", re.IGNORECASE
 )
 
 
@@ -106,20 +118,22 @@ def keyword_variants(keyword: str) -> list[str]:
     return sorted(variants)
 
 
-def extract_cue_term(prompt: str, persona_intents: list[str] | None = None) -> str | None:
+def extract_cue_term(prompt: str, persona_intents: list[str] | None = None, exclude: Any = ()) -> str | None:
     """Pick the narrowest deterministic cue term for a learned mapping.
 
     Preference order: an intent of the proposed persona that literally appears
-    in the prompt; otherwise the first non-stopword token of >= 4 characters.
+    in the prompt; otherwise the first non-stopword token of >= 4 characters
+    that is not in ``exclude`` (persona names are never cues).
     Returns None when the prompt offers no usable cue (no candidate is made).
     """
     text = str(prompt or "").lower()
+    skip = {str(item).lower() for item in exclude if item}
     for intent in persona_intents or []:
         if intent and intent != "default" and keyword_present(text, intent):
             return intent
     for raw in re.findall(r"[a-z][a-z-]{3,}", text):
         token = raw.strip("-")
-        if token in _STOPWORDS or token in {v for v in _STOPWORDS}:
+        if token in _STOPWORDS or token in skip:
             continue
         return token
     return None
@@ -226,7 +240,23 @@ class RoutingAdaptationStore:
             eid = evidence["evidence_id"]
             etype = evidence["type"]
             proposed = evidence.get("proposed_persona")
-            if (
+            if etype == "durable_request":
+                # A free-text "from now on use X" is NOT authority: it makes the mapping eligible and offerable; only a bare
+                # "yes" from the same owner and session (or the operator API) can promote it. Already in force -> nothing to offer.
+                candidate["supporting_evidence"].append(eid)
+                if not (candidate.get("status") == "active" and proposed == candidate["proposed_persona"]):
+                    if proposed and proposed != candidate["proposed_persona"] and len(candidate["supporting_evidence"]) > 1:
+                        candidate.setdefault("superseded_proposals", []).append(
+                            {"persona": candidate["proposed_persona"], "by": eid, "at": _now()}
+                        )
+                    candidate["proposed_persona"] = proposed
+                    candidate["status"] = "eligible"
+                    candidate["awaiting"] = "user-ratification"
+                    candidate["requested_by"] = eid
+                    candidate["rationale"] = "the user asked for this from now on; it needs their yes to an offer (or operator ratification)"
+                    candidate.pop("promotion_authorised_by", None)
+                    candidate.pop("rejection", None)
+            elif (
                 etype != "explicit_durable" and proposed
                 and proposed != candidate["proposed_persona"] and candidate["supporting_evidence"]
             ):
@@ -400,6 +430,9 @@ class RoutingAdaptationStore:
             if authorisation["type"] == "user_instruction":
                 if authorisation.get("evidence_id") not in candidate.get("supporting_evidence", []):
                     raise ValueError("user_instruction authorisation must cite supporting evidence")
+                if self._type_of(str(authorisation.get("evidence_id"))) != "explicit_durable":
+                    # Only an explicit act (a bare "yes" to an offer) is user authority; a free-text request or a correction is not.
+                    raise ValueError("user_instruction authorisation must cite explicit_durable evidence (a yes to an offer)")
             elif authorisation["type"] == "operator_ratification":
                 # The operator's own authenticated act (the ratification the
                 # seed order requires for repetition-eligible candidates).
@@ -574,7 +607,18 @@ class RoutingAdaptationStore:
 
 
 def is_durable_instruction(prompt: str) -> bool:
-    return bool(_DURABLE_PHRASE.search(str(prompt or "")))
+    """True only when the user's OWN instruction text asks for a standing routing change.
+
+    Not durable: a question ("Does Jin always know about compost?"), a statement about a persona ("Jin always knows ..."),
+    a negated or quoted phrase, a phrase that is only in pasted/third-party text (after a colon or newline, or in a
+    summarise/proofread/translate/reply/forward turn), or a reserved/safety turn. Even when True, the result is only an OFFER.
+    """
+    from src.misumi_persona_state import durable_phrase_clause, is_reserved_turn, own_instruction
+
+    own = own_instruction(prompt)
+    if own["data_task"] or is_reserved_turn(prompt):
+        return False
+    return durable_phrase_clause(own["text"], require=_ROUTING_IMPERATIVE) is not None
 
 
 def record_durable_instruction(
@@ -586,22 +630,29 @@ def record_durable_instruction(
     owner: str | None,
     persist: bool = True,
 ) -> dict[str, Any] | None:
-    """Handle one explicit durable user instruction (``use X for Y from now on``).
+    """Record one free-text durable routing request (``use X for Y from now on``) as an OFFER.
 
-    The instruction is user authority for exactly this mapping. Returns the
-    recorded evidence, the (eligible) candidate and, when promoted, the active
-    revision. Returns None when the instruction carries no usable cue.
+    Free text is never authority by itself (round-4 review): the request is recorded as ``durable_request`` evidence and the
+    candidate becomes eligible awaiting user ratification. It is promoted only by a bare "yes" to the offer from the same owner
+    and session, or by the operator ratification API. Callers must already hold the execute scope (the route checks it).
+    Returns None when the prompt is not the user's own durable instruction or carries no usable cue.
     """
-    if not persist:
+    if not persist or not is_durable_instruction(prompt):
         return None
     from src.persona_capabilities import routing_intents
 
     previous = store.last_auto_route(session_id)
-    cue_term = extract_cue_term(prompt, routing_intents(named_persona))
+    try:
+        from src.misumi_policy import persona_record
+
+        display = str(persona_record(named_persona).get("display_name") or "")
+    except Exception:  # noqa: BLE001 - a missing persona record only means no display name to exclude
+        display = ""
+    cue_term = extract_cue_term(prompt, routing_intents(named_persona), exclude=(named_persona, display))
     if not cue_term:
         return None
     result = store.record_evidence(
-        type="explicit_durable",
+        type="durable_request",
         cue=[cue_term],
         previous_persona=previous["persona"] if previous else "aoteru",
         proposed_persona=named_persona,
@@ -609,35 +660,20 @@ def record_durable_instruction(
         previous_route_reasons=previous["reasons"] if previous else [],
         session_id=session_id,
         owner=owner,
+        context="free-text durable request: offered, needs a bare yes or operator ratification",
     )
     candidate = result["candidate"]
-    outcome: dict[str, Any] = {
+    offerable = candidate.get("status") == "eligible" and candidate.get("awaiting") == "user-ratification"
+    return {
         "evidence_id": result["evidence"]["evidence_id"],
-        "evidence_type": "explicit_durable",
+        "evidence_type": "durable_request",
         "cue": candidate.get("cue"),
         "candidate_id": candidate.get("candidate_id"),
         "candidate_status": candidate.get("status"),
         "base_persona": result["evidence"]["previous_persona"],
         "proposed_persona": named_persona,
-        "state": "shadow" if candidate.get("status") != "eligible" else "eligible",
+        "state": "offered" if offerable else str(candidate.get("status") or "shadow"),
     }
-    if candidate.get("status") == "eligible":
-        try:
-            revision = store.promote(
-                candidate["candidate_id"],
-                authorisation={"type": "user_instruction", "evidence_id": outcome["evidence_id"]},
-            )
-            outcome["promotion"] = {
-                "authorised_by": "user_instruction",
-                "evidence_id": outcome["evidence_id"],
-                "revision_id": revision["revision_id"],
-                "previous_revision_id": revision.get("previous_revision_id"),
-            }
-            outcome["state"] = "active"
-        except (KeyError, ValueError) as exc:
-            logger.warning("Misumi routing promotion refused: %s", exc)
-            outcome["promotion_refused"] = str(exc)
-    return outcome
 
 
 def record_manual_choice(

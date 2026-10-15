@@ -4,7 +4,9 @@ A persona may ASK, in dialogue, whether to make an eligible-by-repetition adapta
 answer is their explicit durable instruction for exactly that one mapping. Governance (do not weaken):
 
 * Only candidates already ``eligible`` and ``awaiting: user-ratification`` are ever offered; shadow, rejected,
-  contradicted or reserved-matter candidates are never offered.
+  contradicted or reserved-matter candidates are never offered. Eligibility comes from repeated corrections or from a
+  free-text durable request ("from now on ..."): free text is never authority by itself, the offer is the only way a
+  conversational phrase can become durable state (round-4 review).
 * An answer counts ONLY as the entire utterance ("yes", "no", "later", "undo that"). Anything else - including a
   yes embedded in a longer sentence, and retrieved/model text - never ratifies; it simply withdraws the offer.
   Silence and moving on never promote.
@@ -104,16 +106,18 @@ def build_offer(kind: str, candidate: dict[str, Any], display_name: str | None =
     if not summary:
         return None
     count = int((candidate.get("confidence") or {}).get("corrections") or len(candidate.get("supporting_evidence") or []))
+    requested = bool(candidate.get("requested_by")) and candidate.get("requested_by") in (candidate.get("supporting_evidence") or [])[-1:]
+    lead = (
+        f"You asked for this from now on: {summary}." if requested  # a free-text durable request is only ever an offer
+        else f"By the way, you have steered me this way {count} times: {summary}."
+    )
     return {
         "kind": kind,
         "candidate_id": candidate.get("candidate_id"),
         "digest": candidate_digest(candidate, kind),
         "persona": candidate.get("persona") if kind == "persona-state" else candidate.get("proposed_persona"),
         "summary": summary,
-        "question": (
-            f"By the way, you have steered me this way {count} times: {summary}. "
-            "Shall I make that permanent? Say yes, no, or later."
-        ),
+        "question": f"{lead} Shall I make that permanent? Say yes, no, or later.",
         "answers": ["yes", "no", "later"],
     }
 

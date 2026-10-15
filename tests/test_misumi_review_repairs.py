@@ -319,11 +319,15 @@ def test_a_caller_without_the_execute_scope_cannot_promote_household_style_by_ph
 
     monkeypatch.setattr(misumi_routes, "_require_api_scope", read_only)
     body = _as(client, "bob", "From now on keep answers short", "s-bob")
-    assert body["persona_state"]["captured"][0]["state"] == "eligible-needs-execute-scope"
+    # Round 4 (stronger than before): a read-only caller records nothing at all - no evidence, no candidate, no offer.
+    assert body["persona_state"]["captured"] is None and "ratification_offer" not in body
     assert PersonaStateStore(tmp_path / "persona-state").active_revisions() == []
+    assert PersonaStateStore(tmp_path / "persona-state").all_candidates() == {}
     body = _as(client, "alice", "From now on keep answers short", "s-alice")
     note = body["persona_state"]["captured"][0]
-    assert note["state"] == "active"
+    assert note["state"] == "offered" and PersonaStateStore(tmp_path / "persona-state").active_revisions() == []
+    assert _as(client, "bob", "yes", "s-alice").get("source") != "ratification-dialogue"
+    assert _as(client, "alice", "yes", "s-alice")["ratification"]["state"] == "active"
     authorisation = PersonaStateStore(tmp_path / "persona-state").active_revisions()[0]["authorisation"]
     assert authorisation["principal"] == "alice" and authorisation["principal_authenticated"] is True
 
@@ -354,8 +358,8 @@ def test_an_active_routing_mapping_is_not_offered_again_by_more_corrections(tmp_
     import time
     store, record_manual_choice = _routing_candidate(tmp_path)
     candidate = store.get_candidate(["compost"])
-    eid = candidate["supporting_evidence"][0]
-    store.promote(candidate["candidate_id"], authorisation={"type": "user_instruction", "evidence_id": eid})
+    # Round 4: a user_instruction must cite explicit_durable evidence (a yes); citing a correction is refused, so ratify as operator.
+    store.promote(candidate["candidate_id"], authorisation={"type": "operator_ratification", "principal": "test-operator"})
     store._last_auto_route["w"] = {"prompt": "Check the compost bin", "persona": "misato", "reasons": ["compost"], "request_id": "r-w", "at": time.time()}
     record_manual_choice(store, prompt="ask Jin about the compost w", chosen_persona="jin", session_id="w", owner=None)
     assert store.get_candidate(["compost"])["status"] == "active"

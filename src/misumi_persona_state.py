@@ -22,15 +22,25 @@ Immutable by construction (never reachable from this module):
 
 Authority model (same as routing; do not weaken):
 
-- an explicit durable user instruction ("keep answers short from now on") is
-  direct user authority for that one dimension value and promotes it;
+- durable state changes ONLY by (a) the execute-scoped, principal-recording
+  ratification API or (b) a bare "yes" to an offer, from the same owner in the
+  same session (``misumi_ratification_dialogue``). Free text is never authority
+  by itself: a durable phrase in the user's own instruction ("keep answers
+  short from now on") is a ``durable_request`` that makes the candidate
+  eligible and OFFERED, never active (round-4 review, 2026-10-15);
+- only the part of a turn the user typed as their own instruction counts (the
+  first line, before any colon, outside quotes); a turn that asks to process
+  third-party text (summarise, proofread, translate, reply, forward ...)
+  yields no capture at all (``own_instruction``);
 - feedback ("too long") is a ``correction``: shadow-only; three consistent
   corrections across the evidence log make a candidate ``eligible`` awaiting
   operator ratification; confidence never bypasses the gate;
 - a one-off request ("shorter please") is a ``temporary_choice``: it shapes
   THAT turn only and never creates durable state;
 - reserved matters (standards, values, boundaries, ratification, Level 5/6)
-  are never captured;
+  and safety turns (a broad lexicon that errs towards "safety": gas, fire,
+  poisoning, medicines and dosing, breathing/chest/collapse, self-harm ...)
+  are never captured and never shaped by learned style;
 - every promotion first passes a deterministic evaluation (enum validity,
   bounded fixed render, foundation intact, no unresolved contradiction).
 
@@ -88,8 +98,9 @@ STYLE_HEADER = (
     "reserved-matter or seed-order rules above):"
 )
 GLOBAL_SCOPE = "*"  # a durable instruction that names no persona applies household-wide
-EVIDENCE_TYPES = ("correction", "temporary_choice", "explicit_durable")
-EVIDENCE_WEIGHTS = {"explicit_durable": 3, "correction": 1, "temporary_choice": 0}
+# explicit_durable: an authorised act (a bare "yes" to an offer). durable_request: a free-text durable phrase - it may only OFFER.
+EVIDENCE_TYPES = ("correction", "temporary_choice", "explicit_durable", "durable_request")
+EVIDENCE_WEIGHTS = {"explicit_durable": 3, "durable_request": 1, "correction": 1, "temporary_choice": 0}
 REPEATED_CORRECTIONS_FOR_ELIGIBLE = 3
 _MAX_RENDER_CHARS = 200
 
@@ -164,10 +175,102 @@ def _clause_before(text: str, position: int) -> str:
     return text[start:position]
 
 
+# Safety lexicon (round 4). A keyword list alone missed gas smells, fires, button batteries, child dosing, chest pain and self-harm.
+# This is broader on purpose and errs towards "safety": a false positive only means learned style is not applied and nothing is
+# captured on that turn (harmless); a false negative lets learned brevity shape emergency advice. The only carve-outs are cheap and
+# unambiguous ("fire up the oven", "fire off an email").
+_SAFETY_DOMAINS: tuple[tuple[str, re.Pattern[str]], ...] = tuple((domain, re.compile(pattern, re.IGNORECASE)) for domain, pattern in (
+    ("gas-co", r"\bsmel\w*\s+(?:of\s+)?gas\b|\bgas\s+(?:leak\w*|smell\w*|escape)|\bleak\w*\s+gas\b|\bcarbon\s+monoxide\b|\bco\s+(?:alarm|detector)\b"),
+    ("fire", r"\bfire\b(?!\s+(?:up|off|away)\b)|\bon\s+fire\b|\bcaught\s+fire\b|\bflames?\b|\bsmoke\s+(?:alarm|detector)\b|"
+             r"\bsmel\w*\s+(?:of\s+)?(?:burning|smoke)\b|\bburning\s+smell\b"),
+    ("poisoning", r"\bswallow\w*|\b(?:button|coin)[- ]?(?:cell|batter(?:y|ies))\b|\bpoison\w*|\bingest\w*|\bbleach\b|\bantifreeze\b|"
+                  r"\b(?:drank|drunk|ate|eaten)\b[^.!?\n]{0,40}\b(?:cleaner|detergent|chemicals?|pods?|tablets|pills|medicine)\b|\bdetergent\s+pods?\b"),
+    ("medicine-dosing", r"\b(?:paracetamol|acetaminophen|ibuprofen|calpol|nurofen|aspirin|tylenol|codeine|antihistamines?|insulin|inhaler|"
+                        r"epi-?pens?|antibiotics?|medicines?|medications?|meds)\b|\b(?:doses?|dosage|dosing|overdos\w*|mg|milligrams?)\b|"
+                        r"\b(?<!dishwasher\s)(?:pills?|tablets?|capsules?)\b|\btoo\s+many\b[^.!?\n]{0,20}\b(?:pills|tablets|paracetamol)\b"),
+    ("medical-emergency", r"\bchest\s+(?:pains?|tight\w*|pressure)\b|\b(?:pain|tight\w*|pressure)\s+in\s+(?:my|his|her|their|the)\s+chest\b|"
+                          r"\b(?:can'?t|cannot|can\s+not|struggl\w*\s+to|difficulty|trouble)\s+breath\w*|\bnot\s+breathing\b|"
+                          r"\bshort(?:ness)?\s+of\s+breath\b|\bheart\s+attack\b|\bstroke\b|\bseizures?\b|\bunconscious\b|\bunresponsive\b|"
+                          r"\bpassed\s+out\b|\bfaint\w*|\bbleed\w*|\banaphyla\w*|\bchok(?:e|ed|es|ing)\b|\bconcussion\b|\bhead\s+injur\w*|"
+                          r"\bnumb(?:ness)?\b|\bambulance\b|\b(?:999|911|112|111)\b|\ba\s*&\s*e\b|\bhospital\b|\bparamedics?\b|\bcpr\b|"
+                          r"\binjur\w*|\bwounds?\b|\bbroken\s+(?:bone|arm|leg|wrist|ankle)\b|\bburn(?:ed|t)\s+(?:my|his|her|their)\w*\b|"
+                          r"\bfevers?\b|\bhigh\s+temperature\b|\bvomit\w*|\bsymptoms?\b"),
+    ("self-harm", r"\bsuicid\w*|\bkill(?:ing)?\s+(?:my|him|her|them)sel(?:f|ves)\b|\bend(?:ing)?\s+(?:my|his|her|their)\s+(?:own\s+)?life\b|"
+                  r"\bself[- ]?harm\w*|\bhurt(?:ing)?\s+(?:my|him|her|them)sel(?:f|ves)\b|\bcut(?:ting)?\s+(?:my|him|her)sel(?:f|ves)\b|"
+                  r"\bwant(?:s)?\s+to\s+die\b|\bdon'?t\s+want\s+to\s+(?:live|be\s+alive|be\s+here)\b|\bno\s+reason\s+to\s+live\b|"
+                  r"\bbetter\s+off\s+dead\b"),
+    ("danger", r"\b(?:emergenc\w*|urgent\w*|danger\w*|unsafe|abus\w*|assault\w*|violen\w*|threaten\w*|police|intruder|break[- ]?in)\b"),
+))
+
+
+def safety_matter(prompt: str) -> str | None:
+    """The safety domain a turn touches ('gas-co', 'fire', 'poisoning', ...), or None. Errs towards a match."""
+    text = _prep(prompt)
+    return next((domain for domain, pattern in _SAFETY_DOMAINS if pattern.search(text)), None)
+
+
 def is_reserved_turn(prompt: str) -> bool:
     """True when the prompt is about a reserved matter (safety, medical, emergency, memory retention, standards ...): learned style is
-    neither captured from nor applied to such a turn."""
-    return bool(_RESERVED_MATTERS.search(_prep(prompt)))
+    neither captured from nor applied to such a turn. Fail-safe: any match of the broad safety lexicon counts."""
+    return bool(_RESERVED_MATTERS.search(_prep(prompt))) or safety_matter(prompt) is not None
+
+
+# Third-party data (round 4). A turn whose primary intent is to process someone else's text carries that text as DATA, so nothing in
+# it - or in the rest of the turn - is the user's own standing instruction. Ambiguous turns err to "data" (no capture, at most a
+# one-turn style effect from the user's own head text).
+_DATA_TASK = re.compile(
+    r"\b(?:summar(?:y|ies|i[sz]\w*)|sum\s+up|proof-?read\w*|spell-?check\w*|grammar|translat\w*|repl(?:y|ies|ying)|respond(?:ing)?\s+to|"
+    r"rewrit\w*|re-?word\w*|rephras\w*|paraphras\w*|(?<!going\s)forward(?:s|ed|ing)?(?!\s+(?:on|from)\b)|quot(?:e|ed|es|ing)|draft\w*|polish|critique|analy[sz]\w*|"
+    r"(?:edit|correct|fix|check|review|improve|shorten|explain)\s+(?:this|that|the\s+following|my|his|her|their)\b|"
+    r"here\s+is|here'?s|the\s+following|below|attached|paste\w*|wrote|writes|sent|says|texted|emailed|messaged|"
+    r"(?:this|that|the|my|his|her|their|a)\s+(?:\w+'s\s+)?(?:e-?mails?|letters?|messages?|texts?|notes?|posts?|comments?|documents?|"
+    r"paragraphs?|essays?|articles?|reviews?|replies|memos?|minutes|transcripts?))\b",
+    re.IGNORECASE,
+)
+_QUESTION_START = re.compile(
+    r"^\W*(?:does|do|did|is|are|was|were|has|have|had|why|how|what|who|whom|whose|when|where|which|should\s+i|shall\s+i)\b",
+    re.IGNORECASE,
+)
+
+
+def own_instruction(prompt: str) -> dict[str, Any]:
+    """The part of a turn the user typed as their own instruction, and whether the turn is a data-processing task.
+
+    Own text = the first line, before any colon, with quoted/code/reported spans removed. Everything after a newline or colon is
+    treated as possibly third-party content. ``data_task`` is True when the turn (anywhere, after quote removal) asks to process
+    someone else's text; such a turn yields no captured or durable signal.
+    """
+    text = _strip_quoted(_prep(prompt))
+    own = text.split("\n", 1)[0].split(":", 1)[0]
+    return {"text": own, "data_task": bool(_DATA_TASK.search(text)), "partial": own.strip() != text.strip()}
+
+
+def _clause_bounds(text: str, index: int) -> tuple[int, int]:
+    start = max((m.end() for m in _CLAUSE_BOUNDARY.finditer(text, 0, index)), default=0)
+    end = next((m.start() for m in _CLAUSE_BOUNDARY.finditer(text, index)), len(text))
+    return start, end
+
+
+def is_users_own_clause(text: str, start: int, end: int) -> bool:
+    """False for a clause that asks something, talks ABOUT an instruction, or is a question by its first word."""
+    clause = text[start:end]
+    asks = end < len(text) and text[end] == "?"
+    return not (asks or _QUESTION_START.match(clause) or _NOT_DURABLE_CONTEXT.search(clause))
+
+
+def durable_phrase_clause(text: str, require: re.Pattern[str] | None = None) -> tuple[int, int] | None:
+    """(start, end) of the first clause of ``text`` (already the user's own text) that carries a non-negated durable phrase, is the
+    user's own instruction, and (if given) also matches ``require``; None otherwise."""
+    for match in _DURABLE_PHRASE.finditer(text):
+        start, end = _clause_bounds(text, match.start())
+        if not is_users_own_clause(text, start, end):
+            continue
+        if _NEGATION.search(text[start:match.start()]):
+            continue
+        if require is not None and not require.search(text[start:end]):
+            continue
+        return start, end
+    return None
 
 
 # (dimension, value, kind, pattern). kind: "feedback" (about the previous answer) | "request".
@@ -222,10 +325,11 @@ def detect_style_signals(prompt: str) -> list[dict[str, str]]:
     ambiguous and dropped. A request or feedback that is negated ("don't make
     it shorter", "I wasn't saying it was too long") is not a signal.
     """
-    text = _prep(prompt)
-    if is_reserved_turn(text):
+    if is_reserved_turn(prompt):
         return []
-    text = _strip_quoted(text)  # an instruction that is only quoted, reported or in code is not the user's own
+    # Only the user's own head text (first line, before any colon, outside quotes/code/reported speech) can carry a signal; what
+    # follows may be pasted third-party content.
+    text = own_instruction(prompt)["text"]
     found: dict[str, list[dict[str, str]]] = {}
     for dimension, value, kind, pattern in _SIGNALS:
         for match in pattern.finditer(text):
@@ -243,19 +347,25 @@ def detect_style_signals(prompt: str) -> list[dict[str, str]]:
 
 
 def classify_signal(prompt: str, signal: dict[str, str]) -> str:
-    """Evidence type for one signal: durable instruction / feedback correction / one-off request."""
+    """Evidence type for one signal: durable request / feedback correction / one-off request.
+
+    ``explicit_durable`` here means only "the user's own text asks for a standing change"; the route records it as a
+    ``durable_request`` (an offer), never as authority. A data-processing turn is never durable.
+    """
     if signal.get("kind") == "feedback":
         return "correction"  # "your answers are always too long" describes an answer; it is never a standing instruction
-    text = _strip_quoted(_prep(prompt))
+    own = own_instruction(prompt)
+    if own["data_task"]:
+        return "temporary_choice"
+    text = own["text"]
     index = text.lower().find(str(signal.get("matched") or "\0"))
-    if index >= 0:
-        # the durable phrase must be in the same sentence as the signal it would make durable
-        start = max((m.end() for m in _CLAUSE_BOUNDARY.finditer(text, 0, index)), default=0)
-        end = next((m.start() for m in _CLAUSE_BOUNDARY.finditer(text, index)), len(text))
-        asks = end < len(text) and text[end] == "?"
-        text = text[start:end]
-        if asks or _NOT_DURABLE_CONTEXT.search(text):
-            return "temporary_choice"
+    if index < 0:
+        return "temporary_choice"
+    # the durable phrase must be in the same sentence as the signal it would make durable
+    start, end = _clause_bounds(text, index)
+    if not is_users_own_clause(text, start, end):
+        return "temporary_choice"
+    text = text[start:end]
     request_at = text.lower().find(str(signal.get("matched") or "\0"))
     # "from now on ..." counts anywhere in the sentence; "always"/"forever" only before the request ("always explain ..."), not after it
     if _DURABLE_STRONG.search(text) or _DURABLE_WEAK.search(text[:request_at] if request_at >= 0 else text):
@@ -290,7 +400,7 @@ class PersonaStateStore:
         if fields.get("type") not in EVIDENCE_TYPES:
             raise ValueError(f"unknown evidence type: {fields.get('type')!r}")
         prompt = str(fields.get("prompt") or "")
-        if _RESERVED_MATTERS.search(prompt):
+        if is_reserved_turn(prompt):
             raise ValueError("reserved matters are never captured by persona state")
         record = {
             "evidence_id": f"ps-ev-{uuid.uuid4().hex[:12]}",
@@ -376,6 +486,22 @@ class PersonaStateStore:
                 candidate["promotion_authorised_by"] = eid
                 candidate["rationale"] = "explicit durable user instruction directly authorises this value"
                 candidate.pop("rejection", None)
+            elif etype == "durable_request":
+                # A free-text durable phrase is NOT authority: it makes the candidate eligible and offerable, and only a bare
+                # "yes" from the same owner and session (or the operator API) can promote it. Already in force -> nothing to offer.
+                candidate["supporting_evidence"].append(eid)
+                if not (status == "active" and value == candidate["proposed_value"]):
+                    if value != candidate["proposed_value"] and len(candidate["supporting_evidence"]) > 1:
+                        candidate.setdefault("superseded_proposals", []).append(
+                            {"value": candidate["proposed_value"], "by": eid, "at": _now()}
+                        )
+                    candidate["proposed_value"] = value
+                    candidate["status"] = "eligible"
+                    candidate["awaiting"] = "user-ratification"
+                    candidate["requested_by"] = eid
+                    candidate["rationale"] = "the user asked for this from now on; it needs their yes to an offer (or operator ratification)"
+                    candidate.pop("promotion_authorised_by", None)
+                    candidate.pop("rejection", None)
             elif value != candidate["proposed_value"] and candidate["supporting_evidence"]:
                 candidate["contradicting_evidence"].append(eid)
                 if status not in ("active", "rejected"):
@@ -530,6 +656,11 @@ class PersonaStateStore:
             if authorisation["type"] == "user_instruction":
                 if authorisation.get("evidence_id") not in candidate.get("supporting_evidence", []):
                     raise ValueError("user_instruction authorisation must cite supporting evidence")
+                cited = next((row for row in self._read_jsonl(self.evidence_path)
+                              if row.get("evidence_id") == authorisation.get("evidence_id")), {})
+                if cited.get("type") != "explicit_durable":
+                    # Only an explicit act (a bare "yes" to an offer) is user authority; a free-text request or a correction is not.
+                    raise ValueError("user_instruction authorisation must cite explicit_durable evidence (a yes to an offer)")
             elif authorisation["type"] == "operator_ratification":
                 if not authorisation.get("principal"):
                     raise ValueError("operator_ratification requires the ratifying principal")
