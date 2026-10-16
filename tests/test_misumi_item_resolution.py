@@ -18,9 +18,10 @@ from fastapi.testclient import TestClient
 
 from routes.misumi_routes import setup_misumi_routes
 from services.memory.skills import SkillsManager
+from src import endpoint_resolver, llm_core
 from src.misumi_household import (
-    _ZERO_QUANTITY, AMBIGUOUS, FOUND, NOT_PRESENT, UNRESOLVED, HouseholdReadOnlyAdapter, _norm, _singular, item_question,
-    load_item_vocabulary, phrase_key, stock_item_mention,
+    AMBIGUOUS, FOUND, NOT_PRESENT, UNRESOLVED, HouseholdReadOnlyAdapter, _norm, _singular, item_question,
+    load_item_vocabulary, phrase_key, quantity_state, stock_item_mention,
 )
 
 STOCK = """# Food stock - synthetic fixture in the shape of the real file.
@@ -249,7 +250,10 @@ def test_a_partial_match_is_reported_as_unconfirmed_never_as_yes_or_no(adapter, 
     result = adapter.resolve_item(question, domain="food")
     assert result["outcome"] == AMBIGUOUS
     assert partial in [record["name"] for record in result["candidates"]]
-    (hit,) = adapter.search(question, domain="food")
+    # Round 6: an unconfirmed item is evidence for the model, so `search` (the deterministic answer) returns nothing for it;
+    # the not-confirmed hit is what the route shows when no model is available.
+    assert adapter.search(question, domain="food") == []
+    (hit,) = adapter.resolution_hits(result)
     assert hit["resolution"] == AMBIGUOUS and hit["snippet"].startswith("Not confirmed") and partial in hit["snippet"]
     assert "entry" not in hit
 
@@ -290,8 +294,9 @@ def test_a_genuinely_absent_item_is_not_present_only_when_that_is_safe(adapter):
 ])
 def test_an_unparsed_mention_is_unresolved_not_a_confident_no(adapter, question):
     result = adapter.resolve_item(question, domain="food")
-    assert result["outcome"] == UNRESOLVED
-    (hit,) = adapter.search(question, domain="food")
+    assert result["outcome"] == UNRESOLVED and not result["deterministic"]
+    assert adapter.search(question, domain="food") == []  # round 6: never a deterministic answer
+    (hit,) = adapter.resolution_hits(result)
     assert hit["snippet"].startswith("Not confirmed")
 
 
@@ -357,6 +362,24 @@ def _write(root: Path, files: dict) -> Path:
     return root
 
 
+def _model_client(root: Path, tmp_path: Path, monkeypatch):
+    """A client whose model is a stub that records every message list it receives and answers 'stub answer'."""
+    monkeypatch.setattr(endpoint_resolver, "resolve_endpoint", lambda *args, **kwargs: ("http://model.test", "model", {}))
+    calls = []
+
+    async def model_call(url, model, messages, **kwargs):
+        calls.append(messages)
+        return '{"answer":"stub answer","memory":null,"artifact":null}'
+
+    monkeypatch.setattr(llm_core, "llm_call_async", model_call)
+    return _client_for(root, tmp_path, monkeypatch), calls
+
+
+def _evidence(messages) -> str:
+    """The item-lookup evidence block the model received ('' if none)."""
+    return "\n".join(str(m["content"]) for m in messages if "household item lookup" in str(m.get("content")))
+
+
 def _client_for(root: Path, tmp_path: Path, monkeypatch) -> TestClient:
     monkeypatch.setenv("MISUMI_HOUSEHOLD_ROOT", str(root))
     app = FastAPI()
@@ -414,7 +437,7 @@ def test_wh_location_and_shopping_scaffolding_is_removed_generically(question, m
 def test_the_question_kind_and_asked_field_are_parsed():
     assert item_question("Do we need to buy a tv?")["kind"] == "shopping"
     assert item_question("What's the milk expiry in stock?")["field"] == "expiry"
-    assert item_question("What do we have in stock?") == {"mention": "", "kind": "stock", "wh": True, "field": None}
+    assert item_question("What do we have in stock?") == {"mention": "", "kind": "stock", "wh": True, "field": None, "scoped": True}
 
 
 @pytest.mark.parametrize("question,never", [
@@ -472,8 +495,15 @@ def test_a_general_word_is_never_a_flat_no_when_a_related_record_exists(realisti
         result = adapter.resolve_question(question, "food")
         assert result["outcome"] == AMBIGUOUS, (question, result["outcome"])
         assert expected <= {record["name"] for record in result["candidates"]}
-    body = _ask(_client_for(realistic, tmp_path, monkeypatch), f"Do we have any {word}?")
-    assert "no matching" not in body["text"].lower() and "Not confirmed" in body["text"]
+    # Round 6: a scoped, unconfirmed item question without a model is answered "not confirmed", never "no" ...
+    body = _ask(_client_for(realistic, tmp_path / "nomodel", monkeypatch), f"Do we have any {word} in stock?")
+    assert body["source"] == "household-read-only" and "Not confirmed" in body["text"] and "no matching" not in body["text"].lower()
+    # ... and an unscoped one goes to the model with the candidates as quoted data.
+    client, calls = _model_client(realistic, tmp_path, monkeypatch)
+    body = _ask(client, f"Do we have any {word}?")
+    assert body["source"] == "model" and "no matching" not in body["text"].lower()
+    evidence = _evidence(calls[-1])
+    assert all(f'name: "{name}"' in evidence for name in expected), evidence
 
 
 def test_a_vocabulary_relation_never_turns_into_a_yes(realistic):
@@ -572,15 +602,21 @@ def test_shopping_list_items_resolve_whole_and_ticked_items_say_so(realistic, tm
 
 @pytest.mark.parametrize("value", [
     "0", "0 tins", "none", "None left", "no", "nil", "nothing left", "out", "out of stock", "empty", "gone", "all gone", "used up",
-    "finished", "run out", "ran out", "depleted", "sold out", "out - buy more", "0 (checked Monday)", "zero",
+    "finished", "run out", "ran out", "depleted", "sold out", "out - buy more", "0 (checked Monday)", "zero", "0g", "0 kg", "0.0",
 ])
 def test_every_common_way_of_recording_none_left_is_out_of_stock(value):
-    assert _ZERO_QUANTITY.match(value)
+    assert quantity_state(value) == "out"
 
 
-@pytest.mark.parametrize("value", ["1 tin", "no idea", "not checked", "half a bag", "2 tins", "outdoor fridge: 3", "nothing but crumbs"])
-def test_quantities_that_are_not_zero_are_not_out_of_stock(value):
-    assert not _ZERO_QUANTITY.match(value)
+@pytest.mark.parametrize("value", ["1 tin", "half a bag", "2 tins", "outdoor fridge: 3", "500g", "3"])
+def test_quantities_that_say_some_is_left_are_in_stock(value):
+    assert quantity_state(value) == "in"
+
+
+# Round 6 (review): a zero word followed by a number is not "out" ("no, 3 bags left"); unknown values are not guessed.
+@pytest.mark.parametrize("value", ["no, 3 bags left", "none - bought 2kg today", "no idea", "not checked", "", "null", "~"])
+def test_unclear_or_missing_quantities_are_neither_in_nor_out(value):
+    assert quantity_state(value) is None
 
 
 def test_recorded_text_is_rendered_as_quoted_data_never_as_an_instruction(tmp_path, monkeypatch):
@@ -595,7 +631,7 @@ def test_recorded_text_is_rendered_as_quoted_data_never_as_an_instruction(tmp_pa
 def test_an_alias_shared_by_two_records_picks_neither(tmp_path):
     stock = "items:\n  - name: rice pudding\n    aliases: [pud]\n  - name: bread pudding\n    aliases: [pud]\n"
     adapter = HouseholdReadOnlyAdapter(_root(tmp_path, stock))
-    assert all(record["alias_collisions"] for record in adapter.item_index()["records"])
+    assert all(record["alias_collisions"] for record in adapter.item_index()["records"] if record["kind"] == "stock")
     result = adapter.resolve_question("Do we have any pud?", "food")
     assert result["outcome"] == AMBIGUOUS and {record["name"] for record in result["candidates"]} == {"rice pudding", "bread pudding"}
 
@@ -603,7 +639,7 @@ def test_an_alias_shared_by_two_records_picks_neither(tmp_path):
 def test_a_name_beats_another_records_alias(tmp_path):
     stock = "items:\n  - name: aubergine\n    aliases: [eggplant]\n  - name: eggplant\n    quantity: 1\n"
     adapter = HouseholdReadOnlyAdapter(_root(tmp_path, stock))
-    records = adapter.item_index()["records"]
+    records = [record for record in adapter.item_index()["records"] if record["kind"] == "stock"]
     assert records[0]["alias_collisions"] == [phrase_key("eggplant")] and records[1]["alias_collisions"] == []
     result = adapter.resolve_question("Do we have eggplant?", "food")
     assert result["outcome"] == FOUND and [record["name"] for record in result["records"]] == ["eggplant"]
@@ -626,23 +662,279 @@ def test_a_misspelt_head_word_inside_a_longer_name_is_a_candidate_not_a_no(tmp_p
     assert result["outcome"] == AMBIGUOUS and result["candidates"][0]["name"] == "tenderstem broccoli"
 
 
+# --- round 6: an evidence retriever over every household record (independent review of 2533263b) ------------------------------
+# The review found false "no" for records outside the stock-named files (oven, kettle, rice cooker in kitchen-equipment.yaml;
+# flow-style, nested and also_known_as YAML; spices.yaml), grounded answers to non-inventory questions, plural folding into a
+# different record, quantity misreadings, and 8 surviving mutants. The resolver now indexes every household record and decides
+# only exact records and explicitly scoped absences; everything else goes to the model as quoted evidence.
+
+from misumi_item_question_bank import ITEM_FAMILIES, NON_INVENTORY, TYPO_PHRASINGS  # noqa: E402
+
+EQUIPMENT = (
+    "items:\n  - name: kettle\n    category: appliance\n    status: available\n"
+    "  - name: oven\n    category: appliance\n    status: available\n"
+    "  - name: rice cooker\n    category: appliance\n    status: missing\n"
+)
+WIDE = {
+    "household/food/stock.yaml": STOCK,
+    "household/food/kitchen-equipment.yaml": EQUIPMENT,
+    "household/food/condiments.yaml": "items:\n  - {name: mango chutney, quantity: 1 jar}\n  - {name: lime pickle, quantity: null}\n",
+    "household/food/dairy-stock.yaml": (
+        "groups:\n  - category: cheese\n    items:\n      - name: cheddar\n        quantity: half a block\n"
+        "      - name: stilton\n        quantity: 0g\n"
+    ),
+    "household/food/spices.yaml": (
+        "spices:\n  - name: cumin\n    quantity: 1 jar\n  - name: smoked paprika\n    also_known_as:\n      - pimenton\n"
+        "  - name: lentils\n    aliases: null\n"
+    ),
+    "household/food/shopping-list.md": "# Shopping list\n\n- [ ] desk\n- [ ] tv stand\n",
+    "household/food/preferences.yaml": "likes:\n  - sesame oil\n",
+}
+
+
+@pytest.fixture()
+def wide(tmp_path):
+    return _write(tmp_path / "wide", WIDE)
+
+
+@pytest.mark.parametrize("prompt,name,path", [
+    ("do we have an oven for cooking?", "oven", "household/food/kitchen-equipment.yaml"),
+    ("Do we have a kettle?", "kettle", "household/food/kitchen-equipment.yaml"),
+    ("Have we got a rice cooker?", "rice cooker", "household/food/kitchen-equipment.yaml"),
+    ("Do we have mango chutney?", "mango chutney", "household/food/condiments.yaml"),
+    ("Any cheddar in stock?", "cheddar", "household/food/dairy-stock.yaml"),
+    ("Do we have pimenton?", "smoked paprika", "household/food/spices.yaml"),
+    ("Is there any cumin in stock?", "cumin", "household/food/spices.yaml"),
+])
+def test_records_in_every_household_file_shape_are_found(wide, tmp_path, monkeypatch, prompt, name, path):
+    body = _ask(_client_for(wide, tmp_path, monkeypatch), prompt)
+    assert body["source"] == "household-read-only" and "can't find" not in body["text"].lower()
+    assert [(source["entry"], source["path"]) for source in body["sources"]] == [(name, path)]
+
+
+def test_rice_cooker_for_cooking_is_the_appliance_not_the_rice(wide):
+    (hit,) = HouseholdReadOnlyAdapter(wide).search("rice cooker for cooking", domain="food")
+    assert hit["resolution"] == FOUND and hit["entry"] == "rice cooker" and hit["kind"] == "equipment"
+
+
+def test_a_nested_group_passes_its_category_down_so_cheese_is_never_a_no(wide, tmp_path, monkeypatch):
+    result = HouseholdReadOnlyAdapter(wide).resolve_question("any cheese in stock?", "food")
+    assert result["outcome"] == AMBIGUOUS and {"cheddar", "stilton"} <= {r["name"] for r in result["candidates"]}
+    body = _ask(_client_for(wide, tmp_path, monkeypatch), "any cheese in stock?")
+    assert "no matching" not in body["text"].lower() and "can't find" not in body["text"].lower()
+
+
+def test_a_null_alias_is_not_an_alias(wide):
+    adapter = HouseholdReadOnlyAdapter(wide)
+    lentils = next(r for r in adapter.item_index()["records"] if r["name"] == "lentils")
+    assert lentils["aliases"] == [] and lentils["keys"] == [("lentil",)]
+    result = adapter.resolve_question("do we have null?", "food")
+    assert result["records"] == []
+
+
+def test_a_file_that_does_not_parse_blocks_any_deterministic_absence(tmp_path, monkeypatch):
+    root = _write(tmp_path / "hh", {"household/food/stock.yaml": STOCK, "household/food/spices.yaml": "items:\n  - name: [unclosed\n"})
+    adapter = HouseholdReadOnlyAdapter(root)
+    assert adapter.item_index()["failed"] == ["household/food/spices.yaml"]
+    result = adapter.resolve_question("Do we have saffron in stock?", "food")
+    assert result["outcome"] == NOT_PRESENT and not result["deterministic"]
+    body = _ask(_client_for(root, tmp_path, monkeypatch), "Do we have saffron in stock?")
+    assert "can't find" not in body["text"].lower() and "no matching" not in body["text"].lower()
+    assert "Not confirmed" in body["text"]
+
+
+def test_only_an_explicit_scope_may_say_cannot_find(tmp_path, monkeypatch):
+    client = _client_for(_root(tmp_path), tmp_path, monkeypatch)
+    assert "I can't find" in _ask(client, "Do we have saffron in stock?")["text"]
+    for prompt in ("Do we have saffron?", "Is saffron running low?", "How much saffron do we have?"):
+        body = _ask(client, prompt)
+        assert body["source"] != "household-read-only" and "can't find" not in body["text"].lower(), prompt
+
+
+@pytest.mark.parametrize("prompt", NON_INVENTORY)
+def test_non_inventory_questions_never_get_a_deterministic_household_answer(wide, tmp_path, monkeypatch, prompt):
+    body = _ask(_client_for(wide, tmp_path, monkeypatch), prompt)
+    assert body["source"] != "household-read-only", (prompt, body["text"])
+
+
+@pytest.mark.parametrize("family", sorted(ITEM_FAMILIES))
+def test_held_out_phrasing_families_answer_from_the_exact_record(adapter, family):
+    failures = []
+    for name in ITEMS:
+        for form in (name, _other_number(name)):
+            for phrasing in ITEM_FAMILIES[family]:
+                result = adapter.resolve_question(phrasing.format(n=form), None)
+                ids = [r["id"] for r in result["records"]] if result and result["outcome"] == FOUND else None
+                if ids != [next(r["id"] for r in adapter.item_index()["records"] if r["name"] == name)]:
+                    failures.append((phrasing, form, result and result["outcome"]))
+    assert not failures, f"{len(failures)} misses, e.g. {failures[:5]}"
+
+
+def _typo(name: str) -> str:
+    """One deletion inside the longest word (a bounded misspelling): 'broccoli' -> 'brocoli'."""
+    words = name.split()
+    longest = max(range(len(words)), key=lambda i: len(words[i]))
+    word = words[longest]
+    words[longest] = word[:len(word) // 2] + word[len(word) // 2 + 1:]
+    return " ".join(words)
+
+
+def test_a_misspelt_item_is_a_candidate_never_another_record_or_a_no(adapter):
+    for name in ITEMS:
+        typo = _typo(name)
+        if len(max(name.split(), key=len)) < 5:
+            continue  # too short to tell from another word
+        for phrasing in TYPO_PHRASINGS:
+            result = adapter.resolve_question(phrasing.format(t=typo), None)
+            assert result is not None and result["outcome"] != NOT_PRESENT, (phrasing, typo)
+            assert result["outcome"] != FOUND or [r["name"] for r in result["records"]] == [name], (phrasing, typo)
+            if result["outcome"] != FOUND:
+                assert name in [r["name"] for r in result["candidates"]], (phrasing, typo)
+
+
+def test_unconfirmed_items_reach_the_model_as_quoted_data_with_no_absence_claim(wide, tmp_path, monkeypatch):
+    client, calls = _model_client(wide, tmp_path, monkeypatch)
+    body = _ask(client, "Do we have any parmesan?")
+    assert body["source"] == "model"
+    messages = calls[-1]
+    evidence = _evidence(messages)
+    assert evidence and '"parmesan"' in evidence and 'name: "cheddar"' in evidence
+    assert "household/food/dairy-stock.yaml line" in evidence
+    instruction = next(m["content"] for m in messages if m["role"] == "system" and "Household item lookup" in m["content"])
+    assert "couldn't confirm" in instruction and "Never state or imply that the household does not have" in instruction
+    evidence_message = next(m for m in messages if "household item lookup" in str(m.get("content")))
+    assert evidence_message["role"] == "user" and evidence_message["metadata"]["trusted"] is False  # data, not instructions
+
+
+def test_an_exact_record_never_goes_to_the_model(wide, tmp_path, monkeypatch):
+    client, calls = _model_client(wide, tmp_path, monkeypatch)
+    body = _ask(client, "Do we have any mango chutney?")
+    assert body["source"] == "household-read-only" and not calls
+
+
+def test_a_non_inventory_question_carries_no_item_evidence_when_nothing_is_related(wide, tmp_path, monkeypatch):
+    client, calls = _model_client(wide, tmp_path, monkeypatch)
+    _ask(client, "Do we have time to cook tonight?")
+    assert calls and "no related record" in _evidence(calls[-1])  # the model is told nothing matched, never "we have none"
+    client, calls = _model_client(_write(tmp_path / "with-stock-cubes", REALISTIC), tmp_path / "second", monkeypatch)
+    body = _ask(client, "Any stock photos?")
+    assert body["source"] == "model"  # 'stock' as a modifier relates to no record (not stock cubes)
+    assert "no related record" in _evidence(calls[-1]) and "stock cubes" not in _evidence(calls[-1])
+
+
+def test_plural_folding_never_lands_on_a_different_record(tmp_path):
+    stock = "items:\n  - name: pepper\n    category: spice\n  - name: peppers\n    category: fresh_veg\n"
+    adapter = HouseholdReadOnlyAdapter(_root(tmp_path, stock))
+    assert [r["name"] for r in adapter.resolve_question("Do we have peppers?", None)["records"]] == ["peppers"]
+    assert [r["name"] for r in adapter.resolve_question("Do we have pepper?", None)["records"]] == ["pepper"]
+
+
+def test_anything_with_and_need_to_buy_name_the_item(wide):
+    adapter = HouseholdReadOnlyAdapter(wide)
+    assert stock_item_mention("anything with stock cubes in it?") == {"mention": "stock cubes"}
+    assert stock_item_mention("need to buy desk?") == {"mention": "desk"}
+    assert [r["name"] for r in adapter.resolve_question("need to buy desk?", None)["records"]] == ["desk"]
+
+
+def test_whats_in_stock_lists_the_records_not_the_pointer_document(tmp_path):
+    root = _write(tmp_path / "hh", {
+        "household/food/stock.yaml": STOCK,
+        "household/food/stock.md": "# Food stock\n\n- Edit `stock.yaml` when things are bought or used up.\n",
+    })
+    hits = HouseholdReadOnlyAdapter(root).search("what's in stock?", domain="food", limit=50)
+    assert hits and all(hit["path"] == "household/food/stock.yaml" for hit in hits)
+    assert {hit["entry"] for hit in hits} == set(ITEMS)
+
+
+def test_a_zero_quantity_with_a_unit_is_out_of_stock(wide):
+    stilton = next(r for r in HouseholdReadOnlyAdapter(wide).item_index()["records"] if r["name"] == "stilton")
+    assert stilton["out_of_stock"] is True and stilton["quantity_state"] == "out"
+
+
+# --- round 6 mutation survivors: each rule is load-bearing ------------------------------------------------------------------------
+
+
+def test_word_multisets_not_sets_decide_an_exact_match(tmp_path):
+    """M2 (set equality): 'peri sauce' has the same word SET as 'peri peri sauce' but is not that record."""
+    adapter = HouseholdReadOnlyAdapter(_root(tmp_path, "items:\n  - name: peri peri sauce\n"))
+    assert adapter.resolve_question("Do we have peri sauce in stock?", "food")["outcome"] == AMBIGUOUS
+
+
+def test_a_long_mention_is_not_taken_as_one_item_name(adapter):
+    """M5 (length limit): six words are a description, not a name - unresolved, never ambiguous-as-if-parsed."""
+    result = adapter.resolve_question("Do we have the big red tin of chopped tomatoes in stock?", "food")
+    assert result["outcome"] == UNRESOLVED
+
+
+def test_an_unclear_mention_offers_only_strong_candidates(tmp_path):
+    """M6 (weak candidates in unparsed mentions): a spelling-only relation is not offered for 'something like brocoli'."""
+    adapter = HouseholdReadOnlyAdapter(_root(tmp_path, "items:\n  - name: tenderstem broccoli\n    category: veg\n"))
+    result = adapter.resolve_question("Do we have something like brocoli or whatever in stock?", "food")
+    assert result["outcome"] == UNRESOLVED and result["candidates"] == []
+
+
+def test_the_misspelling_bound_is_tight(tmp_path):
+    """M10 (looser spelling bound): 'lamb' is two edits from 'lime' and is not offered as it."""
+    adapter = HouseholdReadOnlyAdapter(_root(tmp_path, "items:\n  - name: lime\n    category: fruit\n"))
+    result = adapter.resolve_question("Do we have lamb in stock?", "food")
+    assert result["outcome"] == NOT_PRESENT and result["deterministic"]
+
+
+def test_a_five_letter_name_misspelt_to_four_letters_is_never_a_scoped_no(tmp_path):
+    """Real-data sweep (round 6): 'brea' for 'bread' in an 'in stock' question was a deterministic "can't find"."""
+    adapter = HouseholdReadOnlyAdapter(_root(tmp_path, "items:\n  - name: bread\n    category: bakery\n"))
+    result = adapter.resolve_question("Any brea left in stock?", "food")
+    assert result["outcome"] == AMBIGUOUS and not result["deterministic"] and result["candidates"][0]["name"] == "bread"
+
+
+def test_a_recorded_category_alone_makes_a_candidate(tmp_path):
+    """M11 (category relation removed): 'wine' is in no vocabulary entry; only the record's category links it to pinot."""
+    adapter = HouseholdReadOnlyAdapter(_root(tmp_path, "items:\n  - name: pinot\n    category: wine\n"))
+    result = adapter.resolve_question("Do we have any wine in stock?", "food")
+    assert result["outcome"] == AMBIGUOUS and [r["name"] for r in result["candidates"]] == ["pinot"]
+
+
+def test_the_vocabulary_applies_to_the_head_of_a_longer_mention(realistic):
+    """M18 (vocabulary on the whole key only): 'grated parmesan' still reaches Parmigiano Reggiano via 'parmesan'."""
+    result = HouseholdReadOnlyAdapter(realistic).resolve_question("Do we have grated parmesan in stock?", "food")
+    assert result["outcome"] == AMBIGUOUS and "Parmigiano Reggiano" in [r["name"] for r in result["candidates"]]
+
+
+def test_a_bare_query_is_kept_only_on_an_exact_record(adapter):
+    """M23 (bare guard removed): bare text with only a partial match is not an item question."""
+    assert adapter.resolve_question("olive oil", "food", bare=True) is None
+    assert adapter.resolve_question("olives", "food", bare=True)["outcome"] == FOUND
+
+
+def test_the_scope_guard_is_what_allows_cannot_find(adapter):
+    """An unscoped absence is never deterministic; a scoped one over clean files is."""
+    assert not adapter.resolve_question("Do we have saffron?", "food")["deterministic"]
+    assert adapter.resolve_question("Do we have saffron in stock?", "food")["deterministic"]
+
+
 # --- real household data (local only) -------------------------------------------------------------------------------------
 
 
 REAL_ROOT = os.environ.get("MISUMI_REAL_HOUSEHOLD_ROOT", "")
 _real = pytest.mark.skipif(not REAL_ROOT or not Path(REAL_ROOT).is_dir(), reason="MISUMI_REAL_HOUSEHOLD_ROOT not set (real data is local only)")
+_REAL_KINDS = ("stock", "equipment")
+
+
+def _real_records():
+    return [r for r in HouseholdReadOnlyAdapter(REAL_ROOT).item_index()["records"] if r["kind"] in _REAL_KINDS]
 
 
 @_real
-def test_every_real_stock_item_resolves_identically_across_phrasings():
+def test_every_real_stock_and_equipment_item_resolves_identically_across_phrasings():
     adapter = HouseholdReadOnlyAdapter(REAL_ROOT)
-    records = adapter.item_index("food")["records"]
+    records = _real_records()
     assert records
+    phrasings = PHRASINGS + [p for family in ITEM_FAMILIES.values() for p in family]
     failures = []
     for record in records:
-        for form in (record["name"], _other_number(record["name"])):
-            for phrasing in PHRASINGS:
-                result = adapter.resolve_item(phrasing.format(n=form), domain="food")
+        for form in dict.fromkeys((record["name"], _other_number(record["name"]))):
+            for phrasing in phrasings:
+                result = adapter.resolve_question(phrasing.format(n=form), None)
                 ids = [r["id"] for r in result["records"]] if result and result["outcome"] == FOUND else []
                 if ids != [record["id"]]:
                     failures.append((record["id"], phrasing, result and result["outcome"]))
@@ -651,21 +943,18 @@ def test_every_real_stock_item_resolves_identically_across_phrasings():
 
 @_real
 def test_every_real_stock_item_is_answered_from_its_own_record_through_the_route(tmp_path, monkeypatch):
-    """Every real item x every phrasing (wh-forms, no 'stock' word, locations, both numbers) through /misumi/respond: the answer is
-    that record and only that record - zero wrong-item answers, zero 'no', zero model fall-through."""
+    """Every real stock and equipment item x the fix-time phrasings through /misumi/respond: that record only."""
     client = _client_for(Path(REAL_ROOT), tmp_path, monkeypatch)
-    records = HouseholdReadOnlyAdapter(REAL_ROOT).item_index("food")["records"]
-    outcomes, failures = {}, []
-    for record in records:
+    failures, total = [], 0
+    for record in _real_records():
         for form in dict.fromkeys((record["name"], _other_number(record["name"]))):
             for phrasing in PHRASINGS:
+                total += 1
                 body = _ask(client, phrasing.format(n=form))
                 found = {(s["path"], s["line"]) for s in body["sources"] if s.get("resolution") == FOUND}
-                ok = body["source"] == "household-read-only" and found == {(record["path"], record["line"])}
-                outcomes[ok] = outcomes.get(ok, 0) + 1
-                if not ok:
+                if not (body["source"] == "household-read-only" and found == {(record["path"], record["line"])}):
                     failures.append((record["id"], phrasing))
-    assert not failures, f"{len(failures)} of {sum(outcomes.values())} questions not answered from their record, e.g. {failures[:5]}"
+    assert not failures, f"{len(failures)} of {total} questions not answered from their record, e.g. {failures[:5]}"
 
 
 @_real
@@ -675,4 +964,11 @@ def test_real_general_words_from_the_review_are_never_a_flat_no(tmp_path, monkey
     for question in (f"Do we have any {word} in stock?", f"What's the quantity of {word} in stock?", f"Is {word} running low?",
                      f"Do we have {word} in the food cupboard?"):
         body = _ask(client, question)
-        assert "no matching" not in body["text"].lower(), question
+        assert "no matching" not in body["text"].lower() and "can't find" not in body["text"].lower(), question
+
+
+@_real
+@pytest.mark.parametrize("prompt", ["do we have an oven for cooking?", "Do we have a kettle?", "rice cooker for cooking"])
+def test_real_kitchen_equipment_is_found(tmp_path, monkeypatch, prompt):
+    body = _ask(_client_for(Path(REAL_ROOT), tmp_path, monkeypatch), prompt)
+    assert "can't find" not in body["text"].lower()
