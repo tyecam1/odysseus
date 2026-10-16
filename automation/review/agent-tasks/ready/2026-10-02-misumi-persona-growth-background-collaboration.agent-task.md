@@ -1593,3 +1593,20 @@ Generic agent benchmarks will not expose Misumi's actual failures. The correct b
 #### Validation criteria
 
 At least 25 cases are machine-readable, each has an unambiguous pass condition, and a deliberately unsafe or cross-domain agent fails the permission/isolation cases.
+
+---
+
+## 2026-10-16 user-directed intelligence and demonstration ambition
+
+Source-of-intent and acceptance expansion: `docs/misumi-intelligence-and-demonstration-ambition-2026-10-16.md` (Odysseus; this branch). Domain-owned personality/ambient companion specification: `tyecam1/misumi:docs/core/misumi-persona-and-ambient-companions-2026-10-16.md` (corresponding proposed Misumi PR).
+
+This is a **scope and prioritisation update** to this existing acceptance owner, not a new long-horizon queue, runtime implementation or ratification of any household norm. Reconcile these additional acceptance criteria into the programme's active dependency frontier:
+
+1. Demonstrate whether deterministic v0.2 or a qualified local Jev-like bounded semantic selector yields better reliable persona routing; do not claim Jev or any neural classifier is deployed now. Preserve v0.1 rollback, safe abstention and reserved-matter authority.
+2. Evaluate strong solo, cheap-first, smaller complementary specialist teams and evidence-based whole-workflow allocation on *matched real tasks*. Count actual verified outcome, model/tool/host spend, tokens, latency, specialist contribution, synthesis errors, rework, human corrections and permissions. PR #91 remains the global model-role owner; PR #124's progress scheduling owns which tasks are worth doing next. Do not create a separate router, evaluator or scheduler.
+3. Build a safe, evidence-coupled inspection/demo surface over the existing runtime and test harness, with reproducible scenarios, production/synthetic/replay badges, user-visible routing/team/host/model/resource traces, guest-mode isolation, truthful UI room/presence states and one-touch reset. Use the same execution path, not a fabricated demo backend.
+4. Build bounded opportunities for Misumi to ask residents useful clarifying stock questions through *consented, actually audible* conversations, prioritised by information gain vs intrusion. Keep hardware availability distinct from permission, attention, identity, audibility and retention. Start with synthetic explicit-turn tests; physical always-on/ambient listening requires separate household consent.
+5. Audit and improve active persona character decision pressure using source-grounded, independently evaluated, blind comparisons (PR #36), not catchphrase imitation or unapproved personality promotion. Add Ein and Jiji only as inexpensive presentation-level ambient companions, not routable or tool-using agents.
+6. Prioritise safety/security verification, current PR #122/#123 integration and actual long-horizon continuity first when they are the critical path. These extensions are ongoing product requirements, not a pretext to keep stale unsafe software running.
+
+A completed demo or milestone is not the mission's completion boundary. Continue selecting evidence-justified next capability gaps without arbitrary busywork; preserve existing consent, permissions, audit and human-only ratification gates.
