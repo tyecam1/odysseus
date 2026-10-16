@@ -88,3 +88,35 @@ They are **not** routable personas, executors, knowledge authorities, voice assi
 6. Continue beyond any individual PR, milestone or demo; advance the next real, measured user-value bottleneck, without inventing busywork or bypassing protected approvals.
 
 This document captures operator **design intent**. It is not evidence these capabilities have shipped, nor does it amend ratified Level 5/6 household policy or grant new permission.
+
+---
+
+## 2026-10-16 supplementary operator direction: spacecraft HUD, dynamic roles and Spotify
+
+Full Misumi-domain specification: `tyecam1/misumi:docs/design/ftl-hud-and-jin-music-ambition-2026-10-16.md` (proposed in Misumi PR #68). This is additive user design direction, not confirmation of deployment or ratification of new household access.
+
+### HUD / original scene preservation
+
+Refine the existing 2D spacecraft, work-node/room map and HUD visuals to more intentional FTL-inspired pixel-art: tactile 8/16-bit panels, stronger differentiated green/warm-hull/deep-space palettes, legible node states and typography, pixel icons, high-resolution starfields/planets/nebula backgrounds and proper hitbox/keyboard/touch operation. Fix the user's reported broken 2D interactions with reproduced tests, not only screenshots. Preserve the existing ratified low-poly PS2 3D room scenes **without restyling/removing/changing geometry or rigs**; only add complementary animations/characters or truthful events after visual review.
+
+Current assets: `Better_Planets_and_Backgrounds_v1.3.2.zip` supplied by user held **only a README** (no image textures / mod .ftl). Recommended local external reference folder: `C:\Users\tyeca\Pictures\Misumi\design-references\FTL\`; do not import mod/game assets into Git without source-specific reuse rights. Frontend work is owned by Misumi; execution telemetry and model state by Odysseus. Note existing `bbc-route-b.css` and `bbc-pixel.js` refer to `docs/design/bbc-visual-system-v1.md`, absent on inspected Misumi main: reconcile the pointer before assuming its authority.
+
+### Task-specific persona roles, skill requirements and tool/MCP assignment
+
+Distinguish three independent axes:
+
+1. **Persona identity** (Misumi canon, character decision style and domain competencies, stable under ratified rules).
+2. **Ephemeral task assignment** (coordinator/researcher/critic/music-selector/synthesiser/etc., with explicit requested competence and an evidence-based persona/team choice).
+3. **Execution binding** (qualified concrete model/host, tool/MCP endpoint, scoped operation, credential principal, verifier, resource budget), chosen by Odysseus *per task* from the existing capability registry.
+
+No permanent `persona -> model` or `persona -> provider/MCP` bindings. A user-facing persona may request a task capability, but cannot gain credentials, permissions or authority by identity. Define semantic tool capability requirements at plan time and bind a live qualified executor under least privilege only at execution. Local Jev-like typed/classifier inference or a qualifying planner may propose work assignments; benchmark against current deterministic routing and strong solo with held-out tasks before promotion. Expertise must be evidenced by task success, not fictional source character assumptions. Six Eyes evaluates which specialist mix is cheaper/better than a stronger solo model, counting total tool+model+verification+coordination cost, quality, failure and latency. Respects existing host admission and scheduler.
+
+### Jin/Spotify MCP
+
+Jin is the conversational specialist for music taste, intent and recommendations; **Odysseus** owns the provider-agnostic `music.*` tool capability and authorised Spotify-MCP binding. Target spoken/typed commands: play/search/queue/pause/resume/next/volume/device/now-playing. Do not bind a Spotify token to Jin or create an additional tool router. Implement against an existing provider-agnostic tool capability interface with Spotify OAuth2 PKCE, minimal official playback scopes, secure token storage, principal/device-aware write authorisation, idempotency, revocation, no unprompted playback, guest isolation and mock/demo adapter. Only after the operator completes the required OAuth account connection and Spotify Premium/device eligibility. No hardcoding of open-source MCP implementation without security/release review. Spotify Web API development-mode access, quota/rate limits and policy restrictions must be validated before live deployment. No synchronised Spotify audio with visual media or copied music assets. Keep Spotify listening data separate from canonical record ownership.
+
+Acceptance should include an actual authenticated playback/skip/pause/queue drill on the chosen Spotify Connect device, negative read-only and guest tests, clear error paths and source/trace/provenance. Never claim connected Spotify access until OAuth and production tests prove it. This provider integration is subordinate to the existing tool registry and work orchestration, not a new stand-alone service.
+
+### Extension to demo/evaluation programme
+
+Show the ship HUD and 3D room as distinct complementary views. A task inspection should expose persona identity, temporary work roles, selected models/hosts/MCP tools, user scopes, resource cost, verifiers and whether a real Spotify command ran or was only demo-simulated. Guest showcases may show a fake playlist interaction without exercising owner's Spotify account. Visual comparisons must preserve existing PS2 scene snapshots and test functional 2D HUD paths at native 1024x768.
