@@ -43,7 +43,11 @@ ORIGIN_TTL_S = 7 * 24 * 3600  # an offer is only ever made to its origin owner w
 # SAFETY_LATCH_TURNS turns or SAFETY_LATCH_S seconds, whichever ends first (round 6: short, so a false positive costs little).
 SAFETY_LATCH_S = 5 * 60
 SAFETY_LATCH_TURNS = 3
-SAFETY_LATCH_CAP = 4096  # in-memory, least-recently-latched entries are evicted beyond this (never written to shared state)
+# Latches live in memory only (never shared state), in per-OWNER maps so one owner's flood can only evict that owner's own
+# latches (round 7). Callers without the execute scope get a separate, smaller structure that can never evict an execute
+# owner's latch. Latches do not survive a worker restart (and are not shared between workers); that is accepted, because the
+# per-turn gate and the model-facing carve-out do not depend on them.
+LATCH_LIMITS = {"execute": (4096, 64), "read-only": (256, 16)}  # (owners, sessions per owner)
 
 _BARE = r"[\s.!,]*(?:please|thanks|thank you)?[\s.!]*$"
 AFFIRM = re.compile(r"^\s*yes" + _BARE, re.IGNORECASE)  # round 5: bare yes only ("ok", "sure", "yeah" never ratify)
@@ -179,8 +183,10 @@ class OfferBook:
     def __init__(self, clock=None, root: str | Path | None = None):
         self._clock = clock or (lambda: time.time())  # late-bound so tests can move time
         self._memory: dict[str, Any] = {"pending": {}, "last_offered": {}, "last_revision": {}}
-        self._latch: "OrderedDict[str, dict[str, float]]" = OrderedDict()  # process-local, bounded, TTL-pruned
-        self.latch_cap = SAFETY_LATCH_CAP
+        # tier -> owner -> session key -> {"at", "turns"}; process-local, bounded, TTL-pruned
+        self._latch: dict[str, "OrderedDict[str, OrderedDict[str, dict[str, float]]]"] = {
+            tier: OrderedDict() for tier in LATCH_LIMITS}
+        self.latch_limits = dict(LATCH_LIMITS)
         self._io = None
         if root is not None:
             from src.misumi_state_io import StateDir
@@ -270,43 +276,52 @@ class OfferBook:
 
     # ---------- safety latch (recent-context window for the safety gate; in memory, bounded) ----------
 
-    def _prune_latches(self) -> None:
+    def _prune_owner(self, sessions: "OrderedDict[str, dict[str, float]]") -> None:
         now = self._clock()
-        while self._latch:
-            key, row = next(iter(self._latch.items()))
-            if now - row["at"] > SAFETY_LATCH_S:
-                self._latch.popitem(last=False)
-            else:
-                break
-        while len(self._latch) > self.latch_cap:
-            self._latch.popitem(last=False)
+        for key in [k for k, row in sessions.items() if now - row["at"] > SAFETY_LATCH_S or row["turns"] <= 0]:
+            sessions.pop(key, None)
 
-    def latch_safety(self, session_id: str | None, owner: str | None = None) -> None:
+    def latch_safety(self, session_id: str | None, owner: str | None = None, privileged: bool = True) -> None:
         """A flagged turn happened: the next SAFETY_LATCH_TURNS turns of this (owner, session), within SAFETY_LATCH_S, get no
-        learned behaviour. Memory only - never shared state - so no caller, whatever its scope, can grow a file with it."""
+        learned behaviour. Memory only. ``privileged`` is False for callers without the execute scope: their latches live in a
+        separate small structure."""
         if not session_id:
             return
-        key = self._key(session_id, owner)
-        self._latch.pop(key, None)
-        self._latch[key] = {"at": self._clock(), "turns": float(SAFETY_LATCH_TURNS)}
-        self._prune_latches()
+        tier = "execute" if privileged else "read-only"
+        max_owners, max_sessions = self.latch_limits[tier]
+        owners = self._latch[tier]
+        who = _owner_value(owner)
+        sessions = owners.pop(who, None) or OrderedDict()
+        owners[who] = sessions                              # most recently latched owner last
+        self._prune_owner(sessions)
+        key = str(session_id)
+        sessions.pop(key, None)
+        sessions[key] = {"at": self._clock(), "turns": float(SAFETY_LATCH_TURNS)}
+        while len(sessions) > max_sessions:                 # an owner can only evict their OWN oldest latch
+            sessions.popitem(last=False)
+        while len(owners) > max_owners:
+            owners.popitem(last=False)
 
     def consume_latch(self, session_id: str | None, owner: str | None = None) -> bool:
-        """True (and one latched turn used up) when this turn falls inside a latch window."""
-        self._prune_latches()
+        """True (and one latched turn used up) when this turn falls inside a latch window of this (owner, session)."""
         if not session_id:
             return False
-        key = self._key(session_id, owner)
-        row = self._latch.get(key)
-        if row is None:
-            return False
-        if self._clock() - row["at"] > SAFETY_LATCH_S or row["turns"] <= 0:
-            self._latch.pop(key, None)
-            return False
-        row["turns"] -= 1
-        if row["turns"] <= 0:
-            self._latch.pop(key, None)
-        return True
+        who, key, hit = _owner_value(owner), str(session_id), False
+        for tier in LATCH_LIMITS:
+            sessions = self._latch[tier].get(who)
+            if not sessions:
+                continue
+            self._prune_owner(sessions)
+            row = sessions.get(key)
+            if row is not None:
+                hit = True
+                row["turns"] -= 1
+                if row["turns"] <= 0:
+                    sessions.pop(key, None)
+            if not sessions:
+                self._latch[tier].pop(who, None)
+        return hit
 
-    def latch_size(self) -> int:
-        return len(self._latch)
+    def latch_size(self, tier: str | None = None) -> int:
+        tiers = [tier] if tier else list(LATCH_LIMITS)
+        return sum(len(sessions) for t in tiers for sessions in self._latch[t].values())

@@ -19,6 +19,7 @@ Guarantees of :class:`StateDir`:
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import json
 import os
 import threading
@@ -42,6 +43,30 @@ def lock_timeout_s() -> float:
         return max(0.05, float(os.getenv("MISUMI_STATE_LOCK_TIMEOUT_S") or DEFAULT_LOCK_TIMEOUT_S))
     except ValueError:
         return DEFAULT_LOCK_TIMEOUT_S
+
+
+class StateBudget:
+    """One lock-wait budget for a whole request (round 7): every lock acquisition in the request draws from it, so a request
+    waits at most ``seconds`` in total however many stores it touches - not ``seconds`` per attempt."""
+
+    def __init__(self, seconds: float | None = None):
+        self.remaining = lock_timeout_s() if seconds is None else float(seconds)
+
+    def spend(self, waited: float) -> None:
+        self.remaining = max(0.0, self.remaining - max(0.0, waited))
+
+
+_BUDGET: "contextvars.ContextVar[StateBudget | None]" = contextvars.ContextVar("misumi_state_budget", default=None)
+
+
+@contextlib.contextmanager
+def state_budget(budget: StateBudget) -> Iterator[StateBudget]:
+    """Run the enclosed state work against ``budget`` (set it inside the worker thread that does the work)."""
+    token = _BUDGET.set(budget)
+    try:
+        yield budget
+    finally:
+        _BUDGET.reset(token)
 
 
 class StateUnavailable(RuntimeError):
@@ -124,17 +149,29 @@ class StateDir:
                 held[key][0] -= 1
             return
         thread_lock = _thread_lock(key)
-        timeout = self.lock_timeout
-        if not thread_lock.acquire(timeout=timeout):
-            raise StateLockTimeout(f"could not lock adaptation state within {timeout:.1f}s (held in this process)")
+        budget = _BUDGET.get()
+        timeout = self.lock_timeout if budget is None else min(self.lock_timeout, budget.remaining)
+        if timeout <= 0:
+            raise StateLockTimeout("the request's state lock budget is spent")
+        started = time.monotonic()
+        try:
+            if not thread_lock.acquire(timeout=timeout):
+                raise StateLockTimeout(f"could not lock adaptation state within {timeout:.1f}s (held in this process)")
+        finally:
+            if budget is not None:
+                budget.spend(time.monotonic() - started)
         try:
             self.root.mkdir(parents=True, exist_ok=True)
             fd = os.open(key, os.O_RDWR | os.O_CREAT, 0o600)
+            started = time.monotonic()
             try:
-                _os_lock(fd, timeout)
+                _os_lock(fd, timeout if budget is None else max(0.0, min(timeout, budget.remaining)))
             except BaseException:
                 os.close(fd)
                 raise
+            finally:
+                if budget is not None:
+                    budget.spend(time.monotonic() - started)
             held[key] = [1, fd]
             try:
                 yield

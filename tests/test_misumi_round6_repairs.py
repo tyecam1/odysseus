@@ -129,10 +129,9 @@ def test_the_latch_expires_after_five_minutes_and_is_bounded():
     assert book.consume_latch("s", "bob") is False            # per (owner, session)
     now[0] += 5 * 60 + 1                                       # the contract: five minutes, not the constant
     assert book.consume_latch("s", "alice") is False
-    book.latch_cap = 50
-    for i in range(300):
+    for i in range(300):                                        # round 7: bounded per owner
         book.latch_safety(f"s{i}", "flood")
-    assert book.latch_size() == 50
+    assert book.latch_size() == rd.LATCH_LIMITS["execute"][1]
 
 
 def test_a_flagged_turn_withdraws_the_pending_offer(estate):

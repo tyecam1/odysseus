@@ -53,6 +53,7 @@ from pathlib import Path
 from typing import Any
 
 from src.misumi_persona_state import evidence_origin, is_reserved_turn, owner_key
+from src.misumi_safety_gate import withhold_learned_route
 from src.misumi_state_io import StateCorruptError, StateDir, StateUnavailable  # noqa: F401  (re-exported for callers)
 
 logger = logging.getLogger(__name__)
@@ -685,14 +686,16 @@ class RoutingAdaptationStore:
     ) -> tuple[str, dict[str, Any] | None]:
         """Apply active learned revisions to one auto-routing decision.
 
-        Learned routing is ADVISORY (round 6). It applies only when the SAME shared gate as learned style
-        (``is_reserved_turn`` -> ``src.misumi_safety_gate``) does not flag the turn, never when the base route is a reserved
-        route (Aoteru keeps the lead), and only on the exact cue word (no variants). A quarantined, locked or unavailable store
-        applies nothing. Explicit caller persona choices never reach this path. Residual risk: an emergency phrased in a way
-        the lexicon misses can still follow a learned cue to another persona; that persona still carries its seed-order safety
-        rules, but the learned-style carve-out does not cover routing.
+        Learned routing is ADVISORY (round 6/7). It is withheld when the precision safety block flags the turn
+        (``is_reserved_turn``) OR when the separate RECALL-FIRST routing gate (``withhold_learned_route``: any hazard, injury,
+        medical, urgency, distress, substance, violence, vehicle or missing/trapped word, or a person together with a body part)
+        fires; never when the base route is a reserved route (Aoteru keeps the lead); and only on the exact cue word. A
+        quarantined, locked or unavailable store applies nothing. Explicit caller persona choices never reach this path.
+        Residual risk (measured on round-7 held-out sets, 80 emergencies / 80 ordinary): the routing gate missed 3/80 emergencies
+        and withheld the learned route on 10/80 ordinary turns; an emergency it misses can still follow a learned cue to another
+        persona (that persona keeps its seed-order rules; the learned-style carve-out does not cover routing).
         """
-        if is_reserved_turn(prompt, context):
+        if is_reserved_turn(prompt, context) or withhold_learned_route(prompt):
             return base_persona, None
         if any(str(reason).startswith("reserved:") for reason in base_reasons or []):
             return base_persona, None  # a reserved base route (Aoteru) is never overridden by learned state

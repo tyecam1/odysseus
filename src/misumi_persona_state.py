@@ -855,3 +855,44 @@ def compose_system(foundation: str, values: dict[str, str]) -> str:
     """Foundation text first, byte-for-byte untouched; the style block is only ever appended."""
     block = style_block(values)
     return foundation if not block else f"{foundation}\n\n{block}"
+
+
+# Round 7: a durable-looking request that is treated as DATA (reported speech, a hedge, a joke, a signature, pasted text) is not
+# saved silently. The reply says so once and shows the explicit way to save it: the user's own request on its own line, then
+# "yes". CANONICAL_REQUESTS are exactly such requests (each one is detected and classified durable - tested).
+CANONICAL_REQUESTS: dict[tuple[str, str], str] = {
+    ("response_depth", "brief"): "From now on keep answers short",
+    ("response_depth", "thorough"): "From now on give more detail",
+    ("technical_depth", "plain"): "From now on use plain English",
+    ("technical_depth", "technical"): "From now on be more technical",
+    ("structure", "bullets"): "From now on use bullet points",
+    ("structure", "stepwise"): "From now on give numbered steps",
+    ("structure", "prose"): "From now on answer in prose",
+    ("intervention_style", "proactive"): "From now on suggest next steps",
+    ("intervention_style", "reactive"): "From now on just answer what I ask",
+}
+NOT_SAVED_TEMPLATE = (
+    "I have not saved that as a lasting preference, because it read as someone else's words, a quote, a hedge or a joke. "
+    "To save it, send it on its own as your own request, for example: \"{example}\", then answer yes."
+)
+
+
+def unsaved_preference(prompt: str) -> dict[str, str] | None:
+    """{'example', 'message'} when the turn carries a durable-looking style or routing request that was NOT captured because the
+    turn is treated as data; None otherwise. It never creates evidence or an offer."""
+    if not own_instruction(prompt)["data_task"] or is_reserved_turn(prompt):
+        return None
+    text = _prep(prompt)
+    if not _DURABLE_PHRASE.search(text):
+        return None
+    for dimension, value, kind, pattern in _SIGNALS:
+        if kind == "request" and pattern.search(text) and (dimension, value) in CANONICAL_REQUESTS:
+            example = CANONICAL_REQUESTS[(dimension, value)]
+            return {"example": example, "message": NOT_SAVED_TEMPLATE.format(example=example)}
+    if _ROUTING_HINT.search(text):
+        example = "From now on use Jin for compost questions"
+        return {"example": example, "message": NOT_SAVED_TEMPLATE.format(example=example)}
+    return None
+
+
+_ROUTING_HINT = re.compile(r"\b(?:use|ask|send|route)\s+\w+\s+(?:for|about|to)\b|\bquestions\s+(?:go\s+)?to\b", re.IGNORECASE)

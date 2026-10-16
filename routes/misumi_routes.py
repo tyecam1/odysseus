@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 
 from fastapi import APIRouter, HTTPException, Request
+from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 
 from core.middleware import require_admin
@@ -22,7 +23,7 @@ from src.misumi_memory import MisumiMemory
 from src.misumi_observability import MisumiEventLog
 from src.misumi_persona_routing import resolve_auto_lead
 from src.misumi_ratification_dialogue import OfferBook, build_offer, candidate_digest, origin_allows, parse_answer
-from src.misumi_state_io import StateUnavailable
+from src.misumi_state_io import StateBudget, StateUnavailable, state_budget
 from src.misumi_team_formation import plan_team, risk_flag, synthesis_inputs
 from src.misumi_persona_state import (
     GLOBAL_SCOPE,
@@ -32,6 +33,7 @@ from src.misumi_persona_state import (
     detect_style_signals,
     is_reserved_turn,
     own_instruction,
+    unsaved_preference,
 )
 from src.misumi_routing_adaptation import (
     RoutingAdaptationStore,
@@ -1050,7 +1052,7 @@ def setup_misumi_routes(
         }
 
     @router.get("/routing/candidates")
-    async def routing_candidates(request: Request):
+    def routing_candidates(request: Request):
         """Inspect affinity candidates and active revisions (read-only)."""
         _require_api_scope(request, "misumi:read")
         if adaptation is None:
@@ -1068,7 +1070,7 @@ def setup_misumi_routes(
             raise HTTPException(503, str(exc)) from exc
 
     @router.post("/routing/candidates/{candidate_id}/promote")
-    async def routing_candidate_promote(request: Request, candidate_id: str):
+    def routing_candidate_promote(request: Request, candidate_id: str):
         """The operator's ratification act for an eligible candidate."""
         _require_api_scope(request, "misumi:execute")
         if adaptation is None:
@@ -1098,7 +1100,7 @@ def setup_misumi_routes(
         return {"promoted": True, "revision": revision}
 
     @router.post("/routing/candidates/{candidate_id}/reject")
-    async def routing_candidate_reject(request: Request, candidate_id: str, body: Dict[str, Any] = None):
+    def routing_candidate_reject(request: Request, candidate_id: str, body: Dict[str, Any] = None):
         _require_api_scope(request, "misumi:execute")
         if adaptation is None:
             raise HTTPException(503, "Routing adaptation is disabled")
@@ -1114,7 +1116,7 @@ def setup_misumi_routes(
         return {"rejected": True, "candidate": candidate}
 
     @router.post("/routing/revisions/{revision_id}/rollback")
-    async def routing_revision_rollback(request: Request, revision_id: str, body: Dict[str, Any] = None):
+    def routing_revision_rollback(request: Request, revision_id: str, body: Dict[str, Any] = None):
         _require_api_scope(request, "misumi:execute")
         if adaptation is None:
             raise HTTPException(503, "Routing adaptation is disabled")
@@ -1140,7 +1142,7 @@ def setup_misumi_routes(
         return {"rolled_back": True, "rollback": rollback}
 
     @router.get("/persona-state")
-    async def persona_state_inspect(request: Request):
+    def persona_state_inspect(request: Request):
         """Inspect persona-state candidates and effective revisions (read-only)."""
         _require_api_scope(request, "misumi:read")
         if persona_state is None:
@@ -1155,7 +1157,7 @@ def setup_misumi_routes(
             raise HTTPException(503, str(exc)) from exc
 
     @router.post("/persona-state/candidates/{candidate_id}/promote")
-    async def persona_state_promote(request: Request, candidate_id: str):
+    def persona_state_promote(request: Request, candidate_id: str):
         """The operator's ratification act for an eligible persona-state candidate."""
         _require_api_scope(request, "misumi:execute")
         if persona_state is None:
@@ -1183,7 +1185,7 @@ def setup_misumi_routes(
         return {"promoted": True, "revision": revision}
 
     @router.post("/persona-state/candidates/{candidate_id}/reject")
-    async def persona_state_reject(request: Request, candidate_id: str, body: Dict[str, Any] = None):
+    def persona_state_reject(request: Request, candidate_id: str, body: Dict[str, Any] = None):
         _require_api_scope(request, "misumi:execute")
         if persona_state is None:
             raise HTTPException(503, "Persona-state adaptation is disabled")
@@ -1199,7 +1201,7 @@ def setup_misumi_routes(
         return {"rejected": True, "candidate": candidate}
 
     @router.post("/persona-state/revisions/{revision_id}/rollback")
-    async def persona_state_rollback(request: Request, revision_id: str, body: Dict[str, Any] = None):
+    def persona_state_rollback(request: Request, revision_id: str, body: Dict[str, Any] = None):
         _require_api_scope(request, "misumi:execute")
         if persona_state is None:
             raise HTTPException(503, "Persona-state adaptation is disabled")
@@ -1242,116 +1244,138 @@ def setup_misumi_routes(
         routing: Optional[Dict[str, Any]] = None
         adaptation_note: Optional[Dict[str, Any]] = None
         owner = _owner(request)
-        # One gate for routing AND persona-state capture (round 4): a persisted turn from an execute-scoped caller, not a
-        # reserved/safety turn, and not a turn that processes third-party text. Anything else records nothing at all.
-        authority = _adaptation_authority(request) if body.persist_turn else None
-        # ONE gate decides whether learned behaviour (style AND routing), capture and offers may touch this turn (round 5/6).
-        # Only the user's own turn text is assessed: interface/device ``context`` is not the user's words, and a reserved word in
-        # it must not block every turn. A flagged turn latches this (owner, session) for the next few turns (memory only), and
-        # a pending offer is withdrawn by it (execute scope only - read-only callers never write shared state).
-        unsafe_turn = is_reserved_turn(prompt)
-        latched = offers.consume_latch(body.session_id, owner)
-        if unsafe_turn:
-            offers.latch_safety(body.session_id, owner)
-        try:
-            offers.check_healthy()
-            if unsafe_turn and authority is not None and body.session_id:
-                offers.clear(body.session_id, owner)
-        except StateUnavailable as exc:
-            logger.error("Misumi dialogue state unavailable; learned behaviour withheld: %s", exc)
-            latched = True
-        benign = not unsafe_turn and not latched
-        may_capture = (
-            authority is not None and benign and not own_instruction(prompt)["data_task"]
-        )
-        requested: List[str] = []  # candidate ids the user asked for in this turn; offered first
-        dialogue = _handle_dialogue_answer(
-            request, body, prompt, owner, request_id, persona_state, adaptation, offers, events,
-        ) if (body.persist_turn and (persona_state is not None or adaptation is not None)) else None
-        if dialogue is not None:
-            return dialogue
-        if auto_route:
-            # Follow-up carry (contract v0.2) needs the previous lead, and only a PERSISTED previous turn may supply one;
-            # an incognito turn (persist_turn=false) has no prior lead, which is exactly the v0.1 behaviour.
-            prior_lead = None
-            if adaptation is not None and body.persist_turn:
-                previous = adaptation.last_auto_route(body.session_id, owner)
-                if previous and previous.get("persisted"):
-                    prior_lead = previous.get("persona")
-            persona, routing = resolve_auto_lead(prompt, prior_lead=prior_lead)
-            if adaptation is not None:
-                base_persona = persona
-                base_method = str((routing or {}).get("method") or "routing-contract-v0.1")
-                base_reasons = list((routing or {}).get("reasons") or [])
-                learned = None
-                if benign:  # learned routing never touches a turn the shared safety gate does not call benign
-                    persona, learned = adaptation.apply_learned_overlays(prompt, persona, base_reasons)
-                if learned is not None:
-                    routing = {
-                        "method": f"{base_method}+learned-revision",
-                        "selected": persona,
-                        "reasons": [f"learned:{learned['revision_id']} cue={','.join(learned['cue'])}"],
-                        "base_selected": base_persona,
-                        "base_reasons": base_reasons,
-                        "learned": learned,
-                    }
-                adaptation.note_auto_route(
-                    body.session_id, prompt, persona,
-                    list((routing or {}).get("reasons") or []), request_id,
-                    persisted=bool(body.persist_turn), owner=owner,
-                )
-                # A durable request may also arrive inside an auto request ("for X use <persona> from now on"): it is only
-                # ever OFFERED, never promoted here. The persona and cue come from the instruction's own routing grammar.
-                if may_capture and is_durable_instruction(prompt):
-                    try:
-                        adaptation_note = record_durable_instruction(
-                            adaptation,
-                            prompt=prompt,
-                            session_id=body.session_id,
-                            owner=owner,
-                            persist=body.persist_turn,
-                        )
-                    except StateUnavailable as exc:
-                        logger.error("Misumi routing capture refused (quarantined store): %s", exc)
-        elif adaptation is not None and may_capture:
-            # Manual persona choice: a durable request is offered; corrections and temporary choices stay shadow-only.
-            try:
-                adaptation_note = record_manual_choice(
-                    adaptation,
-                    prompt=prompt,
-                    chosen_persona=persona,
-                    session_id=body.session_id,
-                    owner=owner,
-                )
-            except StateUnavailable as exc:
-                logger.error("Misumi routing capture refused (quarantined store): %s", exc)
-        if adaptation_note is not None and adaptation_note.get("state") == "offered":
-            requested.append(str(adaptation_note.get("candidate_id") or ""))
-        # Bounded persona state (-10): a style request shapes THIS turn; durable/feedback evidence is
-        # captured only when the turn is persisted (persist_turn=false captures nothing).
+        # Round 7: every lock and state read/write of this turn runs in a worker thread, never on the event loop, and all
+        # lock waits of the request share ONE budget (``StateBudget``), so a held lock delays this turn by at most that budget
+        # in total and never stalls other requests (/misumi/health keeps answering).
+        budget = StateBudget()
+        authority = None
+        benign = False
+        requested: List[str] = []
         style_note: Optional[List[Dict[str, Any]]] = None
         style_values: Dict[str, str] = {}
         style_applied: List[Dict[str, Any]] = []
-        if persona_state is not None:
-            turn_signals = detect_style_signals(prompt) if benign else []
-            if turn_signals and may_capture:
+
+        def _adaptation_phase():
+            nonlocal persona, routing, adaptation_note, authority, benign, requested, style_note, style_values, style_applied
+            with state_budget(budget):
+                # One gate for routing AND persona-state capture (round 4): a persisted turn from an execute-scoped caller, not a
+                # reserved/safety turn, and not a turn that processes third-party text. Anything else records nothing at all.
+                authority = _adaptation_authority(request) if body.persist_turn else None
+                # ONE gate decides whether learned behaviour (style AND routing), capture and offers may touch this turn (round 5/6).
+                # Only the user's own turn text is assessed: interface/device ``context`` is not the user's words, and a reserved word in
+                # it must not block every turn. A flagged turn latches this (owner, session) for the next few turns (memory only), and
+                # a pending offer is withdrawn by it (execute scope only - read-only callers never write shared state).
+                unsafe_turn = is_reserved_turn(prompt)
+                latched = offers.consume_latch(body.session_id, owner)
+                scoped = _adaptation_authority(request) is not None  # execute scope, persisted turn or not
+                if unsafe_turn:
+                    offers.latch_safety(body.session_id, owner, privileged=scoped)
                 try:
-                    style_note = _capture_style_signals(
-                        persona_state, prompt, turn_signals, responding=persona,
-                        named=_named_persona_in_prompt(prompt), session_id=body.session_id, owner=owner,
-                    )
+                    offers.check_healthy()
+                    if unsafe_turn and scoped and body.session_id:
+                        offers.clear(body.session_id, owner)  # even an incognito flagged turn withdraws this owner's offer
                 except StateUnavailable as exc:
-                    logger.error("Misumi persona-state capture refused (quarantined store): %s", exc)
-                    style_note = [{"refused": "persona-state store is quarantined"}]
-                requested.extend(str(n.get("candidate_id") or "") for n in style_note if n.get("state") == "offered")
-            resolved = {"values": {}, "provenance": []}  # learned style never shapes a turn that is not positively benign
-            if benign:
-                try:
-                    resolved = persona_state.resolve_state(persona, turn_signals)
-                except StateUnavailable as exc:  # fail closed: a damaged store applies no learned style
-                    logger.error("Misumi learned style withheld (quarantined store): %s", exc)
-                    resolved = {"values": {}, "provenance": []}
-            style_values, style_applied = resolved["values"], resolved["provenance"]
+                    logger.error("Misumi dialogue state unavailable; learned behaviour withheld: %s", exc)
+                    latched = True
+                benign = not unsafe_turn and not latched
+                may_capture = (
+                    authority is not None and benign and not own_instruction(prompt)["data_task"]
+                )
+                requested = []  # candidate ids the user asked for in this turn; offered first
+                dialogue = _handle_dialogue_answer(
+                    request, body, prompt, owner, request_id, persona_state, adaptation, offers, events,
+                ) if (body.persist_turn and (persona_state is not None or adaptation is not None)) else None
+                if dialogue is not None:
+                    return dialogue
+                if auto_route:
+                    # Follow-up carry (contract v0.2) needs the previous lead, and only a PERSISTED previous turn may supply one;
+                    # an incognito turn (persist_turn=false) has no prior lead, which is exactly the v0.1 behaviour.
+                    prior_lead = None
+                    if adaptation is not None and body.persist_turn:
+                        previous = adaptation.last_auto_route(body.session_id, owner)
+                        if previous and previous.get("persisted"):
+                            prior_lead = previous.get("persona")
+                    persona, routing = resolve_auto_lead(prompt, prior_lead=prior_lead)
+                    if adaptation is not None:
+                        base_persona = persona
+                        base_method = str((routing or {}).get("method") or "routing-contract-v0.1")
+                        base_reasons = list((routing or {}).get("reasons") or [])
+                        learned = None
+                        if benign:  # learned routing never touches a turn the shared safety gate does not call benign
+                            persona, learned = adaptation.apply_learned_overlays(prompt, persona, base_reasons)
+                        if learned is not None:
+                            routing = {
+                                "method": f"{base_method}+learned-revision",
+                                "selected": persona,
+                                "reasons": [f"learned:{learned['revision_id']} cue={','.join(learned['cue'])}"],
+                                "base_selected": base_persona,
+                                "base_reasons": base_reasons,
+                                "learned": learned,
+                            }
+                        adaptation.note_auto_route(
+                            body.session_id, prompt, persona,
+                            list((routing or {}).get("reasons") or []), request_id,
+                            persisted=bool(body.persist_turn), owner=owner,
+                        )
+                        # A durable request may also arrive inside an auto request ("for X use <persona> from now on"): it is only
+                        # ever OFFERED, never promoted here. The persona and cue come from the instruction's own routing grammar.
+                        if may_capture and is_durable_instruction(prompt):
+                            try:
+                                adaptation_note = record_durable_instruction(
+                                    adaptation,
+                                    prompt=prompt,
+                                    session_id=body.session_id,
+                                    owner=owner,
+                                    persist=body.persist_turn,
+                                )
+                            except StateUnavailable as exc:
+                                logger.error("Misumi routing capture refused (quarantined store): %s", exc)
+                elif adaptation is not None and may_capture:
+                    # Manual persona choice: a durable request is offered; corrections and temporary choices stay shadow-only.
+                    try:
+                        adaptation_note = record_manual_choice(
+                            adaptation,
+                            prompt=prompt,
+                            chosen_persona=persona,
+                            session_id=body.session_id,
+                            owner=owner,
+                        )
+                    except StateUnavailable as exc:
+                        logger.error("Misumi routing capture refused (quarantined store): %s", exc)
+                if adaptation_note is not None and adaptation_note.get("state") == "offered":
+                    requested.append(str(adaptation_note.get("candidate_id") or ""))
+                # Bounded persona state (-10): a style request shapes THIS turn; durable/feedback evidence is
+                # captured only when the turn is persisted (persist_turn=false captures nothing).
+                style_note = None
+                style_values = {}
+                style_applied = []
+                if persona_state is not None:
+                    turn_signals = detect_style_signals(prompt) if benign else []
+                    if turn_signals and may_capture:
+                        try:
+                            style_note = _capture_style_signals(
+                                persona_state, prompt, turn_signals, responding=persona,
+                                named=_named_persona_in_prompt(prompt), session_id=body.session_id, owner=owner,
+                            )
+                        except StateUnavailable as exc:
+                            logger.error("Misumi persona-state capture refused (quarantined store): %s", exc)
+                            style_note = [{"refused": "persona-state store is quarantined"}]
+                        requested.extend(str(n.get("candidate_id") or "") for n in style_note if n.get("state") == "offered")
+                    resolved = {"values": {}, "provenance": []}  # learned style never shapes a turn that is not positively benign
+                    if benign:
+                        try:
+                            resolved = persona_state.resolve_state(persona, turn_signals)
+                        except StateUnavailable as exc:  # fail closed: a damaged store applies no learned style
+                            logger.error("Misumi learned style withheld (quarantined store): %s", exc)
+                            resolved = {"values": {}, "provenance": []}
+                    style_values, style_applied = resolved["values"], resolved["provenance"]
+                return None
+
+        dialogue = await run_in_threadpool(_adaptation_phase)
+        if dialogue is not None:
+            return dialogue
+        # Round 7: a durable-looking request that was treated as data is not dropped silently (no evidence, no offer).
+        not_saved = unsaved_preference(prompt) if (authority is not None and benign) else None
         domain = infer_household_domain(prompt)
         sources = adapter.search(prompt, domain=domain, limit=4) if adapter.reachable else []
         if not domain:
@@ -1596,18 +1620,27 @@ def setup_misumi_routes(
             }
         if team_block is not None and team_block["decision"] == "team":
             response["team"] = team_block
+        if not_saved is not None:
+            response["text"] = f"{response['text']}\n\n{not_saved['message']}"
+            response["preference_not_saved"] = {"example": not_saved["example"]}
         offer_sid = session_id or body.session_id
         if (
             offer_sid and body.persist_turn and authority is not None and benign and outcome in {"model", "grounded", "absent"}
             and (persona_state is not None or adaptation is not None)
         ):
-            try:
-                offer = _dialogue_offer(persona_state, adaptation, offers, prefer=tuple(requested), owner=owner, session_id=offer_sid)
-                if offer is not None:
-                    offers.record_offer(offer_sid, offer, owner)
-            except StateUnavailable as exc:
-                logger.error("Misumi offer withheld (quarantined store): %s", exc)
-                offer = None
+            def _offer_phase():
+                with state_budget(budget):
+                    try:
+                        found = _dialogue_offer(persona_state, adaptation, offers, prefer=tuple(requested), owner=owner,
+                                                session_id=offer_sid)
+                        if found is not None:
+                            offers.record_offer(offer_sid, found, owner)
+                        return found
+                    except StateUnavailable as exc:
+                        logger.error("Misumi offer withheld (state unavailable): %s", exc)
+                        return None
+
+            offer = await run_in_threadpool(_offer_phase)
             if offer is not None:
                 response["text"] = f"{text}\n\n{offer['question']}"
                 response["ratification_offer"] = {

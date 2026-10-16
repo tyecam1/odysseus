@@ -244,3 +244,59 @@ def is_benign_turn(text: object, context: Iterable[object] = ()) -> bool:
 def is_reserved_turn(text: object, context: Iterable[object] = ()) -> bool:
     """The negation of :func:`is_benign_turn`: learned style/routing is neither captured from nor applied to this turn."""
     return not is_benign_turn(text, context)
+
+
+# ---------------------------------------------------------------- round 7: a RECALL-FIRST gate for learned ROUTING only
+#
+# Withholding a learned route costs almost nothing (the deterministic base route still answers), while following a learned cue
+# on a missed emergency can hand the lead to the wrong persona. So learned routing is withheld on any turn that mentions a
+# hazard, an injury or medical matter, urgency or distress, a substance, violence, a vehicle, someone missing or trapped - or a
+# person together with a body part. Heavy over-blocking is accepted here and ONLY here (style uses the precision block above
+# plus the model-facing carve-out). Measured rates on held-out sets are reported in the PR.
+_R_PERSON = (r"\b(?:my|our|his|her|their|the|a)\s+(?:\w+\s+)?(?:son|daughter|baby|babies|toddler|child|children|kids?|boy|girl|"
+             r"dad|father|mum|mom|mother|husband|wife|partner|grand\w+|nan|gran|brother|sister|friend|mate|flatmate|neighbou?r|"
+             r"step\w+|boyfriend|girlfriend|ex|uncle|aunt|nephew|niece|cousin|teen\w*|man|woman|someone|dog|cat)\b|"
+             r"\b(?:he|she|they|someone|somebody|everyone|i'?m|i\s+am|i\s+feel|i\s+can'?t|i'?ve|me|his|her|their|your)\b")
+_R_BODY = (r"\b(?:head|neck|chest|arms?|legs?|hands?|fingers?|thumbs?|foot|feet|toes?|face|eyes?|mouth|throat|tongue|lips?|"
+           r"stomach|belly|tummy|back|skin|bones?|ankles?|wrists?|hips?|knees?|heart|lungs?|brain|soft\s+spot|vision|teeth|nose|ears?)\b")
+_R_HAZARD = (
+    r"\b(?:hurt\w*|pain\w*|ache\w*|aching|injur\w*|bleed\w*|blood\w*|burn\w*|burnt|scald\w*|swell\w*|swollen|bruis\w*|broke\w*|"
+    r"fractur\w*|sprain\w*|wounds?|rash\w*|fever\w*|temperature|vomit\w*|sick|faint\w*|dizz\w*|collaps\w*|unconscious\w*|"
+    r"wake|waking|chok\w*|breath\w*|wheez\w*|asthma|allerg\w*|seizur\w*|fits?|stroke|attack\w*|shock\w*|poison\w*|swallow\w*|"
+    r"overdos\w*|pills?|tablets?|medic\w*|meds|dose\w*|dosage|calpol|paracetamol|ibuprofen|inhaler|insulin|pregnan\w*|labour|"
+    r"fell|fall\w*|trip\w*|slipp?\w*|floor|limp|floppy|blue|grey|gray|purple|pale|confus\w*|slurr\w*|numb\w*|blurr\w*|"
+    r"help|urgent\w*|emergenc\w*|quick(?:ly)?|asap|999|911|112|111|ambulance|hospital|a\s*&\s*e|doctor|gp|nurse|police|"
+    r"dying|die|died|dead|death|kill\w*|suicid\w*|panic\w*|scared|terrified|afraid|frighten\w*|cope|coping|alone|hopeless|"
+    r"worthless|better\s+without\s+me|end\s+(?:it|everything|things)|bleach|cleaner|chemical\w*|detergent|batter(?:y|ies)|magnets?|"
+    r"lamp\s+oil|hot\s+oil|white\s+spirit|antifreeze|gas|smoke\w*|smoulder\w*|smold\w*|fire|flames?|alight|spark\w*|melt\w*|"
+    r"explod\w*|explosion|hiss\w*|leak\w*|electr\w*|wires?|cables?|sockets?|plugs?|extension\s+lead|lighter|boiling|scalding|"
+    r"hit|beat\w*|punch\w*|kick\w*|slap\w*|stab\w*|threat\w*|violen\w*|abus\w*|assault\w*|shout\w*|threw|throw\w*|weapon\w*|"
+    r"gun|follow\w*|stalk\w*|blackmail\w*|bull(?:y|ied|ying)|grabb\w*|push\w*|car|cars|bike|road|traffic|crash\w*|"
+    r"missing|lost|trapped|stuck|locked\s+in|caught\s+in|drown\w*|water|pond|pool|bath|drunk|drank|drink\w*|ate|eaten|"
+    r"party|taken\s+something|cut\s+(?:open|deep|badly|(?:him|her|my|them|your)sel\w*|his|her|my|their))\b"
+)
+_R_PERSON_RE, _R_BODY_RE, _R_HAZARD_RE = (re.compile(p) for p in (_R_PERSON, _R_BODY, _R_HAZARD))
+
+
+def routing_risk(text: object) -> list[str]:
+    """Why a learned ROUTE must be withheld on this turn ([] only when no risk signal is present). Recall-first by design."""
+    try:
+        norm = normalise(text)
+        if len(norm) > MAX_ASSESS_CHARS:
+            return ["too-long-to-assess"]
+        reasons = []
+        hazard = _R_HAZARD_RE.search(norm)
+        if hazard:
+            reasons.append(f"hazard:{hazard.group(0)}")
+        if _R_PERSON_RE.search(norm) and _R_BODY_RE.search(norm):
+            reasons.append("person+body")
+        if not is_benign_turn(text):
+            reasons.append("safety-block")
+        return reasons
+    except Exception:  # noqa: BLE001 - fail safe: an assessment failure withholds the learned route
+        return ["assessment-failed"]
+
+
+def withhold_learned_route(text: object) -> bool:
+    """True when a learned routing overlay must not be applied to this turn (the base route answers instead)."""
+    return bool(routing_risk(text))
