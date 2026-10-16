@@ -41,6 +41,8 @@ kinds:
   tomatoes: [chopped tomatoes, tinned tomatoes, cherry tomatoes, passata, tomato paste, tomato puree, sun-dried tomatoes]
   curry paste: [thai red curry paste, thai green curry paste, red curry paste, green curry paste, massaman paste, korma paste]
   stock: [stock cubes, stock pots, bouillon, chicken stock, vegetable stock, beef stock]
+  mustard: [dijon, dijon mustard, wholegrain mustard, english mustard, yellow mustard, honey mustard, french mustard]
+  kitchen roll: [paper towel, paper towels]
 
 synonyms:
   - [parmesan, parmigiano, parmigiano reggiano, grana padano]
@@ -61,3 +63,7 @@ synonyms:
   - [stock cubes, bouillon cubes]
   - [hot sauce, chilli sauce, chili sauce]
   - [peanut butter, peanut paste]
+  - [crisps, chips, potato chips]
+  - [cookies, biscuits]
+  - [bell peppers, capsicum, sweet peppers, peppers]
+  - [kitchen roll, paper towel, paper towels]

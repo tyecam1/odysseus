@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field
 
 from core.middleware import require_admin
 from src.constants import DATA_DIR
-from src.misumi_household import HouseholdReadOnlyAdapter, infer_household_domain
+from src.misumi_household import HouseholdReadOnlyAdapter, infer_household_domain, item_question
 from src.misumi_memory import MisumiMemory
 from src.misumi_observability import MisumiEventLog
 from src.misumi_persona_routing import resolve_auto_lead
@@ -1180,21 +1180,28 @@ def setup_misumi_routes(
             resolved = persona_state.resolve_state(persona, turn_signals)
             style_values, style_applied = resolved["values"], resolved["provenance"]
         domain = infer_household_domain(prompt)
-        # A question about one item is resolved against the index of every household record. The resolver answers on its own
-        # only when that is deterministic (an exact record, or an explicitly scoped absence over cleanly parsed files); any
-        # other item question goes to the model WITH the candidate records as quoted data, never to a flat "no".
+        # A question about one item is resolved against the allowlisted household record index. The household answers on its
+        # own ONLY for an exact record; any other item question goes to the model (with the candidate records as quoted data
+        # when there are any), and is never answered "no" without it.
         resolution = adapter.resolve_question(prompt, domain) if adapter.reachable else None
         item_evidence: Optional[Dict[str, Any]] = None
+        item_pending = False  # an item question the household cannot answer exactly: the model answers it
         item_unconfirmed = False  # an explicitly scoped item question answered "not confirmed" because no model replied
         if resolution is not None and resolution["deterministic"]:
             domain = str(resolution["domain"])
             found = adapter.resolution_hits(resolution)
+        elif resolution is not None and domain in (None, "food", "shopping"):
+            found = []
+            item_pending = True
+            if resolution["evidence"]:
+                item_evidence = resolution
         else:
             found = adapter.search(prompt, domain=domain, limit=30) if adapter.reachable else []
-            # (with no domain the lexical hits are discarded below, so they never stand in for the item evidence)
-            if resolution is not None and (not found or domain is None) and domain in (None, "food", "shopping") and (
-                    resolution["candidates"] or domain is not None):
-                item_evidence = resolution
+            if not found and domain in ("food", "shopping") and adapter.reachable and (
+                    item_question(prompt) is not None or adapter.mentions_recorded_item(prompt)):
+                # a question about an item is never answered with a flat "no matching" reply: an absence is only ever
+                # stated by the model (or as "not confirmed"), never decided by the household lookup
+                item_pending = True
         named_list = [item for item in found if item.get("listed")]
         resolved_records = [item for item in found if item.get("resolution") == "found"]
         sources = named_list if named_list else resolved_records[:10] if resolved_records else found[:4]
@@ -1207,7 +1214,7 @@ def setup_misumi_routes(
         team_plan = _team_plan(prompt, persona)
         model_required = (
             not domain or bool(_ARTIFACT_REQUEST.search(prompt)) or team_plan["decision"] == "team"
-            or item_evidence is not None
+            or item_pending
         )
         backend = model = None
         turn: Dict[str, Any] = {"memory": None, "artifact": None}
@@ -1239,9 +1246,7 @@ def setup_misumi_routes(
             present = any(item["id"] == domain and item["present"] for item in adapter.domains())
             if present:
                 text = f"No matching {domain} fact was found in the canonical household repository."
-                if resolution is not None and resolution.get("outcome") == "not_present":
-                    text += " " + adapter.not_present_text(resolution)
-                elif _RECOMMENDATION_REQUEST.search(prompt):
+                if _RECOMMENDATION_REQUEST.search(prompt):
                     text += (
                         " That reads as a request for a recommendation; I answer household questions only from recorded"
                         " entries, and none matched. Name something recorded (a title, item or mood) to look up, or add"

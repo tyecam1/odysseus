@@ -53,7 +53,7 @@ _STOP_TERMS = frozenset({
     "no", "not", "now", "of", "off", "on", "only", "or", "other", "our", "out", "over", "plain", "please", "reply", "same",
     "say", "should", "so", "some", "soon", "such", "tell", "than", "that", "the", "them", "then", "there", "they", "this",
     "to", "today", "tomorrow", "tonight", "us", "very", "was", "we", "were", "what", "when", "where", "which", "who",
-    "whose", "will", "with", "words", "would", "yesterday", "yet", "you", "your",
+    "whose", "will", "with", "words", "would", "yesterday", "yet", "you", "your", "need", "needs", "needed",
     "an", "as", "at", "be", "by", "if", "up", "just", "also", "go",
 })
 # Words that may accompany a request to show a whole list or table ("what is on the cleaning rota this week").
@@ -311,10 +311,17 @@ _FILE_KINDS = (
     (re.compile(r"preference|likes|diet", re.IGNORECASE), "preference"),
     (_INVENTORY_FILE, "stock"),
     (re.compile(r"recipe", re.IGNORECASE), "recipe"),
+    (re.compile(r"clean|chore|rota|task", re.IGNORECASE), "cleaning"),
 )
 # Household areas that never answer "do we have X" (personal profile, money, pending proposals).
-_UNINDEXED = re.compile(r"^household/(?:profile|finances?)(?:/|$)|^household/proposals\.ya?ml$", re.IGNORECASE)
-_ID_KEYS = ("name", "item", "title", "plant", "task")
+# PRIVACY BY ALLOWLIST: only these household paths are ever indexed for item questions (food, kitchen, cleaning, and shopping or
+# grocery lists). Profile, finance, health, notes, secrets, records, plants ... are excluded by default, whatever their name.
+_INDEXED_PATH = re.compile(r"^household/(?:food|kitchen|cleaning)/|^household/(?:[^/]+/)*[^/]*(?:shopping|grocer)[^/]*\.(?:md|txt|ya?ml|json)$",
+                           re.IGNORECASE)
+_ID_KEYS = ("name", "item", "product", "ingredient")
+_INDEX_CACHE: Dict[str, tuple] = {}  # root -> (((path, mtime_ns, size), ...), index)
+_HIT_CANDIDATES = 5  # candidates named in a not-confirmed reply
+_EVIDENCE_CANDIDATES = 8  # candidate records given to the model
 _ALIAS_KEYS = ("aliases", "alias", "also_known_as", "aka")
 _QUANTITY_KEYS = ("quantity", "qty", "amount", "count")
 _CONTRACTIONS = (
@@ -358,6 +365,9 @@ _SCAFFOLD_PREFIXES = tuple((re.compile(rf"^(?:{pattern})(?:\s+|$)"), kind, scope
     (rf"(?:is|are)\s+there(?:\s+{_QUALIFIERS[:-3]})*", STOCK, False),
     (rf"there\s+(?:is|are|was|were)(?:\s+{_QUALIFIERS[:-3]})*", STOCK, False),
     (r"how\s+(?:much|many)", STOCK, False),
+    (r"(?:what\s+is\s+|what\s+have\s+we\s+got\s+)?left\s+of", STOCK, False),
+    (rf"(?:are\s+we\s+)?(?:{_QUALIFIERS})*{_OUT_OF}", STOCK, False),
+    (r"(?:ya|you|u)\s+got", STOCK, False),
     (rf"(?:what|which|how|when)\s+(?:is|are|was|were)\s+(?:the\s+|our\s+)?(?:current\s+)?{_FIELD}\s+(?:of|for|on)", STOCK, False),
     (rf"(?:what|which)\s+{_FIELD}\s+of", STOCK, False),
     (rf"(?:the\s+|our\s+)?(?:current\s+)?{_FIELD}\s+(?:of|for|on)", STOCK, False),
@@ -411,10 +421,16 @@ _NON_ITEM_WORDS = frozenset({
     "for", "to", "with", "without", "before", "after", "about", "what", "when", "which", "who", "how", "why", "if", "we", "i",
     "you", "it", "that", "this", "them", "those", "these", "anything", "something", "everything", "nothing", "stuff", "thing",
     "things", "food", "ingredient", "ingredients", "enough", "is", "are", "do", "does", "have", "has", "make", "cook", "can",
-    "should", "could", "would", "or", "but", "not",
+    "should", "could", "would", "or", "but", "not", "in", "on", "at", "from", "by", "like", "than",
 })
 _LINK_WORDS = frozenset({"and", "of", "the", "a", "an", "with", "in", "on"})
 _PHRASE_TOKEN = re.compile(r"[^\W_]+(?:'[^\W_]+)?")
+# Words that may surround an item named with no item phrasing at all ("can i cook spaghetti tonight", "ya got any stock cubes").
+_BARE_FILLER = frozenset(_norm(word) for word in (
+    "ya", "u", "got", "running", "low", "left", "whats", "what's", "cook", "cooking", "make", "making", "use", "using", "eat",
+    "tonight", "tomorrow", "today", "dinner", "lunch", "breakfast", "tea", "some", "any", "there", "the", "a", "an", "of", "for",
+    "with", "i", "we", "can", "could", "should", "out", "is", "are", "do", "does", "have", "has", "please", "list",
+)) | frozenset(_STOP_TERMS) | frozenset(_norm(word) for domain in ("food", "shopping") for word in DOMAIN_TERMS[domain])
 _UNPARSED_LENGTH = 5  # a mention of more words than this is not taken as one item name
 
 
@@ -553,8 +569,8 @@ def _edit_distance(a: str, b: str) -> int:
 def _misspelt(a: str, b: str) -> bool:
     """One word is a bounded misspelling of the other: at most 1 edit for words under 8 letters, 2 for longer; never for words
     of 4 letters or fewer on both sides (too many short real words are one edit apart: time/lime, lamb/lime), while 'brea'
-    for 'bread' still counts."""
-    if a == b or max(len(a), len(b)) < 5 or min(len(a), len(b)) < 4:
+    for 'bread' still counts; and only with the same first letter ('money' is not a misspelling of 'honey')."""
+    if a == b or max(len(a), len(b)) < 5 or min(len(a), len(b)) < 4 or a[0] != b[0]:
         return False
     return _edit_distance(a, b) <= (1 if max(len(a), len(b)) < 8 else 2)
 
@@ -656,26 +672,57 @@ _ZERO_WORDS = re.compile(
 )
 
 
+_UNKNOWN_QUANTITY = frozenset({"", "null", "~", "[]", "{}", "?", "??", "n/a", "na", "tbc", "tbd", "unknown", "unsure", "-", "--",
+                               "not sure", "dunno", "check"})
+_AMOUNT_WORDS = re.compile(
+    r"^(?:half|some|plenty|lots|loads|several|enough|full|nearly\s+full|most|a\s+(?:few|bit|little|lot|couple|handful|bag|tin|jar"
+    r"|pack|packet|box|bottle|block|tub|can|carton|loaf|bunch|head)|one|two|three|four|five|six|a\s+\w+\s+of)\b",
+    re.IGNORECASE,
+)
+
+
 def quantity_state(value: object) -> Optional[str]:
     """What a recorded quantity says: "out" (none left), "in" (some left) or None (not recorded, or unclear).
 
-    A number (with or without a unit) decides first: "0", "0g", "0 tins" are out; "3 tins", "500g" are in. Otherwise a zero word
-    ("none", "no", "nil", "ran out", "out of stock" ...) counts only when it is the whole value or is followed by a remark that
-    holds no number ("out - buy more"); "no, 3 bags left" and "none - bought 2kg today" are unclear, never out.
+    A leading number decides first: "0", "0g", "0 tins" are out unless another number follows ("0 left, bought 3 today" is
+    unclear); "3 tins", "500g" are in. A zero word ("none", "no", "nil", "ran out", "out of stock" ...) is out only as the whole
+    value or before a remark that holds no number ("out - buy more"). "?", "n/a", "TBC", "unknown" are unclear. Other prose is
+    in only when it states an amount ("half a bag", "a few", "plenty"); anything else ("nothing but crumbs") is unclear.
     """
-    text = _scalar(value).strip().lower()
-    if text in _EMPTY_VALUES and text != "none":
+    text = re.sub(r"\s+", " ", _scalar(value).strip().lower())
+    if text in _UNKNOWN_QUANTITY:
         return None
     number = _NUMBER_QUANTITY.match(text)
     if number:
-        return "out" if float(number.group(1)) == 0 else "in"
+        if float(number.group(1)) != 0:
+            return "in"
+        return None if re.search(r"\d", text[number.end():]) else "out"
     parts = re.split(r"\s*[-;,(:–—]\s*", text, maxsplit=1)
     if _ZERO_WORDS.match(parts[0].strip()):
         rest = parts[1] if len(parts) > 1 else ""
         return None if re.search(r"\d", rest) else "out"
-    if re.match(r"^(?:no|not|unknown|unsure|\?)\b", text):
-        return None
-    return "in"
+    return "in" if _AMOUNT_WORDS.match(text) else None
+
+
+def _matching_lines(unparsed: Dict[str, List[str]], key: tuple, limit: int = 5) -> List[tuple]:
+    """Lines of files in an unrecognised layout that mention the item's head word: (file, line, text), for the model."""
+    head = _head(key)
+    if not head or len(head) < 3:
+        return []
+    found = []
+    for rel in sorted(unparsed):
+        for number, line in enumerate(unparsed[rel], 1):
+            text = line.strip()
+            if text and head in phrase_key(text):
+                found.append((rel, number, text[:200]))
+                if len(found) >= limit:
+                    return found
+    return found
+
+
+def _field_name(key: str) -> str:
+    """A field name as shown: plain names as they are, anything else (spaces, newlines, punctuation) quoted and escaped."""
+    return key if re.fullmatch(r"[A-Za-z0-9_-]{1,40}", key) else _quoted(key, 40)
 
 
 def _quoted(value: object, limit: int = 160) -> str:
@@ -699,14 +746,14 @@ def _record_data(record: Dict[str, object], asked: Optional[str] = None, limit: 
         if isinstance(value, list):
             values = [_scalar(item) for item in value if _scalar(item).lower() not in _EMPTY_VALUES]
             if values:
-                parts.append(f"{key}: " + ", ".join(_quoted(item, 80) for item in values))
+                parts.append(f"{_field_name(key)}: " + ", ".join(_quoted(item, 80) for item in values))
             continue
         raw = _scalar(value)
         if raw.lower() in _EMPTY_VALUES:
             if key in wanted or any(key.startswith(word) for word in wanted):
-                parts.append(f"{key}: not recorded")
+                parts.append(f"{_field_name(key)}: not recorded")
             continue
-        parts.append(f"{key}: {_quoted(raw)}")
+        parts.append(f"{_field_name(key)}: {_quoted(raw)}")
     if record.get("inherited_category") and "category" not in fields:
         parts.append(f"category: {_quoted(record['inherited_category'])}")
     joined = "; ".join(parts)
@@ -825,28 +872,46 @@ def _list_records(lines: List[str], rel: str, kind: str) -> List[Dict[str, objec
     return records
 
 
-def _mark_alias_collisions(records: List[Dict[str, object]]) -> None:
-    """Flag each record's alias keys that another record also uses (as its name or an alias): such an alias cannot pick one."""
-    owners: Dict[tuple, set] = {}
+def _mark_alias_ownership(records: List[Dict[str, object]]) -> None:
+    """An alias is OWNED by a record only when no other record uses the same words (as a name or an alias, in any order or
+    number). Only an owned alias may answer for its record; a shared one (`alias_collisions`) only makes candidates."""
+    users: Dict[tuple, set] = {}
     for number, record in enumerate(records):
         for key in record["keys"]:
-            owners.setdefault(tuple(sorted(key)), set()).add(number)
-    for record in records:
-        record["alias_collisions"] = [key for key in record["keys"][1:] if len(owners[tuple(sorted(key))]) > 1]
+            users.setdefault(tuple(sorted(key)), set()).add(number)
+    for number, record in enumerate(records):
+        record["owned_aliases"] = [tuple(_phrase_tokens(alias)) for alias in record["aliases"]
+                                   if users.get(tuple(sorted(phrase_key(alias))), set()) == {number}]
+        record["alias_collisions"] = [key for key in record["keys"][1:] if len(users[tuple(sorted(key))]) > 1]
 
 
-def _same_words(a: tuple, b: tuple) -> bool:
-    """The same words, as a multiset (word order may differ; 'peri sauce' is not 'peri peri sauce')."""
-    return a == b or sorted(a) == sorted(b)
+def _exact_records(surface: tuple, key: tuple, records: List[Dict[str, object]]) -> List[Dict[str, object]]:
+    """The records a mention names EXACTLY, or [] - the only matches that may be answered without the model:
+    1. the name spelled as asked (case and spacing aside) - every such record, in every file;
+    2. an alias spelled as asked that its record owns;
+    3. the other grammatical number of a name, words in the same order ("tomato" for "tomatoes"), only when no other record
+       shares that head noun ("peppers" is not exact for "pepper" while "red peppers" is also recorded).
+    Word-order variants ("milk chocolate" / "chocolate milk") are never exact."""
+    spelled = [record for record in records if record["surface"] == surface]
+    if spelled:
+        return spelled
+    owned = [record for record in records if surface in record["owned_aliases"]]
+    if owned:
+        return owned
+    folded = [record for record in records if record["keys"][0] == key]
+    if not folded:  # the other number of an owned alias ("eggplants" for an aubergine aliased eggplant)
+        folded = [record for record in records if key in {phrase_key(" ".join(alias)) for alias in record["owned_aliases"]}]
+    if folded and not any(record not in folded and _head(record["keys"][0]) == _head(key) for record in records):
+        return folded
+    return []
 
 
 def _resolve(parsed: Dict[str, object], records: List[Dict[str, object]], vocabulary: Dict[tuple, set]) -> Dict[str, object]:
-    """The four-way resolution of one parsed mention against index records (see HouseholdReadOnlyAdapter.resolve_question).
+    """Resolution of one parsed mention against index records (see HouseholdReadOnlyAdapter.resolve_question).
 
-    found: records whose own name has the mention's exact words - preferring the record spelled exactly as asked ("peppers" vs
-    a separate "pepper" record), then the singular/plural-folded name - or, failing that, one record's own uncontested alias.
-    ambiguous: no such record, but related records (the candidates). not_present: nothing even related. unresolved: no item
-    named, no records, or a mention that is not a clean item name.
+    found: the records the mention names exactly (_exact_records). Anything else is evidence, never an answer: ambiguous (related
+    records exist - the candidates), not_present (nothing related was found; never said to the user as "no"), unresolved (no
+    item named, no records, or a mention that is not a clean item name).
     """
     mention = str(parsed["mention"])
     key = phrase_key(mention)
@@ -861,21 +926,12 @@ def _resolve(parsed: Dict[str, object], records: List[Dict[str, object]], vocabu
     if not key:
         result.update(outcome=UNRESOLVED, reason="the question does not name an item")
         return result
-    by_surface = [record for record in records if record["surface"] == surface]
-    by_name = by_surface or [record for record in records if _same_words(record["keys"][0], key)]
-    by_alias = [record for record in records if record not in by_name and any(_same_words(k, key) for k in record["keys"][1:])]
-    if by_name:
-        result.update(outcome=FOUND, records=by_name, candidates=by_alias, strength=3)
-        return result
-    if by_alias:
-        if len(by_alias) == 1 and not any(_same_words(k, key) for k in by_alias[0]["alias_collisions"]):
-            result.update(outcome=FOUND, records=by_alias, strength=3)
-        else:
-            result.update(outcome=AMBIGUOUS, candidates=by_alias, strength=3,
-                          reason=f"{_quoted(mention, 80)} is an alias that more than one record uses")
+    exact = _exact_records(surface, key, records)
+    if exact:
+        result.update(outcome=FOUND, records=exact, strength=3)
         return result
     unparsed = len(key) > _UNPARSED_LENGTH or bool(set(_phrase_tokens(mention)) & _NON_ITEM_WORDS)
-    # In a mention that is not a clean item name ("eggs and bread or something") only strong relations are candidates.
+    # In a mention that is not a clean item name ("calories in an avocado") only strong relations are candidates.
     probe = tuple(_singular(t) for t in _phrase_tokens(mention) if t not in _NON_ITEM_WORDS) if unparsed else key
     scored = []
     for position, record in enumerate(records):
@@ -1126,43 +1182,76 @@ class HouseholdReadOnlyAdapter:
             row.pop("_path")
         return hits[:max(1, min(int(limit), 50))]
 
-    def item_index(self, domain: Optional[str] = None) -> Dict[str, object]:
-        """Index of EVERY parsed household record: each YAML file under household/ (block or flow style, nested groups, aliases
-        or also_known_as as lists or inline, nulls ignored) and the shopping list's items. Profile, finance and proposal files
-        are not indexed.
+    def _index_candidates(self) -> List[Path]:
+        """Household files the item index may read: an ALLOWLIST (household/food, household/kitchen, household/cleaning, and
+        shopping or grocery lists anywhere under household/). Everything else - profile, finance, health, notes, secrets, the
+        record collection, plants - is never indexed, whatever it is called."""
+        files = []
+        for path in self.iter_files():
+            rel = path.relative_to(self.root).as_posix()
+            if _INDEXED_PATH.search(rel) and path.name.lower() not in _DOC_FILES:
+                files.append(path)
+        return files
 
-        Each record: stable id (its own `id:`, else path:line), name, aliases, phrase keys (name first), the exact spelling, the
-        file, line and kind of file (stock, equipment, shopping, preference, records, plants ...), the quantity as recorded and
-        what it says (quantity_state), category, and alias_collisions. `read` lists the files indexed, `failed` the files that
-        did not parse (a scope with a failed file can never say "not present"), `kinds` maps each file read to its kind.
-        `domain` is accepted for compatibility and ignored: the index is the same for every question.
+    def item_index(self, domain: Optional[str] = None) -> Dict[str, object]:
+        """Index of the household records the allowlist admits (`_index_candidates`), cached until a file changes.
+
+        YAML and JSON files are parsed into nodes (block or flow style; nested groups pass their category down; aliases or
+        also_known_as as lists or inline; nulls ignored); a record is a mapping with a name, item, product or ingredient.
+        Shopping-list Markdown yields one record per list item. Each record: id, name, aliases (and which it owns), phrase keys,
+        exact spelling, file, line, kind, quantity and quantity_state, category. `read` lists files whose records were indexed;
+        `failed` files that did not parse; `unparsed` maps files in a layout that is not recognised (a name-keyed mapping, a plain
+        list, a pantry.md) to their lines - they are NOT treated as read, and their matching lines go to the model as evidence.
+        `domain` is accepted for compatibility and ignored. The cache key is every candidate file's (path, mtime, size).
         """
+        candidates = self._index_candidates()
+        signature = []
+        for path in candidates:
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            signature.append((path.relative_to(self.root).as_posix(), stat.st_mtime_ns, stat.st_size))
+        cache_key = str(self.root)
+        cached = _INDEX_CACHE.get(cache_key)
+        if cached is not None and cached[0] == tuple(signature):
+            return cached[1]
         records: List[Dict[str, object]] = []
         read: List[str] = []
         failed: List[str] = []
+        unparsed: Dict[str, List[str]] = {}
         kinds: Dict[str, str] = {}
-        for path in self.iter_files():
+        for path in candidates:
             rel = path.relative_to(self.root).as_posix()
-            if not rel.startswith("household/") or _UNINDEXED.search(rel) or path.name.lower() in _DOC_FILES:
-                continue
             kind = _file_kind(rel)
             suffix = path.suffix.lower()
-            if suffix not in {".yaml", ".yml"} and not (kind == "shopping" and suffix in {".md", ".txt"}):
-                continue
             try:
                 text = path.read_text(encoding="utf-8", errors="replace")
             except OSError:
                 failed.append(rel)
                 continue
-            found = _list_records(text.splitlines(), rel, kind) if suffix in {".md", ".txt"} else _yaml_records(text, rel, kind)
+            if suffix in {".yaml", ".yml", ".json"}:
+                found = _yaml_records(text, rel, kind)
+            elif kind == SHOPPING and suffix in {".md", ".txt"}:
+                found = _list_records(text.splitlines(), rel, kind)
+            else:
+                found = []
             if found is None:
                 failed.append(rel)
+                continue
+            if not found:
+                lines = text.splitlines()
+                if any(_fact_text(line, suffix in {".yaml", ".yml", ".json"}, False) for line in lines):
+                    unparsed[rel] = lines
                 continue
             read.append(rel)
             kinds[rel] = kind
             records.extend(found)
-        _mark_alias_collisions(records)
-        return {"records": records, "read": read, "failed": failed, "kinds": kinds}
+        _mark_alias_ownership(records)
+        index = {"records": records, "read": read, "failed": failed, "unparsed": unparsed, "kinds": kinds,
+                 "files": [path.relative_to(self.root).as_posix() for path in candidates]}
+        _INDEX_CACHE[cache_key] = (tuple(signature), index)
+        return index
 
     def shopping_index(self) -> Dict[str, object]:
         """The shopping-list part of the item index."""
@@ -1174,61 +1263,80 @@ class HouseholdReadOnlyAdapter:
     def resolve_question(self, query: str, domain: Optional[str] = None, bare: bool = False) -> Optional[Dict[str, object]]:
         """Resolve a question about one item against the record index. Returns None when the text is not about one item.
 
-        The result carries `outcome` (found / ambiguous / not_present / unresolved), the found `records`, the `candidates`, and:
-        - `deterministic`: True only when the answer may be given without the model - a found record (exact name or own alias),
-          or not_present for a cleanly parsed mention in an EXPLICIT scope ("in stock", "in the fridge", "on the shopping list",
-          "do we need to buy") whose files all parsed. Every other outcome is evidence for the model, never a "no".
-        - `scoped`: the question named its scope (a not-confirmed reply may then be given when no model is available).
-        - `domain`: the household domain of the found record ("food", "shopping", "records", "plants" ...), else the scope's.
-        A shopping question is resolved against the shopping list only; any other item question against every other record.
-        `bare`: text with no item phrasing at all ("tomato") is tried whole and kept only on an exact record (used by `search`).
+        The result carries `outcome` (found / ambiguous / not_present / unresolved), the found `records`, the `candidates`, and
+        `deterministic` - True ONLY for found (an exact record). Nothing else is ever answered without the model: there is no
+        deterministic "not present". `evidence` says whether the candidates, unparsed-file lines or unreadable files are worth
+        giving to the model; `scoped` whether the question named its scope ("in stock", "in the fridge", "on the shopping list").
+        A shopping question ("do we need to buy X", "is X on the shopping list") counts only when the list is named or X is on
+        the list (exactly or closely); "we need a holiday" or "should we get a dishwasher" is not one.
+        `bare`: text with no item phrasing ("stock cubes", "can i cook spaghetti tonight") is kept only when a run of its words
+        is exactly a record's name (used by `search`).
         """
+        index = self.item_index()
         parsed = item_question(query)
         if parsed is None:
             if not bare or domain not in ("food", "shopping"):
                 return None
-            indicators = {_norm(word) for word in DOMAIN_TERMS.get(domain, ())}
-            words = [token for token in _phrase_tokens(query)
-                     if token not in _STOP_TERMS and _norm(token) not in indicators and token not in _LISTING_FILLER]
-            parsed = {"mention": " ".join(words), "kind": SHOPPING if domain == "shopping" else STOCK, "wh": False,
-                      "field": None, "scoped": False, "bare": True}
+            return self._bare_resolution(query, index)
         if parsed["wh"] and not parsed["mention"]:
             return None  # "what is in stock?": a listing question, answered by the list itself
-        index = self.item_index()
         shopping = parsed["kind"] == SHOPPING
-        records = [r for r in index["records"] if (r["kind"] == SHOPPING) == shopping]
-        scope_files = [rel for rel, kind in index["kinds"].items() if (kind == SHOPPING if shopping else kind == STOCK)]
-        scope_failed = [rel for rel in index["failed"]
-                        if (_file_kind(rel) == SHOPPING if shopping else rel.startswith("household/food/"))]
-        if not scope_files and not records:
-            return None
-        result = _resolve(parsed, records, load_item_vocabulary())
-        result["read"] = scope_files or index["read"]
-        result["failed"] = scope_failed
+        pool = [r for r in index["records"] if (r["kind"] == SHOPPING) == shopping] if not shopping else index["records"]
+        if not index["files"]:
+            return None  # no inventory file at all: not a question this household can speak to
+        result = _resolve(parsed, pool, load_item_vocabulary())
+        if shopping and not re.search(r"\b(?:shopping|grocery)\s+list\b", (query or "").lower()):
+            on_list = [r for r in result["records"] + result["candidates"][:3] if r["kind"] == SHOPPING]
+            if not (result["outcome"] == FOUND or (on_list and result["strength"] >= 2)):
+                return None  # "we need a holiday", "should we get a dishwasher": not a shopping-list question
+        result["read"] = list(index["read"])
+        result["failed"] = list(index["failed"])
+        result["unparsed"] = sorted(index["unparsed"])
+        result["unparsed_lines"] = _matching_lines(index["unparsed"], result["key"])
         result["scoped"] = bool(parsed.get("scoped"))
-        if result["outcome"] == FOUND:
-            result["domain"] = _record_domain(result["records"][0])
-        else:
-            result["domain"] = "shopping" if shopping else "food"
-        result["deterministic"] = result["outcome"] == FOUND or (
-            result["outcome"] == NOT_PRESENT and result["scoped"] and bool(scope_files) and not scope_failed
+        result["deterministic"] = result["outcome"] == FOUND
+        result["domain"] = _record_domain(result["records"][0]) if result["deterministic"] else ("shopping" if shopping else "food")
+        result["evidence"] = bool(
+            result["outcome"] == AMBIGUOUS or result["scoped"] or result["unparsed_lines"]
         )
-        if parsed.get("bare") and result["outcome"] != FOUND:
-            return None
         return result
+
+    def _bare_resolution(self, query: str, index: Dict[str, object]) -> Optional[Dict[str, object]]:
+        """The longest run of the text's words that is exactly a record's name (or owned alias), as a found resolution."""
+        tokens = _phrase_tokens(query)
+        records = index["records"]
+        for size in range(len(tokens), 0, -1):
+            for start in range(len(tokens) - size + 1):
+                run = tuple(tokens[start:start + size])
+                rest = tokens[:start] + tokens[start + size:]
+                if all(word in _STOP_TERMS for word in run) or not all(_norm(word) in _BARE_FILLER for word in rest):
+                    continue  # every other word must be filler: "olive oil" is not "olives" plus "oil"
+                exact = _exact_records(run, phrase_key(" ".join(run)), records)
+                if exact:
+                    return {"mention": " ".join(run), "key": phrase_key(" ".join(run)), "kind": STOCK, "field": None,
+                            "checked": len(records), "records": exact, "candidates": [], "strength": 3, "outcome": FOUND,
+                            "read": list(index["read"]), "failed": list(index["failed"]), "unparsed": sorted(index["unparsed"]),
+                            "unparsed_lines": [], "scoped": False, "deterministic": True, "evidence": False,
+                            "domain": _record_domain(exact[0])}
+        return None
+
+    def mentions_recorded_item(self, text: str) -> bool:
+        """Whether any word of the text (not a stop or filler word) is a word of an indexed record's name or alias, in either
+        grammatical number ("can i cook with tomato tonight" mentions the tomatoes record)."""
+        words = {_singular(token) for token in _phrase_tokens(text)
+                 if len(token) >= 3 and token not in _STOP_TERMS and _norm(token) not in _BARE_FILLER}
+        return any(words & set(key) for record in self.item_index()["records"] for key in record["keys"])
 
     def resolve_item(self, query: str, domain: Optional[str] = "food") -> Optional[Dict[str, object]]:
         """Compatibility name for `resolve_question` (stock and shopping questions)."""
         return self.resolve_question(query, domain or "food")
 
     def resolution_hits(self, resolution: Dict[str, object]) -> List[Dict[str, object]]:
-        """Hits for a resolved question. found yields one hit per matching record (all of them, each with its file, line and
-        quantity as quoted data); a deterministic not_present yields none (the caller says what was searched); any other outcome yields one
-        hit that says the item is NOT CONFIRMED and lists the candidates, so a partial match is never read out as a yes or a no."""
+        """Hits for a resolved question. found yields one hit per exact record (all of them, each with its file, line and
+        fields as quoted data). Every other outcome yields one hit that says the item is NOT CONFIRMED and lists up to five
+        candidates - it never says the item is absent."""
         outcome = resolution["outcome"]
         mention = str(resolution["mention"])
-        shopping = resolution.get("kind") == SHOPPING
-        noun = "shopping-list item" if shopping else "household record"
         hits: List[Dict[str, object]] = []
         if outcome == FOUND:
             for record in resolution["records"]:
@@ -1248,43 +1356,48 @@ class HouseholdReadOnlyAdapter:
                     "in_stock": False if state == "out" else True if state == "in" else None, "context": context,
                     "kind": record["kind"],
                 })
-        elif outcome in (AMBIGUOUS, UNRESOLVED) or (outcome == NOT_PRESENT and not resolution.get("deterministic")):
-            candidates = resolution["candidates"][:5]
-            named = ", ".join(f"{_quoted(c['name'], 80)} ({c['path']} line {c['line']})" for c in candidates)
-            more = f" and {len(resolution['candidates']) - 5} more" if len(resolution["candidates"]) > 5 else ""
-            if mention:
-                reason = resolution.get("reason") or f"no {noun} is named exactly {_quoted(mention, 80)}"
-            else:
-                reason = "the question does not name one item"
-            text = f"Not confirmed: {reason}."
-            text += (f" Recorded items that may be meant: {named}{more}. I cannot say yes or no from a partial or related match."
-                     if candidates else " I found no related record, but I cannot confirm it is absent either.")
-            lead = candidates[0] if candidates else {"path": (resolution.get("read") or ["household"])[0], "line": 1}
-            hits.append({
-                "path": lead["path"], "line": lead["line"], "score": 0, "resolution": outcome if outcome != NOT_PRESENT else UNRESOLVED,
-                "snippet": text,
-                "candidates": [{"id": c["id"], "name": c["name"], "path": c["path"], "line": c["line"]} for c in resolution["candidates"]],
-            })
+            return hits
+        candidates = resolution["candidates"][:_HIT_CANDIDATES]
+        named = ", ".join(f"{_quoted(c['name'], 80)} ({c['path']} line {c['line']})" for c in candidates)
+        extra = len(resolution["candidates"]) - len(candidates)
+        more = f" and {extra} more" if extra > 0 else ""
+        reason = (resolution.get("reason") or f"no household record is named exactly {_quoted(mention, 80)}") if mention \
+            else "the question does not name one item"
+        text = f"Not confirmed: {reason}."
+        text += (f" Recorded items that may be meant: {named}{more}. I cannot say yes or no from a partial or related match."
+                 if candidates else " I found no related record, but I cannot say it is absent either.")
+        if resolution.get("failed") or resolution.get("unparsed"):
+            text += " Some household files could not be read as records: " + ", ".join(
+                list(resolution.get("failed") or []) + list(resolution.get("unparsed") or [])) + "."
+        lead = candidates[0] if candidates else {"path": (resolution.get("read") or ["household"])[0], "line": 1}
+        hits.append({
+            "path": lead["path"], "line": lead["line"], "score": 0, "resolution": outcome if outcome != NOT_PRESENT else UNRESOLVED,
+            "snippet": text,
+            "candidates": [{"id": c["id"], "name": c["name"], "path": c["path"], "line": c["line"]} for c in resolution["candidates"]],
+        })
         return hits
 
     _resolution_hits = resolution_hits
 
-    def evidence_text(self, resolution: Dict[str, object], limit: int = 8) -> str:
-        """The candidate records of an unconfirmed item question as quoted data lines for the model (file, line, kind, fields)."""
+    def evidence_text(self, resolution: Dict[str, object], limit: Optional[int] = None) -> str:
+        """The evidence for an unconfirmed item question, as quoted data lines for the model: the candidate records (file, line,
+        kind, fields), matching lines of files in an unrecognised layout, and the files that could not be read."""
+        limit = _EVIDENCE_CANDIDATES if limit is None else min(int(limit), _EVIDENCE_CANDIDATES)
         lines = [f"Item asked about (quoted from the question): {_quoted(resolution['mention'], 80)}",
                  f"Outcome of the exact-name lookup: {resolution['outcome']} ({resolution['checked']} records checked)"]
         for record in resolution["candidates"][:limit]:
             data = _record_data(record) if record["kind"] != SHOPPING else f"text: {_quoted(record['text'])}"
             lines.append(f"- {record['path']} line {record['line']} ({record['kind']}): {data}")
-        if not resolution["candidates"]:
+        if len(resolution["candidates"]) > limit:
+            lines.append(f"- and {len(resolution['candidates']) - limit} more related records")
+        for rel, number, text in resolution.get("unparsed_lines") or []:
+            lines.append(f"- {rel} line {number} (file not in a recognised record layout): {_quoted(text)}")
+        if not resolution["candidates"] and not resolution.get("unparsed_lines"):
             lines.append("- no related record was found")
+        unreadable = list(resolution.get("failed") or []) + list(resolution.get("unparsed") or [])
+        if unreadable:
+            lines.append("Some files could not be read as records: " + ", ".join(unreadable))
         return "\n".join(lines)
-
-    def not_present_text(self, resolution: Dict[str, object]) -> str:
-        """What an explicitly scoped not_present answer says: the item, the files read and how many records were checked."""
-        noun = "shopping-list items" if resolution.get("kind") == SHOPPING else "household records"
-        return (f"I can't find {_quoted(resolution['mention'], 80)} in {', '.join(resolution['read'])} "
-                f"({resolution['checked']} {noun} checked; nothing with a related name, category or alias either).")
 
     def record_listing(self, files: Iterable[str], limit: int = 50) -> List[Dict[str, object]]:
         """The records of the named data files as listing hits ("what is in stock?" lists the stock records, not the pointer
