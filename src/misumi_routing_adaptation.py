@@ -53,7 +53,7 @@ from pathlib import Path
 from typing import Any
 
 from src.misumi_persona_state import evidence_origin, is_reserved_turn, owner_key
-from src.misumi_state_io import StateCorruptError, StateDir  # noqa: F401  (StateCorruptError re-exported for callers)
+from src.misumi_state_io import StateCorruptError, StateDir, StateUnavailable  # noqa: F401  (re-exported for callers)
 
 logger = logging.getLogger(__name__)
 
@@ -261,6 +261,10 @@ class RoutingAdaptationStore:
         # correction. Not evidence; keyed by owner too (round 5, M3) so another owner's turn in the same session id never counts.
         self._last_auto_route: dict[tuple[str, str], dict[str, Any]] = {}
 
+    def locked(self):
+        """The store's cross-process lock (re-entrant): callers that must check-then-act atomically hold it."""
+        return self._io.locked()
+
     # ---------- evidence ----------
 
     def record_evidence(self, **fields: Any) -> dict[str, Any]:
@@ -395,7 +399,9 @@ class RoutingAdaptationStore:
                 candidate["proposed_persona"] = proposed
                 candidate["status"] = "eligible"
                 candidate["awaiting"] = None
-                candidate["promotion_authorised_by"] = eid
+                # Never overwrite a pending authorisation (round 6): the first recorded yes stays the cited one.
+                if not candidate.get("promotion_authorised_by"):
+                    candidate["promotion_authorised_by"] = eid
                 candidate["rationale"] = "explicit durable user instruction directly authorises this mapping"
             else:
                 if proposed and proposed != candidate["proposed_persona"] and not candidate["supporting_evidence"]:
@@ -428,8 +434,9 @@ class RoutingAdaptationStore:
                 candidate["rationale"] = (
                     f"{corrections} consistent correction(s) across separate interactions"
                 )
+            types = {row.get("evidence_id"): str(row.get("type")) for row in self._read_jsonl(self.evidence_path)}  # one read
             candidate["confidence"]["score"] = sum(
-                EVIDENCE_WEIGHTS.get(self._type_of(eid), 0)
+                EVIDENCE_WEIGHTS.get(types.get(eid, ""), 0)
                 for eid in candidate["supporting_evidence"]
             ) - len(candidate["contradicting_evidence"])
             candidate["updated_at"] = _now()
@@ -644,20 +651,22 @@ class RoutingAdaptationStore:
                 candidate["status"] = "shadow"
                 candidate["awaiting"] = "rolled-back"
                 candidate["origin"] = None
+                candidate.pop("promotion_authorised_by", None)
                 candidate["updated_at"] = _now()
                 self._save_candidates(data)
             return rollback
 
     # ---------- overlay application ----------
 
-    def _apply_overlay(self, prompt: str, overlays: list[dict[str, Any]]) -> tuple[str, dict[str, Any] | None]:
+    def _apply_overlay(self, prompt: str, overlays: list[dict[str, Any]],
+                       exact: bool = False) -> tuple[str, dict[str, Any] | None]:
         best: dict[str, Any] | None = None
         best_hits = 0
         for overlay in overlays:
             hits = sum(
                 1
                 for item in overlay.get("cue") or []
-                for variant in keyword_variants(item)
+                for variant in ([item] if exact else keyword_variants(item))
                 if keyword_present(prompt, variant)
             )
             if hits > best_hits or (hits == best_hits > 0 and best is not None
@@ -676,21 +685,25 @@ class RoutingAdaptationStore:
     ) -> tuple[str, dict[str, Any] | None]:
         """Apply active learned revisions to one auto-routing decision.
 
-        Learned routing applies ONLY to a positively benign turn, decided by the SAME shared fail-safe gate that decides learned
-        style (``is_reserved_turn`` -> ``src.misumi_safety_gate``; round 5, M1): a gas smell, a poisoning or a fire "in the
-        kitchen" keeps the base route. Reserved matters always stay with the base router. A quarantined (corrupt) store applies
-        nothing. Explicit caller persona choices never reach this path.
+        Learned routing is ADVISORY (round 6). It applies only when the SAME shared gate as learned style
+        (``is_reserved_turn`` -> ``src.misumi_safety_gate``) does not flag the turn, never when the base route is a reserved
+        route (Aoteru keeps the lead), and only on the exact cue word (no variants). A quarantined, locked or unavailable store
+        applies nothing. Explicit caller persona choices never reach this path. Residual risk: an emergency phrased in a way
+        the lexicon misses can still follow a learned cue to another persona; that persona still carries its seed-order safety
+        rules, but the learned-style carve-out does not cover routing.
         """
         if is_reserved_turn(prompt, context):
             return base_persona, None
+        if any(str(reason).startswith("reserved:") for reason in base_reasons or []):
+            return base_persona, None  # a reserved base route (Aoteru) is never overridden by learned state
         try:
             overlays = self.active_overlays()
-        except StateCorruptError as exc:
+        except StateUnavailable as exc:
             logger.error("Misumi learned routing withheld: %s", exc)
             return base_persona, None
         if not overlays:
             return base_persona, None
-        persona, overlay = self._apply_overlay(prompt, overlays)
+        persona, overlay = self._apply_overlay(prompt, overlays, exact=True)  # round 6: the exact cue word only
         if overlay is None:
             return base_persona, None
         provenance = {

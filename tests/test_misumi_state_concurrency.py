@@ -43,7 +43,8 @@ _WORKER = textwrap.dedent("""
 
 
 def _hammer(kind, root):
-    env = dict(os.environ, PYTHONPATH=str(REPO))
+    # The subject here is lost or corrupt writes, not latency: give lock waits generous room under a 4-process pile-up.
+    env = dict(os.environ, PYTHONPATH=str(REPO), MISUMI_STATE_LOCK_TIMEOUT_S="60")
     procs = [subprocess.Popen([sys.executable, "-c", _WORKER, kind, str(root), str(i), str(PER_PROC)], cwd=str(REPO), env=env,
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE) for i in range(PROCS)]
     for proc in procs:

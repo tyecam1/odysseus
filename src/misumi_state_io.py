@@ -34,14 +34,25 @@ else:  # pragma: no cover - exercised on POSIX
 
 MARKER = "STATE_CORRUPT.json"
 LOCK_NAME = ".state.lock"
-DEFAULT_LOCK_TIMEOUT_S = 15.0
+DEFAULT_LOCK_TIMEOUT_S = 2.0  # round 6: a turn degrades (no learned behaviour) rather than hanging; MISUMI_STATE_LOCK_TIMEOUT_S
 
 
-class StateCorruptError(RuntimeError):
+def lock_timeout_s() -> float:
+    try:
+        return max(0.05, float(os.getenv("MISUMI_STATE_LOCK_TIMEOUT_S") or DEFAULT_LOCK_TIMEOUT_S))
+    except ValueError:
+        return DEFAULT_LOCK_TIMEOUT_S
+
+
+class StateUnavailable(RuntimeError):
+    """Adaptation state cannot be used right now. Callers degrade: no learned behaviour, no capture; operator API -> 503."""
+
+
+class StateCorruptError(StateUnavailable):
     """The store is quarantined (a file could not be parsed). Capture, promotion and learned behaviour must stop."""
 
 
-class StateLockTimeout(RuntimeError):
+class StateLockTimeout(StateUnavailable):
     """The cross-process lock could not be taken in time; the operation did not happen."""
 
 
@@ -70,7 +81,7 @@ def _os_lock(fd: int, timeout: float) -> None:
             return
         except OSError:
             if time.monotonic() >= deadline:
-                raise StateLockTimeout(f"could not lock adaptation state within {timeout:.0f}s") from None
+                raise StateLockTimeout(f"could not lock adaptation state within {timeout:.1f}s") from None
             time.sleep(0.005)
 
 
@@ -88,10 +99,14 @@ def _os_unlock(fd: int) -> None:
 class StateDir:
     """One state directory: a cross-process lock, atomic JSON documents, append-only JSONL logs, fail-closed reads."""
 
-    def __init__(self, root: str | Path, lock_timeout: float = DEFAULT_LOCK_TIMEOUT_S):
+    def __init__(self, root: str | Path, lock_timeout: float | None = None):
         self.root = Path(root)
-        self.lock_timeout = lock_timeout
+        self._lock_timeout = lock_timeout
         self._lock_path = str((self.root / LOCK_NAME).absolute())
+
+    @property
+    def lock_timeout(self) -> float:
+        return self._lock_timeout if self._lock_timeout is not None else lock_timeout_s()
 
     # ---------- locking ----------
 
@@ -109,13 +124,14 @@ class StateDir:
                 held[key][0] -= 1
             return
         thread_lock = _thread_lock(key)
-        if not thread_lock.acquire(timeout=self.lock_timeout):
-            raise StateLockTimeout("could not lock adaptation state (thread)")
+        timeout = self.lock_timeout
+        if not thread_lock.acquire(timeout=timeout):
+            raise StateLockTimeout(f"could not lock adaptation state within {timeout:.1f}s (held in this process)")
         try:
             self.root.mkdir(parents=True, exist_ok=True)
             fd = os.open(key, os.O_RDWR | os.O_CREAT, 0o600)
             try:
-                _os_lock(fd, self.lock_timeout)
+                _os_lock(fd, timeout)
             except BaseException:
                 os.close(fd)
                 raise

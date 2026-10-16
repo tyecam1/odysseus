@@ -22,7 +22,7 @@ from src.misumi_memory import MisumiMemory
 from src.misumi_observability import MisumiEventLog
 from src.misumi_persona_routing import resolve_auto_lead
 from src.misumi_ratification_dialogue import OfferBook, build_offer, candidate_digest, origin_allows, parse_answer
-from src.misumi_state_io import StateCorruptError
+from src.misumi_state_io import StateUnavailable
 from src.misumi_team_formation import plan_team, risk_flag, synthesis_inputs
 from src.misumi_persona_state import (
     GLOBAL_SCOPE,
@@ -774,14 +774,16 @@ def _offer_still_valid(offer: Dict[str, Any], candidate: Optional[Dict[str, Any]
                        sid: Optional[str], evidence_id: Optional[str] = None) -> bool:
     """The ONE check an answer must pass (and passes again under the store lock): the candidate still exists, is eligible and
     awaiting this user's ratification, is exactly what was shown (digest), and this (owner, session) is its origin - the person
-    whose own words or corrections caused it, within the origin window. A persisted offer alone is never enough."""
+    whose own words or corrections caused it, within the origin window. A persisted offer alone is never enough.
+
+    ``awaiting`` None with a recorded yes (``promotion_authorised_by``) is a ratification whose promotion did not complete
+    (crash, refused precondition): it stays answerable, so a candidate can never get stuck un-offerable (round 6)."""
     if not candidate or candidate.get("status") != "eligible":
         return False
-    # Before the yes is recorded the candidate must await this user's ratification; under the store lock (``evidence_id`` is the
-    # yes just recorded) recording it has cleared ``awaiting`` and only the digest/origin checks remain meaningful.
-    if evidence_id is None and candidate.get("awaiting") != "user-ratification":
-        return False
-    if evidence_id is not None and candidate.get("promotion_authorised_by") != evidence_id:
+    awaiting = candidate.get("awaiting")
+    if evidence_id is None and not (
+        awaiting == "user-ratification" or (awaiting is None and candidate.get("promotion_authorised_by"))
+    ):
         return False
     ignore = (evidence_id,) if evidence_id else ()
     if candidate_digest(candidate, offer.get("kind", ""), ignore_evidence=ignore) != offer.get("digest"):
@@ -792,17 +794,48 @@ def _offer_still_valid(offer: Dict[str, Any], candidate: Optional[Dict[str, Any]
     return origin_allows(candidate, owner, sid)
 
 
+def _ratified_by_this_offer(store, offer: Dict[str, Any], owner: Optional[str]) -> Optional[Dict[str, Any]]:
+    """The live revision an earlier answer to THIS offer (same digest, same principal) created, if any."""
+    for row in reversed(store._effective_active()):
+        auth = row.get("authorisation") or {}
+        if row.get("candidate_id") == offer.get("candidate_id") and auth.get("offer_digest") == offer.get("digest") \
+                and str(auth.get("principal") or "").strip() == str(owner or "").strip():
+            return row
+    return None
+
+
 def _handle_dialogue_answer(
     request: Request, body, prompt: str, owner: Optional[str], request_id: str,
     persona_state, adaptation, offers: OfferBook, events,
 ) -> Optional[Dict[str, Any]]:
-    """Apply a bare yes/no/later/undo to a pending offer. Anything else withdraws the offer (silence never promotes)."""
+    """Apply a bare yes/no/later/undo to a pending offer. Anything else withdraws the offer (silence never promotes).
+
+    Round 6: a caller without the execute scope never reads or writes dialogue state here; every answer runs atomically under
+    the candidate store's cross-process lock (re-verify, record the yes, promote), and a duplicate or concurrent "yes" to the
+    same offer returns the same result without changing state.
+    """
+    if _adaptation_authority(request) is None:
+        return None  # answering is a ratification act: it needs the same scope as the ratification API
     sid = body.session_id
     verdict = parse_answer(prompt)
+    store_for = {"persona-state": persona_state, "routing": adaptation}
     try:
         pending = offers.pending(sid, owner)
-    except StateCorruptError as exc:
-        logger.error("Misumi dialogue state quarantined; no offer can be answered: %s", exc)
+        if verdict == "affirm" and pending is None:
+            last = offers.last_revision(sid, owner)
+            if last and last.get("answer") == "affirm" and last.get("offer"):
+                # A duplicate yes that arrives after the first one finished: same result, no state change.
+                store = store_for.get(last["kind"])
+                row = _ratified_by_this_offer(store, last["offer"], owner) if store else None
+                if row is not None:
+                    pending = last["offer"]
+                    outcome = {"verdict": "affirm", "state": "active", "kind": last["kind"], "revision_id": row["revision_id"],
+                               "candidate_id": last["offer"]["candidate_id"], "duplicate": True}
+                    text = f"Done: {last['offer']['summary']}. Say 'undo that' to reverse it."
+                    return _dialogue_reply(body, request_id, pending, outcome, text, events)
+            return None
+    except StateUnavailable as exc:
+        logger.error("Misumi dialogue state unavailable; no offer can be answered: %s", exc)
         return None
     if verdict == "undo":
         last = offers.last_revision(sid, owner)
@@ -814,9 +847,6 @@ def _handle_dialogue_answer(
     elif verdict is None:
         offers.clear(sid, owner)  # the user moved on: the offer is withdrawn, nothing is promoted
         return None
-    if _adaptation_authority(request) is None:
-        return None  # answering is a ratification act: it needs the same scope as the ratification API
-    store_for = {"persona-state": persona_state, "routing": adaptation}
     outcome: Dict[str, Any] = {"verdict": verdict}
     text = ""
     try:
@@ -835,52 +865,67 @@ def _handle_dialogue_answer(
         else:
             offer = pending
             store = store_for.get(offer["kind"])
-            candidate = store.get_candidate_by_id(offer["candidate_id"]) if store else None
-            if store is None or not _offer_still_valid(offer, candidate, owner, sid):
-                # Gone, changed since it was shown (new evidence, another status, another origin), or not this person's to
-                # answer: an answer to it must never ratify, reject or snooze anything.
+            if store is None:
                 offers.clear(sid, owner)
                 return None
-            context = f"answer to offer {offer['candidate_id']}: {offer['summary']}"
-            if verdict == "affirm":
-                if offer["kind"] == "persona-state":
-                    recorded = store.record_evidence(
-                        type="explicit_durable", persona=candidate["persona"], dimension=candidate["dimension"],
-                        value=candidate["proposed_value"], prompt=prompt, context=context,
-                        session_id=sid, owner=owner,
-                    )
-                else:
-                    recorded = store.record_evidence(
-                        type="explicit_durable", cue=candidate["cue"], previous_persona=candidate.get("base_persona"),
-                        proposed_persona=candidate["proposed_persona"], prompt=prompt, context=context,
-                        session_id=sid, owner=owner,
-                    )
-                evidence_id = recorded["evidence"]["evidence_id"]
-                revision = store.promote(offer["candidate_id"], authorisation={
-                    "type": "user_instruction", "evidence_id": evidence_id,
-                    "principal": owner, "principal_authenticated": bool(str(owner or "").strip()),
-                    "offer_digest": offer.get("digest"),
-                }, precondition=lambda current: _offer_still_valid(offer, current, owner, sid, evidence_id))
-                offers.remember_revision(sid, offer["kind"], revision["revision_id"], owner)
-                outcome.update({"state": "active", "kind": offer["kind"], "revision_id": revision["revision_id"],
-                                "candidate_id": offer["candidate_id"]})
-                text = f"Done: {offer['summary']}. Say 'undo that' to reverse it."
-            elif verdict == "decline":
-                store.reject(offer["candidate_id"], "declined in conversation")
-                outcome.update({"state": "rejected", "kind": offer["kind"], "candidate_id": offer["candidate_id"]})
-                text = "Understood. I will not make that change."
-            else:  # later
-                offers.snooze(offer["candidate_id"])
-                outcome.update({"state": "snoozed", "kind": offer["kind"], "candidate_id": offer["candidate_id"]})
-                text = "Okay, I will leave it for now."
+            with store.locked():  # re-verify + record + promote is ONE unit across threads and processes
+                candidate = store.get_candidate_by_id(offer["candidate_id"])
+                duplicate = _ratified_by_this_offer(store, offer, owner) if verdict == "affirm" else None
+                if duplicate is not None:
+                    outcome.update({"state": "active", "kind": offer["kind"], "revision_id": duplicate["revision_id"],
+                                    "candidate_id": offer["candidate_id"], "duplicate": True})
+                    text = f"Done: {offer['summary']}. Say 'undo that' to reverse it."
+                elif not _offer_still_valid(offer, candidate, owner, sid):
+                    # Gone, changed since it was shown (new evidence, another status, another origin), or not this person's to
+                    # answer: an answer to it must never ratify, reject or snooze anything.
+                    offers.clear(sid, owner)
+                    return None
+                elif verdict == "affirm":
+                    context = f"answer to offer {offer['candidate_id']}: {offer['summary']}"
+                    if offer["kind"] == "persona-state":
+                        recorded = store.record_evidence(
+                            type="explicit_durable", persona=candidate["persona"], dimension=candidate["dimension"],
+                            value=candidate["proposed_value"], prompt=prompt, context=context,
+                            session_id=sid, owner=owner,
+                        )
+                    else:
+                        recorded = store.record_evidence(
+                            type="explicit_durable", cue=candidate["cue"], previous_persona=candidate.get("base_persona"),
+                            proposed_persona=candidate["proposed_persona"], prompt=prompt, context=context,
+                            session_id=sid, owner=owner,
+                        )
+                    evidence_id = recorded["evidence"]["evidence_id"]
+                    revision = store.promote(offer["candidate_id"], authorisation={
+                        "type": "user_instruction", "evidence_id": evidence_id,
+                        "principal": owner, "principal_authenticated": bool(str(owner or "").strip()),
+                        "offer_digest": offer.get("digest"),
+                    }, precondition=lambda current: _offer_still_valid(offer, current, owner, sid, evidence_id))
+                    outcome.update({"state": "active", "kind": offer["kind"], "revision_id": revision["revision_id"],
+                                    "candidate_id": offer["candidate_id"]})
+                    text = f"Done: {offer['summary']}. Say 'undo that' to reverse it."
+                elif verdict == "decline":
+                    store.reject(offer["candidate_id"], "declined in conversation")
+                    outcome.update({"state": "rejected", "kind": offer["kind"], "candidate_id": offer["candidate_id"]})
+                    text = "Understood. I will not make that change."
+                else:  # later
+                    offers.snooze(offer["candidate_id"])
+                    outcome.update({"state": "snoozed", "kind": offer["kind"], "candidate_id": offer["candidate_id"]})
+                    text = "Okay, I will leave it for now."
+            if outcome.get("state") == "active":
+                offers.remember_revision(sid, offer["kind"], outcome["revision_id"], owner, offer=offer, answer="affirm")
             offers.clear(sid, owner)
-    except (KeyError, ValueError, StateCorruptError) as exc:
+    except (KeyError, ValueError, StateUnavailable) as exc:
         logger.warning("Misumi dialogue ratification refused: %s", exc)
         try:
             offers.clear(sid, owner)
-        except StateCorruptError:
+        except StateUnavailable:
             pass
         return None
+    return _dialogue_reply(body, request_id, pending, outcome, text, events)
+
+
+def _dialogue_reply(body, request_id: str, pending, outcome: Dict[str, Any], text: str, events) -> Optional[Dict[str, Any]]:
+    sid = body.session_id
     if not text:
         return None
     persona = normalize_persona((pending or {}).get("persona") or "aoteru")
@@ -1019,7 +1064,7 @@ def setup_misumi_routes(
                 "candidates": candidates,
                 "active_revisions": adaptation.active_overlays(),
             }
-        except StateCorruptError as exc:
+        except StateUnavailable as exc:
             raise HTTPException(503, str(exc)) from exc
 
     @router.post("/routing/candidates/{candidate_id}/promote")
@@ -1036,7 +1081,7 @@ def setup_misumi_routes(
             })
         except KeyError as exc:
             raise HTTPException(404, str(exc).strip("'")) from exc
-        except StateCorruptError as exc:
+        except StateUnavailable as exc:
             raise HTTPException(503, str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
@@ -1062,7 +1107,7 @@ def setup_misumi_routes(
             candidate = adaptation.reject(candidate_id, reason)
         except KeyError as exc:
             raise HTTPException(404, str(exc).strip("'")) from exc
-        except StateCorruptError as exc:
+        except StateUnavailable as exc:
             raise HTTPException(503, str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
@@ -1078,7 +1123,7 @@ def setup_misumi_routes(
             rollback = adaptation.rollback_revision(revision_id, reason)
         except KeyError as exc:
             raise HTTPException(404, str(exc).strip("'")) from exc
-        except StateCorruptError as exc:
+        except StateUnavailable as exc:
             raise HTTPException(503, str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
@@ -1106,7 +1151,7 @@ def setup_misumi_routes(
                 key=lambda c: str(c.get("updated_at") or ""),
             )
             return {"candidates": candidates, "active_revisions": persona_state.active_revisions()}
-        except StateCorruptError as exc:
+        except StateUnavailable as exc:
             raise HTTPException(503, str(exc)) from exc
 
     @router.post("/persona-state/candidates/{candidate_id}/promote")
@@ -1123,7 +1168,7 @@ def setup_misumi_routes(
             })
         except KeyError as exc:
             raise HTTPException(404, str(exc).strip("'")) from exc
-        except StateCorruptError as exc:
+        except StateUnavailable as exc:
             raise HTTPException(503, str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
@@ -1147,7 +1192,7 @@ def setup_misumi_routes(
             candidate = persona_state.reject(candidate_id, reason)
         except KeyError as exc:
             raise HTTPException(404, str(exc).strip("'")) from exc
-        except StateCorruptError as exc:
+        except StateUnavailable as exc:
             raise HTTPException(503, str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
@@ -1163,7 +1208,7 @@ def setup_misumi_routes(
             rollback = persona_state.rollback_revision(revision_id, reason)
         except KeyError as exc:
             raise HTTPException(404, str(exc).strip("'")) from exc
-        except StateCorruptError as exc:
+        except StateUnavailable as exc:
             raise HTTPException(503, str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
@@ -1200,17 +1245,20 @@ def setup_misumi_routes(
         # One gate for routing AND persona-state capture (round 4): a persisted turn from an execute-scoped caller, not a
         # reserved/safety turn, and not a turn that processes third-party text. Anything else records nothing at all.
         authority = _adaptation_authority(request) if body.persist_turn else None
-        # Round 5: ONE fail-safe gate decides whether learned behaviour (style AND routing), capture and offers may touch this
-        # turn: the whole prompt plus the request's own context is scanned, and a recent safety turn in this (owner, session)
-        # latches the gate shut for a while. Anything not positively benign gets no learned behaviour at all.
-        gate_context = [item for item in (interface_context, body.intent) if isinstance(item, str) and item]
-        unsafe_turn = is_reserved_turn(prompt, gate_context)
+        # ONE gate decides whether learned behaviour (style AND routing), capture and offers may touch this turn (round 5/6).
+        # Only the user's own turn text is assessed: interface/device ``context`` is not the user's words, and a reserved word in
+        # it must not block every turn. A flagged turn latches this (owner, session) for the next few turns (memory only), and
+        # a pending offer is withdrawn by it (execute scope only - read-only callers never write shared state).
+        unsafe_turn = is_reserved_turn(prompt)
+        latched = offers.consume_latch(body.session_id, owner)
+        if unsafe_turn:
+            offers.latch_safety(body.session_id, owner)
         try:
-            if unsafe_turn and body.persist_turn and (persona_state is not None or adaptation is not None):
-                offers.latch_safety(body.session_id, owner)
-            latched = offers.safety_latched(body.session_id, owner)
-        except StateCorruptError as exc:
-            logger.error("Misumi dialogue state quarantined; learned behaviour withheld: %s", exc)
+            offers.check_healthy()
+            if unsafe_turn and authority is not None and body.session_id:
+                offers.clear(body.session_id, owner)
+        except StateUnavailable as exc:
+            logger.error("Misumi dialogue state unavailable; learned behaviour withheld: %s", exc)
             latched = True
         benign = not unsafe_turn and not latched
         may_capture = (
@@ -1237,7 +1285,7 @@ def setup_misumi_routes(
                 base_reasons = list((routing or {}).get("reasons") or [])
                 learned = None
                 if benign:  # learned routing never touches a turn the shared safety gate does not call benign
-                    persona, learned = adaptation.apply_learned_overlays(prompt, persona, base_reasons, gate_context)
+                    persona, learned = adaptation.apply_learned_overlays(prompt, persona, base_reasons)
                 if learned is not None:
                     routing = {
                         "method": f"{base_method}+learned-revision",
@@ -1263,7 +1311,7 @@ def setup_misumi_routes(
                             owner=owner,
                             persist=body.persist_turn,
                         )
-                    except StateCorruptError as exc:
+                    except StateUnavailable as exc:
                         logger.error("Misumi routing capture refused (quarantined store): %s", exc)
         elif adaptation is not None and may_capture:
             # Manual persona choice: a durable request is offered; corrections and temporary choices stay shadow-only.
@@ -1275,7 +1323,7 @@ def setup_misumi_routes(
                     session_id=body.session_id,
                     owner=owner,
                 )
-            except StateCorruptError as exc:
+            except StateUnavailable as exc:
                 logger.error("Misumi routing capture refused (quarantined store): %s", exc)
         if adaptation_note is not None and adaptation_note.get("state") == "offered":
             requested.append(str(adaptation_note.get("candidate_id") or ""))
@@ -1292,7 +1340,7 @@ def setup_misumi_routes(
                         persona_state, prompt, turn_signals, responding=persona,
                         named=_named_persona_in_prompt(prompt), session_id=body.session_id, owner=owner,
                     )
-                except StateCorruptError as exc:
+                except StateUnavailable as exc:
                     logger.error("Misumi persona-state capture refused (quarantined store): %s", exc)
                     style_note = [{"refused": "persona-state store is quarantined"}]
                 requested.extend(str(n.get("candidate_id") or "") for n in style_note if n.get("state") == "offered")
@@ -1300,7 +1348,7 @@ def setup_misumi_routes(
             if benign:
                 try:
                     resolved = persona_state.resolve_state(persona, turn_signals)
-                except StateCorruptError as exc:  # fail closed: a damaged store applies no learned style
+                except StateUnavailable as exc:  # fail closed: a damaged store applies no learned style
                     logger.error("Misumi learned style withheld (quarantined store): %s", exc)
                     resolved = {"values": {}, "provenance": []}
             style_values, style_applied = resolved["values"], resolved["provenance"]
@@ -1557,7 +1605,7 @@ def setup_misumi_routes(
                 offer = _dialogue_offer(persona_state, adaptation, offers, prefer=tuple(requested), owner=owner, session_id=offer_sid)
                 if offer is not None:
                     offers.record_offer(offer_sid, offer, owner)
-            except StateCorruptError as exc:
+            except StateUnavailable as exc:
                 logger.error("Misumi offer withheld (quarantined store): %s", exc)
                 offer = None
             if offer is not None:

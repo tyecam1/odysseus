@@ -39,8 +39,10 @@ Authority model (same as routing; do not weaken):
   THAT turn only and never creates durable state;
 - reserved matters (standards, values, boundaries, ratification, Level 5/6)
   and any turn the shared fail-safe gate (``src.misumi_safety_gate``) does
-  not call positively benign are never captured and never shaped by learned
-  style or learned routing (round 5: one gate, whole turn scanned);
+  flags are never captured and never shaped by learned style or learned
+  routing (round 5: one gate, whole turn scanned); round 6: the gate is a
+  precision-first BLOCK and the primary protection is ``STYLE_CARVE_OUT``,
+  appended to every learned style block for the model to apply;
 - an offerable candidate records its ``origin`` (owner, session, evidence);
   only that owner is offered it and can answer (round 5);
 - the store is cross-process safe and fails closed on corruption
@@ -102,6 +104,12 @@ RENDER: dict[tuple[str, str], str] = {
 STYLE_HEADER = (
     "User-approved style preferences (style only; they never relax the honesty, ratification, "
     "reserved-matter or seed-order rules above):"
+)
+# Round 6: the PRIMARY protection for urgent turns lives in the model-facing text itself (the model recognises an emergency far
+# better than a lexicon). It is appended after the preferences of EVERY non-empty style block, whatever the lexicon decided.
+STYLE_CARVE_OUT = (
+    "These style preferences never apply to urgent, safety, medical, legal, financial or emotional-distress matters, or "
+    "whenever the person seems in difficulty: then give a full, careful answer and any safety information."
 )
 GLOBAL_SCOPE = "*"  # a durable instruction that names no persona applies household-wide
 # explicit_durable: an authorised act (a bare "yes" to an offer). durable_request: a free-text durable phrase - it may only OFFER.
@@ -196,7 +204,7 @@ def is_reserved_turn(prompt: str, context: Any = ()) -> bool:
     """True unless the turn is POSITIVELY benign by the shared fail-safe gate (safety lexicons, reserved governance matters,
     near-miss typos, unassessable scripts, over-long text). Learned style is neither captured from nor applied to such a turn;
     learned routing uses the same function (round 5: one gate for both)."""
-    return bool(_RESERVED_MATTERS.search(str(prompt or "").translate(_TYPOGRAPHIC))) or _gate_is_reserved(prompt, context)
+    return _gate_is_reserved(prompt, context)
 
 
 # Third-party data (round 4). A turn whose primary intent is to process someone else's text carries that text as DATA, so nothing in
@@ -230,9 +238,19 @@ _THIRD_PARTY = (
     re.compile(r"\b(?:everyone|everybody|all\s+of\s+you|you\s+all|y'?all|you\s+guys|team)\b[^.!?\n]{0,40}\b(?:please|should|must|"
                r"need\s+to|from\s+now\s+on|going\s+forward)\b|\b(?:from\s+now\s+on|going\s+forward)\b[^.!?\n]{0,10}\b(?:everyone|everybody|"
                r"all\s+of\s+you|you\s+all|team)\b", re.IGNORECASE),
+    # Round 6 (F6): attribution and reported speech ("Mum reckons ...", "she says ..."), hearsay and hedges ("apparently we
+    # should ..."), and joke/sarcasm markers ("lol jk") - none of these is the user's own firm standing instruction.
+    re.compile(r"\b(?:reckons?|apparently|supposedly|allegedly|according\s+to|i\s+(?:heard|read)|rumou?r(?:s|ed)?|"
+               r"(?:he|she|they|mum|mom|mam|dad|my\s+\w+|\w+'s\s+\w+)\s+(?:says|said|thinks|reckons|suggests|suggested|wants\s+"
+               r"(?:us|me|you)\s+to|told\s+(?:me|us))|someone\s+(?:said|says|told)|people\s+say|they\s+say|"
+               r"maybe|perhaps|we\s+(?:should|could|might|ought\s+to)|might\s+be\s+(?:good|nice|worth|better))\b", re.IGNORECASE),
+    re.compile(r"\b(?:lol|lmao|lmfao|rofl|jk|j/k|just\s+(?:kidding|joking)|kidding|joking|haha\w*|hehe\w*|not\s+really)\b|"
+               r"(?:^|\s)/s\s*$|[\U0001F602\U0001F923\U0001F61C\U0001F609\U0001F643]", re.IGNORECASE),
 )
 
 
+# A trailing attribution: "... from now on use Jin - Bob" / "... ~Sam".
+_TRAILING_NAME = re.compile(r"\s(?:-{1,2}|~|\u2013|\u2014)\s*([A-Z][a-zA-Z'-]+)\.?\s*$")
 _GREETING_NAME = re.compile(r"^\W*(?:hi|hello|hey|hiya|dear)\s+([A-Za-z][\w'-]*)\b", re.IGNORECASE)
 _SIGN_OFF_NAME = re.compile(
     r"(?:^|[.!?\n,]\s*)(?i:cheers|thanks|thank\s+you|thx|regards|best|best\s+wishes|kind\s+regards|warm\s+regards|many\s+thanks|"
@@ -263,8 +281,8 @@ def is_third_party_text(prompt: str) -> bool:
     stripped = text.strip()
     if any(pattern.search(stripped) for pattern in _THIRD_PARTY):
         return True
-    for pattern in (_GREETING_NAME, _SIGN_OFF_NAME):
-        match = pattern.search(stripped) if pattern is _SIGN_OFF_NAME else pattern.match(stripped)
+    for pattern in (_GREETING_NAME, _SIGN_OFF_NAME, _TRAILING_NAME):
+        match = pattern.match(stripped) if pattern is _GREETING_NAME else pattern.search(stripped)
         if match and match.group(1).lower() != "there" and not _is_assistant_name(match.group(1)):
             return True
     return False
@@ -447,6 +465,10 @@ class PersonaStateStore:
         self.revisions_path = self.root / "revisions.jsonl"
         self._io = StateDir(self.root)
 
+    def locked(self):
+        """The store's cross-process lock (re-entrant): callers that must check-then-act atomically hold it."""
+        return self._io.locked()
+
     # ---------- evidence ----------
 
     @staticmethod
@@ -550,7 +572,9 @@ class PersonaStateStore:
                 candidate["supporting_evidence"].append(eid)
                 candidate["status"] = "eligible"
                 candidate["awaiting"] = None
-                candidate["promotion_authorised_by"] = eid
+                # Never overwrite a pending authorisation (round 6): the first recorded yes stays the cited one.
+                if not candidate.get("promotion_authorised_by"):
+                    candidate["promotion_authorised_by"] = eid
                 candidate["rationale"] = "explicit durable user instruction directly authorises this value"
                 candidate.pop("rejection", None)
             elif etype == "durable_request":
@@ -789,6 +813,7 @@ class PersonaStateStore:
                 candidate["status"] = "shadow"
                 candidate["awaiting"] = "rolled-back"
                 candidate["origin"] = None
+                candidate.pop("promotion_authorised_by", None)
                 candidate["updated_at"] = _now()
                 self._save_candidates(data)
             return rollback
@@ -823,7 +848,7 @@ def style_block(values: dict[str, str]) -> str:
     lines = [line for line in lines if line]
     if not lines:
         return ""
-    return STYLE_HEADER + "\n" + "\n".join(f"- {line}" for line in lines)
+    return STYLE_HEADER + "\n" + "\n".join(f"- {line}" for line in lines) + "\n" + STYLE_CARVE_OUT
 
 
 def compose_system(foundation: str, values: dict[str, str]) -> str:

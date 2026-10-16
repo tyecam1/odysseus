@@ -258,7 +258,7 @@ def test_foundation_is_untouched_and_only_fixed_sentences_are_appended(tmp_path)
     composed = compose_system(foundation, values_all)
     assert composed.startswith(foundation)
     appended = composed[len(foundation):]
-    allowed = {ps.STYLE_HEADER} | {f"- {s}" for s in RENDER.values()}
+    allowed = {ps.STYLE_HEADER, ps.STYLE_CARVE_OUT} | {f"- {s}" for s in RENDER.values()}
     assert {line for line in appended.splitlines() if line.strip()} <= allowed
     assert compose_system(foundation, {}) == foundation
     assert compose_system(foundation, dict(DEFAULTS)) == foundation  # all-default is a no-op

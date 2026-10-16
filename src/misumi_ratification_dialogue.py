@@ -28,6 +28,7 @@ The decision helpers are pure (clock injected); the route glue lives in ``routes
 from __future__ import annotations
 
 import contextlib
+from collections import OrderedDict
 import hashlib
 import json
 import re
@@ -38,7 +39,11 @@ from typing import Any, Iterator
 PENDING_TTL_S = 15 * 60
 REOFFER_AFTER_S = 24 * 3600
 ORIGIN_TTL_S = 7 * 24 * 3600  # an offer is only ever made to its origin owner within a week of the evidence that caused it
-SAFETY_LATCH_S = 30 * 60  # after a safety turn, the same (owner, session) gets no learned behaviour and no offers for this long
+# After a flagged (unsafe) turn, the same (owner, session) gets no learned behaviour and no offers for the next
+# SAFETY_LATCH_TURNS turns or SAFETY_LATCH_S seconds, whichever ends first (round 6: short, so a false positive costs little).
+SAFETY_LATCH_S = 5 * 60
+SAFETY_LATCH_TURNS = 3
+SAFETY_LATCH_CAP = 4096  # in-memory, least-recently-latched entries are evicted beyond this (never written to shared state)
 
 _BARE = r"[\s.!,]*(?:please|thanks|thank you)?[\s.!]*$"
 AFFIRM = re.compile(r"^\s*yes" + _BARE, re.IGNORECASE)  # round 5: bare yes only ("ok", "sure", "yeah" never ratify)
@@ -134,7 +139,9 @@ def candidate_digest(candidate: dict[str, Any], kind: str = "", ignore_evidence:
 
 def build_offer(kind: str, candidate: dict[str, Any], display_name: str | None = None) -> dict[str, Any] | None:
     """The offer for one eligible-awaiting-ratification candidate, or None if it is not offerable."""
-    if candidate.get("status") != "eligible" or candidate.get("awaiting") != "user-ratification":
+    awaiting = candidate.get("awaiting")
+    healing = awaiting is None and bool(candidate.get("promotion_authorised_by"))  # a yes whose promotion never completed
+    if candidate.get("status") != "eligible" or not (awaiting == "user-ratification" or healing):
         return None
     summary = describe_candidate(kind, candidate, display_name)
     if not summary:
@@ -171,7 +178,9 @@ class OfferBook:
 
     def __init__(self, clock=None, root: str | Path | None = None):
         self._clock = clock or (lambda: time.time())  # late-bound so tests can move time
-        self._memory: dict[str, Any] = {"pending": {}, "last_offered": {}, "last_revision": {}, "safety_latch": {}}
+        self._memory: dict[str, Any] = {"pending": {}, "last_offered": {}, "last_revision": {}}
+        self._latch: "OrderedDict[str, dict[str, float]]" = OrderedDict()  # process-local, bounded, TTL-pruned
+        self.latch_cap = SAFETY_LATCH_CAP
         self._io = None
         if root is not None:
             from src.misumi_state_io import StateDir
@@ -194,7 +203,7 @@ class OfferBook:
             return
         with self._io.locked():
             data = self._io.read_json(self.STATE_FILE) or {}
-            for section in ("pending", "last_offered", "last_revision", "safety_latch"):
+            for section in ("pending", "last_offered", "last_revision"):
                 if not isinstance(data.get(section), dict):
                     data[section] = {}
             yield data
@@ -234,11 +243,13 @@ class OfferBook:
         with self._state(write=True) as state:
             state["last_offered"][str(candidate_id)] = self._clock()
 
-    def remember_revision(self, session_id: str | None, kind: str, revision_id: str, owner: str | None = None) -> None:
+    def remember_revision(self, session_id: str | None, kind: str, revision_id: str, owner: str | None = None,
+                          offer: dict[str, Any] | None = None, answer: str | None = None) -> None:
         if session_id:
             with self._state(write=True) as state:
                 state["last_revision"][self._key(session_id, owner)] = {
                     "kind": kind, "revision_id": revision_id, "at": self._clock(), "owner": _owner_value(owner),
+                    "offer": offer, "answer": answer,
                 }
 
     def last_revision(self, session_id: str | None, owner: str | None = None) -> dict[str, Any] | None:
@@ -252,18 +263,50 @@ class OfferBook:
         with self._state(write=self._io is not None) as state:
             state["last_revision"].pop(self._key(session_id, owner), None)
 
-    # ---------- safety latch (recent-context window for the safety gate) ----------
+    def check_healthy(self) -> None:
+        """Raise ``StateUnavailable`` when the persisted dialogue state is quarantined (callers then withhold learned behaviour)."""
+        if self._io is not None:
+            self._io.check_healthy()
+
+    # ---------- safety latch (recent-context window for the safety gate; in memory, bounded) ----------
+
+    def _prune_latches(self) -> None:
+        now = self._clock()
+        while self._latch:
+            key, row = next(iter(self._latch.items()))
+            if now - row["at"] > SAFETY_LATCH_S:
+                self._latch.popitem(last=False)
+            else:
+                break
+        while len(self._latch) > self.latch_cap:
+            self._latch.popitem(last=False)
 
     def latch_safety(self, session_id: str | None, owner: str | None = None) -> None:
-        """A safety turn happened: this (owner, session) gets no learned behaviour and no offers for ``SAFETY_LATCH_S``."""
-        if session_id:
-            with self._state(write=True) as state:
-                state["safety_latch"][self._key(session_id, owner)] = self._clock()
-                state["pending"].pop(self._key(session_id, owner), None)
+        """A flagged turn happened: the next SAFETY_LATCH_TURNS turns of this (owner, session), within SAFETY_LATCH_S, get no
+        learned behaviour. Memory only - never shared state - so no caller, whatever its scope, can grow a file with it."""
+        if not session_id:
+            return
+        key = self._key(session_id, owner)
+        self._latch.pop(key, None)
+        self._latch[key] = {"at": self._clock(), "turns": float(SAFETY_LATCH_TURNS)}
+        self._prune_latches()
 
-    def safety_latched(self, session_id: str | None, owner: str | None = None) -> bool:
+    def consume_latch(self, session_id: str | None, owner: str | None = None) -> bool:
+        """True (and one latched turn used up) when this turn falls inside a latch window."""
+        self._prune_latches()
         if not session_id:
             return False
-        with self._state() as state:
-            at = state["safety_latch"].get(self._key(session_id, owner))
-        return at is not None and self._clock() - float(at) <= SAFETY_LATCH_S
+        key = self._key(session_id, owner)
+        row = self._latch.get(key)
+        if row is None:
+            return False
+        if self._clock() - row["at"] > SAFETY_LATCH_S or row["turns"] <= 0:
+            self._latch.pop(key, None)
+            return False
+        row["turns"] -= 1
+        if row["turns"] <= 0:
+            self._latch.pop(key, None)
+        return True
+
+    def latch_size(self) -> int:
+        return len(self._latch)
