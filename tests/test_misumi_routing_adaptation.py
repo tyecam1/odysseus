@@ -448,10 +448,11 @@ def test_respond_durable_preference_promotes_and_reroutes(tmp_path, monkeypatch)
         "/misumi/respond",
         json={"prompt": "the cleaning rota needs updating", "persona": "auto", "session_id": "sess-3"},
     ).json()
-    assert after["persona"] == "jin"
-    assert after["routing"]["method"] == "routing-contract-v0.2+learned-revision"
-    assert after["routing"]["learned"]["revision_id"] == note["promotion"]["revision_id"]
-    assert after["routing"]["base_selected"] == "misato"
+    # Round 8: a learned route is an advisory consult - Misato stays lead, Jin is consulted.
+    assert after["persona"] == "misato"
+    assert after["routing"]["method"] == "routing-contract-v0.2"
+    assert after["routing"]["learned_consult"]["revision_id"] == note["promotion"]["revision_id"]
+    assert after["routing"]["learned_consult"]["persona"] == "jin" and after["routing"]["learned_consult"]["lead"] == "misato"
 
     # New process, same state root: the learned route survives restart.
     restarted = _client(tmp_path, monkeypatch)
@@ -459,8 +460,8 @@ def test_respond_durable_preference_promotes_and_reroutes(tmp_path, monkeypatch)
         "/misumi/respond",
         json={"prompt": "cleaning roster for next week", "persona": "auto", "session_id": "sess-4"},
     ).json()
-    assert persisted["persona"] == "jin"
-    assert persisted["routing"]["learned"]["revision_id"] == note["promotion"]["revision_id"]
+    assert persisted["persona"] != "jin"
+    assert persisted["routing"]["learned_consult"]["revision_id"] == note["promotion"]["revision_id"]
 
     # Rollback restores base routing; evidence and candidate stay on disk.
     state_root = tmp_path / "routing-state"
@@ -470,7 +471,7 @@ def test_respond_durable_preference_promotes_and_reroutes(tmp_path, monkeypatch)
         "/misumi/respond",
         json={"prompt": "the cleaning rota needs updating", "persona": "auto", "session_id": "sess-3"},
     ).json()
-    assert rolled["persona"] == "misato"
+    assert rolled["persona"] == "misato" and "learned_consult" not in rolled["routing"]
     assert len(store.list_evidence()) >= 1  # history preserved
 
 
@@ -609,8 +610,8 @@ def test_routing_api_inspect_promote_rollback(tmp_path, monkeypatch):
 
     rerouted = client.post("/misumi/respond", json={
         "prompt": "the cleaning rota needs updating", "persona": "auto", "session_id": "ra-2"}).json()
-    assert rerouted["persona"] == "jin"
-    assert rerouted["routing"]["learned"]["revision_id"] == revision_id
+    assert rerouted["persona"] == "misato" and rerouted["routing"]["learned_consult"]["persona"] == "jin"
+    assert rerouted["routing"]["learned_consult"]["revision_id"] == revision_id
 
     rolled = client.post(
         f"/misumi/routing/revisions/{revision_id}/rollback",
@@ -618,7 +619,7 @@ def test_routing_api_inspect_promote_rollback(tmp_path, monkeypatch):
     assert rolled.status_code == 200
     restored = client.post("/misumi/respond", json={
         "prompt": "the cleaning rota needs updating", "persona": "auto", "session_id": "ra-2"}).json()
-    assert restored["persona"] == "misato"
+    assert restored["persona"] == "misato" and "learned_consult" not in restored["routing"]
 
     rejected = client.post(
         f"/misumi/routing/candidates/{target['candidate_id']}/reject",

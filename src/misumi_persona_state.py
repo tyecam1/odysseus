@@ -288,6 +288,13 @@ def is_third_party_text(prompt: str) -> bool:
     return False
 
 
+# Round 8: a short framing word before a colon is the user's own lead-in, so "Remember: from now on keep answers short" is the
+# user's instruction. A NAME before a colon ("My landlord: ...") still marks quoted third-party text.
+_LEAD_IN = re.compile(
+    r"^\s*(?:remember|reminder|note|quick\s+one|quick\s+request|one\s+thing|one\s+more\s+thing|also|ps|p\.s\.|fyi|"
+    r"request|preference|setting|heads\s+up|important)\s*:\s*", re.IGNORECASE)
+
+
 def own_instruction(prompt: str) -> dict[str, Any]:
     """The part of a turn the user typed as their own instruction, and whether the turn is a data-processing task.
 
@@ -298,7 +305,9 @@ def own_instruction(prompt: str) -> dict[str, Any]:
     """
     full = _full(prompt)
     text = _strip_quoted(_prep(prompt))
-    own = text.split("\n", 1)[0].split(":", 1)[0]
+    first = text.split("\n", 1)[0]
+    lead_in = _LEAD_IN.match(first)  # "Remember: ...", "Quick one: ..." - the user's own framing, not a quoted speaker
+    own = (first[lead_in.end():] if lead_in else first).split(":", 1)[0]
     # A turn longer than the detection window is treated as DATA (fail-safe): nothing in it can create durable state, so no
     # part of a long paste can be missed by a bounded scan. (The safety gate still scans all of it.)
     data = len(full) > _MAX_DETECT_CHARS or bool(_DATA_TASK.search(text)) or is_third_party_text(prompt)
@@ -872,24 +881,38 @@ CANONICAL_REQUESTS: dict[tuple[str, str], str] = {
     ("intervention_style", "reactive"): "From now on just answer what I ask",
 }
 NOT_SAVED_TEMPLATE = (
-    "I have not saved that as a lasting preference, because it read as someone else's words, a quote, a hedge or a joke. "
+    "I have not saved that as a lasting preference, because it read as a question, a hedge, a joke or someone else's words. "
     "To save it, send it on its own as your own request, for example: \"{example}\", then answer yes."
 )
 
 
 def unsaved_preference(prompt: str) -> dict[str, str] | None:
-    """{'example', 'message'} when the turn carries a durable-looking style or routing request that was NOT captured because the
-    turn is treated as data; None otherwise. It never creates evidence or an offer."""
-    if not own_instruction(prompt)["data_task"] or is_reserved_turn(prompt):
+    """{'example', 'message'} when the user's OWN leading text asks for a lasting style or routing change that this turn could not
+    turn into an offer (it read as a hedge, a joke, attribution, a sign-off, or a question); None otherwise.
+
+    Never for a turn that processes someone else's text (summarise, proofread, reply, paste ...), a message addressed to a group
+    or to another person, mail/forward furniture, or a reserved/safety turn. The route shows it only when the turn produced no
+    offer. It never creates evidence or an offer (round 7/8).
+    """
+    if is_reserved_turn(prompt):
         return None
-    text = _prep(prompt)
-    if not _DURABLE_PHRASE.search(text):
+    text = _strip_quoted(_prep(prompt))
+    if _DATA_TASK.search(text):
+        return None
+    stripped = _full(prompt).strip()
+    if any(_THIRD_PARTY[index].search(stripped) for index in (0, 1, 2, 3)):
+        return None  # a group greeting, a signature line, headers/forwards, or a group address: someone else's message
+    greeting = _GREETING_NAME.match(stripped)
+    if greeting and greeting.group(1).lower() != "there" and not _is_assistant_name(greeting.group(1)):
+        return None
+    own = own_instruction(prompt)["text"]
+    if not _DURABLE_PHRASE.search(own):
         return None
     for dimension, value, kind, pattern in _SIGNALS:
-        if kind == "request" and pattern.search(text) and (dimension, value) in CANONICAL_REQUESTS:
+        if kind == "request" and pattern.search(own) and (dimension, value) in CANONICAL_REQUESTS:
             example = CANONICAL_REQUESTS[(dimension, value)]
             return {"example": example, "message": NOT_SAVED_TEMPLATE.format(example=example)}
-    if _ROUTING_HINT.search(text):
+    if _ROUTING_HINT.search(own):
         example = "From now on use Jin for compost questions"
         return {"example": example, "message": NOT_SAVED_TEMPLATE.format(example=example)}
     return None

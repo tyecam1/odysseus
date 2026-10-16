@@ -3,8 +3,14 @@
 Implements the controlled adaptation loop demanded by the programme directive:
 
     interaction -> routing decision -> user evidence -> candidate affinity
-    -> evaluation -> authorised promotion -> changed future route
+    -> evaluation -> authorised promotion -> changed future consult
     -> explainable trace -> rollback
+
+Round 8 (2026-10-16): a learned route NEVER changes the lead. An active revision ("consult Jin on kitchen questions") adds its
+persona as an ADVISORY CONSULT on turns whose exact cue matches and which both safety gates pass; the base-route lead (Aoteru
+or the deterministic lead) keeps responsibility for the whole answer, carries the style carve-out, and is told the consult is
+optional advice. A safety-gate miss therefore no longer changes who answers. A cue the recall-first gate always withholds
+("car", "gas") is never offered; the user is told it cannot apply.
 
 Separation boundaries (enforced structurally, not by convention):
 
@@ -46,8 +52,10 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
+import threading
 import time
 import uuid
+from collections import OrderedDict
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -260,7 +268,10 @@ class RoutingAdaptationStore:
         self._io = StateDir(self.root)
         # In-process index of the latest auto route per (owner, session), used only to detect an immediate manual choice as a
         # correction. Not evidence; keyed by owner too (round 5, M3) so another owner's turn in the same session id never counts.
-        self._last_auto_route: dict[tuple[str, str], dict[str, Any]] = {}
+        # Round 8: bounded (per-owner LRU of sessions, LRU of owners), TTL-pruned and guarded by a lock, because worker threads
+        # read and write it concurrently.
+        self._last_auto_route: "OrderedDict[str, OrderedDict[str, dict[str, Any]]]" = OrderedDict()
+        self._auto_lock = threading.Lock()
 
     def locked(self):
         """The store's cross-process lock (re-entrant): callers that must check-then-act atomically hold it."""
@@ -686,14 +697,13 @@ class RoutingAdaptationStore:
     ) -> tuple[str, dict[str, Any] | None]:
         """Apply active learned revisions to one auto-routing decision.
 
-        Learned routing is ADVISORY (round 6/7). It is withheld when the precision safety block flags the turn
-        (``is_reserved_turn``) OR when the separate RECALL-FIRST routing gate (``withhold_learned_route``: any hazard, injury,
-        medical, urgency, distress, substance, violence, vehicle or missing/trapped word, or a person together with a body part)
-        fires; never when the base route is a reserved route (Aoteru keeps the lead); and only on the exact cue word. A
-        quarantined, locked or unavailable store applies nothing. Explicit caller persona choices never reach this path.
-        Residual risk (measured on round-7 held-out sets, 80 emergencies / 80 ordinary): the routing gate missed 3/80 emergencies
-        and withheld the learned route on 10/80 ordinary turns; an emergency it misses can still follow a learned cue to another
-        persona (that persona keeps its seed-order rules; the learned-style carve-out does not cover routing).
+        Returns ``(suggested_persona, provenance)``. The route treats the suggestion as an ADVISORY CONSULT only - it never
+        makes it the lead (round 8). The suggestion is withheld when the precision safety block flags the turn
+        (``is_reserved_turn``) OR when the recall-first routing gate (``withhold_learned_route``) fires; never made when the base
+        route is a reserved route; and only on the exact cue word. A quarantined, locked or unavailable store suggests nothing.
+        Residual risk: the reviewer measured the recall-first gate missing 28/110 (25.5%) of a fresh emergency set with nine
+        learned routes active; on round-7's own sets it missed 3/80. A miss now adds an optional consult; it does not change
+        the lead.
         """
         if is_reserved_turn(prompt, context) or withhold_learned_route(prompt):
             return base_persona, None
@@ -721,6 +731,9 @@ class RoutingAdaptationStore:
 
     # ---------- auto-route context (correction detection) ----------
 
+    AUTO_ROUTE_TTL_S = 900.0
+    AUTO_ROUTE_LIMITS = (4096, 32)  # (owners, sessions per owner)
+
     def note_auto_route(
         self,
         session_id: str | None,
@@ -733,25 +746,51 @@ class RoutingAdaptationStore:
     ) -> None:
         if not session_id:
             return
-        self._last_auto_route[(owner_key(owner), str(session_id))] = {
-            "prompt": prompt,
+        who, now = owner_key(owner), time.time()
+        row = {
+            "prompt": prompt[:500],
             "persona": persona,
             "reasons": list(reasons),
             "request_id": request_id,
             "persisted": bool(persisted),  # only a persisted turn may seed v0.2 follow-up carry or count as a correction
-            "owner": owner_key(owner),
-            "at": time.time(),
+            "owner": who,
+            "at": now,
         }
+        max_owners, max_sessions = self.AUTO_ROUTE_LIMITS
+        with self._auto_lock:
+            sessions = self._last_auto_route.pop(who, None) or OrderedDict()
+            self._last_auto_route[who] = sessions
+            for key in [k for k, r in sessions.items() if now - r["at"] > self.AUTO_ROUTE_TTL_S]:
+                sessions.pop(key, None)
+            sessions.pop(str(session_id), None)
+            sessions[str(session_id)] = row
+            while len(sessions) > max_sessions:
+                sessions.popitem(last=False)
+            while len(self._last_auto_route) > max_owners:
+                self._last_auto_route.popitem(last=False)
 
     def last_auto_route(self, session_id: str | None, owner: str | None = None,
                         max_age_s: float = 900.0) -> dict[str, Any] | None:
         """The latest auto route of THIS owner in this session (another owner's turn with the same session id is invisible)."""
         if not session_id:
             return None
-        row = self._last_auto_route.get((owner_key(owner), str(session_id)))
+        with self._auto_lock:
+            row = (self._last_auto_route.get(owner_key(owner)) or {}).get(str(session_id))
+            row = dict(row) if row else None
         if row and time.time() - row["at"] <= max_age_s:
             return row
         return None
+
+    def auto_route_entries(self) -> int:
+        with self._auto_lock:
+            return sum(len(sessions) for sessions in self._last_auto_route.values())
+
+
+def cue_never_applies(cue: object) -> bool:
+    """True when the recall-first routing gate withholds every turn that mentions this cue (so a learned consult on it could never
+    run): such a cue is never offered, and the user is told why (round 8)."""
+    term = str(cue or "").strip()
+    return not term or withhold_learned_route(term) or withhold_learned_route(f"{term} questions")
 
 
 def is_durable_instruction(prompt: str) -> bool:
@@ -787,6 +826,12 @@ def record_durable_instruction(
     parsed = parse_routing_instruction(prompt)
     if parsed is None or (named_persona is not None and parsed["persona"] != named_persona):
         return None
+    if cue_never_applies(parsed["cue"]):
+        # Round 8: a cue the routing gate always withholds ("car", "gas", "pills") could never take effect; say so instead of
+        # offering something that would be "Done" and then silently never apply.
+        return {"state": "cannot-apply", "cue": [parsed["cue"]], "proposed_persona": parsed["persona"],
+                "evidence_id": None, "evidence_type": None, "candidate_id": None, "candidate_status": None,
+                "reason": "turns about this topic are treated as possibly urgent, so the main lead always keeps them"}
     previous = store.last_auto_route(session_id, owner)
     result = store.record_evidence(
         type="durable_request",
@@ -849,7 +894,7 @@ def record_manual_choice(
 
     cue = [
         reason for reason in last.get("reasons") or []
-        if not str(reason).startswith(("fallback:", "reserved:", "learned:", "carry:"))
+        if not str(reason).startswith(("fallback:", "reserved:", "learned:", "carry:")) and not cue_never_applies(str(reason))
     ]
     if not cue:
         extracted = extract_cue_term(last.get("prompt") or "", routing_intents(chosen_persona))

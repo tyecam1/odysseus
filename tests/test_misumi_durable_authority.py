@@ -90,7 +90,7 @@ F1_QUESTIONS = [
 def test_f1_an_ordinary_question_never_creates_a_learned_route(estate, token, mode, prompt):
     _turn(estate, prompt, token=token, persona=mode, session="f1")
     probe = _turn(estate, "Does the boiler need servicing?", persona="auto", session="f1-probe")
-    assert probe["persona"] != "jin" and "learned" not in (probe.get("routing") or {})
+    assert probe["persona"] != "jin" and "learned_consult" not in (probe.get("routing") or {})
     assert estate["routing"].active_overlays() == []
     for candidate in estate["routing"].all_candidates().values():
         assert candidate.get("status") not in ("eligible", "active"), candidate
@@ -100,7 +100,7 @@ def test_f1_a_real_routing_instruction_only_offers_and_a_bare_yes_from_the_same_
     reply = _turn(estate, "From now on use Jin for compost questions", persona="auto", session="r1")
     assert estate["routing"].active_overlays() == []                       # free text alone never activates
     offer = reply["ratification_offer"]
-    assert offer["kind"] == "routing" and offer["summary"] == "send compost questions to Jin"
+    assert offer["kind"] == "routing" and offer["summary"] == "consult Jin on compost questions"
     assert _turn(estate, "Is the compost ready?", persona="auto", session="r2")["persona"] != "jin"
 
     assert "ratification" not in _turn(estate, "yes", owner="bob", persona="auto", session="r1")  # another owner
@@ -113,7 +113,9 @@ def test_f1_a_real_routing_instruction_only_offers_and_a_bare_yes_from_the_same_
     (revision,) = estate["routing"].active_overlays()
     assert revision["authorisation"]["principal"] == "alice" and revision["authorisation"]["principal_authenticated"] is True
     assert revision["persona"] == "jin" and revision["cue"] == ["compost"]
-    assert _turn(estate, "Is the compost ready?", persona="auto", session="r4")["persona"] == "jin"
+    routed = _turn(estate, "Is the compost ready?", persona="auto", session="r4")
+    # Round 8: the learned route is an advisory consult; the base lead keeps the answer.
+    assert routed["persona"] != "jin" and routed["routing"]["learned_consult"]["persona"] == "jin"
 
 
 @pytest.mark.parametrize("token", ["ro", "chat"])
@@ -493,7 +495,7 @@ def test_m2_reported_repro_plain_english_then_ok_never_routes_plain_flour(estate
     assert (reply.get("ratification_offer") or {}).get("kind") != "routing"
     _turn(estate, "ok", owner="alice", session="z")
     routed = _turn(estate, "Is plain flour ok for bread?", owner="bob", session="y", persona="auto")
-    assert "learned" not in (routed.get("routing") or {}) and estate["routing"].active_overlays() == []
+    assert "learned_consult" not in (routed.get("routing") or {}) and estate["routing"].active_overlays() == []
 
 
 def test_m2_with_the_persona_state_kill_switch_a_style_request_records_nothing_anywhere(tmp_path, monkeypatch):
@@ -508,7 +510,7 @@ def test_m2_with_the_persona_state_kill_switch_a_style_request_records_nothing_a
 def test_m2_a_routing_instruction_in_manual_mode_proposes_the_persona_it_names(estate):
     reply = _turn(estate, "From now on use Jin for compost questions", persona="misato", session="mm")
     assert reply["routing_adaptation"]["proposed_persona"] == "jin" and reply["routing_adaptation"]["cue"] == ["compost"]
-    assert reply["ratification_offer"]["summary"] == "send compost questions to Jin"
+    assert reply["ratification_offer"]["summary"] == "consult Jin on compost questions"
 
 
 @pytest.mark.parametrize("prompt", STYLE_REQUESTS + [

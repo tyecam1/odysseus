@@ -7,13 +7,13 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 
 from fastapi import APIRouter, HTTPException, Request
-from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 
 from core.middleware import require_admin
@@ -22,7 +22,14 @@ from src.misumi_household import HouseholdReadOnlyAdapter, infer_household_domai
 from src.misumi_memory import MisumiMemory
 from src.misumi_observability import MisumiEventLog
 from src.misumi_persona_routing import resolve_auto_lead
-from src.misumi_ratification_dialogue import OfferBook, build_offer, candidate_digest, origin_allows, parse_answer
+from src.misumi_ratification_dialogue import (
+    PENDING_TTL_S,
+    OfferBook,
+    build_offer,
+    candidate_digest,
+    origin_allows,
+    parse_answer,
+)
 from src.misumi_state_io import StateBudget, StateUnavailable, state_budget
 from src.misumi_team_formation import plan_team, risk_flag, synthesis_inputs
 from src.misumi_persona_state import (
@@ -39,6 +46,7 @@ from src.misumi_routing_adaptation import (
     RoutingAdaptationStore,
     is_durable_instruction,
     record_durable_instruction,
+    cue_never_applies,
     record_manual_choice,
 )
 from src.misumi_policy import load_persona_policy, normalize_persona, persona_record, policy_summary
@@ -405,6 +413,7 @@ async def _model_turn(
     context_messages: Optional[List[Dict[str, str]]] = None,
     contributions: Optional[List[Tuple[str, str]]] = None,
     style_values: Optional[Dict[str, str]] = None,
+    advisory_consult: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Generate one synthesized answer plus bounded retention decisions."""
     try:
@@ -434,6 +443,11 @@ async def _model_turn(
             system += (
                 "\nIf any specialist input begins with RISK:, address that risk explicitly in the answer "
                 "instead of ignoring it."
+            )
+        if advisory_consult:
+            system += (
+                f"\n{advisory_consult} was consulted because of a household routing preference. You remain responsible for "
+                f"the whole answer: answer fully yourself; treat {advisory_consult}'s input as optional advice."
             )
         messages = list(context_messages or [])
         if not messages:
@@ -796,6 +810,30 @@ def _offer_still_valid(offer: Dict[str, Any], candidate: Optional[Dict[str, Any]
     return origin_allows(candidate, owner, sid)
 
 
+def _recent_revision_by(owner: Optional[str], sid: Optional[str], stores: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The newest live revision this owner's own "yes" created in this session within the undo window, from the stores themselves
+    (used when the dialogue state could not record or return the undo pointer)."""
+    import calendar
+
+    best = None
+    for kind, store in stores.items():
+        if store is None:
+            continue
+        for row in store._effective_active():
+            auth = row.get("authorisation") or {}
+            if auth.get("type") != "user_instruction" or str(auth.get("principal") or "").strip() != str(owner or "").strip():
+                continue
+            if str(auth.get("session_id") or "") != str(sid or ""):
+                continue
+            try:
+                at = calendar.timegm(time.strptime(str(row.get("created_at")), "%Y-%m-%dT%H:%M:%SZ"))
+            except ValueError:
+                continue
+            if time.time() - at <= PENDING_TTL_S and (best is None or at >= best["at"]):
+                best = {"kind": kind, "revision_id": row["revision_id"], "at": at, "owner": owner}
+    return best
+
+
 def _ratified_by_this_offer(store, offer: Dict[str, Any], owner: Optional[str]) -> Optional[Dict[str, Any]]:
     """The live revision an earlier answer to THIS offer (same digest, same principal) created, if any."""
     for row in reversed(store._effective_active()):
@@ -822,7 +860,7 @@ def _handle_dialogue_answer(
     verdict = parse_answer(prompt)
     store_for = {"persona-state": persona_state, "routing": adaptation}
     try:
-        pending = offers.pending(sid, owner)
+        pending = offers.pending(sid, owner) if verdict != "undo" else None
         if verdict == "affirm" and pending is None:
             last = offers.last_revision(sid, owner)
             if last and last.get("answer") == "affirm" and last.get("offer"):
@@ -840,7 +878,11 @@ def _handle_dialogue_answer(
         logger.error("Misumi dialogue state unavailable; no offer can be answered: %s", exc)
         return None
     if verdict == "undo":
-        last = offers.last_revision(sid, owner)
+        try:
+            last = offers.last_revision(sid, owner)
+        except StateUnavailable:
+            last = None
+        last = last or _recent_revision_by(owner, sid, {"persona-state": persona_state, "routing": adaptation})
         if last is None:
             return None
         pending, verdict = None, "undo"
@@ -900,7 +942,7 @@ def _handle_dialogue_answer(
                     revision = store.promote(offer["candidate_id"], authorisation={
                         "type": "user_instruction", "evidence_id": evidence_id,
                         "principal": owner, "principal_authenticated": bool(str(owner or "").strip()),
-                        "offer_digest": offer.get("digest"),
+                        "offer_digest": offer.get("digest"), "session_id": sid,
                     }, precondition=lambda current: _offer_still_valid(offer, current, owner, sid, evidence_id))
                     outcome.update({"state": "active", "kind": offer["kind"], "revision_id": revision["revision_id"],
                                     "candidate_id": offer["candidate_id"]})
@@ -913,9 +955,19 @@ def _handle_dialogue_answer(
                     offers.snooze(offer["candidate_id"])
                     outcome.update({"state": "snoozed", "kind": offer["kind"], "candidate_id": offer["candidate_id"]})
                     text = "Okay, I will leave it for now."
-            if outcome.get("state") == "active":
-                offers.remember_revision(sid, offer["kind"], outcome["revision_id"], owner, offer=offer, answer="affirm")
-            offers.clear(sid, owner)
+            try:
+                if outcome.get("state") == "active":
+                    offers.remember_revision(sid, offer["kind"], outcome["revision_id"], owner, offer=offer, answer="affirm")
+                offers.clear(sid, owner)
+            except StateUnavailable as exc:
+                if outcome.get("state") != "active":
+                    raise
+                # The change IS in force; say so honestly. A repeated yes is idempotent, other turns withdraw the stale offer,
+                # and "undo that" finds the revision in the store (round 8).
+                logger.error("Misumi dialogue bookkeeping incomplete after promotion: %s", exc)
+                outcome["bookkeeping"] = "incomplete"
+                text = (f"Done: {offer['summary']}. I saved that, but could not finish my own bookkeeping; "
+                        "say 'undo that' to reverse it.")
     except (KeyError, ValueError, StateUnavailable) as exc:
         logger.warning("Misumi dialogue ratification refused: %s", exc)
         try:
@@ -924,6 +976,46 @@ def _handle_dialogue_answer(
             pass
         return None
     return _dialogue_reply(body, request_id, pending, outcome, text, events)
+
+
+# Round 8: adaptation work (locks, stores, dialogue state) runs on a DEDICATED small executor, admitted by a non-blocking
+# semaphore. When every slot is busy (for example, turns stalled on a held lock) a new turn skips learned behaviour at once
+# instead of queueing, so unrelated turns never wait behind stalled ones; and any error inside adaptation work degrades the turn
+# to "no learned behaviour" instead of failing it.
+ADAPTATION_WORKERS = 8
+_adaptation_executor = None
+_adaptation_slots = threading.BoundedSemaphore(ADAPTATION_WORKERS)
+
+
+def _executor():
+    global _adaptation_executor
+    if _adaptation_executor is None:
+        from concurrent.futures import ThreadPoolExecutor
+
+        _adaptation_executor = ThreadPoolExecutor(max_workers=ADAPTATION_WORKERS, thread_name_prefix="misumi-adaptation")
+    return _adaptation_executor
+
+
+async def _run_adaptation(work, label: str):
+    """Run ``work`` off the event loop; None when saturated or when it fails (fail closed: no learned behaviour)."""
+    if not _adaptation_slots.acquire(blocking=False):
+        logger.warning("Misumi %s work skipped: adaptation workers saturated", label)
+        return None
+    import contextvars
+
+    context = contextvars.copy_context()
+
+    def guarded():
+        try:
+            return context.run(work)
+        finally:
+            _adaptation_slots.release()
+
+    try:
+        return await asyncio.get_running_loop().run_in_executor(_executor(), guarded)
+    except Exception as exc:  # noqa: BLE001 - adaptation state must never fail a turn
+        logger.exception("Misumi %s work failed; learned behaviour withheld: %s", label, exc)
+        return None
 
 
 def _dialogue_reply(body, request_id: str, pending, outcome: Dict[str, Any], text: str, events) -> Optional[Dict[str, Any]]:
@@ -970,6 +1062,8 @@ def _dialogue_offer(
         cid = str(candidate.get("candidate_id") or "")
         if not cid or not origin_allows(candidate, owner, session_id):
             continue
+        if kind == "routing" and any(cue_never_applies(item) for item in candidate.get("cue") or []):
+            continue  # a learned consult on this cue could never run: never offer it
         if cid not in wanted and not offers.may_offer(cid):
             continue
         target = candidate.get("persona") if kind == "persona-state" else candidate.get("proposed_persona")
@@ -1255,8 +1349,11 @@ def setup_misumi_routes(
         style_values: Dict[str, str] = {}
         style_applied: List[Dict[str, Any]] = []
 
+        learned_consult: Optional[Dict[str, Any]] = None
+
         def _adaptation_phase():
             nonlocal persona, routing, adaptation_note, authority, benign, requested, style_note, style_values, style_applied
+            nonlocal learned_consult
             with state_budget(budget):
                 # One gate for routing AND persona-state capture (round 4): a persisted turn from an execute-scoped caller, not a
                 # reserved/safety turn, and not a turn that processes third-party text. Anything else records nothing at all.
@@ -1302,16 +1399,14 @@ def setup_misumi_routes(
                         base_reasons = list((routing or {}).get("reasons") or [])
                         learned = None
                         if benign:  # learned routing never touches a turn the shared safety gate does not call benign
-                            persona, learned = adaptation.apply_learned_overlays(prompt, persona, base_reasons)
-                        if learned is not None:
-                            routing = {
-                                "method": f"{base_method}+learned-revision",
-                                "selected": persona,
-                                "reasons": [f"learned:{learned['revision_id']} cue={','.join(learned['cue'])}"],
-                                "base_selected": base_persona,
-                                "base_reasons": base_reasons,
-                                "learned": learned,
-                            }
+                            suggested, learned = adaptation.apply_learned_overlays(prompt, persona, base_reasons)
+                            if learned is not None and suggested != persona:
+                                # Round 8: a learned route NEVER replaces the lead. The base-route lead keeps the answer (and
+                                # the style carve-out); the learned persona is added as an optional consult.
+                                learned_consult = {**learned, "persona": suggested, "lead": persona, "advisory": True}
+                        routing = dict(routing or {}, method=base_method, selected=persona, reasons=base_reasons)
+                        if learned_consult is not None:
+                            routing["learned_consult"] = learned_consult
                         adaptation.note_auto_route(
                             body.session_id, prompt, persona,
                             list((routing or {}).get("reasons") or []), request_id,
@@ -1371,11 +1466,17 @@ def setup_misumi_routes(
                     style_values, style_applied = resolved["values"], resolved["provenance"]
                 return None
 
-        dialogue = await run_in_threadpool(_adaptation_phase)
+        dialogue = await _run_adaptation(_adaptation_phase, "adaptation")
         if dialogue is not None:
             return dialogue
-        # Round 7: a durable-looking request that was treated as data is not dropped silently (no evidence, no offer).
-        not_saved = unsaved_preference(prompt) if (authority is not None and benign) else None
+        # Round 7/8: a durable-looking request in the user's own leading text that produced no offer is not dropped silently
+        # (no evidence, no offer); a routing request that could never apply is refused plainly.
+        not_saved = unsaved_preference(prompt) if (authority is not None and benign and not requested) else None
+        if adaptation_note is not None and adaptation_note.get("state") == "cannot-apply":
+            cue = ", ".join(adaptation_note.get("cue") or [])
+            not_saved = {"example": "", "message": (
+                f"I can't keep that as a lasting routing preference: questions about {cue} are treated as possibly urgent, so "
+                "the main assistant always keeps them.")}
         domain = infer_household_domain(prompt)
         sources = adapter.search(prompt, domain=domain, limit=4) if adapter.reachable else []
         if not domain:
@@ -1414,6 +1515,8 @@ def setup_misumi_routes(
                 text = "Odysseus is available, but no working model backend is configured for this request."
             else:
                 targets = [item["persona"] for item in team_plan["supports"]]
+                if learned_consult is not None and _consultation_enabled() and learned_consult["persona"] not in targets + [persona]:
+                    targets.append(learned_consult["persona"])  # the learned consult: optional input, never the lead
 
                 async def consult(target: str):
                     began = time.monotonic()
@@ -1442,6 +1545,8 @@ def setup_misumi_routes(
                     for target, contribution in rows
                     if contribution
                 ]
+                if learned_consult is not None:
+                    learned_consult["status"] = (consult_trace.get(learned_consult["persona"]) or {}).get("status", "not-run")
                 consulted = [
                     {"persona": target, "contribution": contribution}
                     for target, contribution in contributions
@@ -1477,7 +1582,13 @@ def setup_misumi_routes(
                 backend=backend,
                 model=model,
                 context_messages=context_messages,
-                contributions=synthesis_inputs(contributions),  # an OK: support adds nothing for the lead; only RISK:/legacy text
+                contributions=synthesis_inputs(contributions) + [  # an OK: support adds nothing; only RISK:/legacy text...
+                    (name, item) for name, item in contributions                   # ...but a learned consult is always shown
+                    if learned_consult is not None and name == learned_consult["persona"]
+                    and (name, item) not in synthesis_inputs(contributions)
+                ],
+                advisory_consult=(str(persona_record(learned_consult["persona"]).get("display_name") or learned_consult["persona"])
+                                  if learned_consult is not None else None),
                 style_values=style_values,
             )
             text = str(turn["answer"])
@@ -1622,7 +1733,7 @@ def setup_misumi_routes(
             response["team"] = team_block
         if not_saved is not None:
             response["text"] = f"{response['text']}\n\n{not_saved['message']}"
-            response["preference_not_saved"] = {"example": not_saved["example"]}
+            response["preference_not_saved"] = {"example": not_saved["example"]} if not_saved["example"] else {"cannot_apply": True}
         offer_sid = session_id or body.session_id
         if (
             offer_sid and body.persist_turn and authority is not None and benign and outcome in {"model", "grounded", "absent"}
@@ -1640,9 +1751,9 @@ def setup_misumi_routes(
                         logger.error("Misumi offer withheld (state unavailable): %s", exc)
                         return None
 
-            offer = await run_in_threadpool(_offer_phase)
+            offer = await _run_adaptation(_offer_phase, "offer")
             if offer is not None:
-                response["text"] = f"{text}\n\n{offer['question']}"
+                response["text"] = f"{response['text']}\n\n{offer['question']}"
                 response["ratification_offer"] = {
                     key: offer[key] for key in ("kind", "candidate_id", "summary", "question", "answers")
                 }

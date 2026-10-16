@@ -32,6 +32,7 @@ from collections import OrderedDict
 import hashlib
 import json
 import re
+import threading
 import time
 from pathlib import Path
 from typing import Any, Iterator
@@ -117,7 +118,8 @@ def describe_candidate(kind: str, candidate: dict[str, Any], display_name: str |
         return f"{who}: {phrase}" if phrase else ""
     cue = ", ".join(str(c) for c in (candidate.get("cue") or []))
     target = str(display_name or candidate.get("proposed_persona") or "")
-    return f"send {cue} questions to {target}" if cue and target else ""
+    # Round 8: a learned route never changes the lead; it adds the persona as an optional consult.
+    return f"consult {target} on {cue} questions" if cue and target else ""
 
 
 def candidate_digest(candidate: dict[str, Any], kind: str = "", ignore_evidence: Any = ()) -> str:
@@ -187,6 +189,7 @@ class OfferBook:
         self._latch: dict[str, "OrderedDict[str, OrderedDict[str, dict[str, float]]]"] = {
             tier: OrderedDict() for tier in LATCH_LIMITS}
         self.latch_limits = dict(LATCH_LIMITS)
+        self._latch_lock = threading.Lock()  # worker threads mutate the latch maps concurrently (round 8)
         self._io = None
         if root is not None:
             from src.misumi_state_io import StateDir
@@ -276,52 +279,57 @@ class OfferBook:
 
     # ---------- safety latch (recent-context window for the safety gate; in memory, bounded) ----------
 
+    # A turn with no session id (the first turn of a new conversation, before the server issues one) latches the OWNER: the key
+    # below then covers every session of that owner for the latch window (round 8).
+    OWNER_WIDE = "*owner*"
+
     def _prune_owner(self, sessions: "OrderedDict[str, dict[str, float]]") -> None:
         now = self._clock()
         for key in [k for k, row in sessions.items() if now - row["at"] > SAFETY_LATCH_S or row["turns"] <= 0]:
             sessions.pop(key, None)
 
     def latch_safety(self, session_id: str | None, owner: str | None = None, privileged: bool = True) -> None:
-        """A flagged turn happened: the next SAFETY_LATCH_TURNS turns of this (owner, session), within SAFETY_LATCH_S, get no
-        learned behaviour. Memory only. ``privileged`` is False for callers without the execute scope: their latches live in a
-        separate small structure."""
-        if not session_id:
-            return
+        """A flagged turn happened: the next SAFETY_LATCH_TURNS turns of this (owner, session) - or of this owner in any session
+        when the turn had no session id - within SAFETY_LATCH_S, get no learned behaviour. Memory only. ``privileged`` is False
+        for callers without the execute scope: their latches live in a separate small structure."""
         tier = "execute" if privileged else "read-only"
         max_owners, max_sessions = self.latch_limits[tier]
-        owners = self._latch[tier]
-        who = _owner_value(owner)
-        sessions = owners.pop(who, None) or OrderedDict()
-        owners[who] = sessions                              # most recently latched owner last
-        self._prune_owner(sessions)
-        key = str(session_id)
-        sessions.pop(key, None)
-        sessions[key] = {"at": self._clock(), "turns": float(SAFETY_LATCH_TURNS)}
-        while len(sessions) > max_sessions:                 # an owner can only evict their OWN oldest latch
-            sessions.popitem(last=False)
-        while len(owners) > max_owners:
-            owners.popitem(last=False)
+        key = str(session_id) if session_id else self.OWNER_WIDE
+        with self._latch_lock:
+            owners = self._latch[tier]
+            who = _owner_value(owner)
+            sessions = owners.pop(who, None) or OrderedDict()
+            owners[who] = sessions                          # most recently latched owner last
+            self._prune_owner(sessions)
+            sessions.pop(key, None)
+            sessions[key] = {"at": self._clock(), "turns": float(SAFETY_LATCH_TURNS)}
+            while len(sessions) > max_sessions:             # an owner can only evict their OWN oldest latch
+                sessions.popitem(last=False)
+            while len(owners) > max_owners:
+                owners.popitem(last=False)
 
     def consume_latch(self, session_id: str | None, owner: str | None = None) -> bool:
-        """True (and one latched turn used up) when this turn falls inside a latch window of this (owner, session)."""
-        if not session_id:
-            return False
-        who, key, hit = _owner_value(owner), str(session_id), False
-        for tier in LATCH_LIMITS:
-            sessions = self._latch[tier].get(who)
-            if not sessions:
-                continue
-            self._prune_owner(sessions)
-            row = sessions.get(key)
-            if row is not None:
-                hit = True
-                row["turns"] -= 1
-                if row["turns"] <= 0:
-                    sessions.pop(key, None)
-            if not sessions:
-                self._latch[tier].pop(who, None)
+        """True (and one latched turn used up) when this turn falls inside a latch window of this (owner, session) or of an
+        owner-wide latch."""
+        who, hit = _owner_value(owner), False
+        keys = ([str(session_id)] if session_id else []) + [self.OWNER_WIDE]
+        with self._latch_lock:
+            for tier in LATCH_LIMITS:
+                sessions = self._latch[tier].get(who)
+                if not sessions:
+                    continue
+                self._prune_owner(sessions)
+                for key in keys:
+                    row = sessions.get(key)
+                    if row is not None and row["turns"] > 0:
+                        hit = True
+                        row["turns"] -= 1
+                self._prune_owner(sessions)                 # spent latches (0 turns left) are removed here
+                if not sessions:
+                    self._latch[tier].pop(who, None)
         return hit
 
     def latch_size(self, tier: str | None = None) -> int:
         tiers = [tier] if tier else list(LATCH_LIMITS)
-        return sum(len(sessions) for t in tiers for sessions in self._latch[t].values())
+        with self._latch_lock:
+            return sum(len(sessions) for t in tiers for sessions in self._latch[t].values())

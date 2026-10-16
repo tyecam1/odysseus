@@ -260,7 +260,7 @@ _R_PERSON = (r"\b(?:my|our|his|her|their|the|a)\s+(?:\w+\s+)?(?:son|daughter|bab
 _R_BODY = (r"\b(?:head|neck|chest|arms?|legs?|hands?|fingers?|thumbs?|foot|feet|toes?|face|eyes?|mouth|throat|tongue|lips?|"
            r"stomach|belly|tummy|back|skin|bones?|ankles?|wrists?|hips?|knees?|heart|lungs?|brain|soft\s+spot|vision|teeth|nose|ears?)\b")
 _R_HAZARD = (
-    r"\b(?:hurt\w*|pain\w*|ache\w*|aching|injur\w*|bleed\w*|blood\w*|burn\w*|burnt|scald\w*|swell\w*|swollen|bruis\w*|broke\w*|"
+    r"\b(?:hurt\w*|pain(?:s|ful|fully|killers?)?|ache[sd]?|aching|injur\w*|bleed\w*|blood\w*|burn\w*|burnt|scald\w*|swell\w*|swollen|bruis\w*|broke\w*|"
     r"fractur\w*|sprain\w*|wounds?|rash\w*|fever\w*|temperature|vomit\w*|sick|faint\w*|dizz\w*|collaps\w*|unconscious\w*|"
     r"wake|waking|chok\w*|breath\w*|wheez\w*|asthma|allerg\w*|seizur\w*|fits?|stroke|attack\w*|shock\w*|poison\w*|swallow\w*|"
     r"overdos\w*|pills?|tablets?|medic\w*|meds|dose\w*|dosage|calpol|paracetamol|ibuprofen|inhaler|insulin|pregnan\w*|labour|"

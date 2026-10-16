@@ -113,7 +113,7 @@ def test_a_safety_turn_latches_the_session_so_a_vague_follow_up_gets_no_learned_
 
 def _ratify_kitchen_route(estate):
     reply = _turn(estate, "From now on use Jin for kitchen questions", persona="auto", session="r1")
-    assert reply["ratification_offer"]["summary"] == "send kitchen questions to Jin"
+    assert reply["ratification_offer"]["summary"] == "consult Jin on kitchen questions"
     assert _turn(estate, "yes", persona="auto", session="r1")["ratification"]["state"] == "active"
 
 
@@ -122,13 +122,14 @@ def _ratify_kitchen_route(estate):
 def test_m1_learned_routing_never_takes_a_safety_turn(estate, prompt):
     _ratify_kitchen_route(estate)
     reply = _turn(estate, prompt, persona="auto", session="m1")
-    assert "learned" not in (reply.get("routing") or {}) and "+learned" not in str((reply.get("routing") or {}).get("method"))
+    assert "learned_consult" not in (reply.get("routing") or {}) and "+learned" not in str((reply.get("routing") or {}).get("method"))
 
 
 def test_m1_learned_routing_still_applies_to_an_ordinary_turn(estate):
     _ratify_kitchen_route(estate)
     reply = _turn(estate, "Which kitchen worktop is easiest to clean?", persona="auto", session="m1n")
-    assert reply["persona"] == "jin" and reply["routing"]["learned"]["cue"] == ["kitchen"]
+    assert reply["persona"] != "jin" and reply["routing"]["learned_consult"]["cue"] == ["kitchen"]
+    assert reply["routing"]["learned_consult"]["persona"] == "jin"
 
 
 def test_m1_unit_apply_learned_overlays_refuses_safety_turns(tmp_path):
@@ -145,4 +146,4 @@ def test_m1_the_safety_latch_also_withholds_learned_routing_on_a_vague_follow_up
     _ratify_kitchen_route(estate)
     _turn(estate, "my dad collapsed", persona="auto", session="latch-r")
     reply = _turn(estate, "Which kitchen worktop is easiest to clean?", persona="auto", session="latch-r")
-    assert "learned" not in (reply.get("routing") or {})
+    assert "learned_consult" not in (reply.get("routing") or {})

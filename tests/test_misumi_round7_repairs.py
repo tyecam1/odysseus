@@ -39,7 +39,7 @@ REVIEW_ROUTE_MISSES = ["my stepfather beats my mum", "my partner took a load of 
 
 def _ratify_kitchen(estate):
     reply = _turn(estate, "From now on use Jin for kitchen questions", persona="auto", session="k")
-    assert reply["ratification_offer"]["summary"] == "send kitchen questions to Jin"
+    assert reply["ratification_offer"]["summary"] == "consult Jin on kitchen questions"
     assert _turn(estate, "yes", persona="auto", session="k")["ratification"]["state"] == "active"
 
 
@@ -47,7 +47,7 @@ def _ratify_kitchen(estate):
 def test_a_learned_route_never_takes_a_kitchen_emergency_the_lexicon_misses(estate, prompt):
     _ratify_kitchen(estate)
     reply = _turn(estate, prompt, persona="auto", session="ke")
-    assert "learned" not in (reply.get("routing") or {}), reply.get("routing")
+    assert "learned_consult" not in (reply.get("routing") or {}), reply.get("routing")
 
 
 @pytest.mark.parametrize("prompt", KITCHEN_EMERGENCIES + REVIEW_ROUTE_MISSES)
@@ -58,7 +58,8 @@ def test_the_routing_gate_withholds_reported_cases(prompt):
 def test_an_ordinary_kitchen_question_still_takes_the_learned_route(estate):
     _ratify_kitchen(estate)
     reply = _turn(estate, "Which kitchen worktop is easiest to clean?", persona="auto", session="ko")
-    assert reply["persona"] == "jin" and reply["routing"]["learned"]["cue"] == ["kitchen"]
+    assert reply["persona"] != "jin" and reply["routing"]["learned_consult"]["cue"] == ["kitchen"]
+    assert reply["routing"]["learned_consult"]["persona"] == "jin"
 
 
 def test_held_out_routing_gate_rates_do_not_regress():
