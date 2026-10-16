@@ -1610,3 +1610,15 @@ This is a **scope and prioritisation update** to this existing acceptance owner,
 6. Prioritise safety/security verification, current PR #122/#123 integration and actual long-horizon continuity first when they are the critical path. These extensions are ongoing product requirements, not a pretext to keep stale unsafe software running.
 
 A completed demo or milestone is not the mission's completion boundary. Continue selecting evidence-justified next capability gaps without arbitrary busywork; preserve existing consent, permissions, audit and human-only ratification gates.
+
+---
+
+## 2026-10-16 additional operator acceptance: FTL-style 2D UI, per-task tool binding and Jin Spotify
+
+Extends, but does **not duplicate**, the 2026-10-16 intelligence/demo scope recorded above.
+
+- **Misumi visual authority:** `tyecam1/misumi:docs/design/ftl-hud-and-jin-music-ambition-2026-10-16.md`. Improve and repair the FTL-inspired 2D spacecraft/HUD/node interface with crisp pixel art, better material/palette cohesion and high-resolution space backgrounds; protect all existing PS2 3D scene art, rigs, geometry and fixed-camera design (add only, do not alter). Evaluate on actual rendering, controls and guests, not CSS inspection alone.
+- **Dynamic persona-role-tool assignment:** separate fixed character persona identity from temporary execution roles and scoped tool/MCP/model/host assignment. Use capability requirements plus measured complementary skills and availability; compare teams of cheap models against strong solo and deterministic baselines under the existing model-role evaluation owner and Six Eyes objective. Personas do not retain provider credentials, broaden permissions or determine their own tool authority.
+- **Spotify:** enable Jin to request `music.*` capabilities through Odysseus's existing governed tools/MCP executor, with user OAuth PKCE and least-privilege Spotify playback scopes, explicit per-user/device control, guest/read-only denial and actual playback audit after connection. No music plays from unsolicited instructions, no authenticated user can be invented. Demonstration mode uses a safe mock.
+- **Local references:** user's uploaded `Better_Planets_and_Backgrounds_v1.3.2.zip` contains README only. Proposed laptop reference path is `C:\Users\tyeca\Pictures\Misumi\design-references\FTL\` (outside Git); user must place real screenshots/full .ftl there. Do not silently copy copyrighted/mod assets into repository.
+- **Review:** this is user design intent and acceptance expansion, not a shipped feature, new ratified Level 5/6 authority or reason to terminate existing safer work. Reconcile existing duplicate interface, music recognition, PR #91, PR #36 and previous demo work before implementation.
