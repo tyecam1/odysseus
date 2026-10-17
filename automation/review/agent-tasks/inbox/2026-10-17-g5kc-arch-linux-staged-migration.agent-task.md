@@ -79,6 +79,16 @@ notes: "Do not run a destructive installer overnight unattended. The gifted Mac 
 5. Keep detailed private machine inventory, identifiers, personal data, drive serial numbers, key material, recovery codes and absolute personal paths **out of Git**. Commit only sanitised receipts, non-secret manifests and reusable scripts. Preserve any needed sensitive evidence in the operator-approved secure local storage.
 6. Do not touch lab Jetson, CPI devices, Windows home worker, interface PC, or other host deployments. Do not perform an unrequested firmware flash, account migration or security policy change.
 
+## Model delegation policy (must apply at every gate)
+
+- Follow `AGENTS.md` and the live Odysseus preflight/routing contract before delegating substantive work. Route by **currently qualified** capability and evidence, not by a model-name assumption; do not invent GLM availability.
+- Prefer deterministic PowerShell and direct system queries for enumeration, event collection, exact comparisons and validations; **do not spend inference on work that scripts can reliably perform**.
+- Use a GLM model for bounded, read-only log filtering, controller-error grouping, candidate storage-option comparison or independent summary **when the live estate preflight says a GLM lane is available and adequate**. Send only sanitised task-relevant evidence; no raw serials, identifiers, credentials, recovery codes or private file contents.
+- Use Codex as the coordinator/verifier for cross-source diagnosis, uncertain hardware findings, safety/approval decisions and any future reviewed implementation. Do not dispatch Codex purely to supervise deterministic commands when the existing controller can handle them.
+- Delegating interpretation to a remote GLM model does **not** grant it access to the Windows laptop. Enumeration must run on the real laptop via an already-authorised local agent or shell. No remote executor may claim laptop-specific observations without a captured provenance path.
+- Record each substantive delegation's `task | host/route | selected model | result | verifier | reason if retained locally`. If GLM is unavailable, unauthorised, insufficient or more costly overall, record that reason and use the cheapest adequate alternative without stalling the safe diagnosis.
+- Never construct a second queue/router, auto-install an agent, relax Windows administration security, or approve destructive action to make a model route convenient.
+
 ## Pre-gate: digital-only diagnosis on the live laptop (do now)
 
 - **Hard stop:** no power-off/reboot, lid/case opening, physical SSD handling, BIOS access, PCIe reset, partition changes, disk initialisation, firmware update, driver installation, storage-controller-mode changes or offline disk operations. Do not ask the operator to do these as prerequisites for this inspection.
