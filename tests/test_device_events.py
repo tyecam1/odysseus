@@ -79,6 +79,24 @@ def test_synthetic_duplicate_connection_storm_is_debounced():
     assert sink.events == [first.as_dict()]
 
 
+def test_synthetic_add_then_change_for_same_device_is_debounced():
+    sink = RecordingSink()
+    adapter = DeviceEventAdapter(
+        host_id="test-host",
+        allowlist=ALLOWLIST,
+        debounce_window_seconds=10,
+        event_sink=sink,
+        clock=lambda: SYNTHETIC_TIME,
+    )
+
+    added = adapter.handle_event(synthetic_udev_event(action="add"))
+    changed = adapter.handle_event(synthetic_udev_event(action="change"))
+
+    assert added is not None
+    assert changed is None
+    assert sink.events == [added.as_dict()]
+
+
 def test_synthetic_elapsed_debounce_crosses_epoch_bucket_boundary():
     first_time = SYNTHETIC_TIME + timedelta(seconds=7, milliseconds=900)
     moments = iter(
@@ -126,7 +144,19 @@ def test_synthetic_idempotency_key_includes_action_and_full_identity():
     )
 
 
-def test_synthetic_usb_provenance_fails_closed_when_markers_are_missing():
+@pytest.mark.parametrize(
+    ("subsystem", "device_type"),
+    (
+        pytest.param(None, None, id="both-missing"),
+        pytest.param("usb", None, id="subsystem-only"),
+        pytest.param(None, "usb_device", id="devtype-only"),
+        pytest.param("block", "usb_device", id="conflicting-subsystem"),
+        pytest.param("usb", "partition", id="conflicting-devtype"),
+    ),
+)
+def test_synthetic_usb_provenance_requires_both_positive_markers(
+    subsystem, device_type
+):
     sink = RecordingSink()
     adapter = DeviceEventAdapter(
         host_id="test-host",
@@ -135,14 +165,20 @@ def test_synthetic_usb_provenance_fails_closed_when_markers_are_missing():
         clock=lambda: SYNTHETIC_TIME,
     )
     raw_event = synthetic_udev_event()
-    del raw_event["subsystem"]
-    del raw_event["device_type"]
+    if subsystem is None:
+        del raw_event["subsystem"]
+    else:
+        raw_event["subsystem"] = subsystem
+    if device_type is None:
+        del raw_event["device_type"]
+    else:
+        raw_event["device_type"] = device_type
 
     assert adapter.handle_event(raw_event) is None
     assert sink.events == []
 
 
-def test_synthetic_rejected_identity_does_not_consume_debounce_state():
+def test_synthetic_rejected_identity_is_debounced_without_blocking_authorised_device():
     sink = RecordingSink()
     adapter = DeviceEventAdapter(
         host_id="test-host",
@@ -156,13 +192,90 @@ def test_synthetic_rejected_identity_does_not_consume_debounce_state():
     authorised = adapter.handle_event(synthetic_udev_event())
 
     assert rejected is not None and rejected.authorised is False
-    assert repeated_rejection is not None and repeated_rejection.authorised is False
+    assert repeated_rejection is None
     assert authorised is not None and authorised.authorised is True
+    assert sink.events == [rejected.as_dict(), authorised.as_dict()]
+
+
+def test_synthetic_rejected_identity_can_emit_again_after_debounce_window():
+    moments = iter(
+        (
+            SYNTHETIC_TIME,
+            SYNTHETIC_TIME + timedelta(seconds=5),
+            SYNTHETIC_TIME + timedelta(seconds=10),
+        )
+    )
+    sink = RecordingSink()
+    adapter = DeviceEventAdapter(
+        host_id="test-host",
+        allowlist=ALLOWLIST,
+        debounce_window_seconds=10,
+        event_sink=sink,
+        clock=lambda: next(moments),
+    )
+
+    first = adapter.handle_event(synthetic_udev_event(model="Wrong_Model"))
+    repeated = adapter.handle_event(synthetic_udev_event(model="Wrong_Model"))
+    after_window = adapter.handle_event(synthetic_udev_event(model="Wrong_Model"))
+
+    assert first is not None and first.authorised is False
+    assert repeated is None
+    assert after_window is not None and after_window.authorised is False
+    assert sink.events == [first.as_dict(), after_window.as_dict()]
+
+
+def test_synthetic_clock_rollback_accepts_out_of_order_without_rewinding_high_watermark():
+    moments = iter(
+        (
+            SYNTHETIC_TIME,
+            SYNTHETIC_TIME - timedelta(hours=1),
+            SYNTHETIC_TIME - timedelta(hours=1) + timedelta(seconds=11),
+        )
+    )
+    sink = RecordingSink()
+    adapter = DeviceEventAdapter(
+        host_id="test-host",
+        allowlist=ALLOWLIST,
+        debounce_window_seconds=10,
+        event_sink=sink,
+        clock=lambda: next(moments),
+    )
+
+    first = adapter.handle_event(synthetic_udev_event())
+    rolled_back = adapter.handle_event(synthetic_udev_event())
+    later_out_of_order = adapter.handle_event(synthetic_udev_event())
+
+    assert first is not None
+    assert rolled_back is not None
+    assert later_out_of_order is not None
     assert sink.events == [
-        rejected.as_dict(),
-        repeated_rejection.as_dict(),
-        authorised.as_dict(),
+        first.as_dict(),
+        rolled_back.as_dict(),
+        later_out_of_order.as_dict(),
     ]
+
+
+def test_synthetic_clock_rollback_still_debounces_rejected_identity():
+    rollback_time = SYNTHETIC_TIME - timedelta(hours=1)
+    moments = iter((SYNTHETIC_TIME, rollback_time, rollback_time))
+    sink = RecordingSink()
+    adapter = DeviceEventAdapter(
+        host_id="test-host",
+        allowlist=ALLOWLIST,
+        debounce_window_seconds=10,
+        event_sink=sink,
+        clock=lambda: next(moments),
+    )
+    raw_event = synthetic_udev_event(model="Wrong_Model")
+
+    first = adapter.handle_event(raw_event)
+    rolled_back = adapter.handle_event(raw_event)
+    repeated_rollback = adapter.handle_event(raw_event)
+
+    assert first is not None
+    assert rolled_back is not None
+    assert repeated_rollback is None
+    assert sink.events == [first.as_dict(), rolled_back.as_dict()]
 
 
 def test_synthetic_state_vocabulary_and_authorisation_labelling():
@@ -181,12 +294,13 @@ def test_synthetic_state_vocabulary_and_authorisation_labelling():
         "retryable_error",
         "permanent_schema_error",
     }
+    moments = iter((SYNTHETIC_TIME, SYNTHETIC_TIME + timedelta(seconds=6)))
     sink = RecordingSink()
     adapter = DeviceEventAdapter(
         host_id="test-host",
         allowlist=ALLOWLIST,
         event_sink=sink,
-        clock=lambda: SYNTHETIC_TIME,
+        clock=lambda: next(moments),
     )
 
     removed = adapter.handle_event(synthetic_udev_event(action="remove"))

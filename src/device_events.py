@@ -183,7 +183,12 @@ class DeviceEventAdapter:
         self._allowlist = {(item.serial.strip(), item.model.strip()) for item in allowlist}
         self._event_sink = event_sink
         self._clock = clock
-        self._last_authorised_at: dict[tuple[str, str, str, str], datetime] = {}
+        self._last_observed_at: dict[
+            tuple[str, Optional[str], Optional[str]], datetime
+        ] = {}
+        self._last_out_of_order_at: dict[
+            tuple[str, Optional[str], Optional[str]], datetime
+        ] = {}
 
     def consume(self, source: DeviceEventSource) -> Iterator[DeviceConnectionEvent]:
         """Yield accepted observations; duplicate/non-USB events yield nothing."""
@@ -200,11 +205,7 @@ class DeviceEventAdapter:
 
         subsystem = _event_value(raw_event, "subsystem", "SUBSYSTEM")
         device_type = _event_value(raw_event, "device_type", "DEVTYPE")
-        if (subsystem is None and device_type is None) or (
-            subsystem is not None and subsystem != "usb"
-        ) or (
-            device_type is not None and device_type != "usb_device"
-        ):
+        if subsystem != "usb" or device_type != "usb_device":
             return None
 
         serial = _event_value(raw_event, "ID_SERIAL_SHORT", "serial")
@@ -219,15 +220,37 @@ class DeviceEventAdapter:
         )
 
         authorised = serial is not None and model is not None and (serial, model) in self._allowlist
-        if authorised:
-            debounce_identity = (self.host_id, action, serial, model)
-            last_authorised_at = self._last_authorised_at.get(debounce_identity)
-            if last_authorised_at is not None and (
-                observed_at - last_authorised_at
+        debounce_identity = (self.host_id, serial, model)
+        last_observed_at = self._last_observed_at.get(debounce_identity)
+        if last_observed_at is not None:
+            if observed_at < last_observed_at:
+                # A rolled-back wall clock must not turn a negative delta into
+                # an ordinary duplicate. Accept the out-of-order observation,
+                # but retain the newer timestamp as the ordering high-water
+                # mark. A separate monotonic cursor within the rolled-back
+                # timeline still repeat-suppresses storms.
+                last_out_of_order_at = self._last_out_of_order_at.get(
+                    debounce_identity
+                )
+                if last_out_of_order_at is not None and (
+                    observed_at < last_out_of_order_at
+                    or (
+                        observed_at - last_out_of_order_at
+                    ).total_seconds() < self.debounce_window_seconds
+                ):
+                    return None
+                self._last_out_of_order_at[debounce_identity] = observed_at
+            elif (
+                observed_at - last_observed_at
             ).total_seconds() < self.debounce_window_seconds:
                 return None
-            self._last_authorised_at[debounce_identity] = observed_at
+            else:
+                self._last_observed_at[debounce_identity] = observed_at
+                self._last_out_of_order_at.pop(debounce_identity, None)
+        else:
+            self._last_observed_at[debounce_identity] = observed_at
 
+        if authorised:
             if action == "remove":
                 state = DeviceState.DEVICE_REMOVED
                 transitions = (DeviceState.DEVICE_REMOVED,)
