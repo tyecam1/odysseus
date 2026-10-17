@@ -31,6 +31,7 @@ allowed_paths:
   - automation/review/agent-tasks/**
   - docs/**
   - companion/laptop_client/**
+  - scripts/windows/g5kc-storage-inventory-readonly.ps1
 denied_paths:
   - "**/.env"
   - "**/secrets/**"
@@ -42,6 +43,7 @@ inputs:
   - docs/aoteru-laptop-activation-closeout.agent-task.md
   - docs/aoteru-model-host-routing-contract.md
   - docs/aoteru-p13-laptop-reentry-evidence.md
+  - scripts/windows/g5kc-storage-inventory-readonly.ps1
 outputs:
   - read-only hardware and SSD diagnosis with purchase/no-purchase decision
   - verified external backup and Windows rollback/recovery plan
@@ -54,7 +56,7 @@ handoff_model: independent-human-gate-review
 operator_decision_path: ""
 supersedes: []
 duplicates: []
-notes: "Do not run a destructive installer overnight unattended. First diagnose Mac SSD and verify spare M.2 slot. This record is work intake, not installation approval. Do not create a second agent-task runtime. Avoid including laptop personal data, secrets or raw disk serial numbers in this public repository."
+notes: "Do not run a destructive installer overnight unattended. The gifted Mac SSD is already physically installed in the second M.2 slot; it is not free. Start with live Windows read-only software diagnostics. Operator declines shutdown, reboot or physical inspection at this stage. This record is work intake, not installation approval. Do not create a second agent-task runtime. Avoid including laptop personal data, secrets or raw disk serial numbers in this public repository."
 ---
 
 # G5 KC Arch Linux migration: staged, reversible work item
@@ -63,10 +65,10 @@ notes: "Do not run a destructive installer overnight unattended. First diagnose 
 
 - **Operator decision:** Arch Linux as the target operating system; KDE Plasma as initial desktop.
 - **Host:** Gigabyte G5 KC; known prior inventory: Intel Core i5-10500H, NVIDIA RTX 3060 Laptop GPU, Windows on an approximately 477 GB disk. Treat these as previously reported, not an up-to-date live attestation.
-- **Storage design:** target a *second, independently bootable* internal M.2 2280 NVMe SSD; preserve Windows and its existing drive intact. No in-place conversion of the Windows system.
-- **Immediate priority:** diagnose a spare SSD reportedly removed from a Mac. It was not detectable when previously tried; failure is **unconfirmed**. Do not purchase, repartition or discard it until connector, physical fit and enumeration have been assessed.
+- **Storage design:** Preserve Windows and its existing drive intact. The second M.2 slot is reportedly already occupied by the gifted Mac SSD. After read-only diagnosis, either reuse/replace that SSD with a separate NVMe Arch drive, populate the additional 2.5-inch 7mm SATA bay (subject to missing connector/caddy verification), or consider external USB SSD for a non-invasive trial. No in-place conversion of Windows.
+- **Immediate priority:** digitally diagnose the gifted Mac SSD **while installed in the powered-on laptop**. It was reportedly undetectable; failure is **unconfirmed**. The operator explicitly does **not** consent to shutdown, reboot, BIOS entry or opening the laptop during this gate. No purchasing or writing until digital evidence is assessed. No agent can infer physical connector/slot integrity merely from a device absent in OS enumeration.
 - **Purpose:** a stable native Arch workstation for research, coding, ROS 2 container workloads, Obsidian/Zotero, and the existing thin Aoteru/Odysseus client. Do not relocate Odysseus runtime, research authority or shared orchestration onto the laptop.
-- **References:** Gigabyte G5 (RTX 30 Series) official specification lists two M.2 2280 slots, one NVMe PCIe/SATA and one NVMe PCIe, plus a 2.5-inch 7 mm SATA bay: https://www.gigabyte.com/us/Laptop/G5--RTX-30-Series/sp . These are model-family specifications; physical slot occupancy is not yet observed. Some older Apple SSDs have a proprietary connector; never infer failed silicon solely from non-enumeration in a PC.
+- **References:** Gigabyte G5 (RTX 30 Series) official specification lists two M.2 2280 slots, one NVMe PCIe/SATA and one NVMe PCIe, plus a 2.5-inch 7 mm SATA bay and an SD card reader. Gigabyte separately advertises *two* PCIe 3.0 x4 M.2 slots, with comparable NVMe capability: https://www.gigabyte.com/Laptop/G5--RTX-30-Series . Spec: https://www.gigabyte.com/us/Laptop/G5--RTX-30-Series/sp . These are model-family specifications; physical slot occupancy is not yet observed. Some older Apple SSDs have a proprietary connector; never infer failed silicon solely from non-enumeration in a PC.
 
 ## Operating and authority contract
 
@@ -76,6 +78,16 @@ notes: "Do not run a destructive installer overnight unattended. First diagnose 
 4. The human must physically approve case opening/drive insertion, firmware/boot changes, any action affecting encryption or Secure Boot, and the exact target disk and destructive write immediately before installation. A lost agent connection at reboot is expected and must not be disguised as a completed migration.
 5. Keep detailed private machine inventory, identifiers, personal data, drive serial numbers, key material, recovery codes and absolute personal paths **out of Git**. Commit only sanitised receipts, non-secret manifests and reusable scripts. Preserve any needed sensitive evidence in the operator-approved secure local storage.
 6. Do not touch lab Jetson, CPI devices, Windows home worker, interface PC, or other host deployments. Do not perform an unrequested firmware flash, account migration or security policy change.
+
+## Pre-gate: digital-only diagnosis on the live laptop (do now)
+
+- **Hard stop:** no power-off/reboot, lid/case opening, physical SSD handling, BIOS access, PCIe reset, partition changes, disk initialisation, firmware update, driver installation, storage-controller-mode changes or offline disk operations. Do not ask the operator to do these as prerequisites for this inspection.
+- Use the existing authorised laptop Aoteru/remote execution path *if* it is actually available. A GitHub connector cannot execute commands on the laptop; do not claim that repository access alone establishes local host access. If no laptop shell exists, provide the exact minimal local PowerShell invocation.
+- Run `scripts/windows/g5kc-storage-inventory-readonly.ps1` on the live Windows machine. Inspect output of Win32_DiskDrive, Get-Disk, Get-PhysicalDisk, partitions/GPT type, present vs historical PnP disk devices, storage controllers, BIOS version and recent relevant system event metadata. **No disk serial numbers or PnP instance IDs in public evidence.**
+- Separate: (A) Mac SSD enumerated and Windows cannot mount APFS/possibly FileVault; (B) device enumerated but controller/device error; (C) historical detection only; (D) no digital evidence of enumeration. None of (B)-(D) alone proves a broken drive; a wrong protocol/adapter, seating and physical failure remain indistinguishable without subsequent physical diagnostic intervention.
+- Observe the SATA controller, but do not infer a physically installed 2.5-inch cable/caddy solely because the chipset supports SATA. Even a comprehensive digital inventory cannot prove vacant bay mechanical fit.
+- Compare four choices: replacing Mac SSD with NVMe; adding 2.5-inch SATA SSD; removable SD for **data only**, not preferred boot/system; external USB 3.x SSD for a non-invasive Arch trial. The G5 KC's SD reader is specified but **UEFI boot support from internal SD is unverified**, and speed/endurance are inferior to internal SSDs for frequent package writes and containers.
+- Output a short decision matrix with verified vs unknown items. Stop at `DIGITAL_INSPECTION_DONE` and obtain a separate decision before any hardware procurement or migration.
 
 ## Phase 0: establish real machine and disk truth (read-only)
 
@@ -90,13 +102,13 @@ notes: "Do not run a destructive installer overnight unattended. First diagnose 
   Get-BitLockerVolume | Select MountPoint,ProtectionStatus,VolumeStatus
   ```
 - If any command requires elevation or errors, capture the failure without assuming the corresponding hardware/feature is absent.
-- Inspect service manual, existing free slot, screw/standoff, existing M.2 key/length and thickness clearance (single/double sided, **no oversized heatsink**). Confirm that the second M.2 slot is physically empty before ordering.
+- Defer physical-slot and clearance checks to the later authorised installation gate; the second M.2 slot is **occupied by the gifted Mac SSD** and not available without removing it. Independently confirm the two NVMe PCIe 3.0 x4 electrical capabilities from the manufacturer's specification.
 - Snapshot critical user workflows: Obsidian vault Git state and untracked content; Zotero database and attachment storage; ROS 2 distributions/toolchains/containers; Python/Conda/venvs; CUDA/graphics; SSH/Tailscale; audio/music hardware and software; local work, games and licences; university VPN/Microsoft applications; backups. Classify native, containerised, web, Wine/VM, or must-retain-Windows. Identify blockers *before* operating-system selection is treated as irreversible.
 - **Gate 0:** sign off a read-only, sanitised inventory; no changes to disk topology.
 
 ## Phase 1: diagnose spare Apple/Mac SSD (read-only by default)
 
-1. Obtain a photograph of **both sides** showing connector and printed part/model number, plus length and any adapter, or an accurate transcription of these identifiers. Do not publish full serial numbers.
+1. **First inspect digital enumeration without shutdown**; only after the user separately approves physical access, obtain a photograph of **both sides** showing connector and printed part/model number, plus length and adapter, or an accurate transcription. Do not publish full serial numbers.
 2. Identify whether the device is a standard M.2 2280 NVMe, M.2 SATA, Apple proprietary blade form, SATA, or some other module. Identify donor Mac generation only from actual label/connector evidence, not an assumption that all Mac SSDs are interchangeable.
 3. If proprietary: select a *verified appropriate* Apple-to-PC adapter/enclosure only if the cost is justified; confirm direction of adapter, physical clearance and electrical protocol. A common PC M.2 slot or USB NVMe enclosure cannot read every Apple SSD unadapted.
 4. If standard and mechanically compatible: test with power off and suitable ESD handling in the confirmed free slot, or with a known-good **protocol-matched** enclosure. Inspect BIOS enumeration and `Get-Disk` / Disk Management (or Linux live `lsblk -o NAME,SIZE,MODEL,TRAN` and `nvme list`) without initialising, formatting or writing to the device.
@@ -159,9 +171,9 @@ Never promise that an unattended overnight installation can safely manage physic
 
 ## Immediate next operator evidence
 
-1. Photograph of the gifted Mac SSD **including its connector and model label** (serial masked).
-2. Read-only Windows storage inventory/UEFI visibility for the Mac SSD, and confirmation of the free M.2 slot.
-3. Whether the user prefers 1 TB or 2 TB *only after* determining that Mac SSD reuse is not practical.
+1. Run the pinned read-only Windows storage inventory script using an existing authorised agent/shell on the **running** laptop. No reboot or physical inspection permitted in this stage.
+2. Evaluate whether a second physical disk is enumerated, historical PnP sightings, partition type and storage-controller errors. If not enumerated, report bounded unknowns rather than declaring dead or fixable.
+3. Compare second NVMe-slot replacement, 7mm SATA SSD (after eventual cable check), SD card as noncritical storage and external USB SSD trial. Defer model selection, capacity and physical SSD inspection until the digital findings are reviewed.
 
 ## Closure record
 
