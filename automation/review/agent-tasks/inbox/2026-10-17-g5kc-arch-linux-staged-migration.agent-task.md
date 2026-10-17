@@ -7,7 +7,7 @@ status: inbox
 priority: medium
 task_type: host-migration
 created_by: chatgpt
-created_at: 2026-10-17T17:00:00+01:00
+created_at: 2026-10-17
 executor: ""
 execution_mode: gated-human-assisted
 architecture: single
