@@ -233,9 +233,18 @@ def _say(owner, prompt, session):
 
 
 def test_160_stalled_turns_never_delay_another_owners_turn_or_the_operator_api(estate, tmp_path, monkeypatch):
-    monkeypatch.setenv("MISUMI_STATE_LOCK_TIMEOUT_S", "2")
+    """Round 9: one owner's 160 stalled turns hold at most ADAPTATION_PER_OWNER slots, so another owner's turn is admitted at
+    once and still gets its learned behaviour (round 8 only showed the other turn being SKIPPED quickly)."""
+    _ratify_brief(estate)
+    original = misumi_routes._handle_dialogue_answer
+
+    def stalling(request, body, prompt, owner, *args, **kwargs):
+        if owner == "staller":
+            time.sleep(2.0)  # stalled adaptation work (no shared lock involved)
+        return original(request, body, prompt, owner, *args, **kwargs)
+
+    monkeypatch.setattr(misumi_routes, "_handle_dialogue_answer", stalling)
     app = _async_app(tmp_path)
-    thread, release = _hold_in_thread(tmp_path / "persona-state")
 
     async def scenario():
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as client:
@@ -245,18 +254,16 @@ def test_160_stalled_turns_never_delay_another_owners_turn_or_the_operator_api(e
             began = time.monotonic()
             other = await client.post("/misumi/respond", **_say("bob", "Explain how a rainbow forms", "b"))
             other_s = time.monotonic() - began
+            bob_style = dict(estate["calls"][-1]["style"])
             began = time.monotonic()
             api = await client.get("/misumi/routing/candidates")
             api_s = time.monotonic() - began
             results = await asyncio.gather(*stalled)
-            return other.status_code, other_s, api.status_code, api_s, [r.status_code for r in results]
+            return other.status_code, other_s, bob_style, api.status_code, api_s, [r.status_code for r in results]
 
-    try:
-        other_status, other_s, api_status, api_s, stalled = asyncio.run(scenario())
-    finally:
-        release.set()
-        thread.join(30)
+    other_status, other_s, bob_style, api_status, api_s, stalled = asyncio.run(scenario())
     assert other_status == 200 and other_s < 0.5, other_s
+    assert bob_style == {"response_depth": "brief"}          # admitted, not skipped: one owner cannot starve the others
     assert api_status == 200 and api_s < 0.5, api_s
     assert set(stalled) == {200}
 

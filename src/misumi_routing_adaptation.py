@@ -600,6 +600,7 @@ class RoutingAdaptationStore:
                 "evidence_ids": list(candidate.get("supporting_evidence", [])),
                 "authorisation": authorisation,
                 "created_at": _now(),
+                "created_epoch": time.time(),
                 "status": "active",
             }
             candidate["status"] = "active"
@@ -892,13 +893,14 @@ def record_manual_choice(
         return None
     from src.persona_capabilities import routing_intents
 
-    cue = [
-        reason for reason in last.get("reasons") or []
-        if not str(reason).startswith(("fallback:", "reserved:", "learned:", "carry:")) and not cue_never_applies(str(reason))
-    ]
+    topical = [reason for reason in last.get("reasons") or []
+               if not str(reason).startswith(("fallback:", "reserved:", "learned:", "carry:"))]
+    if any(cue_never_applies(str(reason)) for reason in topical):
+        return None  # the auto route was about a topic that is always withheld: nothing about it is ever learned
+    cue = topical
     if not cue:
         extracted = extract_cue_term(last.get("prompt") or "", routing_intents(chosen_persona))
-        cue = [extracted] if extracted else []
+        cue = [extracted] if extracted and not cue_never_applies(extracted) else []  # never learn a cue that can't apply
     if not cue:
         return None
     related = any(

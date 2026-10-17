@@ -118,10 +118,13 @@ EVIDENCE_WEIGHTS = {"explicit_durable": 3, "durable_request": 1, "correction": 1
 REPEATED_CORRECTIONS_FOR_ELIGIBLE = 3
 _MAX_RENDER_CHARS = 200
 
-_DURABLE_STRONG = re.compile(r"\b(?:from\s+now\s+on|permanently|in\s+future|going\s+forward|from\s+now)\b", re.IGNORECASE)
+_DURABLE_STRONG = re.compile(
+    r"\b(?:from\s+now\s+on|permanently|in\s+(?:the\s+)?future|for\s+the\s+future|going\s+forward|from\s+now|from\s+here\s+on"
+    r"(?:\s+in|\s+out)?|henceforth|for\s+good)\b", re.IGNORECASE)
 _DURABLE_WEAK = re.compile(r"\b(?:always|forever)\b", re.IGNORECASE)
 _DURABLE_PHRASE = re.compile(
-    r"\b(?:from\s+now\s+on|always|permanently|in\s+future|going\s+forward|forever|from\s+now)\b",
+    r"\b(?:from\s+now\s+on|always|permanently|in\s+(?:the\s+)?future|for\s+the\s+future|going\s+forward|forever|from\s+now|"
+    r"from\s+here\s+on(?:\s+in|\s+out)?|henceforth|for\s+good)\b",
     re.IGNORECASE,
 )
 _RESERVED_MATTERS = re.compile(
@@ -211,12 +214,17 @@ def is_reserved_turn(prompt: str, context: Any = ()) -> bool:
 # it - or in the rest of the turn - is the user's own standing instruction. Ambiguous turns err to "data" (no capture, at most a
 # one-turn style effect from the user's own head text).
 _DATA_TASK = re.compile(
-    r"\b(?:summar(?:y|ies|i[sz]\w*)|sum\s+up|proof-?read\w*|spell-?check\w*|grammar|translat\w*|repl(?:y|ies|ying)|respond(?:ing)?\s+to|"
+    r"\b(?:summar(?:y|ies|i[sz]\w*)|sum\s+up|proof-?read\w*|spell-?check\w*|grammar|translat\w*|repl(?:y|ies|ying)\s+(?:to|for)|(?:draft|write|compose|send)\s+(?:a\s+|the\s+)?repl(?:y|ies)|respond(?:ing)?\s+to|"
     r"rewrit\w*|re-?word\w*|rephras\w*|paraphras\w*|(?<!going\s)forward(?:s|ed|ing)?(?!\s+(?:on|from)\b)|quot(?:e|ed|es|ing)|draft\w*|polish|critique|analy[sz]\w*|"
     r"(?:edit|correct|fix|check|review|improve|shorten|explain)\s+(?:this|that|the\s+following|my|his|her|their)\b|"
     r"here\s+is|here'?s|the\s+following|below|attached|paste\w*|wrote|writes|sent|says|texted|emailed|messaged|"
     r"(?:this|that|the|my|his|her|their|a)\s+(?:\w+'s\s+)?(?:e-?mails?|letters?|messages?|texts?|notes?|posts?|comments?|documents?|"
     r"paragraphs?|essays?|articles?|reviews?|replies|memos?|minutes|transcripts?))\b",
+    re.IGNORECASE,
+)
+_REQUEST_QUESTION = re.compile(r"^\W*(?:can|could|would|will)\s+you\b|^\W*would\s+you\s+mind\b|^\W*please\b", re.IGNORECASE)
+_THIRD_PERSON_DIRECTED = re.compile(
+    r"\b(?:tell|ask|remind|get|make|teach)\s+(?:my|the|his|her|their|our)\s+\w+\s+to\b|\b(?:tell|ask|remind)\s+(?:him|her|them)\s+to\b",
     re.IGNORECASE,
 )
 _QUESTION_START = re.compile(
@@ -351,8 +359,9 @@ _SIGNALS: tuple[tuple[str, str, str, re.Pattern[str]], ...] = tuple(
         ("technical_depth", "plain", "feedback", r"\btoo\s+(?:technical|jargon\w*|complicated|complex)\b"),
         ("technical_depth", "technical", "feedback", r"\btoo\s+(?:basic|simple|simplistic|elementary)\b"),
         ("response_depth", "brief", "request",
-         r"\b(?:shorter|briefer|more\s+concise|be\s+concise|keep\s+(?:it|answers|replies|responses)\s+(?:short|brief)"
-         r"|(?:short|brief)\s+(?:answers|replies|responses)|tl;?dr)\b"),
+         r"\b(?:shorter|briefer|more\s+concise|be\s+concise|keep(?:ing)?\s+(?:it|things|(?:your\s+|the\s+)?(?:answers|replies|responses))"
+         r"\s+(?:short|brief|concise)|(?:short|brief)\s+(?:answers|replies|responses)|tl;?dr|less\s+(?:waffle|rambling|detail)|"
+         r"fewer\s+words|cut\s+(?:out\s+)?the\s+waffle)\b"),
         ("response_depth", "thorough", "request",
          r"\b(?:more\s+detail(?:ed)?|in[- ]depth|thorough(?:ly)?|go\s+deeper|elaborate|longer\s+answers)\b"),
         ("technical_depth", "plain", "request",
@@ -399,6 +408,11 @@ def detect_style_signals(prompt: str) -> list[dict[str, str]]:
     # Only the user's own head text (first line, before any colon, outside quotes/code/reported speech) can carry a signal; what
     # follows may be pasted third-party content.
     text = own_instruction(prompt)["text"]
+    # Round 9: a question ABOUT the assistant's habits ("Do you always keep answers short?") or text meant for a third person
+    # ("Should I tell my son to keep answers short?") asks for nothing; a request phrased as a question ("Can you ...",
+    # "Would you mind ...") still does.
+    if (_QUESTION_START.match(text) and not _REQUEST_QUESTION.match(text)) or _THIRD_PERSON_DIRECTED.search(text):
+        return []
     found: dict[str, list[dict[str, str]]] = {}
     for dimension, value, kind, pattern in _SIGNALS:
         for match in pattern.finditer(text):
@@ -781,6 +795,7 @@ class PersonaStateStore:
                 "authorisation": authorisation,
                 "evaluation": evaluation,
                 "created_at": _now(),
+                "created_epoch": time.time(),
                 "status": "active",
             }
             candidate["status"] = "active"
@@ -908,6 +923,8 @@ def unsaved_preference(prompt: str) -> dict[str, str] | None:
     own = own_instruction(prompt)["text"]
     if not _DURABLE_PHRASE.search(own):
         return None
+    if (_QUESTION_START.match(own) and not _REQUEST_QUESTION.match(own)) or _THIRD_PERSON_DIRECTED.search(own):
+        return None  # a question about the assistant's habits, or text meant for someone else, asked for nothing
     for dimension, value, kind, pattern in _SIGNALS:
         if kind == "request" and pattern.search(own) and (dimension, value) in CANONICAL_REQUESTS:
             example = CANONICAL_REQUESTS[(dimension, value)]

@@ -294,6 +294,8 @@ class OfferBook:
         for callers without the execute scope: their latches live in a separate small structure."""
         tier = "execute" if privileged else "read-only"
         max_owners, max_sessions = self.latch_limits[tier]
+        if not session_id and (not privileged or not _owner_value(owner)):
+            return  # round 9: a read-only or anonymous caller never latches a whole owner bucket (it could reach other callers)
         key = str(session_id) if session_id else self.OWNER_WIDE
         with self._latch_lock:
             owners = self._latch[tier]
@@ -308,20 +310,21 @@ class OfferBook:
             while len(owners) > max_owners:
                 owners.popitem(last=False)
 
-    def consume_latch(self, session_id: str | None, owner: str | None = None) -> bool:
+    def consume_latch(self, session_id: str | None, owner: str | None = None, privileged: bool = False) -> bool:
         """True (and one latched turn used up) when this turn falls inside a latch window of this (owner, session) or of an
         owner-wide latch."""
         who, hit = _owner_value(owner), False
         keys = ([str(session_id)] if session_id else []) + [self.OWNER_WIDE]
+        tiers = ["execute"] if privileged else list(LATCH_LIMITS)  # read-only latches never reach an execute caller
         with self._latch_lock:
-            for tier in LATCH_LIMITS:
+            for tier in tiers:
                 sessions = self._latch[tier].get(who)
                 if not sessions:
                     continue
                 self._prune_owner(sessions)
                 for key in keys:
                     row = sessions.get(key)
-                    if row is not None and row["turns"] > 0:
+                    if row is not None:  # spent latches were pruned just above
                         hit = True
                         row["turns"] -= 1
                 self._prune_owner(sessions)                 # spent latches (0 turns left) are removed here
