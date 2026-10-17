@@ -1,6 +1,6 @@
 ---
 title: Instagram Saved primary ingestion | Odysseus execution directive
-status: proposed
+status: active-on-merge
 created: 2026-10-17
 updated: 2026-10-17
 owner: odysseus
