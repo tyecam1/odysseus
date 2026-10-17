@@ -32,6 +32,7 @@ allowed_paths:
   - docs/**
   - companion/laptop_client/**
   - scripts/windows/g5kc-storage-inventory-readonly.ps1
+  - scripts/windows/g5kc-pcie-storage-diagnostics-readonly.ps1
 denied_paths:
   - "**/.env"
   - "**/secrets/**"
@@ -44,6 +45,7 @@ inputs:
   - docs/aoteru-model-host-routing-contract.md
   - docs/aoteru-p13-laptop-reentry-evidence.md
   - scripts/windows/g5kc-storage-inventory-readonly.ps1
+  - scripts/windows/g5kc-pcie-storage-diagnostics-readonly.ps1
 outputs:
   - read-only hardware and SSD diagnosis with purchase/no-purchase decision
   - verified external backup and Windows rollback/recovery plan
@@ -204,3 +206,17 @@ Record phase/gate outcome, evidence date, host hardware summary without serial n
 - **Disposition:** Diagnostic gate complete, migration task remains `inbox`. No SSD is approved for purchase, no disk is approved for formatting, and there is **no** approval to power down/open the laptop. Do not repeat the same Windows inventory without new evidence.
 
 **Next operator choice:** either (1) defer physical intervention until an Arch-installation maintenance window, then inspect/replace the gifted SSD in the reportedly occupied second M.2 slot, preferably with a returnable, verified M.2 2280 NVMe replacement; (2) prioritise the 2.5-inch SATA bay only once its cable/caddy are verified; or (3) evaluate Arch on an external USB SSD. Keep Windows unmodified. If reuse of the Mac SSD is valued, identify its model/adapter at the next explicitly approved powered-down inspection before deciding to discard it.
+
+## Recovery-first second diagnostic gate (operator request, 2026-10-17)
+
+**New objective:** Exhaust remaining safe compatibility/controller observations before recommending replacement. The first pass's `CLASS D` verdict means only that no separate physical disk was enumerated in Windows; it is not evidence of irreparable hardware failure. This task is **not** closed.
+
+1. Confirm the donor Mac model/year from the operator or brother if possible, without opening the laptop; recover the SSD's product/model/adapter details from purchase receipts or historical records if accessible. If unknown, label it unknown. Distinguish an original Apple proprietary module, a replacement standard NVMe M.2 SSD, and a standard M.2 **SATA** SSD.
+2. **Important electrical constraint:** Gigabyte lists two M.2 type 2280 positions: one accepts both NVMe PCIe and M.2 SATA; the **other accepts NVMe PCIe only**. The operator reports the gifted Mac SSD is installed in the second position, but the installed module's protocol and mapping to the dual-protocol slot remain unverified. If it is M.2 SATA in the NVMe-only socket, Windows cannot fix that with a filesystem driver. Confirm exact positioning later only when physical inspection is separately approved.
+3. Run `scripts/windows/g5kc-pcie-storage-diagnostics-readonly.ps1` on the **actual powered-on laptop**. Inspect all present PCI functions (including unidentified/problematic controllers), PnP problem codes and Windows storage-driver versions. Correlate this with the prior inventory. Store complete local diagnostics privately; summarise only sanitised findings in this public task.
+4. Review whether Intel RST/RAID controls the NVMe storage path. Controller presence alone does not prove a VMD defect; this G5 KC uses a 10th-gen CPU and Intel's general newer VMD guidance cannot be applied blindly. **No controller-mode changes, driver replacements or resets.**
+5. If a storage controller or endpoint is visible but unhealthy, identify the precise hardware/problem code and a bounded non-destructive remedy requiring separate approval if it would mutate the host. If no endpoint appears, report that software cannot currently communicate with it and stop; do **not** repeat software rescans or attempt brute-force operations.
+6. On a **future operator-approved reboot**, check whether UEFI enumerates the second storage device, and optionally whether a trusted Linux live environment enumerates it. Neither is authorised in the current digital-only gate. On a separately approved powered-down inspection, confirm module model/connector/adapter, which slot it is in, seating, and a known-good cross-test. This is the only path to separate certain physical/electrical causes from hardware failure.
+7. No purchase recommendation becomes final until compatibility and these bounded tests are reconciled, or the operator knowingly elects to replace the drive without further inspection.
+
+**Acceptance:** concise evidence table for `model/protocol/adapter | PCIe endpoint | controller health | Windows block | remaining unknown | least-invasive next test`. Preserve Windows and its original NVMe disk. No unsupported claim that a missing physical disk is recoverable by file-system software, AI inference, or encryption cracking.
