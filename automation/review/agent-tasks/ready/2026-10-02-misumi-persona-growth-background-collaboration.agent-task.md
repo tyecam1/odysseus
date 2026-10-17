@@ -8,7 +8,7 @@ priority: critical
 task_type: orchestration
 created_by: chatgpt
 created_at: 2026-10-02T19:03:00+01:00
-updated_at: 2026-10-03T14:00:00+01:00
+updated_at: 2026-10-17T16:14:00+01:00
 executor: claude_subscription
 execution_mode: staged-loop
 architecture: single-plus-verifier
@@ -1593,3 +1593,17 @@ Generic agent benchmarks will not expose Misumi's actual failures. The correct b
 #### Validation criteria
 
 At least 25 cases are machine-readable, each has an unambiguous pass condition, and a deliberately unsafe or cross-domain agent fails the permission/isolation cases.
+
+---
+
+## Operator priority amendment: Instagram Saved (2026-10-17)
+
+**Operator direction:** Instagram Saved acquisition and low-friction knowledge ingestion is now the highest-priority **dependency-ready discretionary background stream**. This is not a new planner, queue or standalone persona programme. The governing execution and acceptance contract is:
+
+[Instagram Saved primary ingestion directive](../../../../docs/instagram-saved-primary-ingestion-directive-2026-10-17.md)
+
+Interpret the linked directive as the required sub-programme reading and gate checklist whenever working on Instagram intake, device-triggered events, source events, classification or persona/research ingestion. GLM-Flash coordinates; GLM performs bounded difficult reasoning; Codex independently verifies under live worker qualification, leases and budgets.
+
+The user explicitly requests that agents perform initial source acquisition without routinely asking the user to prepare a first export. Inspect authorised existing exports/hosts/sessions, try compliant official acquisition when eligible, and continue independent work if authentication, device unlock or permissions block acquisition. Do not relax GrapheneOS privacy, platform access rules or canonical PhD research gates to obtain this convenience.
+
+This amendment changes **work ordering**, not the existing persona identity/GUI remit or ownership. It permits independent Instagram stream reconnaissance and bounded implementation before the larger persona-growth programme's activation if existing runtime/lease authority permits; it does not license overlapping mutations with ongoing convergence work. Follow the directive's G0–G6 evidence and anti-drift checkpoints. A merged plan, synthetic fixture or connection detector alone is not successful ingestion.
