@@ -220,3 +220,16 @@ Record phase/gate outcome, evidence date, host hardware summary without serial n
 7. No purchase recommendation becomes final until compatibility and these bounded tests are reconciled, or the operator knowingly elects to replace the drive without further inspection.
 
 **Acceptance:** concise evidence table for `model/protocol/adapter | PCIe endpoint | controller health | Windows block | remaining unknown | least-invasive next test`. Preserve Windows and its original NVMe disk. No unsupported claim that a missing physical disk is recoverable by file-system software, AI inference, or encryption cracking.
+
+## Second read-only diagnostic outcome: 2026-10-17 16:45 UTC
+
+**Reported result:** second diagnostic `COMPLETE / SECOND DEVICE NOT ENUMERATED / CONDITION UNKNOWN`. This is an operator-supplied report from the laptop Codex agent; the laptop-local evidence JSON was not independently inspected via this GitHub session.
+
+- Ran `scripts/windows/g5kc-pcie-storage-diagnostics-readonly.ps1` on the powered-on GIGABYTE G5 KC at 16:45 UTC. **22 PCI functions** present, all reported OK; no identifiable endpoint for a second SSD.
+- Existing 512 GB Windows NVMe remained the sole enumerated physical disk.
+- `Intel Chipset SATA RAID Controller` reports OK with driver `15.44.0.1015`. No present PnP device was flagged with a problem code. This does not imply the Mac SSD is SATA or rule out every controller problem.
+- Frequent **corrected** PCIe root port #15 warnings reported. Its present children were the Realtek card reader and Ethernet controller. No evidence links these warnings to the missing SSD; do not present them as SSD causation.
+- Gifted Mac module model, connector, protocol, adapter and physical slot mapping **remain unknown**. Compatible NVMe endpoint, Apple proprietary blade/adapter, M.2 SATA-in-NVMe-only slot, seating, slot, firmware and drive-electronics failure remain unseparated.
+- The agent reports no shutdown, reboot, case opening, driver/firmware/storage modification. Live Odysseus routing had **no qualified GLM binding**; none dispatched. Deterministic Windows queries supplied the evidence; Codex verified the report.
+- Private local evidence paths, *not to be ingested into public Git unredacted*: `%LOCALAPPDATA%/G5KC-SSD-diagnostics/2026-10-17/pcie-diagnostics.json`, `storage-inventory.json`, `sanitised-correlation.json`. Do not assume the raw files are accessible from the remote compute host or this GitHub session.
+- **Gate disposition:** digital-only diagnosis exhausted without new hardware identity. No supported software remedy identified. No purchase or physical operation approved. Status remains `inbox`, awaiting the **donor Mac model/year or SSD/adapter identity** obtained without opening the laptop, or a separately approved powered-down UEFI/physical inspection and known-good slot test. Avoid redundant Windows rescans or conjectural driver changes.
