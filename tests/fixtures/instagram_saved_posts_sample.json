@@ -1,0 +1,76 @@
+{
+  "_fixture_notice": "SYNTHETIC test fixture. This is NOT a real Instagram Download Your Information (DYI) export and contains no real personal data. It is a hand-authored, schema-representative sample modeled on Meta's publicly documented DYI JSON export shape for 'saved_posts.json' (top-level array key holding one object per saved item, each with a 'string_map_data' dict keyed by field label -> {href, timestamp}). All usernames, post URLs, collection names and timestamps below are fabricated for testing src/instagram_importer.py only. P2 ACCEPTANCE STATUS: this synthetic fixture alone is NOT sufficient for P2 acceptance per the programme's real-export schema gate - it exists to exercise the importer's logic (aggregation, idempotency, schema-drift reporting) independently of the real-export gate, which remains blocked pending an actual current Instagram DYI export containing Saved items/collections. Two simplifying, documented assumptions vs. the real export, unresolved until a real export is inspected: (1) the top-level array key is named 'saved_saved_media' here (Meta has used a couple of versioned key spellings across export format revisions; any of them would be handled the same way by the importer's item-extraction step) and (2) collection membership is inlined per item as a top-level 'collection' string field for fixture simplicity, rather than cross-referenced from a separate saved_collections.json the way a real export splits it - the importer is written to only need collection as a per-item field, so this does not change the shape under test, but must be re-verified against the real container structure.",
+  "saved_saved_media": [
+    {
+      "title": "chef_marco",
+      "collection": "Recipes",
+      "string_map_data": {
+        "Saved on": {
+          "href": "https://www.instagram.com/p/AAA111/",
+          "timestamp": 1700000000
+        }
+      }
+    },
+    {
+      "title": "traveler_jane",
+      "collection": "Travel Ideas",
+      "string_map_data": {
+        "Saved on": {
+          "href": "https://www.instagram.com/p/BBB222/",
+          "timestamp": 1701000000
+        }
+      }
+    },
+    {
+      "title": "chef_marco",
+      "collection": "Weekend Ideas",
+      "string_map_data": {
+        "Saved on": {
+          "href": "https://www.instagram.com/p/AAA111/",
+          "timestamp": 1700500000
+        }
+      }
+    },
+    {
+      "title": "diy_dana",
+      "collection": "DIY Projects",
+      "string_map_data": {
+        "Saved on": {
+          "href": "https://www.instagram.com/p/DDD444/",
+          "timestamp": 1703000000
+        }
+      }
+    },
+    {
+      "title": "traveler_jane",
+      "collection": "Travel Ideas",
+      "string_map_data": {
+        "Saved on": {
+          "href": "https://www.instagram.com/p/EEE555/",
+          "timestamp": 1704000000
+        }
+      }
+    },
+    {
+      "title": "ghost_user",
+      "collection": "Mystery",
+      "string_map_data": {
+        "Some Other Label": {
+          "href": "https://www.instagram.com/p/FFF666/",
+          "timestamp": 1705000000
+        }
+      }
+    },
+    {
+      "title": "odd_format_owen",
+      "collection": ["not", "a", "string"],
+      "string_map_data": {
+        "Saved on": {
+          "href": "https://www.instagram.com/p/GGG777/",
+          "timestamp": 1706000000
+        }
+      }
+    },
+    "not even an object"
+  ]
+}
