@@ -188,3 +188,19 @@ Never promise that an unattended overnight installation can safely manage physic
 ## Closure record
 
 Record phase/gate outcome, evidence date, host hardware summary without serial numbers, new drive make/model, exact installer method, source commits, validation commands/results, remaining blockers, rollback proof, and the operator's decisions. Store no sensitive inventory, keys or filesystem user data in this public repo. Change this task's status only when justified by actual gate evidence.
+
+## Gate result: 2026-10-17 read-only laptop inspection
+
+**Reported executor outcome:** `DIGITAL_INSPECTION_DONE / CLASS D / INCONCLUSIVE`. This receipt records the operator-provided Codex report; the underlying laptop-local inventory file was **not independently read** through this GitHub session.
+
+- Actual host reported: GIGABYTE G5 KC, powered-on Windows laptop. Script `scripts/windows/g5kc-storage-inventory-readonly.ps1` was fetched from Odysseus `dev`, inspected and executed at **2026-10-17 16:24 UTC**.
+- Enumerated physical disks: exactly **one**, model `NVMe ESR512GTLCG-EAC-`, nominal 512 GB, online, hosting Windows `C:`.
+- No second physical disk identifiable as the installed gifted Mac SSD. Present and retained PnP lists and checked PnP history/event records contained no identifiable Mac SSD match. This does **not** establish that the drive has never enumerated.
+- Mac SSD SMART/health inaccessible without enumeration. Failure state, protocol/adapter compatibility, seating, slot/controller fault and drive electronics remain unresolved. Windows not understanding APFS alone would not explain absence of physical disk enumeration.
+- 2.5-inch SATA bay is specified by manufacturer, but cable/caddy and actual fit are **unverified**. An enumerated SATA RAID controller does not establish the existence of an installed SATA data cable.
+- The model's internal SD reader is inadequate as a recommended Arch root-system target. An external USB SSD is a reversible evaluation path if desired.
+- **Execution safety:** Report states no reboot, shutdown, physical inspection, driver/firmware change or storage write during the diagnostic gate.
+- **Delegation provenance:** Odysseus preflight attempted; the live route returned `glm` as an unknown alias. No qualified GLM lane was available through that alias, so deterministic PowerShell gathered evidence and Codex retained the cross-source judgement. Do not hardcode a nonexistent GLM alias or claim GLM ran.
+- **Disposition:** Diagnostic gate complete, migration task remains `inbox`. No SSD is approved for purchase, no disk is approved for formatting, and there is **no** approval to power down/open the laptop. Do not repeat the same Windows inventory without new evidence.
+
+**Next operator choice:** either (1) defer physical intervention until an Arch-installation maintenance window, then inspect/replace the gifted SSD in the reportedly occupied second M.2 slot, preferably with a returnable, verified M.2 2280 NVMe replacement; (2) prioritise the 2.5-inch SATA bay only once its cable/caddy are verified; or (3) evaluate Arch on an external USB SSD. Keep Windows unmodified. If reuse of the Mac SSD is valued, identify its model/adapter at the next explicitly approved powered-down inspection before deciding to discard it.
