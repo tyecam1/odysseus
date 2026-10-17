@@ -11,3 +11,5 @@ Ownership rule:
 Historical tasks migrated from `obsidian-PhD` retain their original content and queue status unless the task had already been executed, in which case the migrated copy is archived under `done/`.
 
 See `docs/aoteru-repository-ownership-trajectory.md` and `automation/review/agent-task-migration-20260923.md`.
+
+**Current work selection rule:** `AGENTS.md` § “Temporary operating priority: ship the existing backlog (2026-10-17)”. Use the live queue for delivery and status; do not create an independent priority list.
