@@ -16,8 +16,15 @@ import logging
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from enum import Enum
-from math import floor
-from typing import Callable, Iterable, Iterator, Mapping, Optional, Protocol
+from typing import (
+    Callable,
+    Iterable,
+    Iterator,
+    Mapping,
+    Optional,
+    Protocol,
+    runtime_checkable,
+)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -29,6 +36,7 @@ class DeviceState(str, Enum):
 
     DEVICE_DETECTED = "device_detected"
     DEVICE_AUTHORISED = "device_authorised"
+    DEVICE_REMOVED = "device_removed"
     DATA_ACCESS_READY = "data_access_ready"
     EXPORT_DISCOVERED = "export_discovered"
     IMPORT_COMPLETE = "import_complete"
@@ -64,7 +72,6 @@ class DeviceConnectionEvent:
     device_serial: Optional[str]
     device_model: Optional[str]
     observed_at: datetime
-    timestamp_bucket: int
     idempotency_key: str
     authorised: bool
     reason: Optional[str] = None
@@ -83,7 +90,17 @@ class DeviceEventSource(Protocol):
     def __iter__(self) -> Iterator[object]: ...
 
 
-EventSink = Callable[[DeviceConnectionEvent], None]
+@runtime_checkable
+class EventSink(Protocol):
+    """Passive output boundary; implementations receive labelled dictionaries only.
+
+    The adapter calls only ``emit``.  It never passes the raw udev object or
+    invokes acquisition, inference, callable, or other sink methods.
+    """
+
+    def emit(self, event: dict[str, object]) -> None: ...
+
+
 Clock = Callable[[], datetime]
 
 
@@ -97,26 +114,26 @@ def _normalized_timestamp(value: datetime) -> datetime:
     return value.astimezone(timezone.utc)
 
 
-def timestamp_bucket(observed_at: datetime, window_seconds: int) -> int:
-    """Return the stable epoch bucket used for debounce and event identity."""
-
-    if window_seconds <= 0:
-        raise ValueError("debounce window must be greater than zero")
-    return floor(_normalized_timestamp(observed_at).timestamp() / window_seconds)
-
-
 def make_idempotency_key(
     host_id: str,
+    action: str,
     device_serial: str,
+    device_model: str,
     observed_at: datetime,
-    window_seconds: int,
 ) -> str:
-    """Hash host, serial, and timestamp bucket into a SourceEvent-safe key."""
+    """Hash the full event identity and exact observation time."""
 
     if not host_id.strip():
         raise ValueError("host_id must be non-empty")
-    bucket = timestamp_bucket(observed_at, window_seconds)
-    identity = f"{host_id.strip()}\0{device_serial.strip()}\0{bucket}"
+    identity = "\0".join(
+        (
+            host_id.strip(),
+            action.strip(),
+            device_serial.strip(),
+            device_model.strip(),
+            _normalized_timestamp(observed_at).isoformat(timespec="microseconds"),
+        )
+    )
     return hashlib.sha256(identity.encode("utf-8")).hexdigest()
 
 
@@ -134,8 +151,12 @@ def _event_value(event: object, *names: str) -> Optional[str]:
     return None
 
 
-def _default_sink(event: DeviceConnectionEvent) -> None:
-    LOGGER.info("usb_device_event %s", json.dumps(event.as_dict(), sort_keys=True))
+class _LoggingEventSink:
+    def emit(self, event: dict[str, object]) -> None:
+        LOGGER.info("usb_device_event %s", json.dumps(event, sort_keys=True))
+
+
+_DEFAULT_SINK = _LoggingEventSink()
 
 
 class DeviceEventAdapter:
@@ -147,20 +168,22 @@ class DeviceEventAdapter:
         host_id: str,
         allowlist: Iterable[AllowedDevice],
         debounce_window_seconds: int = 5,
-        event_sink: EventSink = _default_sink,
+        event_sink: EventSink = _DEFAULT_SINK,
         clock: Clock = _utcnow,
     ) -> None:
         if not host_id.strip():
             raise ValueError("host_id must be non-empty")
         if debounce_window_seconds <= 0:
             raise ValueError("debounce window must be greater than zero")
+        if not isinstance(event_sink, EventSink) or not callable(event_sink.emit):
+            raise TypeError("event_sink must implement emit(event_dict)")
 
         self.host_id = host_id.strip()
         self.debounce_window_seconds = debounce_window_seconds
         self._allowlist = {(item.serial.strip(), item.model.strip()) for item in allowlist}
         self._event_sink = event_sink
         self._clock = clock
-        self._seen_keys: dict[str, int] = {}
+        self._last_authorised_at: dict[tuple[str, str, str, str], datetime] = {}
 
     def consume(self, source: DeviceEventSource) -> Iterator[DeviceConnectionEvent]:
         """Yield accepted observations; duplicate/non-USB events yield nothing."""
@@ -177,7 +200,9 @@ class DeviceEventAdapter:
 
         subsystem = _event_value(raw_event, "subsystem", "SUBSYSTEM")
         device_type = _event_value(raw_event, "device_type", "DEVTYPE")
-        if (subsystem is not None and subsystem != "usb") or (
+        if (subsystem is None and device_type is None) or (
+            subsystem is not None and subsystem != "usb"
+        ) or (
             device_type is not None and device_type != "usb_device"
         ):
             return None
@@ -185,27 +210,30 @@ class DeviceEventAdapter:
         serial = _event_value(raw_event, "ID_SERIAL_SHORT", "serial")
         model = _event_value(raw_event, "ID_MODEL", "model")
         observed_at = _normalized_timestamp(self._clock())
-        bucket = timestamp_bucket(observed_at, self.debounce_window_seconds)
         key = make_idempotency_key(
             self.host_id,
+            action,
             serial or "<missing-serial>",
+            model or "<missing-model>",
             observed_at,
-            self.debounce_window_seconds,
         )
-
-        if key in self._seen_keys:
-            return None
-        self._seen_keys[key] = bucket
-        self._seen_keys = {
-            seen_key: seen_bucket
-            for seen_key, seen_bucket in self._seen_keys.items()
-            if seen_bucket >= bucket - 1
-        }
 
         authorised = serial is not None and model is not None and (serial, model) in self._allowlist
         if authorised:
-            state = DeviceState.DEVICE_AUTHORISED
-            transitions = (DeviceState.DEVICE_DETECTED, DeviceState.DEVICE_AUTHORISED)
+            debounce_identity = (self.host_id, action, serial, model)
+            last_authorised_at = self._last_authorised_at.get(debounce_identity)
+            if last_authorised_at is not None and (
+                observed_at - last_authorised_at
+            ).total_seconds() < self.debounce_window_seconds:
+                return None
+            self._last_authorised_at[debounce_identity] = observed_at
+
+            if action == "remove":
+                state = DeviceState.DEVICE_REMOVED
+                transitions = (DeviceState.DEVICE_REMOVED,)
+            else:
+                state = DeviceState.DEVICE_AUTHORISED
+                transitions = (DeviceState.DEVICE_DETECTED, DeviceState.DEVICE_AUTHORISED)
             reason = None
         else:
             state = DeviceState.BLOCKED_ACCESS
@@ -220,10 +248,9 @@ class DeviceEventAdapter:
             device_serial=serial,
             device_model=model,
             observed_at=observed_at,
-            timestamp_bucket=bucket,
             idempotency_key=key,
             authorised=authorised,
             reason=reason,
         )
-        self._event_sink(event)
+        self._event_sink.emit(event.as_dict())
         return event
