@@ -1,46 +1,45 @@
-"""Tests for src.instagram_importer.import_instagram_saved_export (P2).
+"""Acceptance coverage for the real Meta DYI saved-post export schema."""
 
-Uses tests/fixtures/instagram_saved_posts_sample.json - a SYNTHETIC,
-schema-representative fixture (see that file's "_fixture_notice" field and
-src/instagram_importer.py's module docstring); it contains no real Instagram
-export data and is explicitly NOT sufficient for P2 acceptance on its own
-(see the real-export schema gate). 8 top-level entries: 4 distinct valid
-permalinks (one of them - "AAA111" - saved into two different collections
-at two different timestamps, to exercise multi-collection-permalink
-aggregation and preservation), and 3 intentionally schema-drifted entries
-(missing "Saved on" label; a non-string "collection" field; a bare string
-instead of an object) to exercise visible schema-drift-failure reporting.
-"""
+import copy
+import inspect
 import json
-import os
+from pathlib import Path
 
 import pytest
 
 from core.database import SourceEvent, get_db_session
 from src.instagram_importer import (
+    EVIDENCE_CEILING,
     InstagramImportSchemaError,
+    _parse_collections,
+    _parse_saved_posts,
     import_instagram_saved_export,
 )
 
-FIXTURE_PATH = os.path.join(
-    os.path.dirname(__file__), "fixtures", "instagram_saved_posts_sample.json"
-)
 
-ALL_HREFS = [
-    "https://www.instagram.com/p/AAA111/",
-    "https://www.instagram.com/p/BBB222/",
-    "https://www.instagram.com/p/DDD444/",
-    "https://www.instagram.com/p/EEE555/",
-    "https://www.instagram.com/p/FFF666/",  # malformed entry's href - never recorded
-    "https://www.instagram.com/p/GGG777/",  # malformed entry's href - never recorded
-]
+FIXTURES = Path(__file__).parent / "fixtures"
+POSTS_FIXTURE = FIXTURES / "instagram_saved_posts_real_schema_fixture.json"
+COLLECTIONS_FIXTURE = FIXTURES / "instagram_saved_collections_real_schema_fixture.json"
+TEST_PREFIX = "https://www.instagram.com/p/REDACTED_"
+
+
+def _fixture(path: Path):
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _write_exports(tmp_path: Path, posts, collections) -> tuple[str, str]:
+    posts_path = tmp_path / "saved_posts.json"
+    collections_path = tmp_path / "saved_collections.json"
+    posts_path.write_text(json.dumps(posts), encoding="utf-8")
+    collections_path.write_text(json.dumps(collections), encoding="utf-8")
+    return str(posts_path), str(collections_path)
 
 
 def _cleanup():
     with get_db_session() as db:
         db.query(SourceEvent).filter(
             SourceEvent.source == "instagram",
-            SourceEvent.external_id.in_(ALL_HREFS),
+            SourceEvent.external_id.like(f"{TEST_PREFIX}%"),
         ).delete(synchronize_session=False)
 
 
@@ -51,234 +50,219 @@ def _clean_rows():
     _cleanup()
 
 
-def _rows_by_external_id():
-    """Return {external_id: {field: value, ...}} snapshots.
-
-    Copies plain field values out while the session is still open rather than
-    returning ORM instances - SessionLocal's default expire_on_commit=True
-    would make attribute access on a returned row raise
-    DetachedInstanceError once the session (and its `with` block) has closed.
-    """
+def _rows():
     with get_db_session() as db:
-        rows = (
-            db.query(SourceEvent)
-            .filter(
-                SourceEvent.source == "instagram",
-                SourceEvent.external_id.in_(ALL_HREFS),
-            )
-            .all()
-        )
+        rows = db.query(SourceEvent).filter(
+            SourceEvent.source == "instagram",
+            SourceEvent.external_id.like(f"{TEST_PREFIX}%"),
+        ).all()
         return {
-            r.external_id: {
-                "id": r.id,
-                "source": r.source,
-                "domain": r.domain,
-                "payload_ref": r.payload_ref,
-                "content_hash": r.content_hash,
-                "status": r.status,
-                "revision_count": r.revision_count,
+            row.external_id: {
+                "id": row.id,
+                "source": row.source,
+                "domain": row.domain,
+                "payload_ref": row.payload_ref,
+                "content_hash": row.content_hash,
+                "received_at": row.received_at,
+                "revision_count": row.revision_count,
             }
-            for r in rows
+            for row in rows
         }
 
 
-def test_one_source_event_per_distinct_permalink_with_truthful_created_count():
-    result = import_instagram_saved_export(FIXTURE_PATH)
-
-    # 4 distinct valid permalinks in the fixture (AAA111's two occurrences
-    # collapse to one row via pre-aggregation).
-    rows = _rows_by_external_id()
-    assert len(rows) == 4
-    for row in rows.values():
-        assert row["source"] == "instagram"
-
-    # Truthful accounting: all 4 are genuinely new on a first import.
-    assert result["counts"]["created"] == 4
-    assert result["counts"]["revised"] == 0
-    assert result["counts"]["unchanged"] == 0
-    assert result["counts"]["processed"] == 4
-    assert result["counts"]["failed"] == 3
-    outcomes = {item["external_id"]: item["outcome"] for item in result["imported"]}
-    assert all(outcome == "created" for outcome in outcomes.values())
-
-
-def test_duplicate_permalink_across_collections_preserves_both_memberships():
-    """The controller-identified defect this corrects: a permalink saved
-    into two collections must not become a last-write-wins single-
-    collection record - both memberships must survive in the same row."""
-    result = import_instagram_saved_export(FIXTURE_PATH)
-    rows = _rows_by_external_id()
-
-    reused_row = rows["https://www.instagram.com/p/AAA111/"]
-    payload = json.loads(reused_row["payload_ref"])
-
-    assert set(payload["collections"]) == {"Recipes", "Weekend Ideas"}
-    assert payload["collections"] == sorted(payload["collections"])  # deterministic order
-
-    imported_entry = next(
-        item for item in result["imported"]
-        if item["external_id"] == "https://www.instagram.com/p/AAA111/"
+def test_real_shape_parsing_extracts_nested_fields_and_timestamp_value():
+    posts, post_failures = _parse_saved_posts(_fixture(POSTS_FIXTURE), POSTS_FIXTURE.name)
+    memberships, collection_failures = _parse_collections(
+        _fixture(COLLECTIONS_FIXTURE), COLLECTIONS_FIXTURE.name
     )
-    assert set(imported_entry["collections"]) == {"Recipes", "Weekend Ideas"}
 
-    # Only one row exists for this permalink - not two competing rows.
-    assert reused_row["revision_count"] == 0
-    assert reused_row["status"] == "received"
-
-
-def test_canonical_content_uses_earliest_occurrence_deterministically():
-    import_instagram_saved_export(FIXTURE_PATH)
-    rows = _rows_by_external_id()
-
-    # AAA111's earliest occurrence is timestamp 1700000000 (Recipes), not
-    # 1700500000 (Weekend Ideas, saved later) - the canonical content must
-    # reflect the earliest save, independent of fixture list order.
-    payload = json.loads(rows["https://www.instagram.com/p/AAA111/"]["payload_ref"])
-    assert payload["saved_at"] == 1700000000
-
-
-def test_single_collection_permalink_preserved():
-    import_instagram_saved_export(FIXTURE_PATH)
-    rows = _rows_by_external_id()
-
-    travel_payload = json.loads(rows["https://www.instagram.com/p/BBB222/"]["payload_ref"])
-    diy_payload = json.loads(rows["https://www.instagram.com/p/DDD444/"]["payload_ref"])
-
-    assert travel_payload["collections"] == ["Travel Ideas"]
-    assert diy_payload["collections"] == ["DIY Projects"]
+    assert post_failures == []
+    assert collection_failures == []
+    assert len(posts) == 4
+    post = posts["https://www.instagram.com/p/REDACTED_PERMALINK0/"]
+    assert len(post["hashtags"]) == 5
+    assert post["owner"] == [{
+        "URL": "",
+        "Name": "REDACTED_Name",
+        "Username": "REDACTED_Username",
+    }]
+    collection_records = memberships["https://www.instagram.com/p/REDACTED_PERMALINK0/"]
+    assert len(collection_records) == 2
+    assert all(record["updated_at"] == 1750000000 for record in collection_records)
+    assert all(record["member_indices"] == [0, 1] for record in collection_records)
 
 
-def test_reimport_is_idempotent_no_duplicate_rows_and_no_spurious_revisions():
-    first_result = import_instagram_saved_export(FIXTURE_PATH)
-    first_rows = _rows_by_external_id()
-    first_ids = {r["id"] for r in first_rows.values()}
-    first_hashes = {href: r["content_hash"] for href, r in first_rows.items()}
+def test_import_creates_one_neutral_event_per_distinct_permalink():
+    result = import_instagram_saved_export(str(POSTS_FIXTURE), str(COLLECTIONS_FIXTURE))
+    rows = _rows()
 
-    second_result = import_instagram_saved_export(FIXTURE_PATH)
-    second_rows = _rows_by_external_id()
-    second_ids = {r["id"] for r in second_rows.values()}
-    second_hashes = {href: r["content_hash"] for href, r in second_rows.items()}
-
-    assert len(first_rows) == len(second_rows) == 4
-    assert first_ids == second_ids  # same rows, not new ones
-    assert first_hashes == second_hashes  # content did not drift on re-import
-
-    assert first_result["counts"]["created"] == 4
-    # Truthful accounting on the second pass: nothing is newly created,
-    # nothing genuinely changed - all 4 are "unchanged", never re-labelled
-    # "created".
-    assert second_result["counts"]["created"] == 0
-    assert second_result["counts"]["unchanged"] == 4
-    assert second_result["counts"]["revised"] == 0
-    assert second_result["counts"]["processed"] == 4
-    for row in second_rows.values():
-        assert row["revision_count"] == 0
-
-
-def test_malformed_entries_are_visibly_reported_not_silently_dropped():
-    result = import_instagram_saved_export(FIXTURE_PATH)
-
-    assert result["counts"]["failed"] == 3
-    assert len(result["failed"]) == 3
-    reasons = " | ".join(f["reason"] for f in result["failed"])
-    assert "Saved on" in reasons or "string_map_data" in reasons
-    assert "collection" in reasons
-    assert "not a JSON object" in reasons
-
-    # Never silently absent from both success and failure accounting: their
-    # hrefs must not appear in the imported list nor as SourceEvent rows.
-    imported_external_ids = {item["external_id"] for item in result["imported"]}
-    assert "https://www.instagram.com/p/FFF666/" not in imported_external_ids
-    assert "https://www.instagram.com/p/GGG777/" not in imported_external_ids
-
-    with get_db_session() as db:
-        ghost_rows = (
-            db.query(SourceEvent)
-            .filter(
-                SourceEvent.source == "instagram",
-                SourceEvent.external_id.in_([
-                    "https://www.instagram.com/p/FFF666/",
-                    "https://www.instagram.com/p/GGG777/",
-                ]),
-            )
-            .all()
-        )
-    assert ghost_rows == []
-
-
-def test_never_sets_or_mutates_domain():
-    """Neutral provenance only: this importer must never write anything but
-    P1's own neutral default into SourceEvent.domain - there is no domain
-    parameter to pass one."""
-    import inspect
-    sig = inspect.signature(import_instagram_saved_export)
-    assert "domain" not in sig.parameters
-
-    import_instagram_saved_export(FIXTURE_PATH)
-    rows = _rows_by_external_id()
-    for row in rows.values():
-        assert row["domain"] == "neutral"
-
-
-def test_module_has_no_apply_domain_helper():
-    import src.instagram_importer as mod
-    assert not hasattr(mod, "_apply_domain")
-
-
-def test_missing_top_level_key_raises_schema_error(tmp_path):
-    bad_export = tmp_path / "bad_export.json"
-    bad_export.write_text(json.dumps({"not_the_right_key": []}), encoding="utf-8")
-
-    with pytest.raises(InstagramImportSchemaError):
-        import_instagram_saved_export(str(bad_export))
-
-
-def test_non_list_saved_media_value_raises_schema_error(tmp_path):
-    bad_export = tmp_path / "bad_export.json"
-    bad_export.write_text(json.dumps({"saved_saved_media": "not a list"}), encoding="utf-8")
-
-    with pytest.raises(InstagramImportSchemaError):
-        import_instagram_saved_export(str(bad_export))
-
-
-def test_content_revision_is_reported_as_revised_not_created(tmp_path):
-    """A genuine content change (e.g. a later export with an updated
-    earliest-occurrence timestamp for the same permalink) must be truthfully
-    reported as 'revised', never folded into 'created'."""
-    export_v1 = {
-        "saved_saved_media": [
-            {
-                "title": "chef_marco",
-                "collection": "Recipes",
-                "string_map_data": {"Saved on": {"href": "https://www.instagram.com/p/ZZZ999/", "timestamp": 1700000000}},
-            },
-        ],
+    assert result["counts"] == {
+        "created": 4,
+        "revised": 0,
+        "unchanged": 0,
+        "processed": 4,
+        "failed": 0,
     }
-    export_v2 = {
-        "saved_saved_media": [
-            {
-                "title": "chef_marco",
-                "collection": "Recipes",
-                "string_map_data": {"Saved on": {"href": "https://www.instagram.com/p/ZZZ999/", "timestamp": 1600000000}},
-            },
-        ],
+    assert len(rows) == 4
+    assert all(row["source"] == "instagram" for row in rows.values())
+    assert all(row["domain"] == "neutral" for row in rows.values())
+
+
+def test_permalink_normalization_collapses_query_host_case_and_missing_slash(tmp_path):
+    posts = _fixture(POSTS_FIXTURE)[:1]
+    duplicate = copy.deepcopy(posts[0])
+    duplicate["timestamp"] += 10
+    duplicate["label_values"][0]["value"] = (
+        "https://WWW.INSTAGRAM.COM/p/REDACTED_PERMALINK0?tracking=removed"
+    )
+    posts.append(duplicate)
+    paths = _write_exports(tmp_path, posts, [])
+
+    result = import_instagram_saved_export(*paths)
+
+    assert result["counts"]["created"] == 1
+    assert result["imported"][0]["external_id"] == (
+        "https://www.instagram.com/p/REDACTED_PERMALINK0/"
+    )
+    assert len(_rows()) == 1
+
+
+def test_permalink_in_two_collections_has_union_in_deterministic_order(tmp_path):
+    collections = _fixture(COLLECTIONS_FIXTURE)
+    collections[0]["label_values"][0]["value"] = "REDACTED_Zeta"
+    collections[0]["fbid"] = "REDACTED_FBID_Z"
+    collections[1]["label_values"][0]["value"] = "REDACTED_Alpha"
+    collections[1]["fbid"] = "REDACTED_FBID_A"
+    paths = _write_exports(tmp_path, _fixture(POSTS_FIXTURE), collections)
+
+    result = import_instagram_saved_export(*paths)
+    imported = next(
+        item for item in result["imported"]
+        if item["external_id"].endswith("REDACTED_PERMALINK0/")
+    )
+
+    assert imported["collections"] == ["REDACTED_Alpha", "REDACTED_Zeta"]
+    payload = json.loads(_rows()[imported["external_id"]]["payload_ref"])
+    assert len(payload["collection_refs"]) == 2
+    assert payload["collection_refs"][0]["collection_index"] == 1
+    assert payload["collection_refs"][1]["collection_index"] == 0
+
+
+def test_missing_caption_is_tolerated_and_evidence_ceiling_is_explicit(tmp_path):
+    posts = _fixture(POSTS_FIXTURE)
+    posts[1]["label_values"] = [
+        value for value in posts[1]["label_values"]
+        if value.get("label") != "Caption"
+    ]
+    paths = _write_exports(tmp_path, posts, _fixture(COLLECTIONS_FIXTURE))
+
+    result = import_instagram_saved_export(*paths)
+    imported = next(
+        item for item in result["imported"]
+        if item["external_id"].endswith("REDACTED_PERMALINK1/")
+    )
+
+    assert result["counts"]["failed"] == 0
+    assert imported["missing_optional_fields"] == ["caption"]
+    assert imported["evidence_ceiling"] == EVIDENCE_CEILING
+    payload = json.loads(_rows()[imported["external_id"]]["payload_ref"])
+    assert payload["missing_optional_fields"] == ["caption"]
+    assert payload["evidence_ceiling"] == EVIDENCE_CEILING
+
+
+def test_missing_url_is_item_level_permanent_schema_error(tmp_path):
+    posts = _fixture(POSTS_FIXTURE)
+    posts[2]["label_values"] = [
+        value for value in posts[2]["label_values"]
+        if value.get("label") != "URL"
+    ]
+    paths = _write_exports(tmp_path, posts, _fixture(COLLECTIONS_FIXTURE))
+
+    result = import_instagram_saved_export(*paths)
+
+    assert result["counts"]["processed"] == 3
+    assert result["counts"]["failed"] == 1
+    assert result["failed"] == [{
+        "source_file": "saved_posts.json",
+        "index": 2,
+        "status": "permanent_schema_error",
+        "reason": "saved-post item is missing a valid URL label",
+    }]
+
+
+def test_payload_ref_has_pointers_but_no_raw_private_text():
+    import_instagram_saved_export(str(POSTS_FIXTURE), str(COLLECTIONS_FIXTURE))
+    row = _rows()["https://www.instagram.com/p/REDACTED_PERMALINK0/"]
+    payload = json.loads(row["payload_ref"])
+
+    assert payload["field_pointers"]["hashtags"] == "/0/label_values/3"
+    assert payload["field_pointers"]["owner"] == "/0/label_values/4"
+    assert payload["saved_at"] == 1750000000
+    for private_value in (
+        "REDACTED_Caption", "REDACTED_Title", "REDACTED_Name",
+        "REDACTED_Username", "REDACTED_Privacy",
+    ):
+        assert private_value not in row["payload_ref"]
+
+
+def test_saved_at_is_source_timestamp_and_imported_at_is_separate():
+    result = import_instagram_saved_export(str(POSTS_FIXTURE), str(COLLECTIONS_FIXTURE))
+    imported = next(
+        item for item in result["imported"]
+        if item["external_id"].endswith("REDACTED_PERMALINK0/")
+    )
+
+    assert imported["saved_at"] == 1750000000
+    assert imported["imported_at"] is not None
+    assert imported["imported_at"] != str(imported["saved_at"])
+
+
+def test_reimport_is_noop_with_truthful_unchanged_counts():
+    first = import_instagram_saved_export(str(POSTS_FIXTURE), str(COLLECTIONS_FIXTURE))
+    first_rows = _rows()
+    second = import_instagram_saved_export(str(POSTS_FIXTURE), str(COLLECTIONS_FIXTURE))
+    second_rows = _rows()
+
+    assert first["counts"] == {
+        "created": 4, "revised": 0, "unchanged": 0, "processed": 4, "failed": 0,
     }
-    path_v1 = tmp_path / "v1.json"
-    path_v2 = tmp_path / "v2.json"
-    path_v1.write_text(json.dumps(export_v1), encoding="utf-8")
-    path_v2.write_text(json.dumps(export_v2), encoding="utf-8")
+    assert second["counts"] == {
+        "created": 0, "revised": 0, "unchanged": 4, "processed": 4, "failed": 0,
+    }
+    assert {value["id"] for value in first_rows.values()} == {
+        value["id"] for value in second_rows.values()
+    }
+    assert all(value["revision_count"] == 0 for value in second_rows.values())
 
-    try:
-        result_v1 = import_instagram_saved_export(str(path_v1))
-        assert result_v1["counts"]["created"] == 1
 
-        result_v2 = import_instagram_saved_export(str(path_v2))
-        assert result_v2["counts"]["created"] == 0
-        assert result_v2["counts"]["revised"] == 1
-        assert result_v2["imported"][0]["outcome"] == "revised"
-    finally:
-        with get_db_session() as db:
-            db.query(SourceEvent).filter(
-                SourceEvent.source == "instagram",
-                SourceEvent.external_id == "https://www.instagram.com/p/ZZZ999/",
-            ).delete(synchronize_session=False)
+def test_collection_update_time_change_is_a_revision(tmp_path):
+    paths = _write_exports(
+        tmp_path, _fixture(POSTS_FIXTURE), _fixture(COLLECTIONS_FIXTURE)
+    )
+    first = import_instagram_saved_export(*paths)
+    collections = _fixture(COLLECTIONS_FIXTURE)
+    collections[0]["label_values"][3]["timestamp_value"] += 1
+    paths = _write_exports(tmp_path, _fixture(POSTS_FIXTURE), collections)
+    second = import_instagram_saved_export(*paths)
+
+    assert first["counts"]["created"] == 4
+    assert second["counts"]["created"] == 0
+    assert second["counts"]["revised"] == 1
+    assert second["counts"]["unchanged"] == 3
+
+
+@pytest.mark.parametrize("broken_file", ["posts", "collections"])
+def test_non_list_top_level_fails_visibly(tmp_path, broken_file):
+    posts = {} if broken_file == "posts" else _fixture(POSTS_FIXTURE)
+    collections = {} if broken_file == "collections" else _fixture(COLLECTIONS_FIXTURE)
+    paths = _write_exports(tmp_path, posts, collections)
+
+    with pytest.raises(InstagramImportSchemaError, match="top-level JSON list"):
+        import_instagram_saved_export(*paths)
+
+
+def test_never_accepts_domain_routing_and_has_no_domain_helper():
+    import src.instagram_importer as module
+
+    assert "domain" not in inspect.signature(import_instagram_saved_export).parameters
+    assert not hasattr(module, "_apply_domain")

@@ -1,305 +1,393 @@
-"""Instagram "Download Your Information" (DYI) saved-posts export importer (P2).
+"""Offline importer for Instagram Download Your Information saved posts.
 
-Offline, file-based only. This module never makes a network call to
-instagram.com/meta and never scrapes anything live - it reads a JSON export
-file the user already downloaded via Meta's DYI tool and turns each saved
-item into a `SourceEvent` row by calling the generic, source-agnostic
-`src/source_events.py::record_source_event()` contract added in P1.
+Meta's observed 2026 saved-post export consists of two top-level JSON lists:
+``saved_posts.json`` contains one metadata-only item per saved post, while
+``saved_collections.json`` contains collection metadata and nested ``Media``
+membership entries. This module joins those files by normalized permalink and
+records exactly one neutral :class:`SourceEvent` per distinct permalink.
 
-Neutral provenance only: this importer has no `domain` argument and never
-touches `SourceEvent.domain`. Every row it creates or revises keeps
-`record_source_event`'s own neutral-by-default value. Collection-to-domain
-routing is exclusively a P3 governed-handoff concern - this module does not
-implement, anticipate, or stub any part of that classification.
+The export's ``media`` arrays are empty, so the evidence ceiling is metadata
+only. Missing Caption or Title labels are tolerated and remain explicitly
+unknown; they are never interpreted as evidence that the source text was
+empty. Missing required URL labels are reported per item as
+``permanent_schema_error``. A non-list top level is a file-level schema error.
 
-Expected export shape (see tests/fixtures/instagram_saved_posts_sample.json
-for a SYNTHETIC, schema-representative fixture and a fuller note on the
-documented simplifying assumptions taken there pending a real export):
-
-    {
-      "saved_saved_media": [
-        {
-          "title": "<post author / item label>",
-          "collection": "<collection name, optional>",
-          "string_map_data": {
-            "Saved on": {
-              "href": "<stable permalink for the saved item>",
-              "timestamp": <unix seconds>
-            }
-          }
-        },
-        ...
-      ]
-    }
-
-Stable identity, one row per permalink: `external_id` passed to
-`record_source_event` is the saved item's own permalink (`href`) - never a
-hash of its content - so re-importing the same export (or a later export
-containing the same saved item) resolves to the same SourceEvent row
-instead of creating a duplicate.
-
-The same permalink can legitimately appear multiple times in one export -
-Instagram lets a user save the same post into more than one collection, at
-different times. Those occurrences are pre-aggregated by permalink BEFORE
-any `record_source_event` call is made, so there is exactly one call (and
-therefore one create-or-revise decision) per distinct permalink, never a
-second call for the same href that would compete with and silently replace
-the first's collection membership. The aggregated row's `collections` field
-is the full deduplicated, sorted set of every collection that permalink was
-found in across all its occurrences - not just the most recent one. The
-canonical title/timestamp used for that row's content is taken from its
-earliest ("Saved on") occurrence, a deterministic choice independent of
-list order, so repeated imports of the same export (or a superset export
-that still contains that earliest occurrence) hash to the same content and
-stay idempotent.
-
-Payload discipline: only small structured fields (title, href, collections,
-timestamp) are ever passed as `content`/`metadata` - never raw media bytes,
-never a full raw copy of the export. `record_source_event` itself only
-persists a sha256 hash of `content` plus the small `metadata` pointer, never
-the raw content, mirroring `src/attachment_refs.py`'s ref-not-raw-bytes
-convention.
-
-Truthful accounting: `record_source_event` alone does not report whether it
-created, revised, or no-op'd a row - its no-op path returns the existing
-row with whatever status it already had, indistinguishable by `status`
-alone from a fresh single "received" row. This importer therefore checks
-for an existing row (by source, external_id) immediately before each call,
-and classifies the outcome as "created" (no prior row existed), "revised"
-(a prior row existed with a different content hash), or "unchanged" (a
-prior row existed with an identical content hash) by comparing before and
-after - `counts["created"]` means exactly what it says, never inflated by
-counting every successfully processed permalink as newly created.
-
-Schema-drift handling (design choice, see module docstring of
-`import_instagram_saved_export` below): this importer uses **partial-import-
-with-report** semantics, not exception-per-malformed-item, at the per-item
-level - a single malformed entry in an otherwise-valid export does not abort
-the whole import, but it is never silently dropped either. It is collected
-into the returned result's `failed` list with an explicit reason naming the
-offending entry (by index and, when available, its `title`), so a caller
-can inspect `result["failed"]` and treat a non-empty list as a visible
-signal rather than have it disappear from both success and failure
-accounting. A structurally broken *file* (not a single malformed item, but
-a top-level shape that doesn't match the expected export at all, e.g.
-missing or non-list `saved_saved_media`) still raises
-`InstagramImportSchemaError` immediately, since there is nothing item-level
-to partially import in that case.
+Privacy/provenance discipline: private text is used in memory to compute the
+content hash but is never put in SQL metadata or logs. ``payload_ref`` holds
+only file names, item/member indexes, and JSON pointers back into the user's
+export. This preserves Hashtags, Owner, collection membership, and optional
+text as recoverable provenance without copying their raw values into SQLite.
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
+from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import urlsplit, urlunsplit
 
 from src.source_events import SourceEventValidationError, record_source_event
 
-# The export's top-level array key. Documented assumption pending a real
-# export: Meta has used a couple of versioned spellings for this key across
-# DYI export format revisions; this importer only looks for this one name
-# (see module docstring / fixture notice for the reasoning). Update to the
-# observed real-export key once one is available (see the fixture's
-# _fixture_notice).
-SAVED_MEDIA_KEY = "saved_saved_media"
 
-# The string_map_data label the "Saved on" timestamp/href entry is keyed
-# under in a real DYI export.
-SAVED_ON_LABEL = "Saved on"
+EVIDENCE_CEILING = "metadata_only"
+PERMANENT_SCHEMA_ERROR = "permanent_schema_error"
 
 
 class InstagramImportSchemaError(ValueError):
-    """Raised for a top-level export file that isn't a recognizable DYI export.
-
-    A ValueError subclass so callers can catch it specifically or via the
-    generic `except ValueError`. Not raised for a single malformed *item*
-    inside an otherwise-valid export - those are reported, not raised (see
-    module docstring for the partial-import-with-report design choice).
-    """
+    """Raised when an export file has no item-level shape to import."""
 
 
-def _extract_saved_on(entry: dict[str, Any]) -> tuple[Optional[str], Optional[int]]:
-    """Return (href, timestamp) for one export entry, or (None, None) if absent."""
-    string_map_data = entry.get("string_map_data")
-    if not isinstance(string_map_data, dict):
-        return None, None
-    saved_on = string_map_data.get(SAVED_ON_LABEL)
-    if not isinstance(saved_on, dict):
-        return None, None
-    href = saved_on.get("href")
-    timestamp = saved_on.get("timestamp")
-    if not isinstance(href, str) or not href.strip():
-        return None, None
-    if not isinstance(timestamp, int) or isinstance(timestamp, bool):
-        return None, None
-    return href, timestamp
+def _load_list(path: str, export_kind: str) -> list[Any]:
+    with open(path, "r", encoding="utf-8") as fh:
+        value = json.load(fh)
+    if not isinstance(value, list):
+        raise InstagramImportSchemaError(
+            f"Instagram {export_kind} export at {path!r} must have a top-level "
+            f"JSON list, got {type(value).__name__}."
+        )
+    return value
 
 
-def _describe_entry(index: int, entry: Any) -> str:
-    title = entry.get("title") if isinstance(entry, dict) else None
-    if title:
-        return f"entry #{index} (title={title!r})"
-    return f"entry #{index}"
+def _is_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
 
 
-def _aggregate_by_permalink(items: list, source_file: str) -> tuple[dict[str, dict], list[dict]]:
-    """Group valid export entries by stable permalink (href).
+def _normalize_permalink(value: Any) -> Optional[str]:
+    """Normalize a permalink for SourceEvent identity."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    parsed = urlsplit(value.strip())
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+        return None
+    path = parsed.path or "/"
+    if not path.endswith("/"):
+        path += "/"
+    return urlunsplit((parsed.scheme.lower(), parsed.netloc.lower(), path, "", ""))
 
-    Returns (aggregated, failed):
-      - aggregated: {href: {"collections": [sorted, deduped], "title":...,
-        "saved_on_timestamp":..., "item_indices": [sorted]}} - exactly one
-        entry per distinct permalink, ready for exactly one
-        record_source_event call each.
-      - failed: per-occurrence schema-drift reports, in original order -
-        never silently dropped, matching the item-level partial-import-
-        with-report contract.
 
-    The canonical title/timestamp for a permalink with multiple occurrences
-    is taken from its earliest ("Saved on") occurrence - a deterministic
-    choice independent of input list order, so the same export (or any
-    superset export that still contains that earliest occurrence) always
-    aggregates to the same content and stays idempotent across re-imports.
-    """
+def _label_values(entry: dict[str, Any]) -> Optional[list[Any]]:
+    values = entry.get("label_values")
+    return values if isinstance(values, list) else None
+
+
+def _direct_label(
+    values: list[Any], label: str, *, key: str = "value"
+) -> tuple[Any, Optional[int]]:
+    for index, value in enumerate(values):
+        if isinstance(value, dict) and value.get("label") == label:
+            return value.get(key), index
+    return None, None
+
+
+def _group(values: list[Any], title: str) -> tuple[Optional[dict[str, Any]], Optional[int]]:
+    for index, value in enumerate(values):
+        if isinstance(value, dict) and value.get("title") == title:
+            return value, index
+    return None, None
+
+
+def _nested_records(group: Optional[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Extract label/value maps from a Hashtags/Owner-style nested group."""
+    if not group or not isinstance(group.get("dict"), list):
+        return []
+    records: list[dict[str, Any]] = []
+    for wrapper in group["dict"]:
+        if not isinstance(wrapper, dict) or not isinstance(wrapper.get("dict"), list):
+            continue
+        record: dict[str, Any] = {}
+        for field in wrapper["dict"]:
+            if not isinstance(field, dict):
+                continue
+            label = field.get("label")
+            if isinstance(label, str) and "value" in field:
+                record[label] = field.get("value")
+        if record:
+            records.append(record)
+    return records
+
+
+def _failure(
+    source_file: str,
+    index: int,
+    reason: str,
+    *,
+    member_index: Optional[int] = None,
+) -> dict[str, Any]:
+    report: dict[str, Any] = {
+        "source_file": source_file,
+        "index": index,
+        "status": PERMANENT_SCHEMA_ERROR,
+        "reason": reason,
+    }
+    if member_index is not None:
+        report["member_index"] = member_index
+    return report
+
+
+def _parse_saved_posts(
+    items: list[Any], source_file: str
+) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
     buckets: dict[str, list[dict[str, Any]]] = {}
     failed: list[dict[str, Any]] = []
 
     for index, entry in enumerate(items):
         if not isinstance(entry, dict):
-            failed.append({
-                "index": index,
-                "title": None,
-                "reason": "entry is not a JSON object",
-            })
+            failed.append(_failure(source_file, index, "saved-post item is not a JSON object"))
+            continue
+        values = _label_values(entry)
+        if values is None:
+            failed.append(_failure(source_file, index, "saved-post item has no label_values list"))
             continue
 
-        href, timestamp = _extract_saved_on(entry)
-        if href is None or timestamp is None:
-            failed.append({
-                "index": index,
-                "title": entry.get("title"),
-                "reason": (
-                    f"{_describe_entry(index, entry)} is missing a valid "
-                    f"string_map_data[{SAVED_ON_LABEL!r}].href/timestamp "
-                    f"pair (schema drift from the expected DYI export shape)"
-                ),
-            })
+        raw_url, url_index = _direct_label(values, "URL")
+        permalink = _normalize_permalink(raw_url)
+        if permalink is None:
+            failed.append(_failure(source_file, index, "saved-post item is missing a valid URL label"))
+            continue
+        timestamp = entry.get("timestamp")
+        if not _is_int(timestamp):
+            failed.append(_failure(source_file, index, "saved-post item has no valid integer timestamp"))
             continue
 
-        collection = entry.get("collection")
-        if collection is not None and not isinstance(collection, str):
-            failed.append({
-                "index": index,
-                "title": entry.get("title"),
-                "reason": (
-                    f"{_describe_entry(index, entry)} has a non-string "
-                    f"'collection' field ({type(collection).__name__}) - "
-                    "schema drift from the expected DYI export shape"
-                ),
-            })
-            continue
+        caption, caption_index = _direct_label(values, "Caption")
+        title, title_index = _direct_label(values, "Title")
+        hashtags_group, hashtags_index = _group(values, "Hashtags")
+        owner_group, owner_index = _group(values, "Owner")
+        hashtags = [
+            record["Name"]
+            for record in _nested_records(hashtags_group)
+            if isinstance(record.get("Name"), str)
+        ]
+        owner = _nested_records(owner_group)
+        missing_optional = []
+        if not isinstance(caption, str):
+            caption = None
+            missing_optional.append("caption")
+        if not isinstance(title, str):
+            title = None
+            missing_optional.append("title")
 
-        buckets.setdefault(href, []).append({
+        field_pointers = {
+            "url": f"/{index}/label_values/{url_index}",
+            "hashtags": (
+                f"/{index}/label_values/{hashtags_index}"
+                if hashtags_index is not None else None
+            ),
+            "owner": (
+                f"/{index}/label_values/{owner_index}"
+                if owner_index is not None else None
+            ),
+        }
+        if caption_index is not None:
+            field_pointers["caption"] = f"/{index}/label_values/{caption_index}"
+        if title_index is not None:
+            field_pointers["title"] = f"/{index}/label_values/{title_index}"
+
+        buckets.setdefault(permalink, []).append({
             "index": index,
-            "title": entry.get("title"),
-            "collection": collection,
             "timestamp": timestamp,
+            "fbid": entry.get("fbid") if isinstance(entry.get("fbid"), str) else None,
+            "caption": caption,
+            "title": title,
+            "hashtags": hashtags,
+            "owner": owner,
+            "missing_optional_fields": missing_optional,
+            "field_pointers": field_pointers,
         })
 
     aggregated: dict[str, dict[str, Any]] = {}
-    for href, occurrences in buckets.items():
-        earliest = min(occurrences, key=lambda o: o["timestamp"])
-        collections = sorted({o["collection"] for o in occurrences if o["collection"]})
-        aggregated[href] = {
-            "title": earliest["title"],
-            "saved_on_timestamp": earliest["timestamp"],
-            "collections": collections,
-            "item_indices": sorted(o["index"] for o in occurrences),
+    for permalink, occurrences in buckets.items():
+        canonical = min(occurrences, key=lambda item: (item["timestamp"], item["index"]))
+        aggregated[permalink] = {
+            **canonical,
+            "item_indices": sorted(item["index"] for item in occurrences),
         }
-
     return aggregated, failed
 
 
-def import_instagram_saved_export(export_path: str) -> dict:
-    """Import one Instagram DYI saved-posts export file.
+def _parse_collections(
+    items: list[Any], source_file: str
+) -> tuple[dict[str, list[dict[str, Any]]], list[dict[str, Any]]]:
+    memberships: dict[str, list[dict[str, Any]]] = {}
+    failed: list[dict[str, Any]] = []
 
-    Reads the JSON file at `export_path`, pre-aggregates its valid entries
-    by stable permalink (see `_aggregate_by_permalink`), and for each
-    distinct permalink calls `record_source_event(source="instagram",
-    external_id=<href>, content=..., metadata=...)` exactly once. See the
-    module docstring for the schema-drift handling design (partial-import-
-    with-report), the stable-external-id/single-call-per-permalink
-    rationale, and the truthful-accounting design.
+    for index, entry in enumerate(items):
+        if not isinstance(entry, dict):
+            failed.append(_failure(source_file, index, "collection item is not a JSON object"))
+            continue
+        values = _label_values(entry)
+        if values is None:
+            failed.append(_failure(source_file, index, "collection item has no label_values list"))
+            continue
 
-    Returns a dict:
+        name, name_index = _direct_label(values, "Name")
+        collection_type, _ = _direct_label(values, "Type")
+        privacy, _ = _direct_label(values, "Privacy")
+        update_time, update_index = _direct_label(values, "Update time", key="timestamp_value")
+        media_group, media_index = _group(values, "Media")
+        if not isinstance(name, str) or not name:
+            failed.append(_failure(source_file, index, "collection item is missing a valid Name label"))
+            continue
+        if update_index is not None and not _is_int(update_time):
+            failed.append(_failure(source_file, index, "collection Update time is not an integer timestamp_value"))
+            continue
+        if media_group is None or not isinstance(media_group.get("dict"), list):
+            failed.append(_failure(source_file, index, "collection item is missing a valid Media group"))
+            continue
+
+        by_permalink: dict[str, list[int]] = {}
+        for member_index, member in enumerate(media_group["dict"]):
+            if not isinstance(member, dict) or not isinstance(member.get("dict"), list):
+                failed.append(_failure(
+                    source_file, index, "collection Media member is not a nested dict list",
+                    member_index=member_index,
+                ))
+                continue
+            # Meta emits empty wrappers in otherwise valid Media lists.
+            if not member["dict"]:
+                continue
+            raw_url, _ = _direct_label(member["dict"], "URL")
+            permalink = _normalize_permalink(raw_url)
+            if permalink is None:
+                failed.append(_failure(
+                    source_file, index, "collection Media member is missing a valid URL label",
+                    member_index=member_index,
+                ))
+                continue
+            by_permalink.setdefault(permalink, []).append(member_index)
+
+        for permalink, member_indices in by_permalink.items():
+            memberships.setdefault(permalink, []).append({
+                "name": name,
+                "type": collection_type if isinstance(collection_type, str) else None,
+                "privacy": privacy if isinstance(privacy, str) else None,
+                "updated_at": update_time if _is_int(update_time) else None,
+                "fbid": entry.get("fbid") if isinstance(entry.get("fbid"), str) else None,
+                "collection_index": index,
+                "member_indices": sorted(member_indices),
+                "name_pointer": f"/{index}/label_values/{name_index}",
+                "update_time_pointer": (
+                    f"/{index}/label_values/{update_index}"
+                    if update_index is not None else None
+                ),
+                "media_pointer": f"/{index}/label_values/{media_index}",
+            })
+
+    for records in memberships.values():
+        records.sort(key=lambda record: (
+            record["name"].casefold(), record["name"], record["collection_index"]
+        ))
+    return memberships, failed
+
+
+def _collection_names(records: list[dict[str, Any]]) -> list[str]:
+    return sorted({record["name"] for record in records}, key=lambda value: (value.casefold(), value))
+
+
+def _collection_content(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Private collection values used only as hash input, never payload_ref."""
+    unique = {
+        (
+            record["name"], record["type"], record["privacy"],
+            record["updated_at"], record["fbid"],
+        )
+        for record in records
+    }
+    return [
         {
-          "imported": [
-            {"external_id":..., "id":..., "collections": [...],
-             "saved_at":..., "outcome": "created"|"revised"|"unchanged"},
-            ...
-          ],
-          "failed": [ {"index":..., "title":..., "reason":...}, ... ],
-          "counts": {
-            "created": <int>, "revised": <int>, "unchanged": <int>,
-            "processed": <int>, "failed": <int>,
-          },
+            "name": name,
+            "type": collection_type,
+            "privacy": privacy,
+            "updated_at": updated_at,
+            "fbid": fbid,
         }
-
-    `counts["processed"]` is the number of distinct permalinks successfully
-    handled (created + revised + unchanged) - never conflated with
-    `counts["created"]`, which counts only genuinely new SourceEvent rows.
-
-    Raises `InstagramImportSchemaError` if the file's top-level shape doesn't
-    match a recognizable DYI export (missing/non-list saved-media key) - see
-    module docstring.
-    """
-    with open(export_path, "r", encoding="utf-8") as fh:
-        export = json.load(fh)
-
-    if not isinstance(export, dict) or SAVED_MEDIA_KEY not in export:
-        raise InstagramImportSchemaError(
-            f"Instagram export at {export_path!r} is missing the expected "
-            f"top-level {SAVED_MEDIA_KEY!r} key - not a recognizable DYI "
-            f"saved-posts export."
+        for name, collection_type, privacy, updated_at, fbid in sorted(
+            unique,
+            key=lambda item: (
+                item[0].casefold(), item[0], item[3] if item[3] is not None else -1,
+                item[4] or "",
+            ),
         )
+    ]
 
-    items = export[SAVED_MEDIA_KEY]
-    if not isinstance(items, list):
-        raise InstagramImportSchemaError(
-            f"Instagram export at {export_path!r} has a non-list "
-            f"{SAVED_MEDIA_KEY!r} value - not a recognizable DYI saved-posts "
-            f"export."
-        )
 
-    source_file = os.path.basename(export_path)
-    aggregated, failed = _aggregate_by_permalink(items, source_file)
+def _payload_ref(
+    post: dict[str, Any],
+    collection_records: list[dict[str, Any]],
+    posts_file: str,
+    collections_file: str,
+) -> dict[str, Any]:
+    collection_refs = [
+        {
+            "collection_index": record["collection_index"],
+            "member_indices": record["member_indices"],
+            "name_pointer": record["name_pointer"],
+            "update_time_pointer": record["update_time_pointer"],
+            "media_pointer": record["media_pointer"],
+        }
+        for record in collection_records
+    ]
+    return {
+        "kind": "instagram_saved_post",
+        "saved_posts_file": posts_file,
+        "saved_collections_file": collections_file,
+        "item_indices": post["item_indices"],
+        "field_pointers": post["field_pointers"],
+        "collection_refs": collection_refs,
+        "saved_at": post["timestamp"],
+        "evidence_ceiling": EVIDENCE_CEILING,
+        "missing_optional_fields": post["missing_optional_fields"],
+    }
+
+
+def import_instagram_saved_export(
+    saved_posts_path: str,
+    saved_collections_path: Optional[str] = None,
+) -> dict[str, Any]:
+    """Import real-shape ``saved_posts`` and ``saved_collections`` exports."""
+    if saved_collections_path is None:
+        saved_collections_path = str(Path(saved_posts_path).with_name("saved_collections.json"))
+
+    saved_posts = _load_list(saved_posts_path, "saved-posts")
+    saved_collections = _load_list(saved_collections_path, "saved-collections")
+    posts_file = os.path.basename(saved_posts_path)
+    collections_file = os.path.basename(saved_collections_path)
+
+    posts, post_failures = _parse_saved_posts(saved_posts, posts_file)
+    memberships, collection_failures = _parse_collections(saved_collections, collections_file)
+    failed = post_failures + collection_failures
+
+    from core.database import SessionLocal, SourceEvent
 
     imported: list[dict[str, Any]] = []
     counts = {"created": 0, "revised": 0, "unchanged": 0}
-
-    # Imported lazily, matching src/source_events.py's own lazy-import
-    # convention, so importing this module doesn't force core.database's
-    # import at module load time for callers that only need the exception
-    # type.
-    from core.database import SessionLocal, SourceEvent
-
-    for href, agg in aggregated.items():
+    for permalink in sorted(posts):
+        post = posts[permalink]
+        collection_records = memberships.get(permalink, [])
+        collections = _collection_names(collection_records)
         content = {
-            "title": agg["title"],
-            "href": href,
-            "saved_on_timestamp": agg["saved_on_timestamp"],
+            "permalink": permalink,
+            "saved_at": post["timestamp"],
+            "fbid": post["fbid"],
+            "caption": post["caption"],
+            "title": post["title"],
+            "hashtags": post["hashtags"],
+            "owner": post["owner"],
+            "collections": _collection_content(collection_records),
+            "evidence_ceiling": EVIDENCE_CEILING,
         }
-        metadata = {
-            "collections": agg["collections"],
-            "saved_at": agg["saved_on_timestamp"],
-            "source_file": source_file,
-            "item_indices": agg["item_indices"],
-        }
+        metadata = _payload_ref(post, collection_records, posts_file, collections_file)
 
         db = SessionLocal()
         try:
             existing = (
                 db.query(SourceEvent)
-                .filter(SourceEvent.source == "instagram", SourceEvent.external_id == href)
+                .filter(
+                    SourceEvent.source == "instagram",
+                    SourceEvent.external_id == permalink,
+                )
                 .first()
             )
             existed_before = existing is not None
@@ -310,17 +398,18 @@ def import_instagram_saved_export(export_path: str) -> dict:
         try:
             row = record_source_event(
                 source="instagram",
-                external_id=href,
+                external_id=permalink,
                 content=content,
                 metadata=metadata,
             )
         except SourceEventValidationError as exc:
-            for index in agg["item_indices"]:
-                failed.append({
-                    "index": index,
-                    "title": agg["title"],
-                    "reason": f"record_source_event rejected entry #{index}: {exc}",
-                })
+            # Validation errors contain structural details only; never echo
+            # private export values into a failure report or log.
+            failed.append(_failure(
+                posts_file,
+                post["index"],
+                f"SourceEvent validation rejected saved-post item: {exc}",
+            ))
             continue
 
         if not existed_before:
@@ -330,20 +419,34 @@ def import_instagram_saved_export(export_path: str) -> dict:
         else:
             outcome = "unchanged"
         counts[outcome] += 1
-
         imported.append({
-            "external_id": href,
+            "external_id": permalink,
             "id": row.id,
-            "collections": agg["collections"],
-            "saved_at": agg["saved_on_timestamp"],
+            "collections": collections,
+            "saved_at": post["timestamp"],
+            "imported_at": row.received_at.isoformat() if row.received_at else None,
+            "evidence_ceiling": EVIDENCE_CEILING,
+            "missing_optional_fields": post["missing_optional_fields"],
             "outcome": outcome,
         })
 
     counts["processed"] = counts["created"] + counts["revised"] + counts["unchanged"]
     counts["failed"] = len(failed)
+    return {"imported": imported, "failed": failed, "counts": counts}
 
-    return {
-        "imported": imported,
-        "failed": failed,
-        "counts": counts,
-    }
+
+def _main(argv: Optional[list[str]] = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("saved_posts", help="path to saved_posts.json")
+    parser.add_argument("saved_collections", help="path to saved_collections.json")
+    args = parser.parse_args(argv)
+    try:
+        result = import_instagram_saved_export(args.saved_posts, args.saved_collections)
+    except (OSError, json.JSONDecodeError, InstagramImportSchemaError) as exc:
+        parser.exit(2, f"instagram import failed: {exc}\n")
+    print(json.dumps(result["counts"], sort_keys=True))
+    return 0 if result["counts"]["failed"] == 0 else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(_main())
