@@ -26,15 +26,22 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import tempfile
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Optional
+
+from core.platform_compat import safe_chmod
+from src.constants import DATA_DIR
 
 # Hard cap on the serialized size of caller-supplied `metadata` (stored as
 # `payload_ref`). Enforces this module's own stated invariant that
 # `metadata` is a small pointer, never raw content — without a cap nothing
 # actually stopped a caller from passing megabytes of data through.
 MAX_PAYLOAD_REF_BYTES = 4096
+SOURCE_EVENT_PAYLOAD_DIR = Path(DATA_DIR) / "source_event_payloads"
 
 
 class SourceEventValidationError(ValueError):
@@ -66,6 +73,97 @@ def _normalize_content(content: Any) -> str:
 def _hash_content(content: Any) -> str:
     normalized = _normalize_content(content)
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def store_source_event_payload(
+    source: str,
+    external_id: str,
+    payload: Any,
+    *,
+    root: Optional[Path] = None,
+) -> dict[str, str]:
+    """Persist a raw/private payload outside SQL and return its small pointer.
+
+    Files are content-addressed beneath the governed application data
+    directory.  Neither the source identifier nor the external identifier is
+    used verbatim in a filename.  The returned relative path and checksum are
+    safe to place in ``SourceEvent.payload_ref``; the payload itself is not.
+    """
+    _validate_inputs(source, external_id, payload)
+    normalized = _normalize_content(payload)
+    payload_hash = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+    identity_hash = hashlib.sha256(
+        f"{source.strip()}\0{external_id.strip()}".encode("utf-8")
+    ).hexdigest()
+    payload_root = Path(root) if root is not None else SOURCE_EVENT_PAYLOAD_DIR
+    relative_path = Path(identity_hash[:2]) / identity_hash / f"{payload_hash}.json"
+    path = payload_root / relative_path
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    safe_chmod(payload_root, 0o700)
+    safe_chmod(path.parent.parent, 0o700)
+    safe_chmod(path.parent, 0o700)
+    if not path.exists():
+        fd, temporary = tempfile.mkstemp(
+            prefix=".source-event-payload-",
+            suffix=".tmp",
+            dir=path.parent,
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(normalized)
+                handle.flush()
+                os.fsync(handle.fileno())
+            safe_chmod(temporary, 0o600)
+            os.replace(temporary, path)
+            safe_chmod(path, 0o600)
+        except Exception:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+            raise
+
+    return {
+        "kind": "source_event_payload",
+        "path": relative_path.as_posix(),
+        "sha256": payload_hash,
+    }
+
+
+def read_source_event_payload(
+    payload_ref: dict[str, Any] | str,
+    *,
+    root: Optional[Path] = None,
+) -> Any:
+    """Resolve and checksum-verify a pointer from ``store_source_event_payload``."""
+    if isinstance(payload_ref, str):
+        try:
+            payload_ref = json.loads(payload_ref)
+        except json.JSONDecodeError as exc:
+            raise SourceEventValidationError("payload_ref is not valid JSON") from exc
+    if not isinstance(payload_ref, dict) or payload_ref.get("kind") != "source_event_payload":
+        raise SourceEventValidationError("payload_ref is not a source-event payload pointer")
+    relative_value = payload_ref.get("path")
+    expected_hash = payload_ref.get("sha256")
+    if not isinstance(relative_value, str) or not isinstance(expected_hash, str):
+        raise SourceEventValidationError("payload_ref requires string path and sha256 fields")
+
+    payload_root = (Path(root) if root is not None else SOURCE_EVENT_PAYLOAD_DIR).resolve()
+    relative_path = Path(relative_value)
+    if relative_path.is_absolute() or ".." in relative_path.parts:
+        raise SourceEventValidationError("payload_ref path must stay inside the payload store")
+    path = (payload_root / relative_path).resolve()
+    try:
+        path.relative_to(payload_root)
+    except ValueError as exc:
+        raise SourceEventValidationError("payload_ref path must stay inside the payload store") from exc
+
+    raw = path.read_bytes()
+    actual_hash = hashlib.sha256(raw).hexdigest()
+    if actual_hash != expected_hash:
+        raise SourceEventValidationError("payload_ref checksum does not match stored payload")
+    return json.loads(raw.decode("utf-8"))
 
 
 def _validate_inputs(source: Any, external_id: Any, content: Any) -> None:

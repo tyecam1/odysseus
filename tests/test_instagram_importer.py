@@ -3,6 +3,9 @@
 import copy
 import inspect
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -15,6 +18,7 @@ from src.instagram_importer import (
     _parse_saved_posts,
     import_instagram_saved_export,
 )
+from src.source_events import read_source_event_payload
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -44,7 +48,12 @@ def _cleanup():
 
 
 @pytest.fixture(autouse=True)
-def _clean_rows():
+def _clean_rows(tmp_path, monkeypatch):
+    import src.source_events as source_events
+
+    monkeypatch.setattr(
+        source_events, "SOURCE_EVENT_PAYLOAD_DIR", tmp_path / "source_event_payloads"
+    )
     _cleanup()
     yield
     _cleanup()
@@ -61,9 +70,11 @@ def _rows():
                 "id": row.id,
                 "source": row.source,
                 "domain": row.domain,
+                "payload": row.payload,
                 "payload_ref": row.payload_ref,
                 "content_hash": row.content_hash,
                 "received_at": row.received_at,
+                "status": row.status,
                 "revision_count": row.revision_count,
             }
             for row in rows
@@ -141,11 +152,15 @@ def test_permalink_in_two_collections_has_union_in_deterministic_order(tmp_path)
         if item["external_id"].endswith("REDACTED_PERMALINK0/")
     )
 
-    assert imported["collections"] == ["REDACTED_Alpha", "REDACTED_Zeta"]
-    payload = json.loads(_rows()[imported["external_id"]]["payload_ref"])
-    assert len(payload["collection_refs"]) == 2
-    assert payload["collection_refs"][0]["collection_index"] == 1
-    assert payload["collection_refs"][1]["collection_index"] == 0
+    assert imported["collection_count"] == 2
+    assert "collections" not in imported
+    payload = read_source_event_payload(imported["payload_ref"])
+    assert [item["name"] for item in payload["collections"]] == [
+        "REDACTED_Alpha", "REDACTED_Zeta",
+    ]
+    assert len(payload["collection_memberships"]) == 2
+    assert payload["collection_memberships"][0]["collection_index"] == 1
+    assert payload["collection_memberships"][1]["collection_index"] == 0
 
 
 def test_missing_caption_is_tolerated_and_evidence_ceiling_is_explicit(tmp_path):
@@ -190,10 +205,11 @@ def test_missing_url_is_item_level_permanent_schema_error(tmp_path):
     }]
 
 
-def test_payload_ref_has_pointers_but_no_raw_private_text():
+def test_payload_ref_resolves_to_private_payload_outside_source_event():
     import_instagram_saved_export(str(POSTS_FIXTURE), str(COLLECTIONS_FIXTURE))
     row = _rows()["https://www.instagram.com/p/REDACTED_PERMALINK0/"]
-    payload = json.loads(row["payload_ref"])
+    payload_ref = json.loads(row["payload_ref"])
+    payload = read_source_event_payload(payload_ref)
 
     assert payload["field_pointers"]["hashtags"] == "/0/label_values/3"
     assert payload["field_pointers"]["owner"] == "/0/label_values/4"
@@ -203,6 +219,129 @@ def test_payload_ref_has_pointers_but_no_raw_private_text():
         "REDACTED_Username", "REDACTED_Privacy",
     ):
         assert private_value not in row["payload_ref"]
+        assert private_value in json.dumps(payload)
+
+
+def test_private_values_are_only_in_payload_store_not_envelopes_or_logs(
+    tmp_path, monkeypatch, caplog
+):
+    import src.instagram_importer as importer
+
+    posts = _fixture(POSTS_FIXTURE)
+    collections = _fixture(COLLECTIONS_FIXTURE)
+    posts[0]["label_values"][1]["value"] = "PRIVATE_CAPTION_SENTINEL"
+    posts[0]["label_values"][2]["value"] = "PRIVATE_TITLE_SENTINEL"
+    posts[0]["label_values"][3]["dict"][0]["dict"][0]["value"] = (
+        "PRIVATE_HASHTAG_SENTINEL"
+    )
+    posts[0]["label_values"][4]["dict"][0]["dict"][1]["value"] = (
+        "PRIVATE_OWNER_SENTINEL"
+    )
+    collections[0]["label_values"][0]["value"] = "PRIVATE_COLLECTION_SENTINEL"
+    paths = _write_exports(tmp_path, posts, collections)
+
+    captured = []
+    real_record = importer.record_source_event
+
+    def capture_record(**kwargs):
+        captured.append(copy.deepcopy(kwargs))
+        return real_record(**kwargs)
+
+    monkeypatch.setattr(importer, "record_source_event", capture_record)
+    result = import_instagram_saved_export(*paths)
+    external_id = "https://www.instagram.com/p/REDACTED_PERMALINK0/"
+    call = next(item for item in captured if item["external_id"] == external_id)
+    row = _rows()[external_id]
+    imported = next(item for item in result["imported"] if item["external_id"] == external_id)
+    private_values = (
+        "PRIVATE_CAPTION_SENTINEL",
+        "PRIVATE_TITLE_SENTINEL",
+        "PRIVATE_HASHTAG_SENTINEL",
+        "PRIVATE_OWNER_SENTINEL",
+        "PRIVATE_COLLECTION_SENTINEL",
+    )
+
+    source_event_envelope = json.dumps({
+        "content": call["content"],
+        "metadata": call["metadata"],
+        "payload": row["payload"],
+        "payload_ref": row["payload_ref"],
+    })
+    result_envelope = json.dumps(result)
+    for private_value in private_values:
+        assert private_value not in source_event_envelope
+        assert private_value not in result_envelope
+        assert private_value not in caplog.text
+
+    payload = read_source_event_payload(imported["payload_ref"])
+    payload_text = json.dumps(payload)
+    for private_value in private_values:
+        assert private_value in payload_text
+    assert imported["collection_count"] == 2
+    assert "collections" not in imported
+    assert set(imported["payload_ref"]) == {"kind", "path", "sha256"}
+
+
+def test_collection_aggregation_hash_is_stable_across_fresh_hash_seeds(tmp_path):
+    posts = _fixture(POSTS_FIXTURE)[:1]
+    collections = _fixture(COLLECTIONS_FIXTURE)
+    collections[0]["label_values"][0]["value"] = "PRIVATE_COLLECTION"
+    collections[0]["label_values"][1]["value"] = "PRIVATE_TYPE_A"
+    collections[0]["label_values"][2]["value"] = "PRIVATE_PRIVACY_A"
+    collections[1]["label_values"][0]["value"] = "PRIVATE_COLLECTION"
+    collections[1]["label_values"][1]["value"] = "PRIVATE_TYPE_B"
+    collections[1]["label_values"][2]["value"] = "PRIVATE_PRIVACY_B"
+    posts_path, collections_path = _write_exports(tmp_path, posts, collections)
+    database_path = tmp_path / "subprocess.db"
+    data_path = tmp_path / "subprocess-data"
+    script = """
+import json
+from core.database import SourceEvent, get_db_session
+from src.instagram_importer import import_instagram_saved_export
+
+result = import_instagram_saved_export({posts!r}, {collections!r})
+with get_db_session() as db:
+    row = db.query(SourceEvent).filter(
+        SourceEvent.source == "instagram",
+        SourceEvent.external_id == "https://www.instagram.com/p/REDACTED_PERMALINK0/",
+    ).one()
+    snapshot = {{
+        "content_hash": row.content_hash,
+        "row_status": row.status,
+        "revision_count": row.revision_count,
+        "counts": result["counts"],
+    }}
+print(json.dumps(snapshot, sort_keys=True))
+""".format(posts=posts_path, collections=collections_path)
+
+    snapshots = []
+    for hash_seed in ("1", "2"):
+        environment = os.environ.copy()
+        environment.update({
+            "DATABASE_URL": f"sqlite:///{database_path}",
+            "ODYSSEUS_DATA_DIR": str(data_path),
+            "PYTHONHASHSEED": hash_seed,
+        })
+        completed = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=Path(__file__).parents[1],
+            env=environment,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        snapshots.append(json.loads(completed.stdout.strip().splitlines()[-1]))
+
+    assert snapshots[0]["content_hash"] == snapshots[1]["content_hash"]
+    assert snapshots[0]["row_status"] == snapshots[1]["row_status"] == "received"
+    assert snapshots[1]["revision_count"] == 0
+    assert snapshots[1]["counts"] == {
+        "created": 0,
+        "revised": 0,
+        "unchanged": 1,
+        "processed": 1,
+        "failed": 0,
+    }
 
 
 def test_saved_at_is_source_timestamp_and_imported_at_is_separate():

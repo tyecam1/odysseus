@@ -12,11 +12,10 @@ unknown; they are never interpreted as evidence that the source text was
 empty. Missing required URL labels are reported per item as
 ``permanent_schema_error``. A non-list top level is a file-level schema error.
 
-Privacy/provenance discipline: private text is used in memory to compute the
-content hash but is never put in SQL metadata or logs. ``payload_ref`` holds
-only file names, item/member indexes, and JSON pointers back into the user's
-export. This preserves Hashtags, Owner, collection membership, and optional
-text as recoverable provenance without copying their raw values into SQLite.
+Privacy/provenance discipline: raw captions, titles, owners, hashtags, and
+collection details are copied only to the governed local SourceEvent payload
+store.  The SourceEvent content/metadata envelopes and importer result contain
+only neutral counts, timestamps, checksums, and a ``payload_ref`` pointer.
 """
 
 from __future__ import annotations
@@ -28,7 +27,11 @@ from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlsplit, urlunsplit
 
-from src.source_events import SourceEventValidationError, record_source_event
+from src.source_events import (
+    SourceEventValidationError,
+    record_source_event,
+    store_source_event_payload,
+)
 
 
 EVIDENCE_CEILING = "metadata_only"
@@ -282,12 +285,8 @@ def _parse_collections(
     return memberships, failed
 
 
-def _collection_names(records: list[dict[str, Any]]) -> list[str]:
-    return sorted({record["name"] for record in records}, key=lambda value: (value.casefold(), value))
-
-
 def _collection_content(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Private collection values used only as hash input, never payload_ref."""
+    """Return unique private collection values in a deterministic total order."""
     unique = {
         (
             record["name"], record["type"], record["privacy"],
@@ -306,21 +305,35 @@ def _collection_content(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
         for name, collection_type, privacy, updated_at, fbid in sorted(
             unique,
             key=lambda item: (
-                item[0].casefold(), item[0], item[3] if item[3] is not None else -1,
+                item[0].casefold(),
+                item[0],
+                item[1] is None,
+                item[1] or "",
+                item[2] is None,
+                item[2] or "",
+                item[3] is None,
+                item[3] if item[3] is not None else 0,
+                item[4] is None,
                 item[4] or "",
             ),
         )
     ]
 
 
-def _payload_ref(
+def _private_payload(
     post: dict[str, Any],
     collection_records: list[dict[str, Any]],
     posts_file: str,
     collections_file: str,
+    permalink: str,
 ) -> dict[str, Any]:
-    collection_refs = [
+    collection_memberships = [
         {
+            "name": record["name"],
+            "type": record["type"],
+            "privacy": record["privacy"],
+            "updated_at": record["updated_at"],
+            "fbid": record["fbid"],
             "collection_index": record["collection_index"],
             "member_indices": record["member_indices"],
             "name_pointer": record["name_pointer"],
@@ -331,12 +344,19 @@ def _payload_ref(
     ]
     return {
         "kind": "instagram_saved_post",
+        "permalink": permalink,
+        "saved_at": post["timestamp"],
+        "fbid": post["fbid"],
+        "caption": post["caption"],
+        "title": post["title"],
+        "hashtags": post["hashtags"],
+        "owner": post["owner"],
+        "collections": _collection_content(collection_records),
+        "collection_memberships": collection_memberships,
         "saved_posts_file": posts_file,
         "saved_collections_file": collections_file,
         "item_indices": post["item_indices"],
         "field_pointers": post["field_pointers"],
-        "collection_refs": collection_refs,
-        "saved_at": post["timestamp"],
         "evidence_ceiling": EVIDENCE_CEILING,
         "missing_optional_fields": post["missing_optional_fields"],
     }
@@ -366,19 +386,35 @@ def import_instagram_saved_export(
     for permalink in sorted(posts):
         post = posts[permalink]
         collection_records = memberships.get(permalink, [])
-        collections = _collection_names(collection_records)
+        private_payload = _private_payload(
+            post,
+            collection_records,
+            posts_file,
+            collections_file,
+            permalink,
+        )
+        payload_pointer = store_source_event_payload(
+            "instagram", permalink, private_payload
+        )
         content = {
             "permalink": permalink,
             "saved_at": post["timestamp"],
-            "fbid": post["fbid"],
-            "caption": post["caption"],
-            "title": post["title"],
-            "hashtags": post["hashtags"],
-            "owner": post["owner"],
-            "collections": _collection_content(collection_records),
-            "evidence_ceiling": EVIDENCE_CEILING,
+            "item_count": len(post["item_indices"]),
+            "collection_count": len(private_payload["collections"]),
+            "collection_membership_count": len(collection_records),
+            "payload_sha256": payload_pointer["sha256"],
+            "payload_ref": payload_pointer["path"],
         }
-        metadata = _payload_ref(post, collection_records, posts_file, collections_file)
+        metadata = {
+            **payload_pointer,
+            "source_kind": "instagram_saved_post",
+            "saved_at": post["timestamp"],
+            "item_count": len(post["item_indices"]),
+            "collection_count": len(private_payload["collections"]),
+            "collection_membership_count": len(collection_records),
+            "evidence_ceiling": EVIDENCE_CEILING,
+            "missing_optional_fields": post["missing_optional_fields"],
+        }
 
         db = SessionLocal()
         try:
@@ -422,7 +458,8 @@ def import_instagram_saved_export(
         imported.append({
             "external_id": permalink,
             "id": row.id,
-            "collections": collections,
+            "collection_count": len(private_payload["collections"]),
+            "payload_ref": payload_pointer,
             "saved_at": post["timestamp"],
             "imported_at": row.received_at.isoformat() if row.received_at else None,
             "evidence_ceiling": EVIDENCE_CEILING,
