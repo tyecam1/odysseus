@@ -1,0 +1,72 @@
+schema_version: 1
+application_id: 2026-09-29-j1-long-horizon-method-loop-03
+prompt_id: j1-long-horizon-method-loop
+prompt_version: 4
+repository: tyecam1/obsidian-PhD
+branch: sonnet/j1-long-horizon-20260929
+# Start time is the first clock artefact of the session; approximate.
+session_started_at: "2026-09-29T23:12:00+01:00"
+session_ended_at: "2026-09-29T23:55:00+01:00"
+start_commit: f05c4436720f260a945801a83dc63be9b88d8448
+end_commit: 67081f0c486ec725af592ded9e012aa5ef5f15dd
+outcome_status: partial
+stop_reason: >-
+  Reached the authorial boundary of the targeted source-repair mandate. Both
+  sources the author unblocked were obtained and read in full; consequential
+  changes were checked by one fresh pointer-first Sol packet; the revised R1-R6
+  packet v3 with a defensible stop proof was produced and posted to issue #479.
+  No gate was passed, no architecture selected, no novelty declared, no amendment
+  applied, no canonical file edited, no manuscript prose written, no evidence
+  frozen. Twelve remaining dependency groups are access-limited or
+  author-controlled.
+commits:
+  - 71cb0d388
+  - 3091b1e9f
+  - 67081f0c4
+models_routes:
+  - "Sonnet coordinator/execution (Claude Code, claude-sonnet-5-5 as stated by the session); no subagents"
+  - "Sol adjudication: requested gpt-6-sol via codex exec read-only high reasoning (live policy field reconciled); one pointer-first packet (25); server identity not independently verified"
+  - "native Opus: not used (E6 contract section 9 convergence condition not met; Sol OPUS-TRIGGER=NOT-MET)"
+  - "no GLM lane used"
+verification:
+  - "deterministic: verbatim-quote substring checks for #104 and Sgarbossa passages; arithmetic recomputed by script (payback 1.74 vs 1.83, working-day and 61.2 percent checks, RPN and PRS percentages); PDF identity by DOI/journal string and sha256 prefix; absence of audit vocabulary counted in the Sgarbossa text"
+  - "Sol pkt 25: #104 facts 4/5 confirmed (one amended only as to Sol's excerpt), classification BOUNDARY, wider-claim row DOCUMENTED, E6-6 wording amended, Opus not triggered, Sgarbossa comparison AGREE with replacement Prior-collision wording, QB1/QC3 one-campaign reading AGREE, authority NO"
+  - "sources obtained from the two author-supplied URLs; the Poliba verification page cleared after a passive wait without interaction; no challenge was solved and no credentials were used"
+failure_tags:
+  - sol_pointer_range_omitted_load_bearing_line
+  - withheld_section_not_physically_separable
+  - shell_heredoc_quoting_failure
+  - external_access_ceiling_unresolved
+rating:
+  scale: 1-5
+  goal_progress: 4
+  correctness_verification: 4
+  authority_scope_discipline: 4
+  routing_resource_efficiency: 4
+  continuity_handoff_quality: 4
+  agent_overall: 4.0
+  operator_overall: null
+  operator_note: null
+prompt_revision_recommended: true
+revision_reason: >-
+  Two evidence-backed defects in reviewer-packet construction. (1) The Sol packet's
+  line-range list omitted a line that carried a figure the packet asked the reviewer
+  to verify (a 32 m distance), so the reviewer could only partly confirm the fact.
+  (2) A section the reviewer was told not to read until it had answered was in the
+  same file and was displayed by the file read, so the independence instruction
+  could not be honoured mechanically (the reviewer disclosed this). Packets should
+  put withheld material in a separate file and check deterministically that every
+  asserted figure appears in a listed range. A third observation: when the author
+  supplies a URL that met a bot-verification page, a single passive load in the
+  automation browser is lawful and sufficient; the page cleared on its own, whereas
+  script requests kept returning 403; challenges are never solved. v4's re-read,
+  claim-provenance, method-terms and repository-first rules performed well (the
+  re-read rule found and fixed no new sample error this session but the ledger and
+  Sol caught the same class earlier) and are preserved.
+evidence:
+  - "obsidian-PhD continuation 35: automation/review/J1/2026-09-29-j1-continuation-35.md (branch sonnet/j1-long-horizon-20260929)"
+  - "revised packet v3: automation/review/J1/2026-09-29-gate45-authorial-packet-v3/gate45-authorial-packet-v3.md"
+  - "source checks: automation/review/J1/2026-09-29-continuation-35/{martin104-source-check,sgarbossa-closest-prior}.md"
+  - "Sol pkt 25 final: automation/review/J1/2026-09-29-sol-packet-25/sol-packet-25-final.txt"
+  - "issue #479 comment: https://github.com/tyecam1/obsidian-PhD/issues/479#issuecomment-5900248819"
+  - "end commit: 67081f0c486ec725af592ded9e012aa5ef5f15dd"

@@ -393,7 +393,7 @@ being withheld pending these; see each workstream's `next_action` for what
   last_verified_commit: a68493e
 
 - id: E-memory-broker
-  outcome: source-linked memory broker ready for future home-primary promotion
+  outcome: source-linked memory broker ready for future home-primary promotion  # superseded 2026-10-02: the Ratified Phase 4 ADR adopts no broker, no lab replica and no failover
   status: complete-current-estate
   priority: medium
   depends_on: []

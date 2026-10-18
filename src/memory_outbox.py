@@ -19,6 +19,11 @@ Idempotency key: `MisumiMemory.capture()` already stamps every record
 with a UUID-based `id` (`_new_id`), and every store folds latest-by-id.
 Replay therefore only needs to skip any id the target already has —
 no separate hash/dedup table required.
+
+Status (2026-10-02): the Ratified Phase 4 architecture (tyecam1/misumi docs/memory-architecture.md) adopts no lab
+memory replica, memory broker or automatic failover, and the lab is a compute worker that holds no household memory (its
+local store holds only verification test data). This is therefore a one-shot, idempotent *merge* utility, for example
+consolidating a stray local store into the household runtime's, and not a replication or failover mechanism.
 """
 from __future__ import annotations
 

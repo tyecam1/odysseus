@@ -1,22 +1,25 @@
 # Aoteru estate — host/service registry (P1, plan section 4).
 #
 # Hosts are added here only once genuinely inventoried or explicitly named
-# by the operator — never speculatively. `verified: false` / `tailscale:
-# false` / `os: unknown` mean exactly that: named, not yet confirmed.
+# by the operator — never speculatively. Identity confirmation and worker
+# qualification are deliberately separate: `identity_verified` records a
+# confirmed machine identity but grants no execution eligibility by itself;
+# `worker.enabled` and `worker.qualified_executors` are the governed routing
+# gates. `tailscale: false` / `os: unknown` still mean exactly that: named,
+# not yet confirmed.
 #
 # P12.7 re-entry (2026-08-29, first laptop-run session — see
 # docs/aoteru-p12-active-estate-convergence-evidence.md and its P13
 # addendum): home (`desktop-in7o23d`) and the interface PC
 # (`desktop-rifpr07`, formerly `interface-pc` with unknown identity) are
 # both now live-confirmed reachable over LAN SSH and Tailscale, with
-# pinned/matching SSH host-key fingerprints. `verified: true` on
-# `interface-pc` is safe (the `interface` role is never
-# execution_worker-eligible regardless, config/routing.yaml). `home`
-# deliberately stays `verified: false` — identity is confirmed but
-# execution-worker eligibility additionally needs P12.7's benchmark
-# evidence (item 4), which `eligible_hosts()` has no separate gate for
-# today; see that host's notes and the evidence doc's residual risks.
-# registered != reachable != verified != execution-worker-eligible.
+# pinned/matching SSH host-key fingerprints. Both machines therefore have
+# `identity_verified: true`. `interface-pc` has no worker block because the
+# `interface` role is never execution-worker-eligible. `home` carries an explicit
+# worker block so its confirmed identity cannot accidentally promote it into routing: as of 2026-10-02 the governed state
+# is `enabled: true` with `qualified_executors: [deterministic, local]` (Stage 8, then the live `local-fast` canary on a
+# free GPU); `codex` and `codex-write` are NOT qualified. The worker block below is authoritative, not this prose.
+# registered != identity-verified != worker-enabled != reachable/healthy.
 #
 # Services are logical names (plan section 5.6). None are provisioned yet —
 # that's P2 (private connectivity). `endpoint: null` means "not live";
@@ -84,6 +87,14 @@ hosts:
     hostname: dmem-HP-Z2-Tower-G9-Workstation-Desktop-PC
     role: lab
     os: linux
+    identity_verified: true
+    worker:
+      enabled: true
+      transport: local
+      qualified_executors: [deterministic, local, codex, codex-write]
+      qualification_evidence:
+        - docs/aoteru-lm4-production-canary-evidence.md
+        - docs/aoteru-p12-active-estate-convergence-evidence.md
     tailscale: true  # cap/is-admin, cap/is-owner, cap/ssh on this node's identity
     inventoried_at: "2026-08-19"
     notes: >-
@@ -123,7 +134,7 @@ hosts:
     os: windows  # Windows 10 Pro, build 19045
     tailscale: true
     tailscale_dns: desktop-rifpr07.tail171792.ts.net
-    verified: true  # identity live-confirmed 2026-08-29 (see notes) — safe to set: `interface` role is never execution_worker-eligible (config/routing.yaml) regardless of this flag, so this does not grant any routing eligibility.
+    identity_verified: true  # identity live-confirmed 2026-08-29 (see notes); `interface` role is never execution_worker-eligible and no worker is configured.
     inventoried_at: "2026-08-29"
     notes: >-
       P12.7 interface re-entry executed 2026-08-29, first laptop-run
@@ -154,7 +165,31 @@ hosts:
     os: windows  # Windows 11 Pro, build 26200
     tailscale: true
     tailscale_dns: desktop-in7o23d.tail171792.ts.net
-    verified: false  # identity IS now live-confirmed (see notes) — deliberately still false: this is the sole gate `eligible_hosts()`/`host_reachable()` has today, and flipping it grants execution_worker eligibility immediately with zero benchmark evidence. P12.7 item 4 (benchmark before promotion) is a documented process step, not yet a separate code gate — see residual risk in the evidence doc. Flip only once benchmark evidence justifies worker eligibility, not merely because identity is confirmed.
+    identity_verified: true
+    identity_evidence: docs/aoteru-p13-laptop-reentry-evidence.md
+    worker:
+      enabled: true
+      transport: ssh
+      ssh:
+        target: User@desktop-in7o23d.tail171792.ts.net
+        # SSH host public key of home; its fingerprint is the already-pinned
+        # SHA256:rmuPA4DUnFnR8UPXBHrksljQbT86l2aZZAztNZ1TIeU (verified 2026-10-02 against
+        # C:\ProgramData\ssh\ssh_host_ed25519_key.pub). SshTransport never accepts
+        # StrictHostKeyChecking=no.
+        host_public_key: ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICweUmDBINBvdWL8vQdTs5SD9bfBGhGfWpH6G0krfoOs
+        # Documentation only (the forced command on home is authoritative): installed
+        # 2026-10-02 into C:\ProgramData\ssh\administrators_authorized_keys for the dedicated
+        # aoteru-worker-lab key (SHA256:uJEKTOnr4qkeT8C+TVMI5+3bk+F8MmGAfpD1ppAHv/0).
+        command: 'cd /d E:\aoteru\odysseus-aoteru && venv\Scripts\python.exe -m src.estate_worker --root E:\aoteru\odysseus-aoteru'
+      machine_fingerprint: 63bcf7a63d612973
+      # Household GPU admission (src/gpu_admission.py). Home is a shared gaming desktop: sustained GPU
+      # utilisation with no estate work in flight withholds local inference up front instead of letting it
+      # time out after 120 s. This block qualifies nothing and is withdrawn by deleting it or `enabled: false`.
+      gpu_admission:
+        busy_util_pct: 60
+      qualified_executors: [deterministic, local]
+      qualification_evidence:
+        - docs/aoteru-multihost-execution-evidence.md
     inventoried_at: "2026-08-29"
     notes: >-
       P12.7 home re-entry executed 2026-08-29, first laptop-run session.
@@ -183,8 +218,14 @@ hosts:
       authority. KEEP as-is, untouched; no migration needed. Tailscale
       installed + authorized 2026-08-29 (silent MSI install over SSH,
       operator completed the interactive login); no Funnel/serve config.
-      P12.7 remaining: hardware/benchmark qualification (item 4) before any
-      worker route is added — not done this pass.
+      Identity evidence is recorded separately above. The estate worker was
+      kept disabled until hardware/benchmark and transport qualification evidence
+      supported a governed promotion. Superseded 2026-10-02: it is now enabled
+      with `qualified_executors: [deterministic, local]` (see the worker block and
+      docs/aoteru-multihost-execution-evidence.md); `codex` and `codex-write` stay
+      unqualified. The 2026-08-29 reconciliation above describes the household
+      deployment as it then was (`e68288238b3c`); it has since been cut over to
+      current `dev` releases with the transcript runtime.
 
   - id: glovebox
     hostname: glovebox
@@ -237,9 +278,10 @@ services:
       small idle python.exe processes, no listening service found) — stays
       null/deferred until actually built, not merely because the box was
       unreachable.
-  - id: svc:memory
-    description: memory broker API (home primary, lab read-cache fallback)
-    endpoint: null
+  # There is deliberately no `svc:memory`. The Ratified Phase 4 architecture (tyecam1/misumi
+  # docs/memory-architecture.md) adopts no memory broker, no lab memory replica and no automatic failover: runtime
+  # memory is the household Odysseus deployment on the home host (single writer), and recoverability is a verified
+  # encrypted backup plus a drilled restore. The lab is a compute worker.
   - id: svc:models-lab
     description: model serving on the lab host
     endpoint: null

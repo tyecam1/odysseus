@@ -1,11 +1,12 @@
 import os
 import logging
 import sqlite3
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 from urllib.parse import unquote, urlparse
-from sqlalchemy import event, create_engine, Column, String, Text, Boolean, DateTime, Integer, ForeignKey, JSON, Index, func, text
+from sqlalchemy import event, create_engine, Column, String, Text, Boolean, DateTime, Integer, ForeignKey, JSON, Index, UniqueConstraint, func, text
 from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.types import TypeDecorator
 from sqlalchemy.ext.declarative import declarative_base, declared_attr
@@ -743,6 +744,10 @@ class TaskRun(Base):
     )
 
 
+PARK_LEASE_SLOT_PREDICATE = "status IN ('active', 'preparing')"
+ESTATE_EXECUTION_UNRESOLVED_PREDICATE = "worktree_resolution = 'unresolved'"
+
+
 class ParkLease(TimestampMixin, Base):
     """Parking lease for estate repo access (canonical plan §8 / P3).
 
@@ -769,14 +774,24 @@ class ParkLease(TimestampMixin, Base):
     branch              = Column(String, nullable=True)
     session_id          = Column(String, nullable=True)
     allowed_write_scope = Column(String, nullable=True, default="repo")
-    status              = Column(String, nullable=False, default="active")  # active|released
+    # active | preparing | released. `preparing` (multihost Stage 6, S6.7)
+    # is a reservation taken before any worktree mutation: it blocks
+    # competing parks/routing but is never write authority, and while it
+    # is `preparing`, `worktree_path` is the documented "not yet bound"
+    # empty string.
+    status              = Column(String, nullable=False, default="active")
     heartbeat_at        = Column(DateTime, nullable=False, default=utcnow_naive)
     released_at         = Column(DateTime, nullable=True)
 
     __table_args__ = (
         Index('ix_park_leases_repo_host_status', 'repo_id', 'host_id', 'status'),
+        # S6.5/S6.7: a `preparing` reservation occupies the same single
+        # slot as an active lease. Both dialect predicates are declared --
+        # with only `sqlite_where`, PostgreSQL silently builds a *full*
+        # unique index (plan §6.0 live evidence).
         Index('ix_park_leases_active_repo_unique', 'repo_id', unique=True,
-              sqlite_where=text("status = 'active'")),
+              sqlite_where=text(PARK_LEASE_SLOT_PREDICATE),
+              postgresql_where=text(PARK_LEASE_SLOT_PREDICATE)),
     )
 
 
@@ -932,6 +947,7 @@ class RoutingDecision(TimestampMixin, Base):
     nondelegation_reason  = Column(String, nullable=True)
     recommended_route     = Column(String, nullable=True)
     actual_route          = Column(String, nullable=True)
+    executed_host_id      = Column(String, nullable=True, index=True)  # attested host that actually ran the work; null if nothing executed
     status                = Column(String, nullable=False)  # complete | blocked | failed | needs_escalation
 
     __table_args__ = (
@@ -988,7 +1004,15 @@ class EstateExecution(TimestampMixin, Base):
     branch            = Column(String, nullable=True)
     worker_pid        = Column(Integer, nullable=True)
     process_group_id  = Column(Integer, nullable=True)
-    # accepted | running | succeeded | failed | timed_out | interrupted
+    # Process/outcome only: accepted | running | succeeded | failed |
+    # timed_out | interrupted | lost.
+    #   interrupted -- the worker WAS reached and positively reported the
+    #                  runner tree quiescent (dead) while the row was
+    #                  accepted/running: an observed outcome.
+    #   lost        -- the outcome cannot currently be determined (worker
+    #                  unreachable / unobserved past the bounded window).
+    #                  Never a synonym for "the process is dead".
+    # Worktree reuse is decided by `worktree_resolution`, never by this.
     lifecycle_state   = Column(String, nullable=False, default="accepted", index=True)
     submitted_at      = Column(DateTime, nullable=False, default=utcnow_naive)
     started_at        = Column(DateTime, nullable=True)
@@ -997,6 +1021,23 @@ class EstateExecution(TimestampMixin, Base):
     result_json       = Column(Text, nullable=True)
     error             = Column(Text, nullable=True)
     finalization_json = Column(Text, nullable=True)
+    # Multihost Stage 6 (docs/aoteru-multihost-execution-implementation-plan.md
+    # §6.0). `worker_handle_json` is NULL only for true legacy rows: a
+    # Stage-6 row carries a non-null dispatch placeholder from creation,
+    # then the worker's canonical run.json handle once confirmed.
+    worker_handle_json      = Column(Text, nullable=True)
+    worker_attestation_json = Column(Text, nullable=True)
+    last_observed_at        = Column(DateTime, nullable=True)
+    # Set once at creation; the only input to the `lost` bound, so it
+    # survives a control-plane restart.
+    execution_deadline_at   = Column(DateTime, nullable=True)
+    # unresolved | not_started | finalized | recovered | legacy_closed
+    # (S6.1) -- the only field admission/release/reclaim read to decide
+    # whether a lease's worktree is reusable.
+    worktree_resolution     = Column(String, nullable=False, default="unresolved",
+                                     server_default="unresolved", index=True)
+    admission_head_sha      = Column(String, nullable=True)   # S6.10 history bound
+    spool_released_at       = Column(DateTime, nullable=True)  # S6.8 release ack
 
     __table_args__ = (
         Index('ix_estate_executions_host_state', 'host_id', 'lifecycle_state'),
@@ -1009,9 +1050,15 @@ class EstateExecution(TimestampMixin, Base):
         # can satisfy this constraint, so the loser gets a real
         # IntegrityError (_ConcurrentExecutionExists) to handle, not a
         # silently-overwritten admission decision.
+        #
+        # Stage 6 (S6.1): the predicate is worktree resolution, not process
+        # state -- at most one *unresolved* execution per lease, whatever
+        # its lifecycle_state, so a finished-but-unfinalized writer still
+        # holds the slot. Both dialect predicates declared (S6.5).
         Index(
             'ix_estate_executions_active_lease_unique', 'lease_id', unique=True,
-            sqlite_where=text("lifecycle_state IN ('accepted', 'running')"),
+            sqlite_where=text(ESTATE_EXECUTION_UNRESOLVED_PREDICATE),
+            postgresql_where=text(ESTATE_EXECUTION_UNRESOLVED_PREDICATE),
         ),
     )
 
@@ -1079,6 +1126,69 @@ class BenchmarkResult(TimestampMixin, Base):
     __table_args__ = (
         Index('ix_benchmark_results_run_model_task', 'run_id', 'concrete_model', 'task_id'),
     )
+
+
+class TranscriptEvent(TimestampMixin, Base):
+    """Durable, owner-scoped Misumi transcript event (append-oriented).
+
+    NOT a semantic-memory table and NOT household truth: this is operational
+    speech history, kept separate from `src/misumi_memory.py` capsules and from
+    the Misumi Git knowledgebase. `(owner, domain, event_id)` is unique so a
+    client retry after an ambiguous timeout can never create a second row.
+    `owner` is NOT NULL (empty string = the local/no-auth owner) because SQLite
+    treats NULLs as distinct inside a unique constraint. Raw audio is never
+    stored here. See docs/misumi-durable-transcript-runtime.md.
+    """
+    __tablename__ = "misumi_transcript_events"
+
+    seq                 = Column(Integer, primary_key=True, autoincrement=True)
+    owner               = Column(String, nullable=False, default="")
+    domain              = Column(String, nullable=False, default="misumi")
+    event_id            = Column(String, nullable=False)   # client-generated idempotency key
+    text                = Column(Text, nullable=False)     # verbatim STT text
+    text_sha256         = Column(String, nullable=False)   # detects same-id/different-text conflicts
+    capture_mode        = Column(String, nullable=False, default="ambient")  # ambient | ptt
+    source              = Column(String, nullable=False, default="text-event")
+    capture_started_at  = Column(DateTime, nullable=True)  # client capture time, naive UTC
+    capture_ended_at    = Column(DateTime, nullable=True)
+    persisted_at        = Column(DateTime, nullable=False, default=utcnow_naive)
+    stt_provider        = Column(String, nullable=True)
+    stt_model           = Column(String, nullable=True)
+    stt_host            = Column(String, nullable=True)    # physical executor, never a guess
+    stt_latency_ms      = Column(Integer, nullable=True)
+    persona             = Column(String, nullable=True)    # presentation context only
+    wake_result         = Column(Text, nullable=True)      # JSON, attached AFTER persistence
+    wake_recorded_at    = Column(DateTime, nullable=True)
+    session_id          = Column(String, nullable=True)
+    response_request_id = Column(String, nullable=True)
+    state               = Column(String, nullable=False, default="persisted")
+
+    __table_args__ = (
+        UniqueConstraint("owner", "domain", "event_id", name="uq_misumi_transcript_owner_domain_event"),
+        Index("ix_misumi_transcript_owner_domain_seq", "owner", "domain", "seq"),
+        Index("ix_misumi_transcript_owner_persisted", "owner", "persisted_at"),
+    )
+
+
+class MisumiRetentionPolicy(TimestampMixin, Base):
+    """Per-owner retention policy for the dimensions the server itself enforces.
+
+    Transcript archive defaults OFF (nothing is stored until explicitly enabled)
+    and transcript retention defaults to a finite window (1-90 days, default 14).
+    `transcript_retention_mode` makes "never expire" an explicit state, not a huge
+    day count: 'finite' uses `transcript_retention_days`, 'permanent' keeps every
+    accepted transcript row (the stored day count is only what a later switch back
+    to 'finite' would use). Raw-audio retention is fixed at "off" in every mode.
+    Conversation-history, semantic-promotion and artifact retention are enforced
+    per request on /misumi/respond, not here.
+    """
+    __tablename__ = "misumi_retention_policies"
+
+    owner                     = Column(String, primary_key=True)   # "" = local/no-auth owner
+    transcript_archive        = Column(Boolean, nullable=False, default=False)
+    transcript_retention_days = Column(Integer, nullable=False, default=14)
+    transcript_retention_mode = Column(String, nullable=False, default="finite", server_default="finite")
+    raw_audio_retention       = Column(String, nullable=False, default="off")
 
 
 class Memory(Base):
@@ -2298,7 +2408,7 @@ def _migrate_add_routing_delegation_columns():
         columns = [row[1] for row in conn.execute("PRAGMA table_info(routing_decisions)").fetchall()]
         if not columns:
             return
-        for name in ("nondelegation_reason", "recommended_route", "actual_route"):
+        for name in ("nondelegation_reason", "recommended_route", "actual_route", "executed_host_id"):
             if name not in columns:
                 conn.execute(f"ALTER TABLE routing_decisions ADD COLUMN {name} TEXT")
         conn.commit()
@@ -2309,6 +2419,305 @@ def _migrate_add_routing_delegation_columns():
             conn.close()
 
 
+_ESTATE_EXECUTION_WORKER_COLUMNS = (
+    ("worker_handle_json", "TEXT"),
+    ("worker_attestation_json", "TEXT"),
+    ("last_observed_at", "DATETIME"),
+    ("execution_deadline_at", "DATETIME"),
+    ("worktree_resolution", "VARCHAR NOT NULL DEFAULT 'unresolved'"),
+    ("admission_head_sha", "VARCHAR"),
+    ("spool_released_at", "DATETIME"),
+)
+
+
+def _recreate_partial_unique_index(conn, *, table, index, column, predicate, duplicate_sql) -> bool:
+    """Drop and recreate a partial unique index with a new predicate,
+    unless rows already violate it -- then log, keep the old index and
+    return False (the in-Python rule still blocks; the next start retries).
+    Idempotent: an index already carrying `predicate` is left alone."""
+    log = logging.getLogger(__name__)
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?", (index,),
+    ).fetchone()
+    normalized = " ".join(predicate.split())
+    if row and row[0] and normalized in " ".join(row[0].split()):
+        return True
+    duplicates = conn.execute(duplicate_sql).fetchall()
+    if duplicates:
+        log.error(
+            "%s: cannot recreate %s with predicate %r -- duplicates %r; keeping the "
+            "old index, affected leases stay blocked until recovery",
+            table, index, predicate, duplicates,
+        )
+        return False
+    conn.execute(f"DROP INDEX IF EXISTS {index}")
+    conn.execute(f"CREATE UNIQUE INDEX {index} ON {table} ({column}) WHERE {predicate}")
+    return True
+
+
+def _migrate_add_estate_execution_worker_columns():
+    """Multihost Stage 6 migration (S6.1/S6.5/S6.7/S6.8/S6.10): add the
+    worker columns, backfill `worktree_resolution`, and recreate both
+    partial unique indexes with their Stage 6 predicates. SQLite only,
+    like most migrations in this module; the PostgreSQL counterpart is
+    `_migrate_add_estate_execution_worker_columns_postgresql` (`create_all`
+    only creates missing tables, never columns or replacement indexes)."""
+    db_path = _sqlite_db_path(engine.url)
+    if db_path is None or not os.path.exists(db_path):
+        return
+    conn = None
+    try:
+        # Explicit transaction around column addition + backfill + index
+        # recreation: Python's sqlite3 would otherwise auto-commit each
+        # DDL statement, and an interruption after ALTER but before the
+        # backfill would make the retry skip the backfill (Stage 6a/6b
+        # adjudication finding 2). SQLite DDL is transactional.
+        conn = sqlite3.connect(db_path, isolation_level=None)
+        conn.execute("BEGIN IMMEDIATE")
+        columns = [row[1] for row in conn.execute("PRAGMA table_info(estate_executions)").fetchall()]
+        if not columns:
+            conn.execute("ROLLBACK")
+            return
+        adding_resolution = "worktree_resolution" not in columns
+        for name, ddl in _ESTATE_EXECUTION_WORKER_COLUMNS:
+            if name not in columns:
+                conn.execute(f"ALTER TABLE estate_executions ADD COLUMN {name} {ddl}")
+        if adding_resolution:
+            # S6.1 backfill: a row whose lease is not currently active is
+            # legacy_closed; every other row stays unresolved (blocking).
+            conn.execute(
+                "UPDATE estate_executions SET worktree_resolution = 'legacy_closed' "
+                "WHERE lease_id IS NULL OR lease_id NOT IN "
+                "(SELECT id FROM park_leases WHERE status = 'active')"
+            )
+        _recreate_partial_unique_index(
+            conn, table="estate_executions", index="ix_estate_executions_active_lease_unique",
+            column="lease_id", predicate=ESTATE_EXECUTION_UNRESOLVED_PREDICATE,
+            duplicate_sql=(
+                "SELECT lease_id, group_concat(id) FROM estate_executions "
+                "WHERE worktree_resolution = 'unresolved' AND lease_id IS NOT NULL "
+                "GROUP BY lease_id HAVING count(*) > 1"
+            ),
+        )
+        _recreate_partial_unique_index(
+            conn, table="park_leases", index="ix_park_leases_active_repo_unique",
+            column="repo_id", predicate=PARK_LEASE_SLOT_PREDICATE,
+            duplicate_sql=(
+                "SELECT repo_id, group_concat(id) FROM park_leases "
+                "WHERE status IN ('active', 'preparing') GROUP BY repo_id HAVING count(*) > 1"
+            ),
+        )
+        conn.execute("COMMIT")
+    except Exception as e:
+        if conn is not None and conn.in_transaction:
+            conn.execute("ROLLBACK")
+        logging.getLogger(__name__).warning(f"estate_executions worker migration failed: {e}")
+    finally:
+        if conn:
+            conn.close()
+
+
+_ESTATE_EXECUTION_WORKER_COLUMNS_PG = tuple(
+    (name, ddl.replace("DATETIME", "TIMESTAMP")) for name, ddl in _ESTATE_EXECUTION_WORKER_COLUMNS
+)
+# Arbitrary constant: serialises concurrent starts so two processes never run the DDL at once.
+_PG_MIGRATION_LOCK_KEY = 0x0D155E06
+
+
+def _pg_recreate_partial_unique_index(conn, *, table, index, column, predicate, duplicate_sql) -> bool:
+    """PostgreSQL counterpart of `_recreate_partial_unique_index`.
+
+    PostgreSQL stores an index predicate in its own normalised form (casts, parentheses, `= ANY (ARRAY[...])`),
+    so comparing text with the declared predicate is unreliable. Idempotence is recorded instead as a comment
+    on the index carrying the predicate it was built with: an index with that comment is left alone, anything
+    else (a pre-Stage-6 index, or one `create_all` built) is replaced once, unless rows already violate the new
+    predicate -- then log, keep the old index and return False (the in-Python rule still blocks; the next start
+    retries), exactly like the SQLite path."""
+    log = logging.getLogger(__name__)
+    marker = "predicate: " + " ".join(predicate.split())
+    current = conn.execute(text(
+        "SELECT obj_description(c.oid, 'pg_class') FROM pg_class c "
+        "JOIN pg_namespace n ON n.oid = c.relnamespace "
+        "WHERE c.relname = :index AND c.relkind = 'i' AND n.nspname = current_schema()"
+    ), {"index": index}).scalar()
+    if current == marker:
+        return True
+    duplicates = conn.execute(text(duplicate_sql)).fetchall()
+    if duplicates:
+        log.error(
+            "%s: cannot recreate %s with predicate %r -- duplicates %r; keeping the "
+            "old index, affected leases stay blocked until recovery",
+            table, index, predicate, [tuple(row) for row in duplicates],
+        )
+        return False
+    conn.execute(text(f"DROP INDEX IF EXISTS {index}"))
+    conn.execute(text(f"CREATE UNIQUE INDEX {index} ON {table} ({column}) WHERE {predicate}"))
+    conn.execute(text(f"COMMENT ON INDEX {index} IS '{marker.replace(chr(39), chr(39) * 2)}'"))
+    return True
+
+
+def _migrate_add_estate_execution_worker_columns_postgresql():
+    """Multihost Stage 6 migration for PostgreSQL: the same columns, backfill and partial-index predicates as
+    the SQLite migration. `create_all` only creates MISSING TABLES -- on an existing pre-Stage-6 database it never
+    adds columns or replaces an index -- so without this a PostgreSQL deployment would keep the pre-Stage-6
+    schema and the write lane would fail at runtime.
+
+    Additive and re-runnable: `ADD COLUMN IF NOT EXISTS`, the backfill only when `worktree_resolution` is being
+    added, and index replacement guarded by the predicate comment. One transaction (PostgreSQL DDL is
+    transactional) under an advisory lock. A no-op on any other dialect."""
+    if engine.dialect.name != "postgresql":
+        return
+    from sqlalchemy import inspect as sa_inspect
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": _PG_MIGRATION_LOCK_KEY})
+            inspector = sa_inspect(conn)
+            if not inspector.has_table("estate_executions"):
+                return
+            existing = {column["name"] for column in inspector.get_columns("estate_executions")}
+            adding_resolution = "worktree_resolution" not in existing
+            for name, ddl in _ESTATE_EXECUTION_WORKER_COLUMNS_PG:
+                conn.execute(text(f"ALTER TABLE estate_executions ADD COLUMN IF NOT EXISTS {name} {ddl}"))
+            if adding_resolution:
+                # S6.1 backfill: a row whose lease is not currently active is legacy_closed; every other row
+                # stays unresolved (blocking).
+                conn.execute(text(
+                    "UPDATE estate_executions SET worktree_resolution = 'legacy_closed' "
+                    "WHERE lease_id IS NULL OR lease_id NOT IN "
+                    "(SELECT id FROM park_leases WHERE status = 'active')"
+                ))
+            # `index=True` on the model only builds this when the table is created, never on an existing one.
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_estate_executions_worktree_resolution "
+                "ON estate_executions (worktree_resolution)"
+            ))
+            _pg_recreate_partial_unique_index(
+                conn, table="estate_executions", index="ix_estate_executions_active_lease_unique",
+                column="lease_id", predicate=ESTATE_EXECUTION_UNRESOLVED_PREDICATE,
+                duplicate_sql=(
+                    "SELECT lease_id, string_agg(id::text, ',') FROM estate_executions "
+                    "WHERE worktree_resolution = 'unresolved' AND lease_id IS NOT NULL "
+                    "GROUP BY lease_id HAVING count(*) > 1"
+                ),
+            )
+            if inspector.has_table("park_leases"):
+                _pg_recreate_partial_unique_index(
+                    conn, table="park_leases", index="ix_park_leases_active_repo_unique",
+                    column="repo_id", predicate=PARK_LEASE_SLOT_PREDICATE,
+                    duplicate_sql=(
+                        "SELECT repo_id, string_agg(id::text, ',') FROM park_leases "
+                        "WHERE status IN ('active', 'preparing') GROUP BY repo_id HAVING count(*) > 1"
+                    ),
+                )
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"estate_executions worker migration (postgresql) failed: {e}")
+
+
+def _migrate_add_transcript_retention_mode_column():
+    """Additive, re-runnable, dialect-neutral: existing policy rows gain
+    `transcript_retention_mode` = 'finite', i.e. exactly the behaviour they had."""
+    try:
+        from sqlalchemy import inspect as sa_inspect
+        inspector = sa_inspect(engine)
+        if not inspector.has_table("misumi_retention_policies"):
+            return
+        if "transcript_retention_mode" in {c["name"] for c in inspector.get_columns("misumi_retention_policies")}:
+            return
+        with engine.begin() as conn:
+            conn.execute(text(
+                "ALTER TABLE misumi_retention_policies "
+                "ADD COLUMN transcript_retention_mode VARCHAR NOT NULL DEFAULT 'finite'"
+            ))
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"misumi retention mode migration failed: {e}")
+
+
+class LeaseSerializationBusy(RuntimeError):
+    """The serialized transaction could not take its lock within the
+    bounded busy timeout. Retryable; the operation never proceeds unlocked."""
+
+
+LEASE_SERIALIZATION_BUSY_TIMEOUT_S = 10.0
+
+
+def _lease_lock_statement(*, lease_id: Optional[str] = None, repo_id: Optional[str] = None):
+    """The first statement of a non-SQLite serialized transaction: lock the
+    exact lease row, or (for park, where no row exists yet) every slot row
+    for the repo, FOR UPDATE."""
+    from sqlalchemy import select
+    statement = select(ParkLease.id)
+    if lease_id is not None:
+        statement = statement.where(ParkLease.id == lease_id)
+    elif repo_id is not None:
+        statement = statement.where(ParkLease.repo_id == repo_id,
+                                    ParkLease.status.in_(("active", "preparing")))
+    else:
+        raise ValueError("lease_serialized_transaction needs lease_id or repo_id")
+    return statement.with_for_update()
+
+
+@contextmanager
+def lease_serialized_transaction(lease_id: Optional[str] = None, repo_id: Optional[str] = None):
+    """S6.5: one transaction serializing lease authority changes against
+    admission. Yields an ORM session; commits on normal exit, rolls back
+    on exception.
+
+    SQLite: a dedicated connection with driver-level autocommit whose
+    first statement is `BEGIN IMMEDIATE`, so the database write lock is
+    held before any read and every read inside is current. Only this
+    connection's behaviour changes; the global engine is untouched.
+    Other backends: an ordinary transaction whose first statement locks
+    the lease row(s) `FOR UPDATE`.
+
+    Never make a worker call while inside this block."""
+    from sqlalchemy.exc import OperationalError
+    from sqlalchemy.orm import Session
+
+    bind = SessionLocal.kw.get("bind") or engine
+    if bind.dialect.name == "sqlite":
+        conn = bind.connect().execution_options(isolation_level="AUTOCOMMIT")
+        previous_timeout = conn.exec_driver_sql("PRAGMA busy_timeout").scalar()
+        try:
+            conn.exec_driver_sql(f"PRAGMA busy_timeout = {int(LEASE_SERIALIZATION_BUSY_TIMEOUT_S * 1000)}")
+            try:
+                conn.exec_driver_sql("BEGIN IMMEDIATE")
+            except OperationalError as exc:
+                raise LeaseSerializationBusy(str(exc)) from exc
+            session = Session(bind=conn, autoflush=False)
+            try:
+                yield session
+                session.flush()
+                conn.exec_driver_sql("COMMIT")
+            except BaseException:
+                session.rollback()
+                try:
+                    conn.exec_driver_sql("ROLLBACK")
+                except OperationalError:
+                    pass
+                raise
+            finally:
+                session.close()
+        finally:
+            # Restore the pooled connection's own timeout so no unrelated
+            # later user inherits ours (adjudication finding 4).
+            try:
+                conn.exec_driver_sql(f"PRAGMA busy_timeout = {int(previous_timeout or 0)}")
+            finally:
+                conn.close()
+        return
+
+    session = SessionLocal()
+    try:
+        session.execute(_lease_lock_statement(lease_id=lease_id, repo_id=repo_id)).all()
+        yield session
+        session.commit()
+    except BaseException:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
 def init_db():
     """
     Initialize the database by creating all tables.
@@ -2317,6 +2726,9 @@ def init_db():
     _migrate_model_endpoints()
     Base.metadata.create_all(bind=engine)
     _migrate_add_routing_delegation_columns()
+    _migrate_add_estate_execution_worker_columns()
+    _migrate_add_estate_execution_worker_columns_postgresql()
+    _migrate_add_transcript_retention_mode_column()
     # Lock the DB file (and any SQLite sidecars) to 0o600 — it holds bearer-token
     # + bcrypt hashes and encrypted provider keys. POSIX only; safe_chmod no-ops
     # on Windows (ACL-restricted profile dir) and the path helper returns None for

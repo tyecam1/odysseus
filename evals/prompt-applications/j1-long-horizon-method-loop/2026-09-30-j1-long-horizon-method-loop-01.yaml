@@ -1,0 +1,91 @@
+schema_version: 1
+application_id: 2026-09-30-j1-long-horizon-method-loop-01
+prompt_id: j1-long-horizon-method-loop
+prompt_version: 6
+repository: tyecam1/obsidian-PhD
+branch: sonnet/j1-long-horizon-20260929
+# Start time is the first clock artefact of the session; approximate.
+session_started_at: "2026-09-30T00:16:00+01:00"
+session_ended_at: "2026-09-30T08:15:00+01:00"
+start_commit: 293db274df96e94c9f5f725b7f92af32b65d3805
+end_commit: badc510cb7b5205c2379b51cfa3f7a388c1603cf
+outcome_status: completed
+stop_reason: >-
+  All three authorised workstreams were assessed. Workstream A (evidence
+  integrity): deterministic identity, count and quote passes over the tracked J1
+  review surface, primary re-verification of the load-bearing sources whose texts
+  are readable, a fresh-context Sol contradiction audit, and repairs of the
+  demonstrated propagation defects; the remainder is bounded by source access.
+  Workstream B (repository): links, frontmatter, owner metadata and current-reliance
+  surfaces reconciled; PR #600 title and description repaired. Workstream C
+  (scientific direction): an E6 ACTIVE contribution-shape scope with a native-Opus
+  pass (identity requested and self-reported only), two separately framed Sol
+  assessments, an explicit provisional disposition and provisional R1-R7
+  recommendations. No gate passed, no architecture selected, no novelty declared,
+  no amendment applied, no canonical file edited, no manuscript prose written, no
+  evidence frozen, no approval token issued. Remaining work needs author-supplied
+  full text, an author ruling on R1-R7, or authorisation of a new evidence-
+  generating step.
+commits:
+  - 6c54c97e6
+  - 5aef85191
+  - 8e3fcfe27
+  - badc510cb
+models_routes:
+  - "Sonnet coordinator/execution (Claude Code, claude-sonnet-5-5 as stated by the session)"
+  - "Sol adjudication: requested gpt-6.1-sol; codex exec read-only high reasoning via the Codex desktop app's bundled client 0.159.0 (the installed 0.156.1 client was refused earlier in the day for this model); CLI-reported model gpt-6.1-sol in the transcripts of packets 27, 28 and 29; identity is the requested and CLI-reported identifier, not an authenticated backend attestation. The repo model policy files still pin gpt-6-sol and were not edited"
+  - "native Opus: requested claude-opus-5-5 via the Agent tool (model=opus, general-purpose, read-only); self-reported claude-opus-5-5; the subagent transcript file was empty so no API-level model field was captured; scoped as an E6 ACTIVE contribution-synthesis pass on the operator's explicit authorisation and, failing that classification, as an advisory non-canonical consultation; the contract restriction (Opus only inside an ACTIVE scope) is recorded"
+  - "no GLM lane used"
+verification:
+  - "deterministic: 837 tracked files scanned for links and frontmatter; 585 DOI strings resolved against Crossref and matched to citing context; B-screen, workforce screening and iteration counts recomputed from rows; quote checks against a 145-file local primary corpus; Semantic Scholar citation contexts used as an independent route for two reference mappings; whole-page string tests for Dhanda and Das quotes"
+  - "primary re-verification: UHTP (D12), Bettoni 2020, Das and Koskinopoulou 2025, Dhanda et al. 2025, workforce anchors #1038, #1072, #66 against local extractions or open-access pages"
+  - "Sol pkt 27 (record integrity, coordinator findings withheld until last): 6 material and 2 wording findings: 4 material missed-by-coordinator items and both wording items accepted and applied, 1 defective coordinator repair corrected (QC3/QB1 unit wording), 1 rejected (reviewer had not read the packet that defines the denominator), scale row 11 PB to U; Sol pkt 28 (direction, separately framed): shape PARTLY, referee outlook REJECT with a narrower submission viable, surviving component the intervention-attribution reassessment; Sol pkt 29 (proposition level and protocol critique): P1 supported as hypothesis, P2 and P3 narrower, 21 design defects in a proposed held-out test, not worth running"
+  - "access: no challenge page was solved or bypassed; the Bash hook blocked one script that merely contained a protected-root path string and was not worked around (file-edit tool used)"
+failure_tags:
+  - shell_cd_drift_repeated
+  - prior_correction_not_propagated_to_e5_owner
+  - sol_reviewer_false_positive_from_unread_packet
+  - bash_hook_blocked_protected_root_string_in_script
+  - tool_classifier_outage_transient
+  - external_access_ceiling_unresolved
+rating:
+  scale: 1-5
+  goal_progress: 4
+  correctness_verification: 4
+  authority_scope_discipline: 4
+  routing_resource_efficiency: 3
+  continuity_handoff_quality: 4
+  agent_overall: 3.8
+  operator_overall: null
+  operator_note: null
+prompt_revision_recommended: true
+revision_reason: >-
+  Three evidence-backed defects in the loop, each demonstrated this session.
+  (1) A source-level correction recorded at the E6, ledger and packet layers
+  (QB1 analysed sample of 12 groups, continuation 34) had not reached the E5
+  quality C owner, the historical Opus synthesis row, or two ledger statuses
+  ("Sol check owed" after Sol had checked); a superseded value survives wherever it
+  is not swept for. A correction should end with a string sweep of every owner and
+  current-reliance surface for the superseded value. (2) A fresh-context Sol audit
+  with the coordinator's own findings withheld until last found six accepted items the
+  coordinator had missed (four material, two wording) and a defect in one of the
+  coordinator's own repairs, and made one false positive because
+  it had not been given the packet that defines the figure it questioned; the
+  reviewer's findings must be checked against the sources before they are applied.
+  (3) Both consultations named a held-out test as the decisive open item; routing
+  the drafted design through a fresh-context Sol critique before anyone executed or
+  recommended it showed it would count recurrences of already-occupied principles
+  and could not discriminate integration from cataloguing, avoiding an unnecessary
+  study. A smaller point: when a reference list does not render, citation contexts
+  from a second index verify a carried mapping. v5/v6 rules on absolute paths,
+  pointer-first packets, withheld files, passive loads and model-pin handling
+  performed well (the shell working directory drifted again; the rule is preserved,
+  not reworded).
+evidence:
+  - "obsidian-PhD continuation 37: automation/review/J1/2026-09-30-j1-continuation-37.md (branch sonnet/j1-long-horizon-20260929)"
+  - "audit: automation/review/J1/2026-09-30-continuation-37/audit-report.md"
+  - "provisional packet: automation/review/J1/2026-09-30-continuation-37/gate45-provisional-packet-v4.md"
+  - "reconciliation: automation/review/J1/2026-09-30-continuation-37/e6c-reconciliation.md"
+  - "Sol finals: automation/review/J1/2026-09-30-continuation-37/sol-packet-{27,28,29}/*-final.txt"
+  - "issue #479 comment: https://github.com/tyecam1/obsidian-PhD/issues/479#issuecomment-5906095339"
+  - "PR #600 title and description updated; end commit: badc510cb7b5205c2379b51cfa3f7a388c1603cf"

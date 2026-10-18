@@ -1,0 +1,376 @@
+schema_version: 1
+prompt_id: j1-long-horizon-method-loop
+active_head: prompt:v8
+nodes:
+  - id: prompt:v1
+    type: prompt_version
+    version: 1
+    path: docs/initialising-prompts/j1-long-horizon-method-loop-v1.md
+    status: superseded
+  - id: application:2026-09-24-j1-long-horizon-method-loop-01
+    type: application
+    application_id: 2026-09-24-j1-long-horizon-method-loop-01
+    trace_path: evals/prompt-applications/j1-long-horizon-method-loop/2026-09-24-j1-long-horizon-method-loop-01.yaml
+    rating:
+      agent_overall: 3.6
+      goal_progress: 4
+      correctness_verification: 4
+      authority_scope_discipline: 3
+      routing_resource_efficiency: 4
+      continuity_handoff_quality: 3
+    failure_tags:
+      - long_horizon_early_return
+      - registered_prompt_resolution_missed
+      - global_application_trace_omitted_at_closeout
+      - rabby_public_fulltext_route_missed
+      - sol_runtime_policy_identity_drift
+  - id: evolution:2026-09-24-j1-v1-to-v2
+    type: evolution_event
+    decision: evolve
+    evidence_application: 2026-09-24-j1-long-horizon-method-loop-01
+    targets:
+      - self-identifying prompt id/version
+      - explicit no-checkpoint-stop audit
+      - alternate public-full-text checks before access blocking
+      - live model-policy/runtime reconciliation
+      - mandatory trace plus evolution closeout
+  - id: prompt:v2
+    type: prompt_version
+    version: 2
+    parent_version: 1
+    path: docs/initialising-prompts/j1-long-horizon-method-loop-v2.md
+    status: superseded
+  - id: application:2026-09-29-j1-long-horizon-method-loop-01
+    type: application
+    application_id: 2026-09-29-j1-long-horizon-method-loop-01
+    trace_path: evals/prompt-applications/j1-long-horizon-method-loop/2026-09-29-j1-long-horizon-method-loop-01.yaml
+    rating:
+      agent_overall: 3.6
+      goal_progress: 4
+      correctness_verification: 3
+      authority_scope_discipline: 4
+      routing_resource_efficiency: 3
+      continuity_handoff_quality: 4
+    failure_tags:
+      - sol_quota_exhausted_by_unprepared_packet
+      - coordinator_summary_error_caught_by_sol
+      - primary_text_omission_propagated_before_adjudication
+      - tool_classifier_outage_stall
+      - external_access_ceiling_unresolved
+  - id: evolution:2026-09-29-j1-long-horizon-method-loop-01
+    type: evolution_event
+    decision: evolve
+    evidence_application: 2026-09-29-j1-long-horizon-method-loop-01
+    targets:
+      - frontier derived from the live controller mandate, not an embedded priority list
+      - recompute counts and summaries from source rows; state read tier; label candidate readings in owner files
+      - pointer-first Sol packets with deterministically verified pre-extracted rows
+      - scope tool/quota outages to the blocked acceptance mechanism
+  - id: prompt:v3
+    type: prompt_version
+    version: 3
+    parent_version: 2
+    path: docs/initialising-prompts/j1-long-horizon-method-loop-v3.md
+    status: superseded
+  - id: application:2026-09-29-j1-long-horizon-method-loop-02
+    type: application
+    application_id: 2026-09-29-j1-long-horizon-method-loop-02
+    trace_path: evals/prompt-applications/j1-long-horizon-method-loop/2026-09-29-j1-long-horizon-method-loop-02.yaml
+    rating:
+      agent_overall: 4.0
+      goal_progress: 4
+      correctness_verification: 4
+      authority_scope_discipline: 4
+      routing_resource_efficiency: 4
+      continuity_handoff_quality: 4
+    failure_tags:
+      - owner_row_sample_size_error_carried_until_primary_reread
+      - ledger_overreach_caught_by_sol
+      - registration_rule_stricter_than_method_declared_deviation
+      - shell_cwd_drift_from_persistent_cd
+      - external_access_ceiling_unresolved
+  - id: evolution:2026-09-29-j1-long-horizon-method-loop-02
+    type: evolution_event
+    decision: evolve
+    evidence_application: 2026-09-29-j1-long-horizon-method-loop-02
+    targets:
+      - re-read open-access anchor primaries at the source before propagating owner-row sample sizes, units, denominators or comparators
+      - classify wider claims as documented or illustrative and state evidence per criterion element; never claim an author-reserved criterion is satisfied
+      - register iteration and stopping rules in the method's own terms and label deviations before results
+      - try repository and journal-native open-archive copies after publisher hosts fail; never solve or bypass bot challenges
+      - use absolute paths or git -C instead of a persistent shell cd
+  - id: prompt:v4
+    type: prompt_version
+    version: 4
+    parent_version: 3
+    path: docs/initialising-prompts/j1-long-horizon-method-loop-v4.md
+    status: superseded
+  - id: application:2026-09-29-j1-long-horizon-method-loop-03
+    type: application
+    application_id: 2026-09-29-j1-long-horizon-method-loop-03
+    trace_path: evals/prompt-applications/j1-long-horizon-method-loop/2026-09-29-j1-long-horizon-method-loop-03.yaml
+    rating:
+      agent_overall: 4.0
+      goal_progress: 4
+      correctness_verification: 4
+      authority_scope_discipline: 4
+      routing_resource_efficiency: 4
+      continuity_handoff_quality: 4
+    failure_tags:
+      - sol_pointer_range_omitted_load_bearing_line
+      - withheld_section_not_physically_separable
+      - shell_heredoc_quoting_failure
+      - external_access_ceiling_unresolved
+  - id: evolution:2026-09-29-j1-long-horizon-method-loop-03
+    type: evolution_event
+    decision: evolve
+    evidence_application: 2026-09-29-j1-long-horizon-method-loop-03
+    targets:
+      - list every line range carrying a figure or quote the reviewer must verify, check that deterministically, and keep withheld material in a separate file
+      - when the operator supplies a URL behind a bot-verification page, load it once passively in the automation browser, record how the file was obtained, never solve a challenge
+  - id: prompt:v5
+    type: prompt_version
+    version: 5
+    parent_version: 4
+    path: docs/initialising-prompts/j1-long-horizon-method-loop-v5.md
+    status: superseded
+  - id: application:2026-09-29-j1-long-horizon-method-loop-04
+    type: application
+    application_id: 2026-09-29-j1-long-horizon-method-loop-04
+    trace_path: evals/prompt-applications/j1-long-horizon-method-loop/2026-09-29-j1-long-horizon-method-loop-04.yaml
+    rating:
+      agent_overall: 3.6
+      goal_progress: 3
+      correctness_verification: 4
+      authority_scope_discipline: 4
+      routing_resource_efficiency: 3
+      continuity_handoff_quality: 4
+    failure_tags:
+      - shell_cd_drift_repeated
+      - operator_named_model_refused_by_installed_client
+      - sol_reviewer_relied_on_transcribed_evidence
+      - browser_extraction_truncation_and_filter
+      - session_date_naming_error
+      - external_access_ceiling_unresolved
+  - id: evolution:2026-09-29-j1-long-horizon-method-loop-04
+    type: evolution_event
+    decision: evolve
+    evidence_application: 2026-09-29-j1-long-horizon-method-loop-04
+    targets:
+      - when the operator names a Sol model newer than the policy pin, confirm it in the client catalogue, smoke-test the exact client, try the vendor's newer bundled client after a client-version refusal, record the deviation from the pin and leave governed policy files for an operator step
+      - treat a truncating browser extraction as a read tier; verify quotes by in-page string test, count whole-text terms for absence statements, inspect results figures as rendered images, and tell reviewers when evidence is transcribed
+  - id: prompt:v6
+    type: prompt_version
+    version: 6
+    parent_version: 5
+    path: docs/initialising-prompts/j1-long-horizon-method-loop-v6.md
+    status: superseded
+  - id: application:2026-09-30-j1-long-horizon-method-loop-01
+    type: application
+    application_id: 2026-09-30-j1-long-horizon-method-loop-01
+    trace_path: evals/prompt-applications/j1-long-horizon-method-loop/2026-09-30-j1-long-horizon-method-loop-01.yaml
+    rating:
+      agent_overall: 3.8
+      goal_progress: 4
+      correctness_verification: 4
+      authority_scope_discipline: 4
+      routing_resource_efficiency: 3
+      continuity_handoff_quality: 4
+    failure_tags:
+      - shell_cd_drift_repeated
+      - prior_correction_not_propagated_to_e5_owner
+      - sol_reviewer_false_positive_from_unread_packet
+      - bash_hook_blocked_protected_root_string_in_script
+      - tool_classifier_outage_transient
+      - external_access_ceiling_unresolved
+  - id: evolution:2026-09-30-j1-long-horizon-method-loop-01
+    type: evolution_event
+    decision: evolve
+    evidence_application: 2026-09-30-j1-long-horizon-method-loop-01
+    targets:
+      - after any correction, string-sweep every E5 owner and current-reliance surface for the superseded value and supersede stale adjudication-owed statuses
+      - before closing a multi-file correction, run a fresh-context Sol contradiction audit with the coordinator's findings withheld, and check its findings against the sources before applying
+      - route consultant-recommended new tests through a fresh-context Sol design critique before executing or recommending them; verify carried reference mappings by an independent route
+  - id: prompt:v7
+    type: prompt_version
+    version: 7
+    parent_version: 6
+    path: docs/initialising-prompts/j1-long-horizon-method-loop-v7.md
+    status: superseded
+  - id: application:2026-09-30-j1-long-horizon-method-loop-02
+    type: application
+    application_id: 2026-09-30-j1-long-horizon-method-loop-02
+    trace_path: evals/prompt-applications/j1-long-horizon-method-loop/2026-09-30-j1-long-horizon-method-loop-02.yaml
+    rating:
+      agent_overall: 3.2
+      goal_progress: 3
+      correctness_verification: 3
+      authority_scope_discipline: 4
+      routing_resource_efficiency: 2
+      continuity_handoff_quality: 4
+    failure_tags:
+      - model_lane_quota_exhausted_mid_run
+      - high_concurrency_triggered_rate_limit_failures
+      - duplicate_background_driver_started
+      - operator_instruction_misread_stop_driver
+      - layout_mode_text_broke_quote_verification
+      - over_inclusive_claim_harvest_inflated_pattern
+      - unverified_figures_written_from_memory_then_corrected
+      - shell_cd_drift_repeated
+      - bash_hook_blocked_recursive_force_delete_not_bypassed
+  - id: evolution:2026-09-30-j1-long-horizon-method-loop-02
+    type: evolution_event
+    decision: evolve
+    evidence_application: 2026-09-30-j1-long-horizon-method-loop-02
+    targets:
+      - probe a model lane with a one-call smoke test before a long bulk run, cap concurrency, capture stderr, never start a second driver on a live queue, stop a lane at its first quota error, and read an operator redirection literally
+      - pilot the text-extraction mode and the claim unit before bulk extraction; treat a first summary count in which every unit fits the hypothesis as a prompt to audit the unit and report the registered and restricted readings together
+      - recompute every figure from the data immediately before writing it into a record
+  - id: prompt:v8
+    type: prompt_version
+    version: 8
+    parent_version: 7
+    path: docs/initialising-prompts/j1-long-horizon-method-loop-v8.md
+    status: active
+edges:
+  - from: prompt:v1
+    to: application:2026-09-24-j1-long-horizon-method-loop-01
+    type: applied
+  - from: application:2026-09-24-j1-long-horizon-method-loop-01
+    to: evolution:2026-09-24-j1-v1-to-v2
+    type: observed
+  - from: evolution:2026-09-24-j1-v1-to-v2
+    to: prompt:v2
+    type: derived_child
+  - from: prompt:v2
+    to: prompt:v1
+    type: supersedes
+  - from: prompt:v2
+    to: application:2026-09-29-j1-long-horizon-method-loop-01
+    type: applied
+  - from: application:2026-09-29-j1-long-horizon-method-loop-01
+    to: evolution:2026-09-29-j1-long-horizon-method-loop-01
+    type: observed
+  - from: evolution:2026-09-29-j1-long-horizon-method-loop-01
+    to: prompt:v3
+    type: derived_child
+  - from: prompt:v3
+    to: prompt:v2
+    type: supersedes
+  - from: prompt:v3
+    to: application:2026-09-29-j1-long-horizon-method-loop-02
+    type: applied
+  - from: application:2026-09-29-j1-long-horizon-method-loop-02
+    to: evolution:2026-09-29-j1-long-horizon-method-loop-02
+    type: observed
+  - from: evolution:2026-09-29-j1-long-horizon-method-loop-02
+    to: prompt:v4
+    type: derived_child
+  - from: prompt:v4
+    to: prompt:v3
+    type: supersedes
+  - from: prompt:v4
+    to: application:2026-09-29-j1-long-horizon-method-loop-03
+    type: applied
+  - from: application:2026-09-29-j1-long-horizon-method-loop-03
+    to: evolution:2026-09-29-j1-long-horizon-method-loop-03
+    type: observed
+  - from: evolution:2026-09-29-j1-long-horizon-method-loop-03
+    to: prompt:v5
+    type: derived_child
+  - from: prompt:v5
+    to: prompt:v4
+    type: supersedes
+  - from: prompt:v5
+    to: application:2026-09-29-j1-long-horizon-method-loop-04
+    type: applied
+  - from: application:2026-09-29-j1-long-horizon-method-loop-04
+    to: evolution:2026-09-29-j1-long-horizon-method-loop-04
+    type: observed
+  - from: evolution:2026-09-29-j1-long-horizon-method-loop-04
+    to: prompt:v6
+    type: derived_child
+  - from: prompt:v6
+    to: prompt:v5
+    type: supersedes
+  - from: prompt:v6
+    to: application:2026-09-30-j1-long-horizon-method-loop-01
+    type: applied
+  - from: application:2026-09-30-j1-long-horizon-method-loop-01
+    to: evolution:2026-09-30-j1-long-horizon-method-loop-01
+    type: observed
+  - from: evolution:2026-09-30-j1-long-horizon-method-loop-01
+    to: prompt:v7
+    type: derived_child
+  - from: prompt:v7
+    to: prompt:v6
+    type: supersedes
+  - from: prompt:v7
+    to: application:2026-09-30-j1-long-horizon-method-loop-02
+    type: applied
+  - from: application:2026-09-30-j1-long-horizon-method-loop-02
+    to: evolution:2026-09-30-j1-long-horizon-method-loop-02
+    type: observed
+  - from: evolution:2026-09-30-j1-long-horizon-method-loop-02
+    to: prompt:v8
+    type: derived_child
+  - from: prompt:v8
+    to: prompt:v7
+    type: supersedes
+guardrail_validation:
+  prompt:v2:
+    scope_preserved: true
+    authority_preserved: true
+    evidence_verification_preserved: true
+    stop_gate_not_weakened: true
+    model_identity_discipline_not_weakened: true
+    access_failure_ceiling_preserved: true
+    trace_evolution_required: true
+  prompt:v3:
+    scope_preserved: true
+    authority_preserved: true
+    evidence_verification_preserved: true
+    stop_gate_not_weakened: true
+    model_identity_discipline_not_weakened: true
+    access_failure_ceiling_preserved: true
+    trace_evolution_required: true
+  prompt:v4:
+    scope_preserved: true
+    authority_preserved: true
+    evidence_verification_preserved: true
+    stop_gate_not_weakened: true
+    model_identity_discipline_not_weakened: true
+    access_failure_ceiling_preserved: true
+    trace_evolution_required: true
+  prompt:v5:
+    scope_preserved: true
+    authority_preserved: true
+    evidence_verification_preserved: true
+    stop_gate_not_weakened: true
+    model_identity_discipline_not_weakened: true
+    access_failure_ceiling_preserved: true
+    trace_evolution_required: true
+  prompt:v6:
+    scope_preserved: true
+    authority_preserved: true
+    evidence_verification_preserved: true
+    stop_gate_not_weakened: true
+    model_identity_discipline_not_weakened: true
+    access_failure_ceiling_preserved: true
+    trace_evolution_required: true
+  prompt:v7:
+    scope_preserved: true
+    authority_preserved: true
+    evidence_verification_preserved: true
+    stop_gate_not_weakened: true
+    model_identity_discipline_not_weakened: true
+    access_failure_ceiling_preserved: true
+    trace_evolution_required: true
+  prompt:v8:
+    scope_preserved: true
+    authority_preserved: true
+    evidence_verification_preserved: true
+    stop_gate_not_weakened: true
+    model_identity_discipline_not_weakened: true
+    access_failure_ceiling_preserved: true
+    trace_evolution_required: true

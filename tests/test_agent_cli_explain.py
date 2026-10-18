@@ -35,9 +35,12 @@ def test_explain_assembles_resolution_hosts_and_evidence(monkeypatch, capsys):
     import src.estate_router as estate_router
     import src.routing_evaluator as routing_evaluator
 
-    monkeypatch.setattr(estate_router, "resolve_alias", lambda alias: {
+    monkeypatch.setattr(estate_router, "resolve_alias", lambda alias, host_id=None: {
         "alias": alias, "resolved": True, "concrete_model": "qwen3:8b", "evidence": "docs/x.md",
     })
+    # Hermetic: `agent explain` fails closed when this machine is not a registered
+    # estate host, so pin the host instead of depending on the runner's hostname.
+    monkeypatch.setattr(estate_router, "current_host_id", lambda: "hz2-workstation")
     monkeypatch.setattr(estate_router, "eligible_hosts", lambda repo=None: [
         {"host_id": "hz2-workstation", "role": "lab", "eligible": True, "reason": "this host"},
     ])
@@ -61,7 +64,7 @@ def test_explain_reports_no_evidence_without_failing(monkeypatch, capsys):
     import src.estate_router as estate_router
     import src.routing_evaluator as routing_evaluator
 
-    monkeypatch.setattr(estate_router, "resolve_alias", lambda alias: {
+    monkeypatch.setattr(estate_router, "resolve_alias", lambda alias, host_id=None: {
         "alias": alias, "resolved": False, "reason": "no evidence-backed binding yet",
     })
     monkeypatch.setattr(estate_router, "eligible_hosts", lambda repo=None: [])
@@ -81,7 +84,7 @@ def test_explain_degrades_gracefully_when_evaluator_db_unavailable(monkeypatch, 
     import src.estate_router as estate_router
     import src.routing_evaluator as routing_evaluator
 
-    monkeypatch.setattr(estate_router, "resolve_alias", lambda alias: {"alias": alias, "resolved": True})
+    monkeypatch.setattr(estate_router, "resolve_alias", lambda alias, host_id=None: {"alias": alias, "resolved": True})
     monkeypatch.setattr(estate_router, "eligible_hosts", lambda repo=None: [])
 
     def _boom():

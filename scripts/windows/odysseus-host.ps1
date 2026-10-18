@@ -24,6 +24,12 @@ param(
     [int]$RestartDelaySeconds = 10,
     [string]$LanCidr = '192.168.4.0/24',
     [switch]$InstallFirewall,
+    # Enables the durable Misumi transcript runtime (ODYSSEUS_MISUMI_TRANSCRIPT_ENABLED). Off by default;
+    # recorded in the scheduled task's arguments so the setting is visible and reversible.
+    [switch]$TranscriptRuntime,
+    # Install only: also start at machine boot, with no interactive session required (startup trigger, S4U principal, start-when-available).
+    # Without it the task is logon-coupled and a reboot leaves the runtime down until someone logs in.
+    [switch]$BootStart,
     [int]$Tail = 120
 )
 
@@ -108,7 +114,11 @@ switch ($Action) {
         if ($InterfaceHealthUrl) { $env:MISUMI_INTERFACE_HEALTH_URL = $InterfaceHealthUrl }
         if ($ModelUrl) { $env:MISUMI_MODEL_URL = $ModelUrl }
         if ($Model) { $env:MISUMI_MODEL = $Model }
+        if ($TranscriptRuntime) { $env:ODYSSEUS_MISUMI_TRANSCRIPT_ENABLED = '1' } else { Remove-Item Env:ODYSSEUS_MISUMI_TRANSCRIPT_ENABLED -ErrorAction SilentlyContinue }
         Set-Location -LiteralPath $SourceRoot
+        # Evidence for later diagnosis: which session this supervisor lives in (0 means non-interactive).
+        "{0:o} Run wrapper started pid={1} session={2} user={3}" -f (Get-Date), $PID, (Get-Process -Id $PID).SessionId, $env:USERNAME |
+            Tee-Object -FilePath $LogPath -Append | Out-Null
         # Windows PowerShell 5.1 turns native stderr lines into error records.
         # Uvicorn logs normally on stderr, so a global Stop preference would
         # terminate the service on its first healthy startup log line.
@@ -140,20 +150,35 @@ switch ($Action) {
         if ($ModelUrl) { $argumentParts += @('-ModelUrl',('"' + $ModelUrl + '"')) }
         if ($Model) { $argumentParts += @('-Model',('"' + $Model + '"')) }
         $argumentParts += @('-RestartDelaySeconds',[string]$RestartDelaySeconds)
+        if ($TranscriptRuntime) { $argumentParts += '-TranscriptRuntime' }
         $arguments = $argumentParts -join ' '
         $taskAction = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $arguments
-        $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
-        $settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -RestartCount 10 `
-            -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit (New-TimeSpan -Days 3650)
-        Register-ScheduledTask -TaskName $TaskName -Action $taskAction -Trigger $trigger `
-            -Settings $settings -Description 'Authenticated LAN-local Misumi/Odysseus runtime' -Force | Out-Null
+        $logonTrigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+        if ($BootStart) {
+            # Machine-start lifecycle: runs without anyone logged in, as the same user (S4U: no stored credential, no network
+            # credentials, least privilege). The logon trigger stays as a harmless second chance; IgnoreNew keeps one instance.
+            $startupTrigger = New-ScheduledTaskTrigger -AtStartup
+            $startupTrigger.Delay = 'PT30S'
+            $triggers = @($startupTrigger, $logonTrigger)
+            $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType S4U -RunLevel Limited
+            $settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -RestartCount 10 `
+                -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit (New-TimeSpan -Days 3650) `
+                -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+            Register-ScheduledTask -TaskName $TaskName -Action $taskAction -Trigger $triggers -Principal $principal `
+                -Settings $settings -Description 'Authenticated LAN-local Misumi/Odysseus runtime (machine-start, non-interactive)' -Force | Out-Null
+        } else {
+            $settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -RestartCount 10 `
+                -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit (New-TimeSpan -Days 3650)
+            Register-ScheduledTask -TaskName $TaskName -Action $taskAction -Trigger $logonTrigger `
+                -Settings $settings -Description 'Authenticated LAN-local Misumi/Odysseus runtime' -Force | Out-Null
+        }
         if ($InstallFirewall) {
             $ruleName = "Odysseus Misumi TCP $Port LAN"
             Get-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue | Remove-NetFirewallRule
             New-NetFirewallRule -DisplayName $ruleName -Direction Inbound -Action Allow `
                 -Protocol TCP -LocalPort $Port -RemoteAddress $LanCidr | Out-Null
         }
-        Write-Output "Installed scheduled task $TaskName"
+        Write-Output "Installed scheduled task $TaskName$(if ($BootStart) { ' (machine-start, S4U)' } else { ' (logon, interactive)' })"
     }
     'Uninstall' {
         Stop-Instance
@@ -183,6 +208,8 @@ switch ($Action) {
         [pscustomobject]@{
             task = $TaskName
             task_state = if ($task) { [string]$task.State } else { 'not-installed' }
+            task_triggers = if ($task) { (@($task.Triggers | ForEach-Object { $_.CimClass.CimClassName -replace 'MSFT_Task|Trigger', '' }) -join ',') } else { $null }
+            task_logon_type = if ($task) { [string]$task.Principal.LogonType } else { $null }
             listening = [bool]$listener
             port = $Port
             pid = if ($listener) { $listener.OwningProcess } else { $null }

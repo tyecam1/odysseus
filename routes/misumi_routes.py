@@ -16,12 +16,30 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from core.middleware import require_admin
+from src.constants import DATA_DIR
 from src.misumi_household import HouseholdReadOnlyAdapter, infer_household_domain
 from src.misumi_memory import MisumiMemory
 from src.misumi_observability import MisumiEventLog
+from src.misumi_persona_routing import resolve_auto_lead
+from src.misumi_ratification_dialogue import OfferBook, build_offer, parse_answer
+from src.misumi_team_formation import plan_team, risk_flag, synthesis_inputs
+from src.misumi_persona_state import (
+    GLOBAL_SCOPE,
+    PersonaStateStore,
+    classify_signal,
+    compose_system,
+    detect_style_signals,
+)
+from src.misumi_routing_adaptation import (
+    RoutingAdaptationStore,
+    is_durable_instruction,
+    record_durable_instruction,
+    record_manual_choice,
+)
 from src.misumi_policy import load_persona_policy, normalize_persona, persona_record, policy_summary
 from src.misumi_skills import installed_skill_files, security_review_files, skills_for_persona
 from src.misumi_task_router import MisumiTaskRouter
+from src.seed_order_enforcement import SEED_OUTPUT_RULES, enforce_seed_order
 
 
 logger = logging.getLogger(__name__)
@@ -67,6 +85,7 @@ class MisumiRespondRequest(BaseModel):
     session_id: Optional[str] = Field(default=None, max_length=120)
     retention_mode: Literal["auto", "off"] = "auto"
     persist_turn: bool = True
+    history_mode: Optional[Literal["auto", "off"]] = None
 
 
 class MisumiTaskRequest(BaseModel):
@@ -143,6 +162,23 @@ class MisumiHandoffRequest(BaseModel):
     note: Optional[str] = None
 
 
+def _persists_history(body: "MisumiRespondRequest") -> bool:
+    """Whether this turn is written to the ordinary conversation session history.
+
+    ``history_mode`` is the explicit control and is independent of
+    ``retention_mode`` (semantic memory / artifacts), so turning semantic memory
+    off no longer silently turns ordinary history off. When a caller omits
+    ``history_mode`` the historical coupling is kept on purpose: clients written
+    before the split send ``retention_mode: "off"`` to mean "store nothing", and
+    reinterpreting that would make a client that believes it is private start
+    saving history. ``persist_turn: false`` remains the true incognito switch."""
+    if not body.persist_turn:
+        return False
+    if body.history_mode is None:
+        return body.retention_mode == "auto"
+    return body.history_mode == "auto"
+
+
 def _owner(request: Request) -> Optional[str]:
     if getattr(request.state, "api_token", False):
         return getattr(request.state, "api_token_owner", None)
@@ -195,79 +231,26 @@ def _consultation_enabled() -> bool:
     return value not in {"", "0", "false", "no", "off"}
 
 
-def _term_positions(text: str, terms: List[str]) -> List[int]:
-    positions = []
-    for term in terms:
-        match = re.search(rf"(?<!\w){re.escape(term)}(?!\w)", text, flags=re.I)
-        if match:
-            positions.append(match.start())
-    return positions
+def _team_plan(prompt: str, persona: str, primary_reply: str = "") -> Dict[str, Any]:
+    """Plan the (at most two) support personas for one request; always returns a recorded decision."""
+    from src.persona_capabilities import consult_edges, routing_intents
 
-
-def _intent_score(prompt: str, intents: List[str]) -> int:
-    normalized_prompt = re.sub(r"[-_]", " ", prompt.lower())
-    score = 0
-    for intent in intents:
-        normalized_intent = re.sub(r"[-_]", " ", intent.lower()).strip()
-        terms = [normalized_intent]
-        if " " in normalized_intent:
-            terms.extend(part for part in normalized_intent.split() if len(part) >= 3)
-        if any(re.search(rf"(?<!\w){re.escape(term)}(?!\w)", normalized_prompt) for term in terms):
-            score += 1
-    return score
+    order = list(load_persona_policy())
+    return plan_team(
+        prompt,
+        persona,
+        policy_order=order,
+        display_names={name: str(persona_record(name).get("display_name") or name) for name in order},
+        intents_of=routing_intents,
+        edges_of=consult_edges,
+        primary_reply=primary_reply,
+        enabled=_consultation_enabled(),
+    )
 
 
 def _consultation_plan(prompt: str, primary_reply: str, persona: str) -> List[str]:
-    """Choose at most two synchronous consultation targets deterministically."""
-    if persona != "aoteru" or not _consultation_enabled():
-        return []
-
-    from src.persona_capabilities import consult_edges, routing_intents
-
-    policy_order = list(load_persona_policy())
-    allowed = set(policy_order) - {"aoteru"}
-    edges = [item.lower() for item in (consult_edges("aoteru") or [])]
-    edges = [item for item in edges if item in allowed]
-    intent_scores = {
-        item: _intent_score(prompt, routing_intents(item) or [])
-        for item in policy_order
-        if item in allowed
-    }
-    mention_text = f"{prompt}\n{primary_reply}"
-    mentioned = []
-    for item in policy_order:
-        if item not in allowed:
-            continue
-        record = persona_record(item)
-        terms = list(dict.fromkeys((item, str(record.get("display_name") or item))))
-        if _term_positions(mention_text, terms):
-            mentioned.append(item)
-    # Consultation is work, not ambient theatre. Only invoke a specialist when
-    # the user names one or the request matches that persona's routing intents.
-    complex_request = bool(re.search(
-        r"\b(plan|planning|decide|decision|compare|review|risk|coordinate|approach|strategy|trade-?off)\b",
-        prompt,
-        re.IGNORECASE,
-    ))
-    intent_candidates = (
-        [item for item in policy_order if intent_scores.get(item, 0)]
-        if complex_request else []
-    )
-    candidates = list(dict.fromkeys(mentioned + intent_candidates))
-
-    def rank(item: str) -> tuple[int, int, int, int]:
-        record = persona_record(item)
-        terms = list(dict.fromkeys((item, str(record.get("display_name") or item))))
-        mentions = _term_positions(mention_text, terms)
-        if mentions:
-            return (0, min(mentions), 0, policy_order.index(item))
-        score = intent_scores.get(item, 0)
-        if score:
-            return (1, 0, -score, policy_order.index(item))
-        edge_index = edges.index(item) if item in edges else len(edges)
-        return (2, edge_index, 0, policy_order.index(item))
-
-    return sorted(candidates, key=rank)[:2]
+    """Support persona ids for one request (a specialist lead recruits only along its own consult edges)."""
+    return [item["persona"] for item in _team_plan(prompt, persona, primary_reply)["supports"]]
 
 
 async def _consult_persona(
@@ -275,6 +258,7 @@ async def _consult_persona(
     persona: str,
     backend: str,
     model: str,
+    lead: str = "aoteru",
 ) -> str:
     from src.llm_core import llm_call_async
     from src.persona_capabilities import capability_summary
@@ -282,7 +266,11 @@ async def _consult_persona(
     record = persona_record(persona)
     system = (
         f"You are {persona}, the Misumi {record.get('role')}. Analyze the user's request from your "
-        f"specialist role and give Aoteru concise, practical evidence, critique, or next steps. "
+        f"specialist role and give {'Aoteru' if lead == 'aoteru' else str(persona_record(lead).get('display_name') or lead)} "
+        f"concise, practical evidence, critique, or next steps. "
+        f"Begin with 'RISK:' ONLY if you can quote, in your first sentence, two facts stated in the request that "
+        f"conflict with each other, or a stated plan that is unsafe; otherwise begin with 'OK:'. Missing detail is "
+        f"not a risk. "
         f"Do not address the user directly. {_HONESTY_CONSTRAINTS}"
     )
     capabilities = capability_summary(persona)
@@ -395,6 +383,7 @@ async def _model_turn(
     model: str,
     context_messages: Optional[List[Dict[str, str]]] = None,
     contributions: Optional[List[Tuple[str, str]]] = None,
+    style_values: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """Generate one synthesized answer plus bounded retention decisions."""
     try:
@@ -416,7 +405,15 @@ async def _model_turn(
         capabilities = capability_summary(persona)
         if capabilities:
             system += f"\n\n{capabilities}"
-        system += f"\n{_RATIFICATION_CONSTRAINT}"
+        system += f"\n{_RATIFICATION_CONSTRAINT}\n{SEED_OUTPUT_RULES}"
+        # Bounded persona state (application -10): fixed style sentences appended AFTER every
+        # foundational constraint; the foundation text above is never edited.
+        system = compose_system(system, style_values or {})
+        if contributions:
+            system += (
+                "\nIf any specialist input begins with RISK:, address that risk explicitly in the answer "
+                "instead of ignoring it."
+            )
         messages = list(context_messages or [])
         if not messages:
             seed = _interactive_seed_context()
@@ -443,6 +440,8 @@ async def _model_turn(
         turn = _parse_model_turn(str(raw or ""), prompt)
         if not turn.get("answer"):
             raise RuntimeError("model returned empty content (reasoning-only)")
+        # The model does not reliably quote a raw note or label a candidate on its own (live fixtures 2 and 3, 2026-10-02).
+        turn["answer"], turn["seed_order_enforced"] = enforce_seed_order(prompt, turn["answer"])
         return turn
     except Exception as exc:
         logger.exception("Misumi model reply failed: %s", exc)
@@ -684,6 +683,187 @@ async def _apply_retention(
     return result
 
 
+def _named_persona_in_prompt(prompt: str, exclude: Optional[str] = None) -> Optional[str]:
+    """Return a persona explicitly named in the prompt text, if any."""
+    try:
+        order = list(load_persona_policy())
+    except Exception:
+        return None
+    lowered = str(prompt or "").lower()
+    for pid in order:
+        if pid == exclude:
+            continue
+        record = persona_record(pid)
+        display = str(record.get("display_name") or "").lower()
+        if re.search(rf"(?<!\w){re.escape(pid)}(?!\w)", lowered) or (
+            display and re.search(rf"(?<!\w){re.escape(display)}(?!\w)", lowered)
+        ):
+            return pid
+    return None
+
+
+def _capture_style_signals(
+    store: PersonaStateStore,
+    prompt: str,
+    signals: List[Dict[str, str]],
+    *,
+    responding: str,
+    named: Optional[str],
+    session_id: Optional[str],
+    owner: Optional[str],
+) -> List[Dict[str, Any]]:
+    """Record evidence for each style signal; promote only on an explicit durable user instruction.
+
+    Scope: a durable instruction that names a persona applies to that persona; one that names none is
+    household-wide. Feedback ("too long") and one-off requests are about the responding persona.
+    """
+    notes: List[Dict[str, Any]] = []
+    for signal in signals:
+        etype = classify_signal(prompt, signal)
+        if etype == "explicit_durable":
+            target = named or GLOBAL_SCOPE
+        else:
+            target = named or responding
+        try:
+            result = store.record_evidence(
+                type=etype, persona=target, dimension=signal["dimension"], value=signal["value"],
+                prompt=prompt, signal=signal["matched"], session_id=session_id, owner=owner,
+            )
+        except ValueError as exc:
+            notes.append({"dimension": signal["dimension"], "value": signal["value"], "refused": str(exc)})
+            continue
+        candidate = result["candidate"]
+        note: Dict[str, Any] = {
+            "dimension": signal["dimension"], "value": signal["value"], "scope": target,
+            "evidence_type": etype, "evidence_id": result["evidence"]["evidence_id"],
+            "candidate_id": candidate.get("candidate_id"), "candidate_status": candidate.get("status"),
+            "state": "shadow-only",
+        }
+        if etype == "explicit_durable" and candidate.get("status") == "eligible":
+            try:
+                revision = store.promote(candidate["candidate_id"], authorisation={
+                    "type": "user_instruction", "evidence_id": note["evidence_id"],
+                })
+                note.update({"state": "active", "revision_id": revision["revision_id"],
+                             "previous_revision_id": revision.get("previous_revision_id")})
+            except (KeyError, ValueError) as exc:
+                note["promotion_refused"] = str(exc)
+        elif candidate.get("status") == "eligible":
+            note["state"] = "eligible-awaiting-ratification"
+        notes.append(note)
+    return notes
+
+
+def _handle_dialogue_answer(
+    request: Request, body, prompt: str, owner: Optional[str], request_id: str,
+    persona_state, adaptation, offers: OfferBook, events,
+) -> Optional[Dict[str, Any]]:
+    """Apply a bare yes/no/later/undo to a pending offer. Anything else withdraws the offer (silence never promotes)."""
+    sid = body.session_id
+    verdict = parse_answer(prompt)
+    pending = offers.pending(sid)
+    if verdict == "undo":
+        last = offers.last_revision(sid)
+        if last is None:
+            return None
+        pending, verdict = None, "undo"
+    elif pending is None:
+        return None
+    elif verdict is None:
+        offers.clear(sid)  # the user moved on: the offer is withdrawn, nothing is promoted
+        return None
+    try:
+        _require_api_scope(request, "misumi:execute")
+    except HTTPException:
+        return None  # answering is a ratification act: it needs the same scope as the ratification API
+    store_for = {"persona-state": persona_state, "routing": adaptation}
+    outcome: Dict[str, Any] = {"verdict": verdict}
+    text = ""
+    try:
+        if verdict == "undo":
+            store = store_for.get(last["kind"])
+            rollback = store.rollback_revision(last["revision_id"], "undone in conversation") if store else None
+            offers.forget_revision(sid)
+            outcome.update({"state": "rolled-back", "revision_id": last["revision_id"]})
+            text = "Undone: that change is rolled back." if rollback else ""
+        else:
+            offer = pending
+            store = store_for.get(offer["kind"])
+            candidate = store.get_candidate_by_id(offer["candidate_id"]) if store else None
+            if store is None or candidate is None or candidate.get("status") != "eligible":
+                offers.clear(sid)
+                return None
+            context = f"answer to offer {offer['candidate_id']}: {offer['summary']}"
+            if verdict == "affirm":
+                if offer["kind"] == "persona-state":
+                    recorded = store.record_evidence(
+                        type="explicit_durable", persona=candidate["persona"], dimension=candidate["dimension"],
+                        value=candidate["proposed_value"], prompt=prompt, context=context,
+                        session_id=sid, owner=owner,
+                    )
+                else:
+                    recorded = store.record_evidence(
+                        type="explicit_durable", cue=candidate["cue"], previous_persona=candidate.get("base_persona"),
+                        proposed_persona=candidate["proposed_persona"], prompt=prompt, context=context,
+                        session_id=sid, owner=owner,
+                    )
+                revision = store.promote(offer["candidate_id"], authorisation={
+                    "type": "user_instruction", "evidence_id": recorded["evidence"]["evidence_id"],
+                })
+                offers.remember_revision(sid, offer["kind"], revision["revision_id"])
+                outcome.update({"state": "active", "kind": offer["kind"], "revision_id": revision["revision_id"],
+                                "candidate_id": offer["candidate_id"]})
+                text = f"Done: {offer['summary']}. Say 'undo that' to reverse it."
+            elif verdict == "decline":
+                store.reject(offer["candidate_id"], "declined in conversation")
+                outcome.update({"state": "rejected", "kind": offer["kind"], "candidate_id": offer["candidate_id"]})
+                text = "Understood. I will not make that change."
+            else:  # later
+                offers.snooze(offer["candidate_id"])
+                outcome.update({"state": "snoozed", "kind": offer["kind"], "candidate_id": offer["candidate_id"]})
+                text = "Okay, I will leave it for now."
+            offers.clear(sid)
+    except (KeyError, ValueError) as exc:
+        logger.warning("Misumi dialogue ratification refused: %s", exc)
+        offers.clear(sid)
+        return None
+    if not text:
+        return None
+    persona = normalize_persona((pending or {}).get("persona") or "aoteru")
+    events.emit({
+        "request_id": request_id, "persona": persona, "persona_source": "requested",
+        "ratification_dialogue": outcome, "outcome": "ratification-dialogue", "approval_mode": "user-in-dialogue",
+    })
+    return {
+        "text": text, "state": "speaking", "mood": body.mood or "focused", "source": "ratification-dialogue",
+        "node": "odysseus", "persona": persona, "persona_source": "requested",
+        "who": persona_record(persona).get("display_name"), "audio_url": None, "voice": None,
+        "tts_provider": None, "request_id": request_id, "sources": [], "session_id": sid,
+        "retention": {"memory": {"status": "none"}, "artifact": {"status": "none"}},
+        "history_persisted": False, "ratification": outcome,
+    }
+
+
+def _dialogue_offer(persona_state, adaptation, offers: OfferBook) -> Optional[Dict[str, Any]]:
+    """The one offerable eligible-awaiting-ratification candidate (persona state first), or None."""
+    pools = []
+    if persona_state is not None:
+        pools.append(("persona-state", persona_state.all_candidates().values()))
+    if adaptation is not None:
+        pools.append(("routing", adaptation.all_candidates().values()))
+    for kind, candidates in pools:
+        for candidate in sorted((c for c in candidates if isinstance(c, dict)), key=lambda c: str(c.get("updated_at"))):
+            cid = str(candidate.get("candidate_id") or "")
+            if not cid or not offers.may_offer(cid):
+                continue
+            target = candidate.get("persona") if kind == "persona-state" else candidate.get("proposed_persona")
+            offer = build_offer(kind, candidate, str(persona_record(str(target)).get("display_name") or target)
+                                if target and target != "*" else None)
+            if offer is not None:
+                return offer
+    return None
+
+
 def setup_misumi_routes(
     skills_manager,
     task_scheduler=None,
@@ -699,6 +879,25 @@ def setup_misumi_routes(
     task_router = MisumiTaskRouter(adapter)
     events = MisumiEventLog()
     memory = MisumiMemory(memory_root)
+    # Experience-driven routing adaptation (application -07). Off switches:
+    # MISUMI_ROUTING_ADAPTATION=0 disables capture AND learned overlays;
+    # MISUMI_ROUTING_STATE_ROOT relocates the state store (tests).
+    _adaptation_flag = (os.getenv("MISUMI_ROUTING_ADAPTATION", "1") or "").strip().lower()
+    adaptation: Optional[RoutingAdaptationStore] = None
+    if _adaptation_flag not in {"0", "false", "no", "off"}:
+        _adaptation_root = (os.getenv("MISUMI_ROUTING_STATE_ROOT") or "").strip()
+        adaptation = RoutingAdaptationStore(
+            Path(_adaptation_root) if _adaptation_root else Path(DATA_DIR) / "misumi" / "routing"
+        )
+    # Bounded persona-state adaptation (application -10). Off switches:
+    # MISUMI_PERSONA_STATE=0 disables capture AND applied style; MISUMI_PERSONA_STATE_ROOT relocates the store.
+    persona_state: Optional[PersonaStateStore] = None
+    if (os.getenv("MISUMI_PERSONA_STATE", "1") or "").strip().lower() not in {"0", "false", "no", "off"}:
+        _state_root = (os.getenv("MISUMI_PERSONA_STATE_ROOT") or "").strip()
+        persona_state = PersonaStateStore(
+            Path(_state_root) if _state_root else Path(DATA_DIR) / "misumi" / "persona_state"
+        )
+    offers = OfferBook()  # conversational ratification offers (process-local; stores hold the truth)
     if oss_skill_ingestion is None:
         from services.memory.oss_skill_ingestion import OSSSkillIngestion
 
@@ -725,28 +924,268 @@ def setup_misumi_routes(
             "household_reachable": adapter.reachable,
         }
 
+    @router.get("/routing/candidates")
+    async def routing_candidates(request: Request):
+        """Inspect affinity candidates and active revisions (read-only)."""
+        _require_api_scope(request, "misumi:read")
+        if adaptation is None:
+            raise HTTPException(503, "Routing adaptation is disabled")
+        candidates = sorted(
+            (c for c in adaptation.all_candidates().values() if isinstance(c, dict)),
+            key=lambda c: str(c.get("updated_at") or ""),
+        )
+        return {
+            "candidates": candidates,
+            "active_revisions": adaptation.active_overlays(),
+        }
+
+    @router.post("/routing/candidates/{candidate_id}/promote")
+    async def routing_candidate_promote(request: Request, candidate_id: str):
+        """The operator's ratification act for an eligible candidate."""
+        _require_api_scope(request, "misumi:execute")
+        if adaptation is None:
+            raise HTTPException(503, "Routing adaptation is disabled")
+        try:
+            revision = adaptation.promote(candidate_id, authorisation={
+                "type": "operator_ratification",
+                "via": "authenticated /misumi/routing API",
+                "principal": _owner(request),
+            })
+        except KeyError as exc:
+            raise HTTPException(404, str(exc).strip("'")) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        events.emit({
+            "request_id": events.request_id(),
+            "persona": revision.get("persona"),
+            "persona_source": "auto",
+            "routing": {"method": "routing-revision-promoted", "selected": revision.get("persona"),
+                        "reasons": [f"cue={','.join(revision.get('cue') or [])}"]},
+            "routing_adaptation": {"promotion": revision, "act": "operator_ratification"},
+            "outcome": "routing-promoted",
+            "approval_mode": "operator",
+        })
+        return {"promoted": True, "revision": revision}
+
+    @router.post("/routing/candidates/{candidate_id}/reject")
+    async def routing_candidate_reject(request: Request, candidate_id: str, body: Dict[str, Any] = None):
+        _require_api_scope(request, "misumi:execute")
+        if adaptation is None:
+            raise HTTPException(503, "Routing adaptation is disabled")
+        reason = str((body or {}).get("reason") or "rejected via ratification API")
+        try:
+            candidate = adaptation.reject(candidate_id, reason)
+        except KeyError as exc:
+            raise HTTPException(404, str(exc).strip("'")) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return {"rejected": True, "candidate": candidate}
+
+    @router.post("/routing/revisions/{revision_id}/rollback")
+    async def routing_revision_rollback(request: Request, revision_id: str, body: Dict[str, Any] = None):
+        _require_api_scope(request, "misumi:execute")
+        if adaptation is None:
+            raise HTTPException(503, "Routing adaptation is disabled")
+        reason = str((body or {}).get("reason") or "rolled back via ratification API")
+        try:
+            rollback = adaptation.rollback_revision(revision_id, reason)
+        except KeyError as exc:
+            raise HTTPException(404, str(exc).strip("'")) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        events.emit({
+            "request_id": events.request_id(),
+            "persona": rollback.get("persona"),
+            "persona_source": "auto",
+            "routing": {"method": "routing-revision-rolled-back", "selected": rollback.get("persona"),
+                        "reasons": [f"rolls_back={revision_id}"]},
+            "routing_adaptation": {"rollback": rollback},
+            "outcome": "routing-rolled-back",
+            "approval_mode": "operator",
+        })
+        return {"rolled_back": True, "rollback": rollback}
+
+    @router.get("/persona-state")
+    async def persona_state_inspect(request: Request):
+        """Inspect persona-state candidates and effective revisions (read-only)."""
+        _require_api_scope(request, "misumi:read")
+        if persona_state is None:
+            raise HTTPException(503, "Persona-state adaptation is disabled")
+        candidates = sorted(
+            (c for c in persona_state.all_candidates().values() if isinstance(c, dict)),
+            key=lambda c: str(c.get("updated_at") or ""),
+        )
+        return {"candidates": candidates, "active_revisions": persona_state.active_revisions()}
+
+    @router.post("/persona-state/candidates/{candidate_id}/promote")
+    async def persona_state_promote(request: Request, candidate_id: str):
+        """The operator's ratification act for an eligible persona-state candidate."""
+        _require_api_scope(request, "misumi:execute")
+        if persona_state is None:
+            raise HTTPException(503, "Persona-state adaptation is disabled")
+        try:
+            revision = persona_state.promote(candidate_id, authorisation={
+                "type": "operator_ratification",
+                "via": "authenticated /misumi/persona-state API",
+                "principal": _owner(request),
+            })
+        except KeyError as exc:
+            raise HTTPException(404, str(exc).strip("'")) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        events.emit({
+            "request_id": events.request_id(),
+            "persona": revision.get("persona"),
+            "persona_source": "requested",
+            "persona_state": {"promotion": revision, "act": "operator_ratification"},
+            "outcome": "persona-state-promoted",
+            "approval_mode": "operator",
+        })
+        return {"promoted": True, "revision": revision}
+
+    @router.post("/persona-state/candidates/{candidate_id}/reject")
+    async def persona_state_reject(request: Request, candidate_id: str, body: Dict[str, Any] = None):
+        _require_api_scope(request, "misumi:execute")
+        if persona_state is None:
+            raise HTTPException(503, "Persona-state adaptation is disabled")
+        reason = str((body or {}).get("reason") or "rejected via ratification API")
+        try:
+            candidate = persona_state.reject(candidate_id, reason)
+        except KeyError as exc:
+            raise HTTPException(404, str(exc).strip("'")) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return {"rejected": True, "candidate": candidate}
+
+    @router.post("/persona-state/revisions/{revision_id}/rollback")
+    async def persona_state_rollback(request: Request, revision_id: str, body: Dict[str, Any] = None):
+        _require_api_scope(request, "misumi:execute")
+        if persona_state is None:
+            raise HTTPException(503, "Persona-state adaptation is disabled")
+        reason = str((body or {}).get("reason") or "rolled back via ratification API")
+        try:
+            rollback = persona_state.rollback_revision(revision_id, reason)
+        except KeyError as exc:
+            raise HTTPException(404, str(exc).strip("'")) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        events.emit({
+            "request_id": events.request_id(),
+            "persona": rollback.get("persona"),
+            "persona_source": "requested",
+            "persona_state": {"rollback": rollback},
+            "outcome": "persona-state-rolled-back",
+            "approval_mode": "operator",
+        })
+        return {"rolled_back": True, "rollback": rollback}
+
     @router.post("/respond")
     async def respond(request: Request, body: MisumiRespondRequest):
         _require_api_scope(request, "misumi:read")
-        if body.retention_mode == "auto" and body.persist_turn:
+        persist_history = _persists_history(body)
+        # Semantic memory (capsules, handoffs, artifacts) follows retention_mode
+        # alone; ordinary history follows history_mode. They must never be conflated.
+        semantic_on = body.persist_turn and body.retention_mode == "auto"
+        if persist_history or semantic_on:
             _require_api_scope(request, "misumi:execute")
         started = time.monotonic()
         request_id = events.request_id()
-        persona = normalize_persona(body.persona)
+        # ``persona: "auto"`` delegates the lead-persona choice to the ratified
+        # deterministic routing contract; any other value stays caller-owned.
+        auto_route = str(body.persona or "").strip().lower() == "auto"
+        persona = normalize_persona("aoteru" if auto_route else body.persona)
         interface_context = body.context if isinstance(body.context, str) else ""
         prompt = (body.prompt or interface_context or body.intent or "status").strip()
+        routing: Optional[Dict[str, Any]] = None
+        adaptation_note: Optional[Dict[str, Any]] = None
         owner = _owner(request)
+        dialogue = _handle_dialogue_answer(
+            request, body, prompt, owner, request_id, persona_state, adaptation, offers, events,
+        ) if (body.persist_turn and (persona_state is not None or adaptation is not None)) else None
+        if dialogue is not None:
+            return dialogue
+        if auto_route:
+            # Follow-up carry (contract v0.2) needs the previous lead, and only a PERSISTED previous turn may supply one;
+            # an incognito turn (persist_turn=false) has no prior lead, which is exactly the v0.1 behaviour.
+            prior_lead = None
+            if adaptation is not None and body.persist_turn:
+                previous = adaptation.last_auto_route(body.session_id)
+                if previous and previous.get("persisted"):
+                    prior_lead = previous.get("persona")
+            persona, routing = resolve_auto_lead(prompt, prior_lead=prior_lead)
+            if adaptation is not None:
+                base_persona = persona
+                base_method = str((routing or {}).get("method") or "routing-contract-v0.1")
+                base_reasons = list((routing or {}).get("reasons") or [])
+                persona, learned = adaptation.apply_learned_overlays(prompt, persona, base_reasons)
+                if learned is not None:
+                    routing = {
+                        "method": f"{base_method}+learned-revision",
+                        "selected": persona,
+                        "reasons": [f"learned:{learned['revision_id']} cue={','.join(learned['cue'])}"],
+                        "base_selected": base_persona,
+                        "base_reasons": base_reasons,
+                        "learned": learned,
+                    }
+                adaptation.note_auto_route(
+                    body.session_id, prompt, persona,
+                    list((routing or {}).get("reasons") or []), request_id,
+                    persisted=bool(body.persist_turn),
+                )
+                # A durable instruction may also arrive inside an auto request
+                # ("for X use <persona> from now on").
+                if is_durable_instruction(prompt):
+                    named = _named_persona_in_prompt(prompt, exclude=persona)
+                    if named is not None:
+                        adaptation_note = record_durable_instruction(
+                            adaptation,
+                            prompt=prompt,
+                            named_persona=named,
+                            session_id=body.session_id,
+                            owner=owner,
+                            persist=body.persist_turn,
+                        )
+        elif adaptation is not None and body.persist_turn:
+            # Manual persona choice: durable instructions may create/activate a
+            # mapping; corrections and temporary choices stay shadow-only.
+            adaptation_note = record_manual_choice(
+                adaptation,
+                prompt=prompt,
+                chosen_persona=persona,
+                session_id=body.session_id,
+                owner=owner,
+            )
+        # Bounded persona state (-10): a style request shapes THIS turn; durable/feedback evidence is
+        # captured only when the turn is persisted (persist_turn=false captures nothing).
+        style_note: Optional[List[Dict[str, Any]]] = None
+        style_values: Dict[str, str] = {}
+        style_applied: List[Dict[str, Any]] = []
+        if persona_state is not None:
+            turn_signals = detect_style_signals(prompt)
+            if turn_signals and body.persist_turn:
+                style_note = _capture_style_signals(
+                    persona_state, prompt, turn_signals, responding=persona,
+                    named=_named_persona_in_prompt(prompt), session_id=body.session_id, owner=owner,
+                )
+            resolved = persona_state.resolve_state(persona, turn_signals)
+            style_values, style_applied = resolved["values"], resolved["provenance"]
         domain = infer_household_domain(prompt)
         sources = adapter.search(prompt, domain=domain, limit=4) if adapter.reachable else []
         if not domain:
             # General chat belongs to the normal model/RAG path. Lexical matches
             # against task/docs files are too weak to replace a conversational answer.
             sources = []
-        model_required = not domain or bool(_ARTIFACT_REQUEST.search(prompt))
+        # A justified team is itself a reason to use the model (supports need synthesis; household sources
+        # are still passed to it as untrusted context). Without one, domain requests stay grounded lookups.
+        team_plan = _team_plan(prompt, persona)
+        model_required = (
+            not domain or bool(_ARTIFACT_REQUEST.search(prompt)) or team_plan["decision"] == "team"
+        )
         backend = model = None
         turn: Dict[str, Any] = {"memory": None, "artifact": None}
         consulted: List[Dict[str, str]] = []
         contributions: List[Tuple[str, str]] = []
+        consult_trace: Dict[str, Dict[str, Any]] = {}
         capsule_id = None
         handoff_ids: List[str] = []
         if sources and not model_required:
@@ -767,12 +1206,23 @@ def setup_misumi_routes(
                 logger.warning("Misumi model endpoint unavailable: %s", exc)
                 text = "Odysseus is available, but no working model backend is configured for this request."
             else:
-                targets = _consultation_plan(prompt, "", persona)
+                targets = [item["persona"] for item in team_plan["supports"]]
 
                 async def consult(target: str):
+                    began = time.monotonic()
                     try:
-                        return target, await _consult_persona(prompt, target, backend, model)
+                        contribution = await _consult_persona(prompt, target, backend, model, lead=persona)
+                        consult_trace[target] = {
+                            "status": "ok", "raised_risk": risk_flag(contribution),
+                            "latency_ms": int((time.monotonic() - began) * 1000),
+                            "contribution_chars": len(contribution),
+                        }
+                        return target, contribution
                     except Exception as exc:
+                        consult_trace[target] = {
+                            "status": "failed", "raised_risk": False,
+                            "latency_ms": int((time.monotonic() - began) * 1000), "contribution_chars": 0,
+                        }
                         logger.warning(
                             "Misumi consultation failed for %s: %s", target, exc,
                             exc_info=True,
@@ -790,7 +1240,7 @@ def setup_misumi_routes(
                     for target, contribution in contributions
                 ]
 
-        should_persist = body.persist_turn and body.retention_mode == "auto"
+        should_persist = persist_history
         if should_persist:
             session_id, session = _ensure_session(
                 session_manager,
@@ -820,7 +1270,8 @@ def setup_misumi_routes(
                 backend=backend,
                 model=model,
                 context_messages=context_messages,
-                contributions=contributions,
+                contributions=synthesis_inputs(contributions),  # an OK: support adds nothing for the lead; only RISK:/legacy text
+                style_values=style_values,
             )
             text = str(turn["answer"])
 
@@ -831,7 +1282,10 @@ def setup_misumi_routes(
             "model"
         )
 
-        if contributions and should_persist:
+        # Consultation capsules/handoffs are semantic-memory writes: gate them on
+        # semantic retention, not on conversation history (found in retrospective
+        # review: history on + retention off used to still write a capsule).
+        if contributions and semantic_on:
             capsule_type = (
                 "decision"
                 if re.search(r"\b(plan|planning|decide|deciding|decision)\b", prompt, re.I)
@@ -842,7 +1296,7 @@ def setup_misumi_routes(
                     prompt,
                     source="consultation",
                     capsule_type=capsule_type,
-                    persona="aoteru",
+                    persona=persona,
                     meta={
                         "contributions": [
                             {"persona": target, "text": contribution}
@@ -858,7 +1312,7 @@ def setup_misumi_routes(
             for target, _contribution in (contributions if capsule_id else []):
                 try:
                     handoff = memory.create_handoff(
-                        "aoteru",
+                        persona,
                         target,
                         f"analyze the request from the {persona_record(target).get('role')} perspective",
                         capsule_id,
@@ -886,12 +1340,36 @@ def setup_misumi_routes(
         if should_persist:
             _persist_conversation_turn(session_manager, session_id, prompt, text, persona)
 
+        team_block: Optional[Dict[str, Any]] = None
+        if team_plan is not None and backend and model and model_required:
+            team_block = {
+                "lead": persona,
+                "decision": team_plan["decision"],
+                "reasons": team_plan["reasons"],
+                "excluded": team_plan["excluded"],
+                "supports": [
+                    {**item, **consult_trace.get(item["persona"], {"status": "not-run"})}
+                    for item in team_plan["supports"]
+                ],
+                "handovers": [
+                    {
+                        "from": persona, "to": item["persona"], "returned_to": persona,
+                        "purpose": f"analyse from the {persona_record(item['persona']).get('role')} perspective",
+                    }
+                    for item in team_plan["supports"]
+                ],
+            }
         files_changed = []
         if retention["artifact"].get("status") == "created":
             files_changed.append(f"document:{retention['artifact']['doc_id']}")
         events.emit({
             "request_id": request_id,
             "persona": persona,
+            "persona_source": "auto" if auto_route else "requested",
+            "routing": routing,
+            "routing_adaptation": adaptation_note,
+            "persona_state": {"applied": style_applied, "captured": style_note} if (style_applied or style_note) else None,
+            "team": team_block,
             "files_read": sorted({item["path"] for item in sources}),
             "files_changed": files_changed,
             "model": model,
@@ -911,6 +1389,7 @@ def setup_misumi_routes(
             ),
             "node": "odysseus",
             "persona": persona,
+            "persona_source": "auto" if auto_route else "requested",
             "who": persona_record(persona).get("display_name"),
             "audio_url": None,
             "voice": None,
@@ -919,7 +1398,33 @@ def setup_misumi_routes(
             "sources": sources,
             "session_id": session_id,
             "retention": retention,
+            "history_persisted": bool(should_persist and session_id),
         }
+        if routing is not None:
+            response["routing"] = routing
+        if adaptation_note is not None:
+            response["routing_adaptation"] = adaptation_note
+        if style_applied or style_note:
+            # Honest about reach: style only shapes model-written replies, not household-grounded answers.
+            response["persona_state"] = {
+                "applied": style_applied,
+                "effective": outcome == "model",
+                "captured": style_note,
+            }
+        if team_block is not None and team_block["decision"] == "team":
+            response["team"] = team_block
+        offer_sid = session_id or body.session_id
+        if (
+            offer_sid and body.persist_turn and outcome in {"model", "grounded", "absent"}
+            and (persona_state is not None or adaptation is not None)
+        ):
+            offer = _dialogue_offer(persona_state, adaptation, offers)
+            if offer is not None:
+                offers.record_offer(offer_sid, offer)
+                response["text"] = f"{text}\n\n{offer['question']}"
+                response["ratification_offer"] = {
+                    key: offer[key] for key in ("kind", "candidate_id", "summary", "question", "answers")
+                }
         if _consultation_enabled():
             response.update({
                 "consulted": consulted,

@@ -52,35 +52,55 @@ Aoteru should normally submit work to Odysseus instead of executing heavy repo/r
 ## Host model
 
 ```yaml
+# config/estate.yaml
 hosts:
   interface:
     role: controller
-    execution_worker: false
+    identity_verified: true
+    # No worker block: controllers are never execution workers.
 
   lab:
     role: worker
-    execution_worker: true
-    verified: true
-    availability: live
-    routing_eligible: true
+    identity_verified: true
+    worker:
+      enabled: true
+      transport: local
+      qualified_executors: [deterministic, local, codex, codex-write]
 
   home:
     role: worker
-    execution_worker: true
-    verified: false
-    availability: unavailable
-    routing_eligible: false
+    identity_verified: true
+    worker:
+      enabled: false
+      transport: ssh
+      qualified_executors: []
+
+# config/models.yaml
+capabilities:
+  - alias: local-fast
+    binding: qwen3:8b
+    qualified_hosts:
+      hz2-workstation:
+        evidence: docs/aoteru-lm4-production-canary-evidence.md
+        # binding: optional host-specific override
 ```
 
-Home becomes eligible only from live discovery proving at minimum:
+Host identity, worker enablement, executor qualification, alias qualification
+and live state are separate claims. `identity_verified` records a governed
+identity check and grants no eligibility on its own. `worker.enabled` is the
+operator's governed permission to route to the host, while
+`worker.qualified_executors` records the evidence-backed executor set. Each
+model alias independently names its `qualified_hosts`; an optional host-local
+`binding` overrides the alias default.
 
-```text
-verified = true
-healthy = true
-reachable = true
-```
-
-Never infer these states from old documentation.
+An eligible host has role `lab` or `home`, verified identity, an enabled
+worker and a healthy live worker response. An executable route additionally
+requires its executor to be qualified and live, every requested alias to be
+qualified and physically present on that host, any requested repository to
+resolve there, and no conflicting live lease. Health, inventory and repository
+availability are runtime observations, never inferred from old documentation.
+During migration, legacy `verified` is identity evidence only when
+`identity_verified` is absent; it never implies `worker.enabled`.
 
 ## Routing dimensions
 
@@ -212,6 +232,11 @@ task:
   context:
     source_pointers: []
     memory_pointers: []
+
+  initialising_prompt:
+    prompt_id: null
+    version: null
+    application_id: null
 ```
 
 ## Eligibility and scoring
@@ -313,6 +338,20 @@ Do not return worker scratchpads to the conversational model.
 
 Routing must improve from observed estate performance rather than remain a static hand-authored ranking.
 
+Initialising-prompt performance is part of that evidence. Prompt versions form
+an explicit graph: version -> rated application -> evolution event -> validated
+child version or reinforcement. Aggregate by ancestry as well as prompt
+id/version, repository/task class and failure tags.
+
+Every substantive application adds one graph event. A child should address the
+smallest observed failure class and may become the next active head only after
+protected-invariant validation. Clean applications reinforce the incumbent
+instead of causing cosmetic version churn.
+
+Prompt evolution cannot weaken permissions, domain gates, evidence requirements,
+verification requirements, model-identity rules, stop gates or repository-local
+authority in order to improve its measured score.
+
 ## Telemetry to capture per routed task
 
 At minimum:
@@ -332,6 +371,10 @@ escalation occurrence and reason
 independent-review outcome
 human correction/rejection where explicitly observed
 final task status
+initialising prompt id/version/application id when one governed the session
+prompt-session rating dimensions + agent overall rating at closeout
+operator rating/correction only when explicitly supplied
+prompt evolution parent/child/reinforcement edge and evidence-backed change targets
 ```
 
 Record source/result pointers rather than sensitive prompt copies where possible.

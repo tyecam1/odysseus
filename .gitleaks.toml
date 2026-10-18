@@ -1,0 +1,17 @@
+# Secret-scan configuration. The default gitleaks ruleset stays fully ON; this file only adds one narrow,
+# verified exception (docs/ci-secret-scan-allowlist.md explains how it was verified and how to re-check it).
+title = "odysseus gitleaks configuration"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "LM2 benchmark artifacts: the model_key field holds a model identifier, not a credential"
+# ALL of the following must match: this one historical commit, the benchmark-artifact tree, and exactly these
+# three model identifiers. A new file, another commit, or any other value is still scanned normally.
+condition = "AND"
+targetRules = ["generic-api-key"]
+commits = ["ddb5ec37f55a21a802a938a4cdfef4e286a06607"]
+paths = ['^evals/local_models/results/artifacts/lm2-[A-Za-z0-9_.-]+/gemma4-(12b|26b-a4b|e4b)-qat-gguf-direct/[A-Za-z0-9_.-]+\.json$']
+regexTarget = "match"
+regexes = ['^model_key": "gemma4-(12b|26b-a4b|e4b)-qat-gguf-direct"$']

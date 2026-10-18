@@ -56,8 +56,37 @@ jobs:
             echo "No dependency manifest changes detected; skipping dependency-review."
           fi
 
-      - name: Review dependency changes
+      # dependency-review needs the repository's dependency graph. Where it is not enabled the action cannot run at
+      # all ("Dependency review is not supported on this repository") and used to turn every manifest-changing PR
+      # red for a reason unrelated to the change. Only a definite 404 from the dependency-graph API means "not
+      # enabled" and skips the review -- loudly, never as a pass. Any other answer (200, a rate limit, a 5xx,
+      # an auth problem) still runs the action, so a real finding or a real fault is never hidden by this step.
+      - name: Check that the dependency graph is enabled
+        id: graph
         if: steps.dependency-files.outputs.changed == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -uo pipefail
+          status="$(gh api -i "repos/${REPO}/dependency-graph/sbom" 2>/dev/null | head -n 1 | awk '{print $2}')"
+          echo "dependency-graph API status: ${status:-none}"
+          if [ "${status}" = "404" ]; then
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=dependency-review SKIPPED::The dependency graph is not enabled for this repository, so dependency review cannot run. This is a skip, not a pass."
+            {
+              echo "### dependency-review SKIPPED (not a pass)"
+              echo
+              echo "The repository's dependency graph is not enabled, so GitHub cannot compare dependencies for this pull request."
+              echo "Enable it under Settings -> Advanced Security -> Dependency graph to turn this gate back on."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Review dependency changes
+        if: steps.dependency-files.outputs.changed == 'true' && steps.graph.outputs.enabled != 'false'
         uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294  # v5.0.0
         with:
           # Fail the PR on any newly introduced moderate-or-worse advisory.

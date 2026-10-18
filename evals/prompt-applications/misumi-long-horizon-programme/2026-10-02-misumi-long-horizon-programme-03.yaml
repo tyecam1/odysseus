@@ -1,0 +1,76 @@
+schema_version: 1
+application_id: 2026-10-02-misumi-long-horizon-programme-03
+prompt_id: misumi-long-horizon-programme
+prompt_version: 3
+repository: tyecam1/odysseus
+# Cross-repository programme: tyecam1/odysseus (dev) and tyecam1/misumi (main).
+branch: dev
+# Start and end times are approximate clock artefacts of the session.
+session_started_at: "2026-10-02T16:50:00+01:00"
+session_ended_at: "2026-10-02T17:25:00+01:00"
+start_commit: bf439d0ff14a8537e2fd52d8e1506449ebb89de4
+end_commit: f6c771bc3f865751a6ebe3477cce00ee8eda645a
+outcome_status: partial
+stop_reason: >-
+  The operator's decisions for the v3 application were carried out: the seed-order
+  verification (authorised through the interface box's existing proxy only, with
+  persistence off), the Phase 4 architecture amended then ratified, permanent
+  transcript retention redefined as user-deletable and implemented with honest
+  backup semantics (deletion API, prune --all, an Invalidate action, a
+  fixed-local-disk destination guard and refusal of a private age identity), the
+  legacy raw audio audited by metadata only and removed, and the backup system
+  prepared to the off-site age-encrypted contract. Per the v3 pre-stop check every
+  remaining item was classified. Human or physical: the lab sudo deployment, the
+  kiosk acceptance, the provider and path for the off-site destination (with the
+  public age recipient and the say-so to install the age binary), the say-so to
+  deploy the deletion endpoint to the household runtime, and an owner decision on
+  three pre-existing modified files in the canonical clone on home. Held back on
+  purpose: Sol review #3 until lab and kiosk evidence exists, backlog cleanup under
+  the strict evidence rule, and a model-behaviour task for seed-order steering.
+commits:
+  - f6c771bc3f
+  - "misumi c7dbcf94 (merge of PR #46)"
+models_routes:
+  - "Sonnet orchestrator (Claude Code, claude-sonnet-5-5 as stated by the session)"
+  - "Opus: not invoked in this application (the Phase 4 architecture direction had already been through its gate and was ratified by the operator)"
+  - "Sol: not invoked; retrospective review #3 remains owed and non-blocking until lab and kiosk evidence exists"
+  - "Seed-order verification: four requests sent from the interface box to its own loopback /agent proxy, which adds the service credential server-side; the credential was never read, printed, copied or persisted; every request set persist_turn false, retention_mode off, history_mode off. Model route reported by the runtime: source model, node odysseus, persona aoteru (qwen3:8b on home), GPU free"
+  - "Deterministic lab shell as user agent over Tailscale SSH on fresh git archive trees of dev (never the live checkout); home and interface PC over the tailnet with HostKeyAlias to the pinned LAN host-key entry and StrictHostKeyChecking yes; GitHub through gh and the Git Data API with no local Odysseus checkout"
+verification:
+  - "deterministic: 25 new deletion and invalidation tests, 113 neighbouring transcript, retention, history-decoupling, backup and drill tests unchanged; CI green on Odysseus #72"
+  - "mutation checks: deletion ignoring the owner, no upper bound, deletion refused for a permanent archive, the route using the read scope, the backup notice dropped, prune --all keeping the newest and a private identity accepted each turned the matching tests red; the first run of the new tests showed a test of my own misreading the export return type, which was fixed before anything merged"
+  - "live: the Windows backup task was exercised on the real home host in a scratch directory with fake data (fixed-disk destination refused and override honoured; a recipients file holding a private identity refused by Run and Install; Invalidate -WhatIf deleted nothing; Invalidate deleted the old snapshot in staging and destination and produced a fresh verified one); the seed-order prompts ran against the live household runtime; the legacy audio directory was audited by metadata only, a checksum-verified manifest was captured, and a guarded script that refuses to delete unless the directory still matches the manifest removed 463 files (0 remain, the runtime still answered 200)"
+  - "honest reporting: seed-order results were recorded as two pass, one partial and one not demonstrated rather than rounded up; the canonical clone on home was found already dirty (three modified host-agent files), proved unchanged by the checks and reported, not cleaned"
+  - "access and authority: the box credential was used only through the box's existing proxy as authorised; no private age identity was generated or handled; the deletion endpoint is merged but not deployed to the household runtime and the evidence says so; nothing was installed or scheduled; one command was blocked by a parse error and none by the harness"
+failure_tags:
+  - shell_and_api_transport_pitfalls_recurred_despite_v3_checklist
+rating:
+  scale: 1-5
+  goal_progress: 4
+  correctness_verification: 4
+  authority_scope_discipline: 5
+  routing_resource_efficiency: 3
+  continuity_handoff_quality: 4
+  agent_overall: 4.0
+  operator_overall: null
+  operator_note: null
+prompt_revision_recommended: false
+revision_reason: >-
+  Reinforce v3; no child. The deterministic planner returned evolve for the single failure tag (its default for any tag);
+  that output is overridden and the override is recorded in the evolution event. The v3 pre-stop check and trace-before-hand-back
+  instructions worked as intended in this application: every remaining item was
+  classified before stopping and the trace is persisted with the evidence rather
+  than on request. The single failure class, shell and API transport mistakes
+  (a UTF-8 byte-order mark written by Set-Content into a path list, a nested-quote
+  inline command, a PowerShell here-string that drops its final newline), is a
+  recurrence of a class the v3 checklist already names, so the instruction text
+  is adequate and the lapse was in applying it. This is the third consecutive
+  application tagged with this class. If it recurs a fourth time, move the fix
+  out of prompt text into a reusable helper (a small script for the lab, home and
+  gh round trips that handles files, encoding and exit codes once) rather than
+  accreting more warnings.
+evidence:
+  - "odysseus PR #72 merged (explicit user deletion for the permanent transcript archive, prune --all, the Invalidate action, destination and private-identity guards); misumi PR #46 merged (Phase 4 architecture Ratified with the operator's amendments, backup runbook to the off-site age-encrypted contract, legacy raw audio audit and manifest, seed-order results on the card, card updates)"
+  - "automation/review/misumi-long-horizon-programme-evidence.md (operator decisions and what was done, refreshed gates); misumi docs/memory-architecture.md, docs/operations/backup-restore.md, docs/audits/2026-10-02-legacy-raw-audio-removal.md and its CSV manifest"
+  - "Open human or physical gates carried forward: lab sudo fast-forward and restart (resolve current dev first); physical kiosk acceptance; provider and path for the off-site backup with the public age recipient and permission to install age on home; permission to deploy the deletion endpoint to the household runtime; owner decision on three modified files in the canonical Misumi clone on home"
+  - "Operator ratings: none supplied"

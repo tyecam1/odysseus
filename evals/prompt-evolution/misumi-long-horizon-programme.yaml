@@ -1,0 +1,388 @@
+schema_version: 1
+prompt_id: misumi-long-horizon-programme
+active_head: prompt:v4
+nodes:
+  - id: prompt:v1
+    type: prompt_version
+    version: 1
+    path: docs/initialising-prompts/misumi-long-horizon-programme-v1.md
+    status: superseded
+  - id: application:2026-10-01-misumi-long-horizon-programme-01
+    type: application
+    application_id: 2026-10-01-misumi-long-horizon-programme-01
+    trace_path: evals/prompt-applications/misumi-long-horizon-programme/2026-10-01-misumi-long-horizon-programme-01.yaml
+    rating:
+      agent_overall: 3.8
+      goal_progress: 4
+      correctness_verification: 3
+      authority_scope_discipline: 4
+      routing_resource_efficiency: 4
+      continuity_handoff_quality: 4
+    failure_tags:
+      - codex_quota_exhausted_unprobed_before_dispatch
+      - existing_deployed_mechanism_missed_by_audit_found_late
+      - coupled_policy_flag_consumer_missed_until_retrospective_review
+      - permission_gates_discovered_serially_not_batched
+      - sol_client_version_mismatch_gpt6_sol_refused
+      - stale_scheduled_resume_prompt_fired_after_completion
+      - shell_quoting_and_harness_precheck_retries
+  - id: evolution:2026-10-01-misumi-long-horizon-programme-01
+    type: evolution_event
+    decision: evolve
+    evidence_application: 2026-10-01-misumi-long-horizon-programme-01
+    targets:
+      - inventory deployed state on every involved host (scheduled tasks, services, release provenance, stores) before designing any persistent mechanism; deployed state outranks repository and audit prose, and a contradiction is an Opus gate
+      - probe a paid lane with a one-call smoke test and resolve the exact client version before a long dispatch; on quota exhaustion record the reset time, block only the affected action and continue other lanes
+      - enumerate every consumer of a coupled flag when splitting it, test each consumer and direction, mutation-check each guard, and preserve the old meaning for callers that omit the new control
+      - surface likely operator-permission gates together at session start, record exact denials and do not retry them in pieces
+      - make resume prompts re-read live state and skip completed steps
+      - keep remote-shell transport simple (files over stdin or encoded commands, local JSON parsing, no cleanup verbs in command text)
+  - id: prompt:v2
+    type: prompt_version
+    version: 2
+    parent_version: 1
+    path: docs/initialising-prompts/misumi-long-horizon-programme-v2.md
+    status: superseded
+  - id: application:2026-10-02-misumi-long-horizon-programme-02
+    type: application
+    application_id: 2026-10-02-misumi-long-horizon-programme-02
+    trace_path: evals/prompt-applications/misumi-long-horizon-programme/2026-10-02-misumi-long-horizon-programme-02.yaml
+    rating:
+      agent_overall: 3.6
+      goal_progress: 4
+      correctness_verification: 4
+      authority_scope_discipline: 4
+      routing_resource_efficiency: 3
+      continuity_handoff_quality: 3
+    failure_tags:
+      - executable_frontier_declared_exhausted_while_dependency_ready_work_remained
+      - merge_attempted_before_policy_confirmed_denied_by_auto_mode
+      - application_trace_not_persisted_until_prompted
+      - shell_and_api_transport_pitfalls_recurred_despite_v2_refinement_6
+      - test_mutant_survived_until_strengthened
+  - id: evolution:2026-10-02-misumi-long-horizon-programme-02
+    type: evolution_event
+    decision: evolve
+    evidence_application: 2026-10-02-misumi-long-horizon-programme-02
+    targets:
+      - before any hand-back that reports a stop, classify every remaining contract item as human-only gate, environment condition or executable, and continue while an executable item exists; a denied merge, deploy or credential action blocks only that action
+      - persist the application trace and evolution event before a hand-back that reports a stop, without waiting to be asked
+      - add merging to a protected branch, when no explicit merge authority is on record, to the permission gates surfaced together at session start
+      - restructure the recurring shell and API transport guidance into a checklist (probe the host's default shell, pass structured API bodies as files, decide success from exit codes, assert replacement anchors match once, keep cleanup verbs out of command text)
+  - id: prompt:v3
+    type: prompt_version
+    version: 3
+    parent_version: 2
+    path: docs/initialising-prompts/misumi-long-horizon-programme-v3.md
+    status: superseded
+  - id: prompt:v4
+    type: prompt_version
+    version: 4
+    parent_version: 3
+    path: docs/initialising-prompts/misumi-long-horizon-programme-v4.md
+    status: active
+  - id: application:2026-10-04-misumi-long-horizon-programme-06
+    type: application
+    application_id: 2026-10-04-misumi-long-horizon-programme-06
+    trace_path: evals/prompt-applications/misumi-long-horizon-programme/2026-10-04-misumi-long-horizon-programme-06.yaml
+    rating:
+      agent_overall: 4.0
+      goal_progress: 4
+      correctness_verification: 4
+      authority_scope_discipline: 5
+      routing_resource_efficiency: 3
+      continuity_handoff_quality: 4
+    failure_tags:
+      - box_port_misassumed_first_live_attempt_404
+      - kiosk_bridge_paused_ui_transition_proof_pending_physical
+      - worker_clone_origin_stale_renamed_remote_discovered
+      - fixture2_model_json_leak_preexisting_preserved
+  - id: evolution:2026-10-04-misumi-long-horizon-programme-06
+    type: evolution_event
+    decision: reinforce
+    evidence_application: 2026-10-04-misumi-long-horizon-programme-06
+  - id: application:2026-10-02-misumi-long-horizon-programme-03
+    type: application
+    application_id: 2026-10-02-misumi-long-horizon-programme-03
+    trace_path: evals/prompt-applications/misumi-long-horizon-programme/2026-10-02-misumi-long-horizon-programme-03.yaml
+    rating:
+      agent_overall: 4.0
+      goal_progress: 4
+      correctness_verification: 4
+      authority_scope_discipline: 5
+      routing_resource_efficiency: 3
+      continuity_handoff_quality: 4
+    failure_tags:
+      - shell_and_api_transport_pitfalls_recurred_despite_v3_checklist
+  - id: evolution:2026-10-02-misumi-long-horizon-programme-03
+    type: evolution_event
+    decision: reinforce
+    evidence_application: 2026-10-02-misumi-long-horizon-programme-03
+    note: >-
+      The deterministic planner returned evolve for the single recurring transport failure tag. Overridden: the failure
+      is a lapse in applying a v3 checklist item that already names it, and the durable fix is tooling, not more prompt
+      text. A fourth consecutive occurrence restructures the fix into a reusable helper instead of adding warnings.
+  - id: application:2026-10-02-misumi-long-horizon-programme-04
+    type: application
+    application_id: 2026-10-02-misumi-long-horizon-programme-04
+    trace_path: evals/prompt-applications/misumi-long-horizon-programme/2026-10-02-misumi-long-horizon-programme-04.yaml
+    rating:
+      agent_overall: 4.0
+      goal_progress: 4
+      correctness_verification: 4
+      authority_scope_discipline: 5
+      routing_resource_efficiency: 3
+      continuity_handoff_quality: 4
+    failure_tags:
+      - shell_and_api_transport_pitfalls_recurred_despite_v3_checklist
+      - pr_description_template_not_read_before_opening
+  - id: evolution:2026-10-02-misumi-long-horizon-programme-04
+    type: evolution_event
+    decision: reinforce
+    evidence_application: 2026-10-02-misumi-long-horizon-programme-04
+    note: >-
+      The deterministic planner returned evolve for the failure tags (its default for any tag); overridden and recorded.
+      The v3 pre-stop rule did its job: the first hand-back was rejected and the executable frontier was then exhausted.
+      The transport failure class recurred a fourth time, which application 03 said would move the fix out of prompt text
+      into a reusable helper; that is done (scripts/publish_tree.py with tests), so the prompt text is not extended again.
+      The new PR-description tag is a one-off convention miss (the repository's PR template is checked by CI) and is not a
+      reason to change the prompt.
+  - id: application:2026-10-03-misumi-long-horizon-programme-05
+    type: application
+    application_id: 2026-10-03-misumi-long-horizon-programme-05
+    trace_path: evals/prompt-applications/misumi-long-horizon-programme/2026-10-03-misumi-long-horizon-programme-05.yaml
+    rating:
+      agent_overall: 3.8
+      goal_progress: 4
+      correctness_verification: 4
+      authority_scope_discipline: 5
+      routing_resource_efficiency: 3
+      continuity_handoff_quality: 3
+    failure_tags:
+      - application_trace_not_persisted_before_handback_recurred
+      - reboot_persistence_defect_found_by_household_incident_not_design_review
+      - first_home_cutover_failed_on_userdomain_assumption
+      - first_box_deploy_rolled_back_on_tls_healthcheck_hostname
+      - direct_dev_loop_probe_denied_steering_contribution_left_unmeasured
+  - id: evolution:2026-10-03-misumi-long-horizon-programme-05
+    type: evolution_event
+    decision: reinforce
+    evidence_application: 2026-10-03-misumi-long-horizon-programme-05
+    note: >-
+      The deterministic planner returned evolve for the failure tags (its default for any tag); overridden and recorded.
+      The transport class did not recur: the reusable helpers (publish_tree.py, the deploy scripts' own rollback safety
+      nets) absorbed it - one TLS-hostname mistake was caught by the deploy script's safety net and fixed on re-run,
+      which is the tooling fix working as designed. The genuinely recurring class is trace discipline: v3 already
+      contains the pre-stop rule to persist the trace and evolution event before a hand-back, and the -05 hand-back
+      still left no trace (second occurrence after -02). That is a lapse in applying an existing rule, not missing
+      prompt content; a third occurrence moves the fix out of prompt text into tooling (a publish/stop checklist that
+      fails closed without a trace), as was done for the transport class. The reboot tag records that the defect was
+      found by a household incident rather than by design review of the logon-triggered lifecycle; the corrective
+      machine-start redesign is the outcome, so no new prompt text is added. The coordinator runtime changed
+      mid-application (Sonnet to GLM Flash, a temporary substitution while Claude subscription capacity is exhausted)
+      and is recorded in the trace's models_routes only; the role contract and the Opus-only gates are unchanged.
+  - id: application:2026-10-05-misumi-long-horizon-programme-07
+    type: application
+    application_id: 2026-10-05-misumi-long-horizon-programme-07
+    trace_path: evals/prompt-applications/misumi-long-horizon-programme/2026-10-05-misumi-long-horizon-programme-07.yaml
+    rating:
+      agent_overall: 4.4
+      goal_progress: 5
+      correctness_verification: 4
+      authority_scope_discipline: 5
+      routing_resource_efficiency: 4
+      continuity_handoff_quality: 4
+    failure_tags:
+      - v4_registration_incomplete_caught_by_register_consistency_ci
+      - promote_lookup_by_cue_key_bug_caught_by_own_tests
+      - shadow_evaluation_phantom_spillover_bug_caught_by_own_tests
+      - deploy_script_freeze_path_regression_aborted_stage1
+      - home_clone_auto_pull_lag_docs_only
+  - id: evolution:2026-10-05-misumi-long-horizon-programme-07
+    type: evolution_event
+    decision: reinforce
+    evidence_application: 2026-10-05-misumi-long-horizon-programme-07
+  - id: application:2026-10-05-misumi-long-horizon-programme-08
+    type: application
+    application_id: 2026-10-05-misumi-long-horizon-programme-08
+    trace_path: evals/prompt-applications/misumi-long-horizon-programme/2026-10-05-misumi-long-horizon-programme-08.yaml
+    rating:
+      agent_overall: 4.2
+      goal_progress: 4
+      correctness_verification: 4
+      authority_scope_discipline: 5
+      routing_resource_efficiency: 4
+      continuity_handoff_quality: 4
+    failure_tags:
+      - sol_lane_unresolved_on_stale_lab_backend_verification_debt_carried
+      - reject_flow_not_live_exercised_on_real_store_tests_only
+      - respond_decorator_edit_glued_line_caught_by_pytest_collection
+      - principal_requirement_surfaced_as_409_in_unauthenticated_testclient
+  - id: evolution:2026-10-05-misumi-long-horizon-programme-08
+    type: evolution_event
+    decision: reinforce
+    evidence_application: 2026-10-05-misumi-long-horizon-programme-08
+  - id: application:2026-10-06-misumi-long-horizon-programme-09
+    type: application
+    application_id: 2026-10-06-misumi-long-horizon-programme-09
+    trace_path: evals/prompt-applications/misumi-long-horizon-programme/2026-10-06-misumi-long-horizon-programme-09.yaml
+    rating:
+      agent_overall: 4.0
+      goal_progress: 4
+      correctness_verification: 4
+      authority_scope_discipline: 5
+      routing_resource_efficiency: 3
+      continuity_handoff_quality: 4
+    failure_tags:
+      - corpus_and_07_suite_used_drifted_persona_intents_first_measurement_withdrawn
+      - named_persona_substring_match_of_one_letter_display_name
+      - durable_instruction_after_conflicting_corrections_unpromotable
+      - stemmer_notes_to_not_collision_caught_by_corpus_test
+      - support_risk_flag_non_discriminating_false_alarms_in_controls
+      - benchmark_first_run_without_no_conflict_controls
+      - live_demo_script_defects_byte_array_unrolling_and_output_capture
+      - sol_glm_lanes_unavailable_verification_debt_carried
+      - background_ci_watcher_killed_under_memory_pressure
+      - production_agent_runs_old_code_until_restarted
+  - id: evolution:2026-10-06-misumi-long-horizon-programme-09
+    type: evolution_event
+    decision: reinforce
+    evidence_application: 2026-10-06-misumi-long-horizon-programme-09
+  - id: application:2026-10-06-misumi-long-horizon-programme-10
+    type: application
+    application_id: 2026-10-06-misumi-long-horizon-programme-10
+    trace_path: evals/prompt-applications/misumi-long-horizon-programme/2026-10-06-misumi-long-horizon-programme-10.yaml
+    rating:
+      agent_overall: 4.0
+      goal_progress: 4
+      correctness_verification: 4
+      authority_scope_discipline: 5
+      routing_resource_efficiency: 3
+      continuity_handoff_quality: 4
+    failure_tags:
+      - wiring_pushed_with_a_test_not_run_locally_ci_failed
+      - preregistered_judge_infeasible_and_substitute_judge_unreliable
+      - first_fix_overcorrected_detection_loss_reassurance_harm
+      - heredoc_windows_path_escape_errors_repeated
+      - production_cutover_declined_by_classifier_then_user_authorised
+      - programme_patch_left_unsubstituted_placeholder_in_merged_file
+  - id: evolution:2026-10-06-misumi-long-horizon-programme-10
+    type: evolution_event
+    decision: reinforce
+    evidence_application: 2026-10-06-misumi-long-horizon-programme-10
+edges:
+  - from: prompt:v1
+    to: application:2026-10-01-misumi-long-horizon-programme-01
+    type: applied
+  - from: application:2026-10-01-misumi-long-horizon-programme-01
+    to: evolution:2026-10-01-misumi-long-horizon-programme-01
+    type: observed
+  - from: evolution:2026-10-01-misumi-long-horizon-programme-01
+    to: prompt:v2
+    type: derived_child
+  - from: prompt:v2
+    to: application:2026-10-02-misumi-long-horizon-programme-02
+    type: applied
+  - from: application:2026-10-02-misumi-long-horizon-programme-02
+    to: evolution:2026-10-02-misumi-long-horizon-programme-02
+    type: observed
+  - from: evolution:2026-10-02-misumi-long-horizon-programme-02
+    to: prompt:v3
+    type: derived_child
+  - from: prompt:v3
+    to: application:2026-10-02-misumi-long-horizon-programme-03
+    type: applied
+  - from: application:2026-10-02-misumi-long-horizon-programme-03
+    to: evolution:2026-10-02-misumi-long-horizon-programme-03
+    type: observed
+  - from: evolution:2026-10-02-misumi-long-horizon-programme-03
+    to: prompt:v3
+    type: reinforced
+  - from: prompt:v3
+    to: application:2026-10-02-misumi-long-horizon-programme-04
+    type: applied
+  - from: application:2026-10-02-misumi-long-horizon-programme-04
+    to: evolution:2026-10-02-misumi-long-horizon-programme-04
+    type: observed
+  - from: evolution:2026-10-02-misumi-long-horizon-programme-04
+    to: prompt:v3
+    type: reinforced
+  - from: prompt:v3
+    to: application:2026-10-03-misumi-long-horizon-programme-05
+    type: applied
+  - from: application:2026-10-03-misumi-long-horizon-programme-05
+    to: evolution:2026-10-03-misumi-long-horizon-programme-05
+    type: observed
+  - from: evolution:2026-10-03-misumi-long-horizon-programme-05
+    to: prompt:v3
+    type: reinforced
+  - from: prompt:v3
+    to: application:2026-10-04-misumi-long-horizon-programme-06
+    type: applied
+  - from: application:2026-10-04-misumi-long-horizon-programme-06
+    to: evolution:2026-10-04-misumi-long-horizon-programme-06
+    type: observed
+  - from: evolution:2026-10-04-misumi-long-horizon-programme-06
+    to: prompt:v3
+    type: reinforced
+  - from: prompt:v4
+    to: application:2026-10-05-misumi-long-horizon-programme-07
+    type: applied
+  - from: application:2026-10-05-misumi-long-horizon-programme-07
+    to: evolution:2026-10-05-misumi-long-horizon-programme-07
+    type: observed
+  - from: evolution:2026-10-05-misumi-long-horizon-programme-07
+    to: prompt:v4
+    type: reinforced
+  - from: prompt:v4
+    to: application:2026-10-05-misumi-long-horizon-programme-08
+    type: applied
+  - from: application:2026-10-05-misumi-long-horizon-programme-08
+    to: evolution:2026-10-05-misumi-long-horizon-programme-08
+    type: observed
+  - from: evolution:2026-10-05-misumi-long-horizon-programme-08
+    to: prompt:v4
+    type: reinforced
+  - from: prompt:v4
+    to: application:2026-10-06-misumi-long-horizon-programme-09
+    type: applied
+  - from: application:2026-10-06-misumi-long-horizon-programme-09
+    to: evolution:2026-10-06-misumi-long-horizon-programme-09
+    type: observed
+  - from: evolution:2026-10-06-misumi-long-horizon-programme-09
+    to: prompt:v4
+    type: reinforced
+  - from: prompt:v4
+    to: application:2026-10-06-misumi-long-horizon-programme-10
+    type: applied
+  - from: application:2026-10-06-misumi-long-horizon-programme-10
+    to: evolution:2026-10-06-misumi-long-horizon-programme-10
+    type: observed
+  - from: evolution:2026-10-06-misumi-long-horizon-programme-10
+    to: prompt:v4
+    type: reinforced
+guardrail_validation:
+  prompt:v4:
+    scope_preserved: true
+    authority_preserved: true
+    evidence_verification_preserved: true
+    stop_gate_not_weakened: true
+    model_identity_discipline_not_weakened: true
+    access_failure_ceiling_preserved: true
+    trace_evolution_required: true
+  prompt:v2:
+    scope_preserved: true
+    authority_preserved: true
+    evidence_verification_preserved: true
+    stop_gate_not_weakened: true
+    model_identity_discipline_not_weakened: true
+    access_failure_ceiling_preserved: true
+    trace_evolution_required: true
+  prompt:v3:
+    scope_preserved: true
+    authority_preserved: true
+    evidence_verification_preserved: true
+    stop_gate_not_weakened: true
+    model_identity_discipline_not_weakened: true
+    access_failure_ceiling_preserved: true
+    trace_evolution_required: true

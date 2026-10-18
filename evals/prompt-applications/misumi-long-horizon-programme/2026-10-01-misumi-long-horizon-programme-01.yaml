@@ -1,0 +1,84 @@
+schema_version: 1
+application_id: 2026-10-01-misumi-long-horizon-programme-01
+prompt_id: misumi-long-horizon-programme
+prompt_version: 1
+repository: tyecam1/odysseus
+# Cross-repository programme: tyecam1/odysseus (dev) and tyecam1/misumi (main).
+branch: dev
+# Start and end times are approximate clock artefacts of the session.
+session_started_at: "2026-10-01T13:20:00+01:00"
+session_ended_at: "2026-10-01T20:00:00+01:00"
+start_commit: fb19b20c0962fbfc2aec6039ed86119b04c33c9b
+end_commit: 93aa5151
+outcome_status: partial
+stop_reason: >-
+  Phase 0 reconciled (62 Misumi cards classified, Misumi PR #41 merged, PR #39
+  reconciled with the queue-ownership rule), Phase 1 multihost Stages 1-7
+  integrated onto dev (PR #44, accepted pending retrospective Sol review), and
+  Phase 2 (durable owner-scoped idempotent transcript runtime, disabled by
+  default) merged (PR #46) then repaired after a retrospective Sol review that
+  found one critical and three major defects (PR #47). Stopped handing back
+  because the remaining critical path is gated by operator permissions that
+  auto-mode refused and that were not bypassed: releasing the integration lease
+  (Production Deploy), configuring the Windows home checkout for Stage 8 (Remote
+  Shell Writes), creating the recovery branch for the deployed interface-box
+  snapshot, and deploying dev to the lab service. Operator-only gates also
+  remain: ambient-capture consent ("everyone in range knows and agrees"), the
+  Misumi PR #39 merge, and several human-gated cards. Executable frontier that
+  was not started: provider-quota task, lifecycle-hardening task, legacy card
+  reconciliation, retrospective Sol review #2, and Phases 3-9.
+commits:
+  - f4dedc4506
+  - 59b3796
+  - f901b8996f
+  - 14b2b8fb30
+  - c81b06cc81
+  - 65550dc118
+  - 93aa5151
+  - e643a3f953
+  - 9d84d2f7
+models_routes:
+  - "Sonnet orchestrator (Claude Code, claude-sonnet-5-5 as stated by the session)"
+  - "Opus planner via the Agent tool, requested opus (identity not authenticated): initial live-state synthesis, then a second bounded synthesis when live state contradicted the programme premise (existing ambient capture mechanism)"
+  - "Sol retrospective review #1: requested gpt-6-sol, codex exec --sandbox read-only via /home/agent/.local/bin/codex 0.155.1 on the lab (CLI-reported; request and client observation only, not an authenticated backend attestation). A first attempt through the older client /home/agent/.local/codex-cli/node_modules/.bin/codex 0.149.0 was refused by the service (model not supported with a ChatGPT account). Operator policy 2026-10-01 made Sol retrospective and non-blocking."
+  - "Lab Codex write lane (aoteru ask --implementation, execution 8a65072e): usage limit hit, failed in 4 s with no repository mutation; not used again"
+  - "Deterministic lab shell as user agent over Tailscale SSH inside leased worktrees (git merge, pytest 3.12.13, git archive baselines); no paid inference for the integration or the transcript runtime"
+  - "Home and interface PC: read-only SSH probes plus one bundle transfer and clone to E:\\aoteru (home); secret-scanned snapshot of the deployed interface-box copied read-only to the session scratch area"
+verification:
+  - "deterministic: lab full suite on the integration tree 5656 passed / 0 failed / 19 errors, identical 19 `no such table: source_events` errors on a git-archive dev baseline (5277 passed + same 19); the one real-thread-timing failure passed 8/8 in isolation on both trees; CI pytest 5638 / 0 failed; transcript runtime full suite 5684 passed / 0 failed; repair suite 5703 passed / 0 failed; CI pytest 5685 / 0 failed; compileall clean"
+  - "mutation checks: re-coupling history, dropping the owner filter, removing the unique constraint and lookup, reverting the consultation gate and dropping the read-time retention cutoff each turned the matching tests red"
+  - "CI: title and description checks fixed; gitleaks reports the same 69 pre-existing findings from two historical commits (ddb5ec37, f88ec808) on every PR; pytest job red only for the pre-existing source_events waiver"
+  - "retrospective Sol review #1: PR #44 ACCEPT_WITH_FINDINGS; transcript runtime REJECT on one critical finding (consultation memory capture gated on conversation history instead of retention_mode). Each of six findings was verified against the code before repair; five repaired in PR #47 with 19 regression tests; the PostgreSQL migration gap is tracked as a task because no PostgreSQL was available to test a fix"
+  - "access and authority: five auto-mode denials were recorded and not bypassed (local scratch diff, first read of the home pull script, interface-box recovery-branch clone, remote sparse-checkout write on home, lease release); the harness pre-check twice blocked commands containing cleanup verbs and they were reworded without them"
+failure_tags:
+  - codex_quota_exhausted_unprobed_before_dispatch
+  - existing_deployed_mechanism_missed_by_audit_found_late
+  - coupled_policy_flag_consumer_missed_until_retrospective_review
+  - permission_gates_discovered_serially_not_batched
+  - sol_client_version_mismatch_gpt6_sol_refused
+  - stale_scheduled_resume_prompt_fired_after_completion
+  - shell_quoting_and_harness_precheck_retries
+rating:
+  scale: 1-5
+  goal_progress: 4
+  correctness_verification: 3
+  authority_scope_discipline: 4
+  routing_resource_efficiency: 4
+  continuity_handoff_quality: 4
+  agent_overall: 3.8
+  operator_overall: null
+  operator_note: null
+prompt_revision_recommended: true
+revision_reason: >-
+  Observed failure classes: a paid lane's quota was not probed before a long
+  dispatch (preflight reported it live); an already-deployed ambient transcript
+  mechanism, its scheduled task and its unrecorded source were found only after
+  the design was drafted; a coupled retention flag had a second consumer that
+  was not enumerated, so a critical semantic-memory bypass reached dev (behind
+  a default-off flag) and was caught only by the retrospective verifier; and
+  operator-permission gates were discovered one denial at a time.
+evidence:
+  - "odysseus PRs: #44 multihost integration, #45 and #48 programme evidence, #46 transcript runtime, #47 retrospective Sol repairs; misumi PRs: #41 backlog classification (merged), #39 reconciled and left for the operator"
+  - "automation/review/misumi-long-horizon-programme-evidence.md (policy change, stage log, denials, Sol review)"
+  - "docs/misumi-durable-transcript-runtime.md; automation/review/agent-tasks/inbox/2026-10-01-provider-quota-health-in-routing-preflight.agent-task.md; automation/review/agent-tasks/inbox/2026-10-01-postgres-estate-migration.agent-task.md"
+  - "Operator ratings: none supplied"

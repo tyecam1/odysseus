@@ -23,7 +23,8 @@ host_eligibility:
     execution_worker: true
     # Never hardcode this true from prose. Real eligibility is computed at
     # request time from config/estate.yaml's desktop-in7o23d entry
-    # (verified/tailscale fields) — this block only documents intent.
+    # (`worker.enabled` and `worker.qualified_executors`, after identity
+    # verification) — this block only documents intent.
 
 # Evidence-triggered escalation only — never a vague "difficulty" judgment.
 escalation_triggers:

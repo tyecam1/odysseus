@@ -1,0 +1,82 @@
+schema_version: 1
+application_id: 2026-09-29-j1-long-horizon-method-loop-04
+prompt_id: j1-long-horizon-method-loop
+prompt_version: 5
+repository: tyecam1/obsidian-PhD
+branch: sonnet/j1-long-horizon-20260929
+# Start time is the first clock artefact of the session; approximate.
+session_started_at: "2026-09-29T23:28:00+01:00"
+session_ended_at: "2026-09-30T00:10:00+01:00"
+start_commit: 67081f0c486ec725af592ded9e012aa5ef5f15dd
+end_commit: 293db274df96e94c9f5f725b7f92af32b65d3805
+outcome_status: partial
+stop_reason: >-
+  No dependency-ready work remains that does not need author-supplied full text or
+  an author ruling on R1-R6. One residual was closed (Roveda 2022 read from its
+  open-access publisher page and Figs 8-9 inspected; three HF/ergonomics-economics
+  priors recovered at abstract tier; one registered bounded PubMed extension search
+  run), checked by one fresh pointer-first Sol packet (26), propagated through the
+  smallest affected records, PR #600 title/description repaired, and issue #479
+  updated. No gate passed, no architecture selected, no novelty declared or
+  cleared, no amendment applied, no canonical file edited, no manuscript prose
+  written, no evidence frozen, no approval token issued. Eleven dependency groups
+  remain access-limited or author-controlled.
+commits:
+  - 35b5f24f5
+  - 870fda9a0
+  - 293db274d
+models_routes:
+  - "Sonnet coordinator/execution (Claude Code, claude-sonnet-5-5 as stated by the session); no subagents"
+  - "Sol adjudication: requested gpt-6.1-sol on the operator's mid-session instruction to replace gpt-6-sol; codex exec read-only high reasoning, one pointer-first packet (26). The installed CLI 0.156.1 listed the model but the service refused the run (not supported with a ChatGPT account); the same packet run with the Codex desktop app's bundled 0.159.0 client was accepted and printed model gpt-6.1-sol. Identity is the requested and CLI-reported identifier, not an authenticated backend attestation. The repo model policy files still pin gpt-6-sol and were not edited (operator/PR step)"
+  - "native Opus: not used (E6 contract section 9 convergence condition not met; Sol OPUS-TRIGGER=NOT-MET)"
+  - "no GLM lane used"
+verification:
+  - "deterministic: seven quoted Roveda passages string-verified against the publisher page text (123,821 characters); whole-text term counts (psycholog, emotion, stress, fatigue, statistic, t-test, Wilcoxon, ANOVA, p-value all 0; significan* 3, none inferential); PubMed abstracts fetched by script into a TSV; registered search rule written before results; link check over 52 changed markdown files plus new records (0 broken after the forward link was written); CI gate failure traced to 16 agent-task files outside the branch diff"
+  - "figure images: Roveda Figs 8-9 inspected as rendered images (screenshot; no download); visual reading only"
+  - "Sol pkt 26: Roveda Q1 NO, Q2 YES (coordinator's PARTLY rejected on the audit's literal definition), assessability count amended to 13 with partial-tier wording, LEAVES-LIST; Prior AMEND-WORDING with one added sentence; Kolus/Yung REFERENCE-IN-LEDGER as abstract-tier claim targets; search-result report amended (protocol reclassified, screen depth stated); authority NO; Opus NOT-MET. Sol read supplied transcriptions, not the article"
+  - "access: ACM DL (gold OA #1058) returned a Cloudflare challenge and VUB returned 503; both stopped, not bypassed; OpenAlex/Unpaywall list no open copy for the other workforce residuals"
+failure_tags:
+  - shell_cd_drift_repeated
+  - operator_named_model_refused_by_installed_client
+  - sol_reviewer_relied_on_transcribed_evidence
+  - browser_extraction_truncation_and_filter
+  - session_date_naming_error
+  - external_access_ceiling_unresolved
+rating:
+  scale: 1-5
+  goal_progress: 3
+  correctness_verification: 4
+  authority_scope_discipline: 4
+  routing_resource_efficiency: 3
+  continuity_handoff_quality: 4
+  agent_overall: 3.6
+  operator_overall: null
+  operator_note: null
+prompt_revision_recommended: true
+revision_reason: >-
+  Two evidence-backed defects. (1) The operator changed the requested Sol model
+  mid-session to a newer identifier than the repo policy pin. The installed CLI
+  listed it in its catalogue but the service rejected the first dispatch; the same
+  packet succeeded on the Codex desktop app's bundled newer client. The initialiser
+  says to reconcile the requested model with live policy but not what to do when the
+  requested identifier is newer than the pin: confirm it in the catalogue, smoke-test
+  the exact client before packeting, treat a refusal from one client version as a
+  client limit rather than a model verdict, try the vendor's newer client, record the
+  deviation from the policy pin, and leave the governed policy files for an operator
+  step. (2) Open-access pages read through the browser: a truncating extraction is a
+  read tier, not a full read. What worked was an in-page string test for each quoted
+  passage, whole-text term counts for any absence statement, and a rendered-image
+  inspection of the results figures when the results are plots; the reviewer should be
+  told plainly when it can only see transcribed evidence. The v4/v5 rule to use
+  absolute paths instead of a persistent shell cd was violated three times this
+  session and is preserved, not reworded. v5's pointer-first packet, separate
+  withheld file, deterministic figure-range and passive-load rules performed well
+  (the reviewer answered before opening the withheld file and the transcript confirms
+  it) and are preserved.
+evidence:
+  - "obsidian-PhD continuation 36: automation/review/J1/2026-09-29-j1-continuation-36.md (branch sonnet/j1-long-horizon-20260929)"
+  - "source check: automation/review/J1/2026-09-29-continuation-36/roveda2022-read.md"
+  - "search: automation/review/J1/2026-09-29-continuation-36/cpc-ergonomics-search-{registration,results}.md"
+  - "Sol pkt 26 final: automation/review/J1/2026-09-29-continuation-36/sol-packet-26/sol-packet-26-final.txt"
+  - "issue #479 comment: https://github.com/tyecam1/obsidian-PhD/issues/479#issuecomment-5900724402"
+  - "PR #600 title and description updated; end commit: 293db274df96e94c9f5f725b7f92af32b65d3805"

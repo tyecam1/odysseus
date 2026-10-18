@@ -786,6 +786,12 @@ app.include_router(setup_misumi_routes(
 from routes.misumi_operator_runtime_routes import setup_misumi_operator_runtime_routes
 app.include_router(setup_misumi_operator_runtime_routes())
 
+# Misumi durable transcript runtime: owner-scoped, idempotent, persist-before-ack.
+# Disabled by default (ODYSSEUS_MISUMI_TRANSCRIPT_ENABLED) and gated per owner;
+# see docs/misumi-durable-transcript-runtime.md.
+from routes.misumi_transcript_routes import setup_misumi_transcript_routes
+app.include_router(setup_misumi_transcript_routes(stt_service=stt_service))
+
 # Central model+host routing authority (docs/aoteru-model-host-routing-
 # contract.md, Phase B). Odysseus-owned, domain-neutral - not part of the
 # Misumi compatibility surface above.

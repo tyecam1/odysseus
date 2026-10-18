@@ -4,6 +4,10 @@ Read and execute `@docs/aoteru-long-horizon-autonomous-convergence.agent-task.md
 
 This file overrides any wording elsewhere that suggests a planned multi-session handoff.
 
+## Work selection priority
+
+During the 2026-10-17 shipping-first period, apply the operator's temporary backlog priority in `AGENTS.md` when choosing the next workstream. Complete and verify usable deliverables ahead of discretionary refinements; keep the existing safety, acceptance, authority and continuation gates intact.
+
 ## Execution rule
 
 Do **not** voluntarily stop at a clean checkpoint, green test suite, completed workstream, pushed commit, substantial progress report, human-action batch, or because the programme is large enough to span multiple sessions.
@@ -13,6 +17,18 @@ A checkpoint is only a durability boundary. Immediately continue into the next h
 While any `active` or `eligible` repository-controlled work remains, you MUST NOT produce a final progress report or hand control back to the operator merely to say what should happen next.
 
 The durable programme-state file exists for recovery from involuntary context/session/tool loss, not as permission to schedule a handoff.
+
+## Initialising-prompt binding
+
+Before entering the long-horizon loop, read `config/initialising-prompts.yaml`.
+If the current repository/task matches an active registered prompt and the operator
+has selected or supplied that prompt, record its `prompt_id` and exact
+`version` in working session state. The registered body is immutable for that
+version; live repository authority still overrides stale factual state inside a
+prompt.
+
+Do not auto-apply a domain-specific prompt merely because it exists in the global
+register. Scope matching and operator/session intent are required.
 
 ## Long-horizon loop
 
@@ -27,6 +43,10 @@ Repeat continuously:
 7. commit and push the cohesive checkpoint;
 8. update programme state;
 9. immediately choose and execute the next eligible workstream.
+
+When a registered initialising prompt is in use, preserve its application id
+through checkpoints so one session produces one trace rather than one trace per
+commit.
 
 Do not ration the invocation to one or two workstreams. Complete as much of the unblocked programme as the environment can actually execute.
 
@@ -58,6 +78,40 @@ If `active_count > 0` OR `eligible_count > 0`, a voluntary final response is **f
 Do not reinterpret `eligible` as "next session" or "large enough to defer". If it can be advanced with current repo/lab/network/model/tool access, advance it now.
 
 A workstream may be changed from `eligible`/`active` to `blocked` only when a concrete external dependency is identified and recorded. Size, elapsed effort, a clean checkpoint, or desire for a fresh context are not blockers.
+
+## Session closeout trace
+
+Before any voluntary final response for a session that used a registered
+initialising prompt, append one record under `evals/prompt-applications/**`
+following `docs/initialising-prompt-register.md`.
+
+Rate the session on the five global dimensions (1-5 each):
+
+1. goal/frontier progress;
+2. correctness and verification quality;
+3. authority/scope discipline;
+4. routing/resource efficiency;
+5. continuity/handoff quality.
+
+Record the arithmetic mean as the agent rating. Operator rating is a separate
+optional field and must remain null unless explicitly supplied by the operator.
+
+Then execute the prompt-evolution graph step before closeout:
+
+1. bind the application to the exact prompt node that started it;
+2. derive improvement targets from rating dimensions, failure tags, verification
+   defects and explicit operator feedback;
+3. append the application -> evolution event edge;
+4. if there is an evidence-backed semantic improvement, write a new immutable
+   child prompt version with `parent_version` and `derived_from_applications`;
+5. validate that the child preserves scope, authority, evidence/verification
+   requirements, model-identity discipline and stop/safety gates;
+6. update the graph and advance the registry active head only after validation;
+7. if there is no actionable defect, reinforce the current version instead of
+   creating cosmetic version churn.
+
+Use `scripts/prompt_evolution.py` for deterministic rating/graph planning.
+A failed evolution leaves the incumbent active and records the blocked reason.
 
 ## Allowed stop conditions
 
