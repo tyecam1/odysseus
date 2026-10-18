@@ -2,6 +2,7 @@
 ingest SourceEvent adapter contract (P1). No Instagram/WhatsApp parsing here,
 only the neutral idempotent record/revision contract future importers call.
 """
+import hashlib
 import os
 
 import pytest
@@ -12,7 +13,9 @@ from tests.helpers.sqlite_db import make_temp_sqlite
 from src.source_events import (
     MAX_PAYLOAD_REF_BYTES,
     SourceEventValidationError,
+    read_source_event_payload,
     record_source_event,
+    store_source_event_payload,
 )
 
 
@@ -200,3 +203,56 @@ def test_source_and_external_id_whitespace_normalized_to_same_identity():
     assert first.id == second.id
     assert second.source == "instagram"
     assert second.external_id == "test-ext-3"
+
+
+def _payload_path(root, source, external_id, payload):
+    identity_hash = hashlib.sha256(f"{source}\0{external_id}".encode("utf-8")).hexdigest()
+    normalized = payload.strip() if isinstance(payload, str) else payload
+    payload_hash = hashlib.sha256(
+        normalized.encode("utf-8") if isinstance(normalized, str) else b""
+    ).hexdigest()
+    return root / identity_hash[:2] / identity_hash / f"{payload_hash}.json"
+
+
+def test_payload_store_refuses_symlinked_prefix_without_writing_outside_root(tmp_path):
+    root = tmp_path / "payloads"
+    outside = tmp_path / "outside"
+    root.mkdir()
+    outside.mkdir()
+    path = _payload_path(root, "instagram", "symlink-prefix", "private payload")
+    path.parent.parent.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(SourceEventValidationError, match="must not be a symlink"):
+        store_source_event_payload(
+            "instagram", "symlink-prefix", "private payload", root=root
+        )
+
+    assert list(outside.iterdir()) == []
+
+
+def test_payload_store_refuses_final_symlink_without_touching_target(tmp_path):
+    root = tmp_path / "payloads"
+    outside_target = tmp_path / "outside-target.json"
+    outside_target.write_text("leave me alone", encoding="utf-8")
+    path = _payload_path(root, "instagram", "final-symlink", "private payload")
+    path.parent.mkdir(parents=True)
+    path.symlink_to(outside_target)
+
+    with pytest.raises(SourceEventValidationError, match="must not be a symlink"):
+        store_source_event_payload(
+            "instagram", "final-symlink", "private payload", root=root
+        )
+
+    assert path.is_symlink()
+    assert outside_target.read_text(encoding="utf-8") == "leave me alone"
+
+
+def test_payload_store_normal_write_and_read_still_work(tmp_path):
+    root = tmp_path / "payloads"
+    payload = {"private": "value", "items": [1, 2, 3]}
+
+    payload_ref = store_source_event_payload(
+        "instagram", "normal-roundtrip", payload, root=root
+    )
+
+    assert read_source_event_payload(payload_ref, root=root) == payload
