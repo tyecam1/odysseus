@@ -27,13 +27,12 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import tempfile
+import stat
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from core.platform_compat import safe_chmod
 from src.constants import DATA_DIR
 
 # Hard cap on the serialized size of caller-supplied `metadata` (stored as
@@ -75,6 +74,155 @@ def _hash_content(content: Any) -> str:
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
+def _lstat_payload_component(path: Path, *, directory: bool) -> os.stat_result | None:
+    """Return an un-followed stat for one payload path component.
+
+    Payload-store paths are derived from hashes, but an attacker able to place
+    a symlink in the store must not be able to redirect writes or chmod calls.
+    """
+    try:
+        result = path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise SourceEventValidationError(
+            f"cannot validate payload-store path component: {path}"
+        ) from exc
+    if stat.S_ISLNK(result.st_mode):
+        raise SourceEventValidationError(
+            f"payload-store path component must not be a symlink: {path}"
+        )
+    expected_type = stat.S_ISDIR if directory else stat.S_ISREG
+    if not expected_type(result.st_mode):
+        kind = "directory" if directory else "regular file"
+        raise SourceEventValidationError(
+            f"payload-store path component must be a {kind}: {path}"
+        )
+    return result
+
+
+def _ensure_payload_directory(path: Path, *, parents: bool = False) -> None:
+    """Create one store directory and verify it without following links."""
+    existing = _lstat_payload_component(path, directory=True)
+    if existing is None:
+        try:
+            path.mkdir(parents=parents, exist_ok=True)
+        except OSError as exc:
+            raise SourceEventValidationError(
+                f"cannot create payload-store directory: {path}"
+            ) from exc
+        # mkdir(exist_ok=True) can lose a race to another creator.  Treat the
+        # result exactly like an existing component and fail closed on links.
+        if _lstat_payload_component(path, directory=True) is None:
+            raise SourceEventValidationError(
+                f"payload-store directory disappeared after creation: {path}"
+            )
+
+
+def _chmod_payload_component(path: Path, mode: int, *, directory: bool) -> None:
+    """Apply a POSIX mode through a verified descriptor, never through a link."""
+    before = _lstat_payload_component(path, directory=directory)
+    if before is None:
+        raise SourceEventValidationError(
+            f"payload-store path component disappeared before chmod: {path}"
+        )
+    if os.name == "nt":
+        # Mirrors core.platform_compat.safe_chmod: POSIX modes do not map to
+        # Windows ACLs, while the no-link validation above remains required.
+        return
+
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    if directory:
+        flags |= getattr(os, "O_DIRECTORY", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError as exc:
+        raise SourceEventValidationError(
+            f"cannot safely open payload-store path component: {path}"
+        ) from exc
+    try:
+        opened = os.fstat(fd)
+        expected_type = stat.S_ISDIR if directory else stat.S_ISREG
+        if (
+            opened.st_dev != before.st_dev
+            or opened.st_ino != before.st_ino
+            or not expected_type(opened.st_mode)
+        ):
+            raise SourceEventValidationError(
+                f"payload-store path component changed during validation: {path}"
+            )
+        os.fchmod(fd, mode)
+    except SourceEventValidationError:
+        raise
+    except OSError as exc:
+        raise SourceEventValidationError(
+            f"cannot safely chmod payload-store path component: {path}"
+        ) from exc
+    finally:
+        os.close(fd)
+
+
+def _write_payload_atomically(path: Path, content: bytes) -> None:
+    """Create a private temp file exclusively and atomically install it."""
+    temporary = path.parent / f".source-event-payload-{uuid.uuid4().hex}.tmp"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
+    # POSIX O_CREAT|O_EXCL already refuses a final-component symlink.  Add
+    # O_NOFOLLOW where available as defence in depth; platforms without it
+    # retain the exclusive-create guarantee and the lstat/fstat checks below.
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    fd: int | None = None
+    installed = False
+    try:
+        fd = os.open(temporary, flags, 0o600)
+        created = os.fstat(fd)
+        if not stat.S_ISREG(created.st_mode):
+            raise SourceEventValidationError(
+                f"payload-store temporary path is not a regular file: {temporary}"
+            )
+        if os.name != "nt":
+            os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "wb") as handle:
+            fd = None
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+
+        verified = _lstat_payload_component(temporary, directory=False)
+        if verified is None or (
+            verified.st_dev != created.st_dev or verified.st_ino != created.st_ino
+        ):
+            raise SourceEventValidationError(
+                f"payload-store temporary file changed during write: {temporary}"
+            )
+
+        # Refuse an already-present final symlink.  If one appears after this
+        # check, os.replace replaces the link itself rather than its referent.
+        _lstat_payload_component(path, directory=False)
+        os.replace(temporary, path)
+        installed = True
+
+        final = _lstat_payload_component(path, directory=False)
+        if final is None or final.st_dev != created.st_dev or final.st_ino != created.st_ino:
+            raise SourceEventValidationError(
+                f"payload-store file changed during atomic installation: {path}"
+            )
+    except SourceEventValidationError:
+        raise
+    except OSError as exc:
+        raise SourceEventValidationError(
+            f"cannot safely write payload-store file: {path}"
+        ) from exc
+    finally:
+        if fd is not None:
+            os.close(fd)
+        if not installed:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+
+
 def store_source_event_payload(
     source: str,
     external_id: str,
@@ -99,32 +247,31 @@ def store_source_event_payload(
     relative_path = Path(identity_hash[:2]) / identity_hash / f"{payload_hash}.json"
     path = payload_root / relative_path
 
-    path.parent.mkdir(parents=True, exist_ok=True)
-    safe_chmod(payload_root, 0o700)
-    safe_chmod(path.parent.parent, 0o700)
-    safe_chmod(path.parent, 0o700)
-    if not path.exists():
-        fd, temporary = tempfile.mkstemp(
-            prefix=".source-event-payload-",
-            suffix=".tmp",
-            dir=path.parent,
-        )
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                handle.write(normalized)
-                handle.flush()
-                os.fsync(handle.fileno())
-            safe_chmod(temporary, 0o600)
-            os.replace(temporary, path)
-        except Exception:
-            try:
-                os.unlink(temporary)
-            except OSError:
-                pass
-            raise
+    prefix_directory = payload_root / identity_hash[:2]
+    identity_directory = prefix_directory / identity_hash
+    _ensure_payload_directory(payload_root, parents=True)
+    _ensure_payload_directory(prefix_directory)
+    _ensure_payload_directory(identity_directory)
+
+    directories = (payload_root, prefix_directory, identity_directory)
+    for directory in directories:
+        _chmod_payload_component(directory, 0o700, directory=True)
+
+    # Re-lstat every component immediately before the write.  This both
+    # enforces the fail-closed contract and narrows the race window after the
+    # directory creation/chmod operations above.
+    for directory in directories:
+        if _lstat_payload_component(directory, directory=True) is None:
+            raise SourceEventValidationError(
+                f"payload-store directory disappeared before write: {directory}"
+            )
+    existing = _lstat_payload_component(path, directory=False)
+    if existing is None:
+        _write_payload_atomically(path, normalized.encode("utf-8"))
+
     # Re-assert the invariant for content-addressed files created by an older
     # run with a different umask/implementation as well as newly written ones.
-    safe_chmod(path, 0o600)
+    _chmod_payload_component(path, 0o600, directory=False)
 
     return {
         "kind": "source_event_payload",
