@@ -4,6 +4,7 @@ import copy
 import inspect
 import json
 import os
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -205,28 +206,7 @@ def test_missing_url_is_item_level_permanent_schema_error(tmp_path):
     }]
 
 
-def test_payload_ref_resolves_to_private_payload_outside_source_event():
-    import_instagram_saved_export(str(POSTS_FIXTURE), str(COLLECTIONS_FIXTURE))
-    row = _rows()["https://www.instagram.com/p/REDACTED_PERMALINK0/"]
-    payload_ref = json.loads(row["payload_ref"])
-    payload = read_source_event_payload(payload_ref)
-
-    assert payload["field_pointers"]["hashtags"] == "/0/label_values/3"
-    assert payload["field_pointers"]["owner"] == "/0/label_values/4"
-    assert payload["saved_at"] == 1750000000
-    for private_value in (
-        "REDACTED_Caption", "REDACTED_Title", "REDACTED_Name",
-        "REDACTED_Username", "REDACTED_Privacy",
-    ):
-        assert private_value not in row["payload_ref"]
-        assert private_value in json.dumps(payload)
-
-
-def test_private_values_are_only_in_payload_store_not_envelopes_or_logs(
-    tmp_path, monkeypatch, caplog
-):
-    import src.instagram_importer as importer
-
+def _private_exports(tmp_path: Path) -> tuple[tuple[str, str], tuple[str, ...]]:
     posts = _fixture(POSTS_FIXTURE)
     collections = _fixture(COLLECTIONS_FIXTURE)
     posts[0]["label_values"][1]["value"] = "PRIVATE_CAPTION_SENTINEL"
@@ -238,7 +218,52 @@ def test_private_values_are_only_in_payload_store_not_envelopes_or_logs(
         "PRIVATE_OWNER_SENTINEL"
     )
     collections[0]["label_values"][0]["value"] = "PRIVATE_COLLECTION_SENTINEL"
-    paths = _write_exports(tmp_path, posts, collections)
+    return _write_exports(tmp_path, posts, collections), (
+        "PRIVATE_CAPTION_SENTINEL",
+        "PRIVATE_TITLE_SENTINEL",
+        "PRIVATE_HASHTAG_SENTINEL",
+        "PRIVATE_OWNER_SENTINEL",
+        "PRIVATE_COLLECTION_SENTINEL",
+    )
+
+
+def test_payload_store_file_contains_private_values_and_resolves_via_pointer(tmp_path):
+    import src.source_events as source_events
+
+    paths, private_values = _private_exports(tmp_path)
+    result = import_instagram_saved_export(*paths)
+    external_id = "https://www.instagram.com/p/REDACTED_PERMALINK0/"
+    row = _rows()[external_id]
+    payload_ref = json.loads(row["payload_ref"])
+    payload = read_source_event_payload(payload_ref)
+    payload_path = source_events.SOURCE_EVENT_PAYLOAD_DIR / payload_ref["path"]
+
+    assert payload["field_pointers"]["hashtags"] == "/0/label_values/3"
+    assert payload["field_pointers"]["owner"] == "/0/label_values/4"
+    assert payload["saved_at"] == 1750000000
+    assert payload_path.is_file()
+    assert stat.S_IMODE(source_events.SOURCE_EVENT_PAYLOAD_DIR.stat().st_mode) == 0o700
+    assert stat.S_IMODE(payload_path.parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(payload_path.stat().st_mode) == 0o600
+    result_pointer = next(
+        item for item in result["imported"]
+        if item["external_id"] == external_id
+    )["payload_ref"]
+    assert result_pointer == {
+        key: payload_ref[key] for key in ("kind", "path", "sha256")
+    }
+    for private_value in private_values:
+        assert private_value not in row["payload_ref"]
+        assert private_value in json.dumps(payload)
+        assert private_value in payload_path.read_text(encoding="utf-8")
+
+
+def test_sql_envelope_metadata_and_logs_exclude_raw_private_values(
+    tmp_path, monkeypatch, caplog
+):
+    import src.instagram_importer as importer
+
+    paths, private_values = _private_exports(tmp_path)
 
     captured = []
     real_record = importer.record_source_event
@@ -248,18 +273,10 @@ def test_private_values_are_only_in_payload_store_not_envelopes_or_logs(
         return real_record(**kwargs)
 
     monkeypatch.setattr(importer, "record_source_event", capture_record)
-    result = import_instagram_saved_export(*paths)
+    import_instagram_saved_export(*paths)
     external_id = "https://www.instagram.com/p/REDACTED_PERMALINK0/"
     call = next(item for item in captured if item["external_id"] == external_id)
     row = _rows()[external_id]
-    imported = next(item for item in result["imported"] if item["external_id"] == external_id)
-    private_values = (
-        "PRIVATE_CAPTION_SENTINEL",
-        "PRIVATE_TITLE_SENTINEL",
-        "PRIVATE_HASHTAG_SENTINEL",
-        "PRIVATE_OWNER_SENTINEL",
-        "PRIVATE_COLLECTION_SENTINEL",
-    )
 
     source_event_envelope = json.dumps({
         "content": call["content"],
@@ -267,19 +284,33 @@ def test_private_values_are_only_in_payload_store_not_envelopes_or_logs(
         "payload": row["payload"],
         "payload_ref": row["payload_ref"],
     })
-    result_envelope = json.dumps(result)
     for private_value in private_values:
         assert private_value not in source_event_envelope
-        assert private_value not in result_envelope
         assert private_value not in caplog.text
 
-    payload = read_source_event_payload(imported["payload_ref"])
-    payload_text = json.dumps(payload)
+
+def test_result_envelope_contains_counts_and_refs_not_raw_private_values(tmp_path):
+    paths, private_values = _private_exports(tmp_path)
+    result = import_instagram_saved_export(*paths)
+    result_envelope = json.dumps(result)
+
+    assert set(result) == {"imported", "failed", "counts"}
+    assert result["counts"] == {
+        "created": 4,
+        "revised": 0,
+        "unchanged": 0,
+        "processed": 4,
+        "failed": 0,
+    }
+    assert result["failed"] == []
+    assert len(result["imported"]) == result["counts"]["processed"]
+    assert all(
+        set(item["payload_ref"]) == {"kind", "path", "sha256"}
+        for item in result["imported"]
+    )
+    assert all("collections" not in item for item in result["imported"])
     for private_value in private_values:
-        assert private_value in payload_text
-    assert imported["collection_count"] == 2
-    assert "collections" not in imported
-    assert set(imported["payload_ref"]) == {"kind", "path", "sha256"}
+        assert private_value not in result_envelope
 
 
 def test_collection_aggregation_hash_is_stable_across_fresh_hash_seeds(tmp_path):

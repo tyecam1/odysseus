@@ -116,13 +116,15 @@ def store_source_event_payload(
                 os.fsync(handle.fileno())
             safe_chmod(temporary, 0o600)
             os.replace(temporary, path)
-            safe_chmod(path, 0o600)
         except Exception:
             try:
                 os.unlink(temporary)
             except OSError:
                 pass
             raise
+    # Re-assert the invariant for content-addressed files created by an older
+    # run with a different umask/implementation as well as newly written ones.
+    safe_chmod(path, 0o600)
 
     return {
         "kind": "source_event_payload",
