@@ -130,7 +130,10 @@ def _failure(
 
 
 def _parse_saved_posts(
-    items: list[Any], source_file: str
+    items: list[Any],
+    source_file: str,
+    *,
+    selected_permalinks: Optional[set[str]] = None,
 ) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
     buckets: dict[str, list[dict[str, Any]]] = {}
     failed: list[dict[str, Any]] = []
@@ -152,6 +155,8 @@ def _parse_saved_posts(
         timestamp = entry.get("timestamp")
         if not _is_int(timestamp):
             failed.append(_failure(source_file, index, "saved-post item has no valid integer timestamp"))
+            continue
+        if selected_permalinks is not None and permalink not in selected_permalinks:
             continue
 
         caption, caption_index = _direct_label(values, "Caption")
@@ -202,7 +207,7 @@ def _parse_saved_posts(
 
     aggregated: dict[str, dict[str, Any]] = {}
     for permalink, occurrences in buckets.items():
-        canonical = min(occurrences, key=lambda item: (item["timestamp"], item["index"]))
+        canonical = min(occurrences, key=lambda item: (-item["timestamp"], item["index"]))
         aggregated[permalink] = {
             **canonical,
             "item_indices": sorted(item["index"] for item in occurrences),
@@ -365,8 +370,16 @@ def _private_payload(
 def import_instagram_saved_export(
     saved_posts_path: str,
     saved_collections_path: Optional[str] = None,
+    *,
+    selected_permalinks: Optional[set[str]] = None,
+    enforce_freshness: bool = False,
 ) -> dict[str, Any]:
-    """Import real-shape ``saved_posts`` and ``saved_collections`` exports."""
+    """Import real-shape ``saved_posts`` and ``saved_collections`` exports.
+
+    The scheduled job may select the permalinks owned by this snapshot after
+    its cross-snapshot reduction and enable the source-timestamp freshness
+    guard. Direct one-off imports retain their existing behavior by default.
+    """
     if saved_collections_path is None:
         saved_collections_path = str(Path(saved_posts_path).with_name("saved_collections.json"))
 
@@ -375,7 +388,11 @@ def import_instagram_saved_export(
     posts_file = os.path.basename(saved_posts_path)
     collections_file = os.path.basename(saved_collections_path)
 
-    posts, post_failures = _parse_saved_posts(saved_posts, posts_file)
+    posts, post_failures = _parse_saved_posts(
+        saved_posts,
+        posts_file,
+        selected_permalinks=selected_permalinks,
+    )
     memberships, collection_failures = _parse_collections(saved_collections, collections_file)
     failed = post_failures + collection_failures
 
@@ -383,9 +400,40 @@ def import_instagram_saved_export(
 
     imported: list[dict[str, Any]] = []
     counts = {"created": 0, "revised": 0, "unchanged": 0}
+    if enforce_freshness:
+        counts["superseded"] = 0
     for permalink in sorted(posts):
         post = posts[permalink]
         collection_records = memberships.get(permalink, [])
+
+        db = SessionLocal()
+        try:
+            existing = (
+                db.query(SourceEvent)
+                .filter(
+                    SourceEvent.source == "instagram",
+                    SourceEvent.external_id == permalink,
+                )
+                .first()
+            )
+            existed_before = existing is not None
+            prior_hash = existing.content_hash if existing is not None else None
+            prior_timestamp = None
+            if enforce_freshness and existing is not None:
+                try:
+                    prior_metadata = json.loads(existing.payload_ref or "")
+                except (TypeError, json.JSONDecodeError):
+                    prior_metadata = {}
+                candidate = prior_metadata.get("saved_at")
+                if _is_int(candidate):
+                    prior_timestamp = candidate
+        finally:
+            db.close()
+
+        if prior_timestamp is not None and post["timestamp"] <= prior_timestamp:
+            counts["superseded"] += 1
+            continue
+
         private_payload = _private_payload(
             post,
             collection_records,
@@ -415,21 +463,6 @@ def import_instagram_saved_export(
             "evidence_ceiling": EVIDENCE_CEILING,
             "missing_optional_fields": post["missing_optional_fields"],
         }
-
-        db = SessionLocal()
-        try:
-            existing = (
-                db.query(SourceEvent)
-                .filter(
-                    SourceEvent.source == "instagram",
-                    SourceEvent.external_id == permalink,
-                )
-                .first()
-            )
-            existed_before = existing is not None
-            prior_hash = existing.content_hash if existing is not None else None
-        finally:
-            db.close()
 
         try:
             row = record_source_event(
