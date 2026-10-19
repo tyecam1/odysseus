@@ -8,15 +8,16 @@ priority: medium
 task_type: evaluation-observability
 created_by: chatgpt
 created_at: 2026-10-19
+updated_at: 2026-10-19T12:17:00+01:00
 executor: ""
 execution_mode: review-first
-architecture: single-implementer-plus-independent-verifier
+architecture: single-plus-verifier
 architecture_rationale: "One mutation owner should extend existing Odysseus evaluation/prompt mechanisms; an independent verifier tests generalisation, security, authority and measurement claims."
 single_agent_baseline: "Audit current execution/evaluation/prompt-evolution machinery, implement a bounded contrastive pilot, compare against the unchanged baseline, and make a measured adopt/reject decision."
-execution_host: auto
+execution_host: compute-box
 context_budget: medium
 coordination_reason: "Read-only external-method analysis may be delegated; only one worker owns code or canonical-prompt mutations at a time. Adjudication is independent."
-requires_remote_compute: false
+requires_remote_compute: true
 requires_local_model: false
 requires_zotero: false
 requires_mcp: false
@@ -56,6 +57,17 @@ notes: "New nonessential capability work: keep in inbox under 2026-10-17 shippin
 ---
 
 # Evaluate and selectively integrate Harness² into Odysseus
+
+## Autonomous prioritisation and delivery handoff
+
+- **Canonical intake:** this `inbox/` agent-task is the sole work item. Consume it through the existing Odysseus queue/prioritisation and autonomous-development workflow, not a GitHub issue, secondary backlog, autonomous runtime or new programme controller.
+- **Admission and precedence:** `priority: medium` is a provisional intake classification, **not permission to pre-empt** the 2026-10-17 shipping-first instruction in `AGENTS.md`. When the accepted baseline backlog is shipped (or this item proves necessary to unblock an accepted item), reassess its relative value, dependencies and delivery cost against the *live* queue. Promote to `ready/` only through existing triage authority; otherwise retain, merge with an existing task, or reject with a recorded reason.
+- **Duplication/dependencies:** explicitly reconcile the operating-contract/model-role evaluation card (2026-09-13) and external-capability equivalence audit (2026-09-10). The Harness² item concerns the **contrastive experiment and evidence-backed composition/transfer mechanism**, not reimplementation of their model telemetry, capability inventory or lifecycle owners. Link or fold any overlap, and preserve predecessor evidence.
+- **First eligible autonomous unit:** take a read-only, source-grounded gap inventory of Harness² versus *live* Odysseus at HEAD and identify one narrowly measurable failure class. Return a compact evidence pointer and the smallest independently verifiable baseline/pilot plan. Do not begin full adaptation from the upstream README alone.
+- **Development route:** recheck `AGENTS.md` and the live estate policy; run Odysseus `aoteru preflight`, use the cheapest adequately qualified route, obtain a governed write lease for mutations, and keep one implementation owner. Use staged bounded commits, deterministic tests and independent adjudication. No silent policy mutation or permission escalation.
+- **Authority gates:** ordinary read-only reconnaissance and local isolated tests follow the normal queue/workflow permissions. `approval_required: true` reserves operator approval for the task's guarded implementation/adoption boundary; it must not be interpreted as permission to deploy, alter guardrails, expose secrets, disable sandboxing or bypass existing approval mechanisms. An authorised reviewer may split out a separately approved read-only pilot if this flag blocks all preliminary work.
+- **Done means shipped:** a written review alone is not implementation completion. Record the source/HEAD, task-level baseline and candidate comparisons, total effort and cost, verification outcomes, accepted native changes if any, deployment or real-path evidence where relevant, explicit rejections, queue disposition and rollback. A justified `retain/reject` with rigorous evidence also completes the **evaluation** objective; no feature must be imported merely because the task exists.
+- **No schedule implied:** this card is durable intake. It does not establish that an automatic watcher is currently running or authorise an immediate dispatch contrary to the backlog policy.
 
 ## Objective
 
