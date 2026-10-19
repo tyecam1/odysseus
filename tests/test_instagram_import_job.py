@@ -9,6 +9,9 @@ import logging
 import stat
 import time
 
+import pytest
+
+from core.database import SourceEvent, get_db_session
 from src.instagram_import_job import (
     JOB_ID,
     append_import_run,
@@ -16,7 +19,11 @@ from src.instagram_import_job import (
     last_import_run,
     run_instagram_import,
 )
+from src.source_events import read_source_event_payload
 from src.task_scheduler import TaskScheduler
+
+
+TEST_PERMALINK_PREFIX = "https://www.instagram.com/p/JOB_TEST_"
 
 
 def _record(timestamp: str, **counts):
@@ -25,9 +32,63 @@ def _record(timestamp: str, **counts):
         "created": counts.get("created", 0),
         "revised": counts.get("revised", 0),
         "unchanged": counts.get("unchanged", 0),
+        "superseded": counts.get("superseded", 0),
         "failed": counts.get("failed", 0),
         "duration_ms": counts.get("duration_ms", 1),
     }
+
+
+def _post(permalink: str, timestamp: int, caption: str):
+    return {
+        "timestamp": timestamp,
+        "label_values": [
+            {"label": "URL", "value": permalink},
+            {"label": "Caption", "value": caption},
+            {"label": "Title", "value": f"{caption} title"},
+        ],
+    }
+
+
+def _snapshot(root, name: str, post):
+    snapshot = root / name
+    snapshot.mkdir(parents=True)
+    (snapshot / "saved_posts.json").write_text(json.dumps([post]), encoding="utf-8")
+    (snapshot / "saved_collections.json").write_text("[]", encoding="utf-8")
+
+
+@pytest.fixture
+def instagram_job_rows(tmp_path, monkeypatch):
+    import src.source_events as source_events
+
+    monkeypatch.setattr(
+        source_events,
+        "SOURCE_EVENT_PAYLOAD_DIR",
+        tmp_path / "source-event-payloads",
+    )
+
+    def cleanup():
+        with get_db_session() as db:
+            db.query(SourceEvent).filter(
+                SourceEvent.source == "instagram",
+                SourceEvent.external_id.like(f"{TEST_PERMALINK_PREFIX}%"),
+            ).delete(synchronize_session=False)
+
+    cleanup()
+    yield
+    cleanup()
+
+
+def _job_row(permalink: str):
+    with get_db_session() as db:
+        row = db.query(SourceEvent).filter(
+            SourceEvent.source == "instagram",
+            SourceEvent.external_id == permalink,
+        ).one()
+        return {
+            "content_hash": row.content_hash,
+            "payload_ref": row.payload_ref,
+            "revision_count": row.revision_count,
+        }
 
 
 def test_job_registration_is_six_hour_local_only_scheduler_job(monkeypatch, tmp_path):
@@ -107,6 +168,60 @@ def test_missing_exports_directory_is_clean_zero_count_run(tmp_path, caplog):
     }
     assert last_import_run(run_log) == accounting
     assert not [record for record in caplog.records if record.levelname in {"WARNING", "ERROR"}]
+
+
+def test_newest_occurrence_wins_across_snapshots_and_reimport_is_noop(
+    tmp_path, instagram_job_rows
+):
+    exports = tmp_path / "exports"
+    permalink = f"{TEST_PERMALINK_PREFIX}NEWEST/"
+    _snapshot(exports, "a-newer", _post(permalink, 200, "newer caption"))
+    _snapshot(exports, "z-older", _post(permalink, 100, "older caption"))
+    run_log = tmp_path / "data" / "instagram" / "runs.jsonl"
+
+    first = run_instagram_import(exports, run_log)
+    first_row = _job_row(permalink)
+    payload = read_source_event_payload(first_row["payload_ref"])
+    second = run_instagram_import(exports, run_log)
+    second_row = _job_row(permalink)
+
+    assert first["created"] == 1
+    assert first["revised"] == 0
+    assert first["superseded"] == 0
+    assert payload["caption"] == "newer caption"
+    assert payload["saved_at"] == 200
+    assert first_row["revision_count"] == 0
+    assert second["created"] == 0
+    assert second["revised"] == 0
+    assert second["unchanged"] == 0
+    assert second["superseded"] == 1
+    assert second_row == first_row
+
+
+def test_older_cross_run_occurrence_is_counted_as_superseded(
+    tmp_path, instagram_job_rows
+):
+    exports = tmp_path / "exports"
+    permalink = f"{TEST_PERMALINK_PREFIX}SUPERSEDED/"
+    snapshot = exports / "only"
+    _snapshot(exports, "only", _post(permalink, 200, "canonical caption"))
+    run_log = tmp_path / "data" / "instagram" / "runs.jsonl"
+    run_instagram_import(exports, run_log)
+    before = _job_row(permalink)
+
+    (snapshot / "saved_posts.json").write_text(
+        json.dumps([_post(permalink, 100, "stale caption")]),
+        encoding="utf-8",
+    )
+    accounting = run_instagram_import(exports, run_log)
+    after = _job_row(permalink)
+
+    assert accounting["created"] == 0
+    assert accounting["revised"] == 0
+    assert accounting["unchanged"] == 0
+    assert accounting["superseded"] == 1
+    assert accounting["failed"] == 0
+    assert after == before
 
 
 def _scheduler_with_instagram_runner(runner):

@@ -27,7 +27,7 @@ DEFAULT_INTERVAL_HOURS = 6.0
 DEFAULT_EXPORTS_DIR = Path.home() / "data" / "ingestion" / "instagram" / "exports"
 DEFAULT_RUN_LOG = Path(DATA_DIR) / "instagram" / "import-runs.jsonl"
 
-_COUNT_KEYS = ("created", "revised", "unchanged", "failed")
+_COUNT_KEYS = ("created", "revised", "unchanged", "superseded", "failed")
 
 
 def _positive_hours(value: Optional[str]) -> float:
@@ -123,25 +123,57 @@ def run_instagram_import(
     exports_dir: str | os.PathLike[str] | None = None,
     run_log_path: str | os.PathLike[str] | None = None,
     *,
-    importer: Optional[Callable[[str, str], dict[str, Any]]] = None,
+    importer: Optional[Callable[..., dict[str, Any]]] = None,
 ) -> dict[str, Any]:
-    """Import every export snapshot and append aggregate per-run counts.
+    """Import each permalink's newest occurrence and append per-run counts.
 
     A missing directory or a directory with no ``saved_posts.json`` is a
-    successful zero-count run.  File-level failures count once and do not stop
-    later snapshots from being processed.
+    successful zero-count run. File-level failures count once and do not stop
+    later snapshots from being processed. The injectable importer remains a
+    two-argument test seam; canonical selection and freshness enforcement are
+    properties of the production importer path.
     """
     started = time.monotonic()
     registration = instagram_import_job_registration()
     export_root = Path(exports_dir) if exports_dir is not None else registration["exports_dir"]
     log_path = Path(run_log_path) if run_log_path is not None else registration["run_log_path"]
-    if importer is None:
+    default_importer = importer is None
+    if default_importer:
         from src.instagram_importer import import_instagram_saved_export
 
         importer = import_instagram_saved_export
 
     counts = {key: 0 for key in _COUNT_KEYS}
-    for posts_path, collections_path in _export_pairs(export_root):
+    pairs = _export_pairs(export_root)
+    selected_permalinks = {posts_path: set() for posts_path, _ in pairs}
+    scan_errors: dict[Path, Exception] = {}
+
+    if default_importer:
+        from src.instagram_importer import _load_list, _parse_saved_posts
+
+        winners: dict[str, tuple[int, Path]] = {}
+        for posts_path, collections_path in pairs:
+            if not collections_path.is_file():
+                continue
+            try:
+                posts, _ = _parse_saved_posts(
+                    _load_list(str(posts_path), "saved-posts"),
+                    posts_path.name,
+                )
+            except Exception as exc:
+                scan_errors[posts_path] = exc
+                continue
+            for permalink, occurrence in posts.items():
+                current = winners.get(permalink)
+                if current is None or occurrence["timestamp"] > current[0]:
+                    winners[permalink] = (
+                        occurrence["timestamp"],
+                        posts_path,
+                    )
+        for permalink, (_, posts_path) in winners.items():
+            selected_permalinks[posts_path].add(permalink)
+
+    for posts_path, collections_path in pairs:
         if not collections_path.is_file():
             counts["failed"] += 1
             logger.warning(
@@ -149,8 +181,24 @@ def run_instagram_import(
                 posts_path,
             )
             continue
+        if posts_path in scan_errors:
+            counts["failed"] += 1
+            logger.warning(
+                "Instagram import failed for %s: %s",
+                posts_path.parent,
+                scan_errors[posts_path],
+            )
+            continue
         try:
-            result = importer(str(posts_path), str(collections_path))
+            if default_importer:
+                result = importer(
+                    str(posts_path),
+                    str(collections_path),
+                    selected_permalinks=selected_permalinks[posts_path],
+                    enforce_freshness=True,
+                )
+            else:
+                result = importer(str(posts_path), str(collections_path))
         except Exception as exc:
             counts["failed"] += 1
             logger.warning("Instagram import failed for %s: %s", posts_path.parent, exc)
