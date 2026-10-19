@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import json
+import logging
 import stat
+import time
 
 from src.instagram_import_job import (
     JOB_ID,
@@ -12,6 +16,7 @@ from src.instagram_import_job import (
     last_import_run,
     run_instagram_import,
 )
+from src.task_scheduler import TaskScheduler
 
 
 def _record(timestamp: str, **counts):
@@ -102,3 +107,105 @@ def test_missing_exports_directory_is_clean_zero_count_run(tmp_path, caplog):
     }
     assert last_import_run(run_log) == accounting
     assert not [record for record in caplog.records if record.levelname in {"WARNING", "ERROR"}]
+
+
+def _scheduler_with_instagram_runner(runner):
+    scheduler = TaskScheduler(session_manager=None)
+    scheduler._instagram_import_registration = {
+        "id": JOB_ID,
+        "interval_seconds": 6 * 60 * 60,
+        "runner": runner,
+        "exports_dir": "/exports",
+        "run_log_path": "/run-log",
+    }
+    scheduler._instagram_import_next_monotonic = 0.0
+    return scheduler
+
+
+async def _wait_for_import_to_finish(scheduler):
+    for _ in range(100):
+        if not scheduler._instagram_import_in_flight:
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("Instagram import did not finish")
+
+
+def _stub_to_thread(monkeypatch):
+    async def run_stubbed(func, *args):
+        result = func(*args)
+        if inspect.isawaitable(result):
+            return await result
+        return result
+
+    monkeypatch.setattr("src.task_scheduler.asyncio.to_thread", run_stubbed)
+
+
+async def test_slow_import_does_not_block_scheduler_tick(monkeypatch):
+    _stub_to_thread(monkeypatch)
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow_runner(_exports_dir, _run_log_path):
+        started.set()
+        await release.wait()
+        return _record("2026-10-19T00:00:00Z")
+
+    scheduler = _scheduler_with_instagram_runner(slow_runner)
+    before = time.monotonic()
+    try:
+        await asyncio.wait_for(scheduler._run_instagram_import_if_due(), timeout=0.25)
+        elapsed = time.monotonic() - before
+
+        assert elapsed < 0.25
+        assert scheduler._instagram_import_in_flight is True
+        await asyncio.wait_for(started.wait(), timeout=1)
+    finally:
+        release.set()
+        await _wait_for_import_to_finish(scheduler)
+
+
+async def test_overlapping_instagram_import_trigger_is_skipped(monkeypatch):
+    _stub_to_thread(monkeypatch)
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls = 0
+
+    async def slow_runner(_exports_dir, _run_log_path):
+        nonlocal calls
+        calls += 1
+        started.set()
+        await release.wait()
+        return _record("2026-10-19T00:00:00Z")
+
+    scheduler = _scheduler_with_instagram_runner(slow_runner)
+    try:
+        await scheduler._run_instagram_import_if_due()
+        first_task = scheduler._instagram_import_task
+        await asyncio.wait_for(started.wait(), timeout=1)
+
+        scheduler._instagram_import_next_monotonic = 0.0
+        await scheduler._run_instagram_import_if_due()
+
+        assert calls == 1
+        assert scheduler._instagram_import_task is first_task
+        assert scheduler._instagram_import_next_monotonic > time.monotonic()
+    finally:
+        release.set()
+        await _wait_for_import_to_finish(scheduler)
+
+
+async def test_instagram_import_exception_is_logged_and_not_propagated(caplog, monkeypatch):
+    _stub_to_thread(monkeypatch)
+
+    def failing_runner(_exports_dir, _run_log_path):
+        raise RuntimeError("stubbed import failure")
+
+    scheduler = _scheduler_with_instagram_runner(failing_runner)
+    caplog.set_level(logging.ERROR, logger="src.task_scheduler")
+
+    await scheduler._run_instagram_import_if_due()
+    await _wait_for_import_to_finish(scheduler)
+
+    assert scheduler._instagram_import_task is None
+    assert "Infrastructure job instagram_saved_import failed" in caplog.text
+    assert "stubbed import failure" in caplog.text
