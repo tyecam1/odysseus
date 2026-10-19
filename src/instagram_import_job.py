@@ -196,6 +196,7 @@ def run_instagram_import(
                     str(collections_path),
                     selected_permalinks=selected_permalinks[posts_path],
                     enforce_freshness=True,
+                    export_root=export_root,
                 )
             else:
                 result = importer(str(posts_path), str(collections_path))

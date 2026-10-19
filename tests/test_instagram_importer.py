@@ -19,7 +19,7 @@ from src.instagram_importer import (
     _parse_saved_posts,
     import_instagram_saved_export,
 )
-from src.source_events import read_source_event_payload
+from src.source_events import read_source_event_payload, store_source_event_payload
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -373,6 +373,68 @@ print(json.dumps(snapshot, sort_keys=True))
         "processed": 1,
         "failed": 0,
     }
+
+
+def test_payload_provenance_with_export_root_includes_snapshot_directory(tmp_path):
+    export_root = tmp_path / "exports"
+    snapshot = export_root / "2026-10-18"
+    snapshot.mkdir(parents=True)
+    posts_path = snapshot / "saved_posts.json"
+    collections_path = snapshot / "saved_collections.json"
+    posts_path.write_text(json.dumps(_fixture(POSTS_FIXTURE)[:1]), encoding="utf-8")
+    collections_path.write_text(
+        json.dumps(_fixture(COLLECTIONS_FIXTURE)), encoding="utf-8"
+    )
+
+    result = import_instagram_saved_export(
+        str(posts_path),
+        str(collections_path),
+        export_root=export_root,
+    )
+    payload = read_source_event_payload(result["imported"][0]["payload_ref"])
+
+    assert payload["saved_posts_file"] == "2026-10-18/saved_posts.json"
+    assert payload["saved_collections_file"] == "2026-10-18/saved_collections.json"
+    assert payload["saved_posts_file"] != os.path.basename(str(posts_path))
+
+
+def test_payload_provenance_without_export_root_records_full_path(tmp_path):
+    paths = _write_exports(tmp_path, _fixture(POSTS_FIXTURE)[:1], [])
+
+    result = import_instagram_saved_export(*paths)
+
+    payload = read_source_event_payload(result["imported"][0]["payload_ref"])
+    assert payload["saved_posts_file"] == paths[0]
+    assert payload["saved_collections_file"] == paths[1]
+
+
+def test_payload_provenance_outside_export_root_falls_back_to_full_path(tmp_path):
+    export_root = tmp_path / "exports"
+    export_root.mkdir()
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    paths = _write_exports(elsewhere, _fixture(POSTS_FIXTURE)[:1], [])
+
+    result = import_instagram_saved_export(*paths, export_root=export_root)
+
+    payload = read_source_event_payload(result["imported"][0]["payload_ref"])
+    assert payload["saved_posts_file"] == paths[0]
+
+
+def test_legacy_bare_basename_provenance_rows_remain_readable(tmp_path):
+    legacy_payload = {
+        "kind": "instagram_saved_post",
+        "permalink": f"{TEST_PREFIX}LEGACY/",
+        "saved_posts_file": "saved_posts.json",
+        "saved_collections_file": "saved_collections.json",
+    }
+    pointer = store_source_event_payload(
+        "instagram", legacy_payload["permalink"], legacy_payload
+    )
+
+    payload = read_source_event_payload(pointer)
+
+    assert payload == legacy_payload
 
 
 def test_saved_at_is_source_timestamp_and_imported_at_is_separate():

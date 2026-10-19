@@ -190,6 +190,8 @@ def test_newest_occurrence_wins_across_snapshots_and_reimport_is_noop(
     assert first["superseded"] == 0
     assert payload["caption"] == "newer caption"
     assert payload["saved_at"] == 200
+    assert payload["saved_posts_file"] == "a-newer/saved_posts.json"
+    assert payload["saved_collections_file"] == "a-newer/saved_collections.json"
     assert first_row["revision_count"] == 0
     assert second["created"] == 0
     assert second["revised"] == 0

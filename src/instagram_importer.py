@@ -367,18 +367,39 @@ def _private_payload(
     }
 
 
+def _provenance_path(path: str, export_root: str | os.PathLike[str] | None) -> str:
+    """Unambiguous file provenance for the governed payload store.
+
+    Every export snapshot names its files ``saved_posts.json`` /
+    ``saved_collections.json``, so a bare basename cannot identify the winning
+    snapshot.  With an ``export_root`` the posix-style root-relative path is
+    recorded; otherwise the full path.  Rows written by older versions whose
+    provenance is a bare basename are never rewritten and remain readable.
+    """
+    if export_root is None:
+        return path
+    try:
+        return Path(path).relative_to(Path(export_root)).as_posix()
+    except ValueError:
+        return path
+
+
 def import_instagram_saved_export(
     saved_posts_path: str,
     saved_collections_path: Optional[str] = None,
     *,
     selected_permalinks: Optional[set[str]] = None,
     enforce_freshness: bool = False,
+    export_root: str | os.PathLike[str] | None = None,
 ) -> dict[str, Any]:
     """Import real-shape ``saved_posts`` and ``saved_collections`` exports.
 
     The scheduled job may select the permalinks owned by this snapshot after
     its cross-snapshot reduction and enable the source-timestamp freshness
-    guard. Direct one-off imports retain their existing behavior by default.
+    guard, and passes ``export_root`` so payload provenance identifies the
+    snapshot directory rather than an ambiguous bare basename. Direct one-off
+    imports retain their existing behavior by default and record the full
+    path as provenance.
     """
     if saved_collections_path is None:
         saved_collections_path = str(Path(saved_posts_path).with_name("saved_collections.json"))
@@ -387,6 +408,8 @@ def import_instagram_saved_export(
     saved_collections = _load_list(saved_collections_path, "saved-collections")
     posts_file = os.path.basename(saved_posts_path)
     collections_file = os.path.basename(saved_collections_path)
+    posts_provenance = _provenance_path(saved_posts_path, export_root)
+    collections_provenance = _provenance_path(saved_collections_path, export_root)
 
     posts, post_failures = _parse_saved_posts(
         saved_posts,
@@ -437,8 +460,8 @@ def import_instagram_saved_export(
         private_payload = _private_payload(
             post,
             collection_records,
-            posts_file,
-            collections_file,
+            posts_provenance,
+            collections_provenance,
             permalink,
         )
         payload_pointer = store_source_event_payload(
