@@ -191,3 +191,79 @@ operator authorization). Neither requires redesigning anything already
 built — the schema, registries and routing authority are already
 host-agnostic and were built to extend, not to be rebuilt, once
 those dependencies clear.
+
+
+## 2026-10-19 addendum: GLM Coding Plan on the lab host
+
+**Purpose:** record the lab commissioning path and its evidence boundary.
+This dated addendum supersedes the older guide's lab GLM availability
+statements where they conflict; it does **not** update executor qualification.
+
+- **Windows credential authority:** the operator's working
+  \`~/.local/bin/claude-glm-flash.ps1\` decrypts a DPAPI \`CurrentUser\`
+  credential from \`~/.aoteru/secrets/zai-glm-coding-key.dpapi\`. The
+  PowerShell variable \`$glmKey\` exists *inside that script*, not
+  automatically in an interactive PowerShell session. The encrypted DPAPI
+  blob is not portable to Linux, and neither the blob nor the key belongs
+  in Git.
+- **Lab credential:** for an authorised lab user, the existing Windows
+  launcher can decrypt the *same working Coding Plan credential* and
+  transmit **only that credential** over an authenticated SSH connection
+  into the lab's \`~/.config/glm/env\` (file mode \`0600\`, directory
+  \`0700\`). Keep secret material out of prompts, terminal output,
+  Git changes and remote command arguments. Do not copy the full
+  Windows Claude profile or DPAPI store. Confirm account/subscription
+  permission and institutional policy before placing a personal key on a
+  shared university host.
+- **Provider config:** the lab launcher
+  \`~/.local/bin/claude-glm\` sources the host-local configuration;
+  \`GLM_BASE_URL\` is \`https://api.z.ai/api/anthropic\`, and
+  \`GLM_AUTH_TOKEN\` is the private key. Do not treat an ordinary
+  pay-as-you-go key as interchangeable with a key known to work with the
+  Coding Plan. The Windows Flash launcher clears inherited
+  \`ANTHROPIC_MODEL\` and \`ANTHROPIC_CUSTOM_MODEL_OPTION*\`, then maps
+  the Sonnet/Opus/Haiku tiers to \`glm-5.3-flash[1m]\`; this is distinct
+  from a full \`glm-5.3\` implementation lane. Match model selections
+  to the intended lane, without quietly substituting Flash.
+
+### Observed lab result and outstanding gates
+
+The operator observed before transferring the working laptop
+credential: direct Z.AI and Claude Code requests returned HTTP
+\`429\`, provider code \`1113\`, *insufficient balance or no resource
+package*. After the credential transfer, the SSH-invoked lab launcher
+printed an \`unrecognized_model\` diagnostic for \`glm-5.3\`, an empty-stdin
+warning, and the model-style response:
+
+> Hi! It looks like your message came through empty. What would you like
+> to work on? I'm in \`/home/agent\` ...
+
+This is **evidence of a returned response and of a changed failure
+symptom**, but **not** verified success of the requested
+\`Reply exactly: GLM connected\` prompt. The transcript did not
+reliably establish exit status, effective provider/model attribution,
+token usage, or Odysseus estate execution. The custom-model catalogue
+diagnostic and the \`claude.ai connectors disabled\` warning are not, by
+themselves, proof of failed authentication.
+
+Run a non-interactive bounded test without forwarding SSH stdin (from
+the operator's existing PowerShell session; \`$lab\` is the SSH target):
+
+\`\`\`powershell
+ssh -n -T $lab 'timeout 90s "$HOME/.local/bin/claude-glm" --print "Reply exactly: GLM connected" </dev/null; rc=$?; printf "\nexit_status=%s\n" "$rc"; exit "$rc"'
+\`\`\`
+
+Accept the **direct launcher** only if it returns the requested text,
+exits successfully and exposes independent model/provider identification
+through an appropriately redacted structured execution record. If the
+prompt is lost or the result remains ambiguous, inspect only the command
+argument/stdin handling (and the verified existing launcher code) before
+modifying model/authentication configuration again.
+
+**Odysseus runtime fallback is a further, separate gate:** GLM must
+be integrated into the current estate execution lifecycle, qualify on the
+actual host and task role, preserve park leases/verification, and prove
+a live Codex-usage-exhausted → GLM switch. An installed launcher, active
+subscription, response to an empty prompt or passing mocked tests does
+not establish that automatic fallback is operational.
+
