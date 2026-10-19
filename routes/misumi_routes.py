@@ -823,6 +823,21 @@ def _offer_still_valid(offer: Dict[str, Any], candidate: Optional[Dict[str, Any]
     return origin_allows(candidate, owner, sid)
 
 
+def _recorded_affirmation_for_offer(store: Any, candidate: Dict[str, Any], offer: Dict[str, Any],
+                                    owner: Optional[str], sid: Optional[str]) -> Optional[str]:
+    """Recover only this owner's recorded yes to this exact offer after an interrupted promotion."""
+    evidence_id = candidate.get("promotion_authorised_by")
+    if not evidence_id:
+        return None
+    context = f"answer to offer {offer['candidate_id']}: {offer['summary']}"
+    row = next((item for item in store.list_evidence() if item.get("evidence_id") == evidence_id), None)
+    if row and row.get("type") == "explicit_durable" and row.get("owner") == owner and \
+            row.get("session_id") == sid and row.get("context") == context and \
+            parse_answer(str(row.get("prompt_excerpt") or "")) == "affirm":
+        return str(evidence_id)
+    return None
+
+
 def _recent_revision_by(owner: Optional[str], sid: Optional[str], stores: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """The single MOST RECENT change this principal's own "yes" made in this session within the undo window - and only while it
     is still in force. Undo reverses that one change once; a second "undo that" finds nothing (the earlier change is not touched).
@@ -934,31 +949,36 @@ def _handle_dialogue_answer(
                 return None
             with store.locked():  # re-verify + record + promote is ONE unit across threads and processes
                 candidate = store.get_candidate_by_id(offer["candidate_id"])
+                retry_evidence_id = _recorded_affirmation_for_offer(store, candidate, offer, owner, sid) \
+                    if candidate else None
                 duplicate = _ratified_by_this_offer(store, offer, owner) if verdict == "affirm" else None
                 if duplicate is not None:
                     outcome.update({"state": "active", "kind": offer["kind"], "revision_id": duplicate["revision_id"],
                                     "candidate_id": offer["candidate_id"], "duplicate": True})
                     text = f"Done: {offer['summary']}. Say 'undo that' to reverse it."
-                elif not _offer_still_valid(offer, candidate, owner, sid):
+                elif not _offer_still_valid(offer, candidate, owner, sid, retry_evidence_id):
                     # Gone, changed since it was shown (new evidence, another status, another origin), or not this person's to
                     # answer: an answer to it must never ratify, reject or snooze anything.
                     offers.clear(sid, owner)
                     return None
                 elif verdict == "affirm":
                     context = f"answer to offer {offer['candidate_id']}: {offer['summary']}"
-                    if offer["kind"] == "persona-state":
+                    if retry_evidence_id:
+                        evidence_id = retry_evidence_id
+                    elif offer["kind"] == "persona-state":
                         recorded = store.record_evidence(
                             type="explicit_durable", persona=candidate["persona"], dimension=candidate["dimension"],
                             value=candidate["proposed_value"], prompt=prompt, context=context,
                             session_id=sid, owner=owner,
                         )
+                        evidence_id = recorded["evidence"]["evidence_id"]
                     else:
                         recorded = store.record_evidence(
                             type="explicit_durable", cue=candidate["cue"], previous_persona=candidate.get("base_persona"),
                             proposed_persona=candidate["proposed_persona"], prompt=prompt, context=context,
                             session_id=sid, owner=owner,
                         )
-                    evidence_id = recorded["evidence"]["evidence_id"]
+                        evidence_id = recorded["evidence"]["evidence_id"]
                     revision = store.promote(offer["candidate_id"], authorisation={
                         "type": "user_instruction", "evidence_id": evidence_id,
                         "principal": owner, "principal_authenticated": bool(str(owner or "").strip()),
@@ -1047,6 +1067,10 @@ _TEAM_SUPPORT_CAP = 2
 _CONSULT_BUDGET_S = 9.0
 _ANGLE_LINE = re.compile(r"^\s*ANGLE\s*:\s*(.+?)\s*$")
 _ANGLE_ALLOWED = re.compile(r"^[A-Za-z0-9 ,.;:!?()&%/+-]{3,120}$")
+_ANGLE_INSTRUCTION = re.compile(
+    r"^(?:change|ignore|tell|say|answer|do|don'?t|stop|switch|use|call|respond)\b|"
+    r"\b(?:you|must|should)\b", re.IGNORECASE,
+)
 # An angle that touches help-seeking, health, danger, dosing, the system or roles is dropped whatever it says: a learned consult
 # offers flavour on ordinary topics only (round 10).
 _ANGLE_SENSITIVE = re.compile(
@@ -1079,7 +1103,8 @@ def _consult_angles(text: object, limit: int = 2) -> List[str]:
         if not match:
             continue
         idea = re.sub(r"\s+", " ", match.group(1)).strip()
-        if not idea.isascii() or not _ANGLE_ALLOWED.match(idea) or _ANGLE_SENSITIVE.search(idea):
+        if not idea.isascii() or not _ANGLE_ALLOWED.match(idea) or _ANGLE_SENSITIVE.search(idea) or \
+                _ANGLE_INSTRUCTION.search(idea):
             continue
         if withhold_learned_route(idea) or is_reserved_turn(idea) or _names_a_persona(idea):
             continue  # the same hazard vocabulary as the routing gate, applied to the advice itself
@@ -1119,18 +1144,19 @@ def _take_slot(owner: Optional[str], answer: bool = False) -> Optional[str]:
     """The lane a turn was admitted to ('main' or 'answer'), or None when it must skip."""
     who = str(owner or "").strip()
     with _owner_slots_lock:
-        if _owner_slots.get(who, 0) < ADAPTATION_PER_OWNER and _adaptation_slots.acquire(blocking=False):
-            _owner_slots[who] = _owner_slots.get(who, 0) + 1
-            return "main"
-    if answer and _answer_slots.acquire(blocking=False):
-        return "answer"
-    return None
+        if _owner_slots.get(who, 0) >= ADAPTATION_PER_OWNER:
+            return None
+        if _adaptation_slots.acquire(blocking=False):
+            lane = "main"
+        elif answer and _answer_slots.acquire(blocking=False):
+            lane = "answer"
+        else:
+            return None
+        _owner_slots[who] = _owner_slots.get(who, 0) + 1
+        return lane
 
 
 def _give_slot(owner: Optional[str], lane: str = "main") -> None:
-    if lane == "answer":
-        _answer_slots.release()
-        return
     who = str(owner or "").strip()
     with _owner_slots_lock:
         left = _owner_slots.get(who, 1) - 1
@@ -1138,7 +1164,10 @@ def _give_slot(owner: Optional[str], lane: str = "main") -> None:
             _owner_slots[who] = left
         else:
             _owner_slots.pop(who, None)
-        _adaptation_slots.release()
+        if lane == "answer":
+            _answer_slots.release()
+        else:
+            _adaptation_slots.release()
 
 
 async def _run_adaptation(work, label: str, owner: Optional[str] = None, answer: bool = False):
@@ -1694,8 +1723,7 @@ def setup_misumi_routes(
                 async def consult(target: str):
                     began = time.monotonic()
                     try:
-                        structured = learned_consult is not None and target == learned_consult["persona"] and \
-                            target not in [item["persona"] for item in team_plan["supports"]]
+                        structured = learned_consult is not None and target == learned_consult["persona"]
                         contribution = await _consult_persona(prompt, target, backend, model, lead=persona,
                                                               structured=structured)
                         consult_trace[target] = {
@@ -1774,8 +1802,7 @@ def setup_misumi_routes(
                 learned_consult["angles"] = len(angles)
 
             def _is_learned_consult(row: Tuple[str, str]) -> bool:
-                return learned_consult is not None and row[0] == learned_consult["persona"] and \
-                    learned_consult["persona"] not in [item["persona"] for item in team_plan["supports"]]
+                return learned_consult is not None and row[0] == learned_consult["persona"]
 
             turn = await _model_turn(
                 prompt,

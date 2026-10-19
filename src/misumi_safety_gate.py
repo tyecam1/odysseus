@@ -48,6 +48,19 @@ def normalise(text: object) -> str:
     return folded.replace("ß", "ss").lower()
 
 
+_LEET = str.maketrans({"0": "o", "1": "l", "3": "e", "4": "a", "5": "s", "7": "t", "@": "a", "$": "s"})
+_SPACED_LETTERS = re.compile(r"\b(?:[a-z]\s+){3,}[a-z]\b")
+
+
+def _obfuscation_variant(text: str) -> str:
+    """A bounded extra reading for common disguises; retain the ordinary reading for precision."""
+    text = "".join(ch for ch in text if unicodedata.category(ch) != "Cf")
+    text = _SPACED_LETTERS.sub(lambda match: re.sub(r"\s+", "", match.group()), text)
+    text = re.sub(r"(?<!\w)[a-z0-9@$]+(?!\w)", lambda match: match.group().translate(_LEET)
+                  if re.search(r"[a-z]", match.group()) else match.group(), text)
+    return re.sub(r"([a-z])\1{2,}", r"\1\1", text)
+
+
 # Everyday idioms that share words with emergencies; removed before matching (precision).
 _IDIOMS = re.compile(
     r"\b(?:light(?:ing)?|lit|start(?:ing|ed)?|build(?:ing)?|stok(?:e|ing)|make|made|log)\s+(?:the\s+|a\s+|up\s+the\s+)?fire\b|"
@@ -215,11 +228,12 @@ def assess(text: object, context: Iterable[object] = ()) -> dict[str, object]:
     raw = "\n".join(parts)
     if len(raw) > MAX_ASSESS_CHARS:
         return {"benign": False, "reasons": ["too-long-to-assess"]}
-    norm = _IDIOMS.sub(" ", normalise(raw))
-    reasons = [domain for domain, pattern in _COMPILED if pattern.search(norm)]
-    if _RESERVED.search(norm):
+    norm = normalise(raw)
+    forms = tuple(dict.fromkeys((_IDIOMS.sub(" ", form) for form in (norm, _obfuscation_variant(norm)))))
+    reasons = [domain for domain, pattern in _COMPILED if any(pattern.search(form) for form in forms)]
+    if any(_RESERVED.search(form) for form in forms):
         reasons.append("reserved-matter")
-    hit = _fuzzy_hit(norm)
+    hit = next((hit for form in forms if (hit := _fuzzy_hit(form)) is not None), None)
     if hit is not None:
         reasons.append(f"near-miss:{hit}")
     if _non_latin_letters(raw):
@@ -288,10 +302,11 @@ def routing_risk(text: object) -> list[str]:
         if len(norm) > MAX_ASSESS_CHARS:
             return ["too-long-to-assess"]
         reasons = []
-        hazard = _R_HAZARD_RE.search(norm)
+        forms = tuple(dict.fromkeys((norm, _obfuscation_variant(norm))))
+        hazard = next((match for form in forms if (match := _R_HAZARD_RE.search(form)) is not None), None)
         if hazard:
             reasons.append(f"hazard:{hazard.group(0)}")
-        if _R_PERSON_RE.search(norm) and _R_BODY_RE.search(norm):
+        if any(_R_PERSON_RE.search(form) and _R_BODY_RE.search(form) for form in forms):
             reasons.append("person+body")
         if not is_benign_turn(text):
             reasons.append("safety-block")
