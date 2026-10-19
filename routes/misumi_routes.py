@@ -1219,10 +1219,11 @@ def setup_misumi_routes(
                 # an item question with no exact record, in ANY domain: a recorded line that says it is still quoted for the
                 # other household domains (records, cleaning ...); otherwise the model answers, never a flat "no matching"
                 found = adapter.search(prompt, domain=domain, limit=30) if domain not in (None, "food", "shopping") else []
-                if not found:
-                    item_pending = True
-                    if resolution["evidence"]:
-                        item_evidence = resolution
+                # a lexical relation never establishes an item's identity or state: without an exact record the model
+                # answers under the stock guard, and any lexical hits reach it only as untrusted context
+                item_pending = True
+                if resolution["evidence"] and not found:
+                    item_evidence = resolution
             else:
                 found = adapter.search(prompt, domain=domain, limit=30) if adapter.reachable else []
                 if not found and domain is not None and adapter.reachable and not non_physical and (

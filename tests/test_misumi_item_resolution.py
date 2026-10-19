@@ -1409,6 +1409,51 @@ def test_a_weak_list_relation_does_not_make_a_shopping_question(tmp_path):
 # --- real household data (local only) -------------------------------------------------------------------------------------
 
 
+def test_round9_weak_cleaning_match_reaches_guarded_model(tmp_path, monkeypatch):
+    root = _write(tmp_path / "hh", {"household/cleaning/rota.md": "- bleach: no\n"})
+    client, calls = _model_client(root, tmp_path, monkeypatch)
+    body = _ask(client, "Do we have bleach for cleaning?")
+    assert body["source"] != "household-read-only"
+    assert calls and "Household stock was not confirmed" in _system_texts(calls[-1])
+
+
+def test_round9_search_never_exposes_unsafe_yaml_fields(tmp_path):
+    root = _write(tmp_path / "hh", {"household/cleaning/tasks.yaml":
+        "tasks:\n  - task: bathroom\n    password: hunter2\n    area: bathroom\n"})
+    hits = HouseholdReadOnlyAdapter(root).search("What cleaning task is bathroom?", domain="cleaning")
+    assert hits
+    assert "hunter2" not in str(hits) and "password" not in str(hits)
+
+
+def test_round9_unparsed_line_does_not_forward_secret(tmp_path, monkeypatch):
+    root = _write(tmp_path / "hh", {
+        "household/food/stock.yaml": "items:\n  - name: milk\n",
+        "household/food/pantry.md": "eggs: password=hunter2\n",
+    })
+    client, calls = _model_client(root, tmp_path, monkeypatch)
+    _ask(client, "Do we have eggs in stock?")
+    assert calls
+    assert "hunter2" not in str(calls[-1])
+    assert "household/food/pantry.md line 1" in _evidence(calls[-1])
+
+
+def test_round9_exact_record_does_not_quote_unsafe_unparsed_line(tmp_path, monkeypatch):
+    root = _write(tmp_path / "hh", {
+        "household/food/stock.yaml": "items:\n  - name: eggs\n",
+        "household/food/pantry.md": "eggs: password=hunter2\n",
+    })
+    body = _ask(_client_for(root, tmp_path, monkeypatch), "Do we have eggs in stock?")
+    assert "hunter2" not in str(body)
+    assert "household/food/pantry.md line 1" in body["text"]
+
+
+def test_round9_source_record_id_is_not_repository_value(tmp_path, monkeypatch):
+    root = _write(tmp_path / "hh", {"household/food/stock.yaml":
+        "items:\n  - name: eggs\n    id: hunter2\n"})
+    body = _ask(_client_for(root, tmp_path, monkeypatch), "Do we have eggs in stock?")
+    assert body["sources"] and "hunter2" not in str(body["sources"])
+
+
 REAL_ROOT = os.environ.get("MISUMI_REAL_HOUSEHOLD_ROOT", "")
 _real = pytest.mark.skipif(not REAL_ROOT or not Path(REAL_ROOT).is_dir(), reason="MISUMI_REAL_HOUSEHOLD_ROOT not set (real data is local only)")
 _REAL_KINDS = ("stock", "equipment")  # the item kinds the allowlisted index holds for food

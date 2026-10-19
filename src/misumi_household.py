@@ -267,7 +267,14 @@ def _value_part(text: str, structured: bool) -> str:
     return found.group(1) if found else text.lstrip("- ")
 
 
-def _fact_text(line: str, structured: bool, table_header: bool) -> str:
+# a field or assignment that names a credential/identifier is never a household fact: it is dropped from every search snippet,
+# context and quoted line (the item index is allowlisted by field; the lexical fallback is not, so it filters by sensitive name)
+_SENSITIVE_ASSIGN = re.compile(
+    r"\b(?:pass(?:word|wd|phrase|code)?|pin|token|secret|api[_ -]?key|credential|iban|sort[_ -]?code|card[_ -]?number|"
+    r"account[_ -]?number|ssn|national[_ -]?insurance|private[_ -]?key)\b[\"']?\s*[:=]", re.I)
+
+
+def _fact_text(line: str, structured: bool, table_header: bool, allow_sensitive: bool = False) -> str:
     """The part of a line that states a household fact, or '' when the line is structure, a placeholder or a note about the repository."""
     text = line.strip()
     if not text:
@@ -281,6 +288,8 @@ def _fact_text(line: str, structured: bool, table_header: bool) -> str:
     else:
         if _HEADING.match(text) or _TABLE_SEPARATOR.match(text) or table_header:
             return ""
+    if not allow_sensitive and _SENSITIVE_ASSIGN.search(text):
+        return ""
     if any(label.strip("`*_ ").lower() == target.rsplit("/", 1)[-1].lower() for label, target in _LINK.findall(text)):
         return ""  # navigation pointer: the link text is the file name
     if _NOT_BUILT_NOTE.search(text):
@@ -754,7 +763,7 @@ def _matching_lines(unparsed: Dict[str, List[str]], key: tuple, limit: int = 5) 
         for number, line in enumerate(unparsed[rel], 1):
             text = line.strip()
             if text and head in phrase_key(text):
-                found.append((rel, number, text[:200]))
+                found.append((rel, number, "" if _SENSITIVE_ASSIGN.search(text) else text[:200]))
                 if len(found) >= limit:
                     return found
     return found
@@ -900,7 +909,7 @@ def _yaml_records(text: str, rel: str, kind: str) -> Optional[List[Dict[str, obj
         line = ident[1].start_mark.line + 1
         own_category = fields.get("category") if isinstance(fields.get("category"), str) else ""
         records.append({
-            "id": (scalar(dict((n, v) for n, _, v in pairs).get("id")) or f"{rel}:{line}"), "name": label, "aliases": aliases,
+            "id": f"{rel}:{line}", "name": label, "aliases": aliases,
             "keys": keys, "surface": tuple(_phrase_tokens(ident[2])), "path": rel, "line": line, "kind": kind,
             "quantity": quantity or None, "quantity_state": state, "out_of_stock": state == "out",
             "category_key": phrase_key(own_category or category), "inherited_category": category if not own_category else "",
@@ -1310,7 +1319,7 @@ class HouseholdReadOnlyAdapter:
                 continue
             if not found:
                 lines = text.splitlines()
-                if any(_fact_text(line, suffix in {".yaml", ".yml", ".json"}, False) for line in lines):
+                if any(_fact_text(line, suffix in {".yaml", ".yml", ".json"}, False, True) for line in lines):
                     unparsed[rel] = lines
                 continue
             read.append(rel)
@@ -1420,7 +1429,7 @@ class HouseholdReadOnlyAdapter:
                     if record["out_of_stock"]:
                         context += f"; recorded, but out of stock (quantity {_quoted(record['quantity'])})"
                 if record is resolution["records"][0] and resolution.get("unparsed_lines"):
-                    context += "".join(f"; also see {rel} line {number} (not read as a record): {_quoted(text)}"
+                    context += "".join(f"; also see {rel} line {number} (not read as a record)" + (f": {_quoted(text)}" if text else "")
                                        for rel, number, text in resolution["unparsed_lines"][:3])
                 state = record.get("quantity_state")
                 hits.append({
@@ -1464,7 +1473,7 @@ class HouseholdReadOnlyAdapter:
         if len(resolution["candidates"]) > limit:
             lines.append(f"- and {len(resolution['candidates']) - limit} more related records")
         for rel, number, text in resolution.get("unparsed_lines") or []:
-            lines.append(f"- {rel} line {number} (file not in a recognised record layout): {_quoted(text)}")
+            lines.append(f"- {rel} line {number} (file not in a recognised record layout)" + (f": {_quoted(text)}" if text else ""))
         if not resolution["candidates"] and not resolution.get("unparsed_lines"):
             lines.append("- no related record was found")
         unreadable = list(resolution.get("failed") or []) + list(resolution.get("unparsed") or [])
