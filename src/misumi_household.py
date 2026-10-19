@@ -8,6 +8,7 @@ import json
 import os
 import re
 import subprocess
+import time
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 
@@ -316,8 +317,24 @@ _FILE_KINDS = (
 # Household areas that never answer "do we have X" (personal profile, money, pending proposals).
 # PRIVACY BY ALLOWLIST: only these household paths are ever indexed for item questions (food, kitchen, cleaning, and shopping or
 # grocery lists). Profile, finance, health, notes, secrets, records, plants ... are excluded by default, whatever their name.
-_INDEXED_PATH = re.compile(r"^household/(?:food|kitchen|cleaning)/|^household/(?:[^/]+/)*[^/]*(?:shopping|grocer)[^/]*\.(?:md|txt|ya?ml|json)$",
-                           re.IGNORECASE)
+_INDEXED_PATH = re.compile(
+    r"^household/(?:food|kitchen|cleaning)/[^/]+(?:/[^/]+)*$"  # these directories only
+    r"|^household/(?:shopping|grocery)[-_]list\.(?:md|txt|ya?ml)$",  # and exactly a top-level shopping list file
+    re.IGNORECASE,
+)
+# Fields of a record that may be shown or given to the model; anything else (password, token, account, phone, dose ...) is never
+# printed, whatever file it is in.
+_SAFE_FIELDS = frozenset({
+    "name", "item", "product", "ingredient", "aliases", "alias", "also_known_as", "aka", "category", "quantity", "qty", "amount",
+    "count", "unit", "units", "location", "expiry", "best_before", "use_by", "sell_by", "status", "notes", "capabilities",
+    "area", "cadence", "brand", "size",
+})
+_MAX_INDEX_FILE_BYTES = 512 * 1024  # a bigger allowlisted file is not read (reported unreadable)
+_MAX_YAML_ALIASES = 50  # more YAML alias references than this: rejected (alias bombs)
+_MAX_YAML_DEPTH = 24
+_MAX_YAML_NODES = 50000
+_INDEX_TIME_BUDGET = 5.0  # seconds; files not reached in time are reported unreadable
+_UNREADABLE_SHOWN = 10  # unreadable files named in a reply or in the evidence
 _ID_KEYS = ("name", "item", "product", "ingredient")
 _INDEX_CACHE: Dict[str, tuple] = {}  # root -> (((path, mtime_ns, size), ...), index)
 _HIT_CANDIDATES = 5  # candidates named in a not-confirmed reply
@@ -493,6 +510,30 @@ def item_question(question: str) -> Optional[Dict[str, object]]:
     return {"mention": text, "kind": kind, "wh": wh, "field": field, "scoped": scoped}
 
 
+# Phrasing that asks about household stock even when the item part does not parse ("yo do we have saffron", "saffron - got any",
+# "did we buy eggs last week", "is the lettuce in the fridge still ok"): such a question always carries the stock guard.
+INVENTORY_INTENT = re.compile(
+    r"\b(?:do|did|does)\s+(?:not\s+)?we\s+(?:still\s+|last\s+)?(?:have|buy|get|need)\b|\bhave\s+we\s+(?:still\s+)?(?:got|any|run\s+out)\b"
+    r"|\bgo(?:es|ne|ing)?\s+off\b|\bin\s+date\b|\bexpir|\buse(?:d)?\s+by\b|\bbest\s+before\b|^\s*got\b"
+    r"|\bgot\s+any\b|\bhow\s+(?:many|much)\b|\b(?:is|are)\s+there\b|\bout\s+of\b|\brunning\s+(?:low|out)\b|\bin\s+stock\b"
+    r"|\bin\s+the\s+(?:fridge|freezer|cupboard|pantry|larder)\b|\bany\s+\w+(?:\s+\w+)?\s+left\b|\bon\s+the\s+shopping\s+list\b",
+    re.IGNORECASE,
+)
+# Abstract or non-household nouns: "do we have time", "are we low on money", "any plans tonight" are not stock questions.
+_NON_PHYSICAL = frozenset({
+    "time", "money", "cash", "idea", "plan", "problem", "chance", "minute", "moment", "energy", "room", "space", "news", "word",
+    "update", "issue", "question", "choice", "option", "luck", "fun", "break", "holiday", "meeting", "appointment", "guest",
+    "people", "visitor", "wifi", "internet", "signal", "weather", "rain", "film", "show", "match", "game", "booking",
+    "reservation", "bill", "rent", "job", "work", "homework", "class", "lesson", "school", "sleep", "rest", "plan", "date",
+    "day", "week", "weekend", "hour", "mile", "calorie", "lift", "chat", "talk", "petrol", "fuel", "budget", "saving",
+})
+
+
+def names_non_physical(mention: str) -> bool:
+    """Whether a parsed mention is about something abstract ("time", "money", "plans") rather than a household item."""
+    return any(_singular(token) in _NON_PHYSICAL for token in _phrase_tokens(mention))
+
+
 def stock_item_mention(question: str) -> Optional[Dict[str, object]]:
     """The item a stock or shopping question asks about ({"mention": "olive oil"}), or None when it is not one."""
     parsed = item_question(question)
@@ -648,7 +689,7 @@ def _unquote(value: object) -> str:
     return str(value or "").strip().strip("\"'").strip()
 
 
-_EMPTY_VALUES = frozenset({"", "null", "~", "[]", "{}", "none"})
+_EMPTY_VALUES = frozenset({"", "null", "~", "[]", "{}"})
 
 
 def _scalar(value: object) -> str:
@@ -667,7 +708,7 @@ def _scalar(value: object) -> str:
 _NUMBER_QUANTITY = re.compile(r"^(\d+(?:\.\d+)?)(?:\s*[a-z]+\.?)?(?:\s|$|[-;,(:])", re.IGNORECASE)
 _ZERO_WORDS = re.compile(
     r"^(?:none(?:\s+left)?|no(?:ne)?\s+(?:left|remaining)|no|nil|nothing(?:\s+left)?|zero|(?:all\s+)?out(?:\s+of\s+stock)?|empty"
-    r"|(?:all\s+)?gone|(?:all\s+)?used(?:\s+up)?|finished|(?:run|ran)\s+out|depleted|sold\s+out)$",
+    r"|(?:all\s+)?gone|(?:all\s+)?used\s+up|all\s+used|finished|(?:run|ran)\s+out|depleted|sold\s+out)$",
     re.IGNORECASE,
 )
 
@@ -684,24 +725,23 @@ _AMOUNT_WORDS = re.compile(
 def quantity_state(value: object) -> Optional[str]:
     """What a recorded quantity says: "out" (none left), "in" (some left) or None (not recorded, or unclear).
 
-    A leading number decides first: "0", "0g", "0 tins" are out unless another number follows ("0 left, bought 3 today" is
-    unclear); "3 tins", "500g" are in. A zero word ("none", "no", "nil", "ran out", "out of stock" ...) is out only as the whole
-    value or before a remark that holds no number ("out - buy more"). "?", "n/a", "TBC", "unknown" are unclear. Other prose is
-    in only when it states an amount ("half a bag", "a few", "plenty"); anything else ("nothing but crumbs") is unclear.
+    Out only when the WHOLE value says none is left ("none", "nil", "ran out", "out of stock") or is zero with at most a unit
+    ("0", "0g", "0 tins left"). In when a positive number (with or without a unit) or an amount phrase ("half a bag") is
+    recorded with no word that contradicts it. Everything else is unclear: "?", "n/a", "TBC", mixed prose such as
+    "out - spare jar in the garage", "used", "3 empty jars", "0 left, bought 3 today".
     """
-    text = re.sub(r"\s+", " ", _scalar(value).strip().lower())
+    text = re.sub(r"\s+", " ", _scalar(value).strip().lower()).strip(" .!")
     if text in _UNKNOWN_QUANTITY:
         return None
+    if _ZERO_WORDS.match(text):
+        return "out"  # the whole value says none is left ("none", "ran out", "out of stock")
     number = _NUMBER_QUANTITY.match(text)
     if number:
-        if float(number.group(1)) != 0:
-            return "in"
-        return None if re.search(r"\d", text[number.end():]) else "out"
-    parts = re.split(r"\s*[-;,(:–—]\s*", text, maxsplit=1)
-    if _ZERO_WORDS.match(parts[0].strip()):
-        rest = parts[1] if len(parts) > 1 else ""
-        return None if re.search(r"\d", rest) else "out"
-    return "in" if _AMOUNT_WORDS.match(text) else None
+        rest = text[number.end():].strip()
+        if float(number.group(1)) == 0:
+            return "out" if re.fullmatch(r"(?:left|remaining|in\s+stock)?", rest) else None  # "0", "0g", "0 tins left"
+        return None if re.search(r"\b(?:empty|finished|gone|used|none|out)\b", text) else "in"  # "3 empty jars" is unclear
+    return "in" if _AMOUNT_WORDS.match(text) and not re.search(r"\b(?:empty|finished|gone|used|none|out)\b", text) else None
 
 
 def _matching_lines(unparsed: Dict[str, List[str]], key: tuple, limit: int = 5) -> List[tuple]:
@@ -718,6 +758,20 @@ def _matching_lines(unparsed: Dict[str, List[str]], key: tuple, limit: int = 5) 
                 if len(found) >= limit:
                     return found
     return found
+
+
+def _record_text(record: Dict[str, object]) -> str:
+    """What a record says, for any file type: a list item's text, else its name."""
+    return str(record.get("text") or record.get("name") or "")
+
+
+_EVIDENCE_CHARS = 6000  # the whole evidence block given to the model
+
+
+def _bounded_names(names: List[str]) -> str:
+    """At most _UNREADABLE_SHOWN file names, then a count ("a.yaml, b.md … and 1490 more")."""
+    shown = ", ".join(names[:_UNREADABLE_SHOWN])
+    return shown + (f" … and {len(names) - _UNREADABLE_SHOWN} more" if len(names) > _UNREADABLE_SHOWN else "")
 
 
 def _field_name(key: str) -> str:
@@ -741,8 +795,8 @@ def _record_data(record: Dict[str, object], asked: Optional[str] = None, limit: 
     wanted = {"quantity"} | ({asked.split()[0].replace("-", "_")} if asked else set())
     parts: List[str] = []
     for key, value in fields.items():
-        if key in {"example", "id"}:
-            continue
+        if key not in _SAFE_FIELDS:
+            continue  # never print a field that is not known to be safe (password, account, phone, dose ...)
         if isinstance(value, list):
             values = [_scalar(item) for item in value if _scalar(item).lower() not in _EMPTY_VALUES]
             if values:
@@ -782,19 +836,28 @@ def _yaml_records(text: str, rel: str, kind: str) -> Optional[List[Dict[str, obj
     parse."""
     import yaml
 
+    if len(text.encode("utf-8", errors="replace")) > _MAX_INDEX_FILE_BYTES or "\x00" in text:
+        return None
     try:
+        aliases = sum(1 for token in yaml.scan(text) if isinstance(token, yaml.AliasToken))
+        if aliases > _MAX_YAML_ALIASES:
+            return None  # an alias bomb or a self-referencing alias: never expanded
         documents = list(yaml.compose_all(text))
-    except yaml.YAMLError:
+    except Exception:
         return None
     records: List[Dict[str, object]] = []
+    budget = {"nodes": 0}
 
     def scalar(node) -> Optional[str]:
         return None if not isinstance(node, yaml.ScalarNode) or _yaml_null(node) else str(node.value).strip()
 
-    def walk(node, category: str) -> None:
+    def walk(node, category: str, depth: int = 0) -> None:
+        budget["nodes"] += 1
+        if depth > _MAX_YAML_DEPTH or budget["nodes"] > _MAX_YAML_NODES:
+            raise ValueError("YAML structure too deep or too large (a recursive alias ends here too)")
         if isinstance(node, yaml.SequenceNode):
             for child in node.value:
-                walk(child, category)
+                walk(child, category, depth + 1)
             return
         if not isinstance(node, yaml.MappingNode):
             return
@@ -807,7 +870,7 @@ def _yaml_records(text: str, rel: str, kind: str) -> Optional[List[Dict[str, obj
         if ident is None:
             group = next((scalar(value) for name, _, value in pairs if name == "category" and scalar(value)), category)
             for _, _, value in pairs:
-                walk(value, group or "")
+                walk(value, group or "", depth + 1)
             return
         fields: Dict[str, object] = {}
         for name, _, value in pairs:
@@ -1221,21 +1284,27 @@ class HouseholdReadOnlyAdapter:
         failed: List[str] = []
         unparsed: Dict[str, List[str]] = {}
         kinds: Dict[str, str] = {}
+        deadline = time.monotonic() + _INDEX_TIME_BUDGET
         for path in candidates:
             rel = path.relative_to(self.root).as_posix()
             kind = _file_kind(rel)
             suffix = path.suffix.lower()
+            if time.monotonic() > deadline:
+                failed.append(rel)  # not reached within the time budget: reported unreadable, never guessed
+                continue
             try:
+                if path.stat().st_size > _MAX_INDEX_FILE_BYTES:
+                    raise ValueError("file too large to index")
                 text = path.read_text(encoding="utf-8", errors="replace")
-            except OSError:
+                if suffix in {".yaml", ".yml", ".json"}:
+                    found = _yaml_records(text, rel, kind)
+                elif kind == SHOPPING and suffix in {".md", ".txt"}:
+                    found = _list_records(text.splitlines(), rel, kind)
+                else:
+                    found = []
+            except Exception:  # any failure of one file is that file being unreadable, never a failed turn
                 failed.append(rel)
                 continue
-            if suffix in {".yaml", ".yml", ".json"}:
-                found = _yaml_records(text, rel, kind)
-            elif kind == SHOPPING and suffix in {".md", ".txt"}:
-                found = _list_records(text.splitlines(), rel, kind)
-            else:
-                found = []
             if found is None:
                 failed.append(rel)
                 continue
@@ -1316,7 +1385,8 @@ class HouseholdReadOnlyAdapter:
                     return {"mention": " ".join(run), "key": phrase_key(" ".join(run)), "kind": STOCK, "field": None,
                             "checked": len(records), "records": exact, "candidates": [], "strength": 3, "outcome": FOUND,
                             "read": list(index["read"]), "failed": list(index["failed"]), "unparsed": sorted(index["unparsed"]),
-                            "unparsed_lines": [], "scoped": False, "deterministic": True, "evidence": False,
+                            "unparsed_lines": _matching_lines(index["unparsed"], phrase_key(" ".join(run))), "scoped": False,
+                            "deterministic": True, "evidence": False,
                             "domain": _record_domain(exact[0])}
         return None
 
@@ -1342,13 +1412,16 @@ class HouseholdReadOnlyAdapter:
             for record in resolution["records"]:
                 if record["kind"] == SHOPPING:
                     state = "ticked (already bought)" if record.get("ticked") else "not ticked yet"
-                    context = f"on the shopping list: {_quoted(record['text'])} ({state})"
+                    context = f"on the shopping list: {_quoted(_record_text(record))} ({state})"
                 else:
                     context = _record_data(record, resolution.get("field"))
                     if record["kind"] not in (STOCK, "food"):
                         context = f"{record['kind']} record: {context}"
                     if record["out_of_stock"]:
                         context += f"; recorded, but out of stock (quantity {_quoted(record['quantity'])})"
+                if record is resolution["records"][0] and resolution.get("unparsed_lines"):
+                    context += "".join(f"; also see {rel} line {number} (not read as a record): {_quoted(text)}"
+                                       for rel, number, text in resolution["unparsed_lines"][:3])
                 state = record.get("quantity_state")
                 hits.append({
                     "path": record["path"], "line": record["line"], "snippet": context[:500],
@@ -1367,7 +1440,7 @@ class HouseholdReadOnlyAdapter:
         text += (f" Recorded items that may be meant: {named}{more}. I cannot say yes or no from a partial or related match."
                  if candidates else " I found no related record, but I cannot say it is absent either.")
         if resolution.get("failed") or resolution.get("unparsed"):
-            text += " Some household files could not be read as records: " + ", ".join(
+            text += " Some household files could not be read as records: " + _bounded_names(
                 list(resolution.get("failed") or []) + list(resolution.get("unparsed") or [])) + "."
         lead = candidates[0] if candidates else {"path": (resolution.get("read") or ["household"])[0], "line": 1}
         hits.append({
@@ -1386,7 +1459,7 @@ class HouseholdReadOnlyAdapter:
         lines = [f"Item asked about (quoted from the question): {_quoted(resolution['mention'], 80)}",
                  f"Outcome of the exact-name lookup: {resolution['outcome']} ({resolution['checked']} records checked)"]
         for record in resolution["candidates"][:limit]:
-            data = _record_data(record) if record["kind"] != SHOPPING else f"text: {_quoted(record['text'])}"
+            data = _record_data(record) if record["kind"] != SHOPPING or "text" not in record else f"text: {_quoted(_record_text(record))}"
             lines.append(f"- {record['path']} line {record['line']} ({record['kind']}): {data}")
         if len(resolution["candidates"]) > limit:
             lines.append(f"- and {len(resolution['candidates']) - limit} more related records")
@@ -1396,8 +1469,8 @@ class HouseholdReadOnlyAdapter:
             lines.append("- no related record was found")
         unreadable = list(resolution.get("failed") or []) + list(resolution.get("unparsed") or [])
         if unreadable:
-            lines.append("Some files could not be read as records: " + ", ".join(unreadable))
-        return "\n".join(lines)
+            lines.append("Some files could not be read as records: " + _bounded_names(unreadable))
+        return "\n".join(lines)[:_EVIDENCE_CHARS]
 
     def record_listing(self, files: Iterable[str], limit: int = 50) -> List[Dict[str, object]]:
         """The records of the named data files as listing hits ("what is in stock?" lists the stock records, not the pointer
@@ -1408,7 +1481,7 @@ class HouseholdReadOnlyAdapter:
             if record["path"] not in wanted:
                 continue
             if record["kind"] == SHOPPING:
-                text = record["text"] + (" (ticked)" if record.get("ticked") else "")
+                text = _record_text(record) + (" (ticked)" if record.get("ticked") else "")
             else:
                 text = record["name"] + (f" ({_quoted(record['quantity'], 60)})" if record.get("quantity") else "")
             hits.append({"path": record["path"], "line": record["line"], "snippet": text, "score": 0, "listed": True,

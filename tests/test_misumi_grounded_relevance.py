@@ -174,11 +174,18 @@ def test_the_kiosk_recommendation_question_is_not_answered_with_a_note_about_a_f
     assert "recommendation" in body["text"].lower()
 
 
-@pytest.mark.parametrize("prompt", ["What record should I play?", "Which record suits my mood?", "Do we own any Beatles records?"])
+@pytest.mark.parametrize("prompt", ["What record should I play?", "Which record suits my mood?"])
 def test_records_questions_without_evidence_are_an_explicit_grounded_failure(client, prompt):
     body = _ask(client, prompt)
     _no_match(body, "records")
     assert "collection.yaml line" not in body["text"]
+
+
+def test_an_item_shaped_records_question_is_never_a_flat_no(client):
+    # Round 8 (review F4): "Do we own any Beatles records?" used to be answered "No matching records fact". An item-shaped
+    # question in ANY domain with no recorded line now goes to the model (with the stock guard), never a deterministic no.
+    body = _ask(client, "Do we own any Beatles records?")
+    assert "no matching" not in body["text"].lower() and body["source"] != "household-read-only"
 
 
 def test_a_direct_relevant_query_returns_a_real_entry(client):
