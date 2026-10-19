@@ -34,7 +34,7 @@ DOMAIN_PHD = "obsidian-phd"
 DOMAIN_MISUMI = "misumi"
 DOMAIN_NEUTRAL = "neutral"
 DEFAULT_HANDOFF_DIR = Path(DATA_DIR) / "instagram" / "handoff"
-DEFAULT_BATCH = 200
+DEFAULT_BATCH = 5000   # one scheduled run drains a whole export (a 1772-item export took 9 runs at 200)
 _MIN_SCORE = 2          # one stray word is never enough to route a save
 _MIN_MARGIN = 1         # a tie between domains stays neutral
 

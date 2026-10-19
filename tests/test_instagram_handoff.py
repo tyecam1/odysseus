@@ -130,3 +130,10 @@ def test_search_by_permalink_collection_domain_and_term_returns_provenance_not_t
     assert search_instagram_items(term="nonexistent") == []
     hit = search_instagram_items(permalink=phd)[0]
     assert "caption" not in hit and "zzquux" not in json.dumps(hit) and hit["payload_path"]
+
+
+def test_one_run_drains_more_items_than_the_old_batch_of_200(rows, tmp_path):
+    for index in range(205):
+        _save(f"bulk{index}", "just a nice view")
+    result = run_instagram_handoff(tmp_path / "handoff")
+    assert result["retained_neutral"] == 205 and result["failed"] == 0
