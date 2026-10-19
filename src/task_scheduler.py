@@ -350,6 +350,8 @@ class TaskScheduler:
         self._run_semaphore = asyncio.Semaphore(1)
         self._concurrency_cap = 1
         self._task_handles = {}
+        self._instagram_import_registration = None
+        self._instagram_import_next_monotonic = 0.0
 
     def _set_run_progress(self, run_id: str, message: str):
         """Persist short live progress text for Activity while a run is active."""
@@ -535,6 +537,9 @@ class TaskScheduler:
             logger.warning(f"Could not dedupe default-assistant rows on startup: {e}")
 
         self._running = True
+        from src.instagram_import_job import instagram_import_job_registration
+        self._instagram_import_registration = instagram_import_job_registration()
+        self._instagram_import_next_monotonic = 0.0
         self._task = asyncio.create_task(self._loop())
         # Internal background scanner that isn't a user-facing "task" — pure
         # infra (no LLM), shouldn't clutter the Tasks UI, fires on its own
@@ -588,6 +593,31 @@ class TaskScheduler:
                 try: await t
                 except asyncio.CancelledError: pass
         logger.info("Task scheduler stopped")
+
+    async def _run_instagram_import_if_due(self):
+        """Run the local-only Instagram job inside the existing scheduler loop."""
+        registration = self._instagram_import_registration
+        if not registration or time.monotonic() < self._instagram_import_next_monotonic:
+            return
+        # Advance before running so a failure cannot create a retry/error storm.
+        self._instagram_import_next_monotonic = (
+            time.monotonic() + registration["interval_seconds"]
+        )
+        try:
+            accounting = await asyncio.to_thread(
+                registration["runner"],
+                registration["exports_dir"],
+                registration["run_log_path"],
+            )
+            logger.info(
+                "Infrastructure job %s completed: %s",
+                registration["id"],
+                json.dumps(accounting, sort_keys=True),
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Infrastructure job %s failed", registration["id"])
 
     async def _note_pings_loop(self):
         """Built-in note-due scanner — ticks every 60s inside the scheduler.
@@ -662,6 +692,7 @@ class TaskScheduler:
         await asyncio.sleep(10)
         while self._running:
             try:
+                await self._run_instagram_import_if_due()
                 await self._check_due_tasks()
             except Exception:
                 logger.exception("Error in task scheduler loop")
