@@ -237,10 +237,13 @@ def test_160_stalled_turns_never_delay_another_owners_turn_or_the_operator_api(e
     once and still gets its learned behaviour (round 8 only showed the other turn being SKIPPED quickly)."""
     _ratify_brief(estate)
     original = misumi_routes._handle_dialogue_answer
+    entered = []
+    release = threading.Event()  # the stall is held until the other owner is served: no wall-clock threshold to flake under load
 
     def stalling(request, body, prompt, owner, *args, **kwargs):
         if owner == "staller":
-            time.sleep(2.0)  # stalled adaptation work (no shared lock involved)
+            entered.append(1)
+            release.wait(60)  # stalled adaptation work (no shared lock involved)
         return original(request, body, prompt, owner, *args, **kwargs)
 
     monkeypatch.setattr(misumi_routes, "_handle_dialogue_answer", stalling)
@@ -251,20 +254,22 @@ def test_160_stalled_turns_never_delay_another_owners_turn_or_the_operator_api(e
             stalled = [asyncio.create_task(client.post("/misumi/respond", **_say("staller", "Explain tides", f"s{i}")))
                        for i in range(160)]
             await asyncio.sleep(0.3)
-            began = time.monotonic()
-            other = await client.post("/misumi/respond", **_say("bob", "Explain how a rainbow forms", "b"))
-            other_s = time.monotonic() - began
-            bob_style = dict(estate["calls"][-1]["style"])
-            began = time.monotonic()
-            api = await client.get("/misumi/routing/candidates")
-            api_s = time.monotonic() - began
+            try:
+                # served while every stalled turn is STILL blocked: if the stallers could delay it, this wait would time out
+                other = await asyncio.wait_for(client.post("/misumi/respond", **_say("bob", "Explain how a rainbow forms", "b")), 30)
+                bob_style = dict(estate["calls"][-1]["style"])
+                api = await asyncio.wait_for(client.get("/misumi/routing/candidates"), 30)
+                held = bool(entered) and not release.is_set()   # stalled work was in flight (and still blocked) when bob was served
+            finally:
+                release.set()
             results = await asyncio.gather(*stalled)
-            return other.status_code, other_s, bob_style, api.status_code, api_s, [r.status_code for r in results]
+            return other.status_code, held, bob_style, api.status_code, [r.status_code for r in results]
 
-    other_status, other_s, bob_style, api_status, api_s, stalled = asyncio.run(scenario())
-    assert other_status == 200 and other_s < 0.5, other_s
+    other_status, held, bob_style, api_status, stalled = asyncio.run(scenario())
+    assert other_status == 200 and held                      # served while stalled adaptation work was still blocked
+    assert len(entered) <= misumi_routes.ADAPTATION_PER_OWNER  # 160 stalled turns hold at most the per-owner slots
     assert bob_style == {"response_depth": "brief"}          # admitted, not skipped: one owner cannot starve the others
-    assert api_status == 200 and api_s < 0.5, api_s
+    assert api_status == 200
     assert set(stalled) == {200}
 
 
