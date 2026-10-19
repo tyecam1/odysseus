@@ -39,8 +39,8 @@ def test_parse_same_day_past_rolls_to_tomorrow():
     assert parse_quota_retry("usage limit; try again at 9:30", NOW) == timedelta(hours=23, minutes=15)
 
 
-def test_parse_exact_reset_time_is_zero():
-    assert parse_quota_retry("usage limit; try again at 10:15", NOW) == timedelta(0)
+def test_parse_exact_reset_time_clamps_to_one_minute():
+    assert parse_quota_retry("usage limit; try again at 10:15", NOW) == timedelta(minutes=1)
 
 
 def test_parse_preserves_timezone_awareness():
@@ -84,6 +84,27 @@ def test_cooldown_boundary_now_equals_until_is_inactive():
     cooldown.set("codex", NOW)
     assert cooldown.active("codex") is False
     assert cooldown.expires_at("codex") is None
+
+
+def test_cooldown_set_never_shortens_an_active_cooldown():
+    cooldown = ProviderCooldown(lambda: NOW)
+    cooldown.set("codex", NOW + timedelta(minutes=30))
+    shorter = cooldown.set("codex", NOW + timedelta(minutes=5))
+    assert shorter == NOW + timedelta(minutes=30)
+    assert cooldown.remaining("codex") == timedelta(minutes=30)
+    longer = cooldown.set("codex", NOW + timedelta(minutes=60))
+    assert longer == NOW + timedelta(minutes=60)
+    assert cooldown.remaining("codex") == timedelta(minutes=60)
+
+
+def test_cooldown_set_replaces_an_expired_cooldown():
+    clock = [NOW]
+    cooldown = ProviderCooldown(lambda: clock[0])
+    cooldown.set("codex", NOW + timedelta(minutes=30))
+    clock[0] = NOW + timedelta(minutes=30)          # old cooldown now expired
+    replaced = cooldown.set("codex", clock[0] + timedelta(minutes=2))
+    assert replaced == NOW + timedelta(minutes=32)
+    assert cooldown.remaining("codex") == timedelta(minutes=2)
 
 
 def test_resolve_provider_keeps_preferred_when_available():

@@ -221,6 +221,18 @@ def _admission_outcome(blocker) -> dict:
                    next_action=park_lease_ops.UNRESOLVED_NEXT_ACTION.get(blocker.lifecycle_state, "recover"))
 
 
+def _reuse_response(blocker) -> dict:
+    """Admission-reuse response describing the EXISTING execution row, not
+    the incoming request: provider/executor come from the blocker row, so a
+    glm-write dispatch that reuses an in-flight codex row reports codex
+    truthfully instead of relabelling the row with the requested provider."""
+    reuse = _admission_outcome(blocker)
+    return {
+        "ok": True, "provider": blocker.provider, "executor": blocker.executor,
+        **reuse, "next_action": _next_action_observe(reuse["execution_id"]),
+    }
+
+
 # ---------------------------------------------------------------------
 # Admission + dispatch (plan Stage 6 steps 1-9)
 # ---------------------------------------------------------------------
@@ -250,9 +262,7 @@ def execute_write_via_worker(objective: str, *, repo_id: str, host_id: str,
         with get_db_session() as db:
             blocker = park_lease_ops._unresolved_execution(db, lease_id)
             if blocker is not None:
-                reuse = _admission_outcome(blocker)
-                return {"ok": True, "provider": response_provider, **reuse,
-                        "next_action": _next_action_observe(reuse["execution_id"])}
+                return _reuse_response(blocker)
     except _Refusal as refusal:
         return {"ok": False, "provider": response_provider, "authority_denied": False,
                 "error_code": refusal.code, "error": str(refusal), **refusal.extra}
@@ -292,9 +302,7 @@ def execute_write_via_worker(objective: str, *, repo_id: str, host_id: str,
                 _ADMISSION_TEST_HOOK()
             blocker = park_lease_ops._unresolved_execution(db, lease_id)                  # step 4
             if blocker is not None:
-                reuse = _admission_outcome(blocker)
-                return {"ok": True, "provider": response_provider, **reuse,
-                        "next_action": _next_action_observe(reuse["execution_id"])}
+                return _reuse_response(blocker)
             now = _now()
             handle = dict(PLACEHOLDER)
             selection_evidence = None
@@ -330,12 +338,10 @@ def execute_write_via_worker(objective: str, *, repo_id: str, host_id: str,
                 return {"ok": False, "provider": response_provider, "error_code": "admission_conflict",
                         "error": f"admission conflict on lease {lease_id} could not be resolved"}
             try:
-                reuse = _admission_outcome(blocker)
+                return _reuse_response(blocker)
             except _Refusal as refusal:
                 return {"ok": False, "provider": response_provider, "error_code": refusal.code,
                         "error": str(refusal), **refusal.extra}
-        return {"ok": True, "provider": response_provider, **reuse,
-                "next_action": _next_action_observe(reuse["execution_id"])}
 
     if provider_runner is None:
         _dispatch_start(execution_id)                                                      # steps 6-7

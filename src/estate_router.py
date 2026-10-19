@@ -41,7 +41,12 @@ from src.runtime_paths import get_app_root
 from src.park_lease_ops import active_lease_for_repo
 from src import worktree_ops
 from src import estate_worker_procs as _estate_worker_procs
-from src.estate_provider_quota import ProviderCooldown, parse_quota_retry
+from src.estate_provider_quota import (
+    ProviderCooldown,
+    ProviderUnavailable,
+    parse_quota_retry,
+    resolve_provider,
+)
 from src.estate_worker_procs import (
     _kill_process_tree as _worker_kill_process_tree,
     _proc_is_live_nonzombie,
@@ -1130,9 +1135,25 @@ def _resolve_claude_glm_launcher() -> tuple[Optional[str], str]:
     return None, "claude-glm launcher is unavailable on this host"
 
 
+# A 429 alone is over-broad (generic rate limiting is not provider-balance
+# exhaustion and must not be classified as glm_unavailable); the live lab
+# rejection carries the 429 together with a provider-balance marker, e.g.
+# "Request rejected (429) · [1113][Insufficient balance or no resource
+# package. Please recharge.]".
+_GLM_QUOTA_429_RE = re.compile(
+    r"429\b.*(?:insufficient balance|no resource package|recharge)",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
 def _glm_unavailable_error(error_text: str) -> bool:
-    text = str(error_text or "").lower()
-    return "429" in text or "insufficient balance" in text or "no resource package" in text
+    text = str(error_text or "")
+    lowered = text.lower()
+    return bool(
+        _GLM_QUOTA_429_RE.search(text)
+        or "insufficient balance" in lowered
+        or "no resource package" in lowered
+    )
 
 
 def execute_claude_glm(objective: str, *, timeout: float = 180.0,
@@ -1492,8 +1513,12 @@ def _glm_placement(host_id: str) -> dict:
     host = next((entry for entry in (_load_yaml("estate").get("hosts") or [])
                  if entry.get("id") == host_id), None) or {}
     return {
-        "routed_host": host_id, "executed_host": host_id, "attested": True,
-        "transport": ((host.get("worker") or {}).get("transport")), "observed_host": host_id,
+        # Truthful, not worker-attested: the host-local GLM run bypasses the
+        # worker protocol, so no worker ever attested this execution.
+        # executed_host records where it actually ran; observed_host stays
+        # None because no attestation was observed either.
+        "routed_host": host_id, "executed_host": host_id, "attested": False,
+        "transport": ((host.get("worker") or {}).get("transport")), "observed_host": None,
     }
 
 
@@ -1668,32 +1693,64 @@ def run_task(task: dict) -> dict:
             provider_name = provider_choice.get("provider")
             response_metadata = {}
             cooldown_expires_at = None
+            glm_attempted = False
             paid_host = route["route"].get("host")
-            if provider_name == "codex" and _provider_cooldown.active("codex"):
-                cooldown_expires_at = _provider_cooldown.expires_at("codex")
-                fallback_choice, fallback_error = _glm_fallback_choice(
-                    paid_host, implementation_mode=implementation_mode,
-                )
-                response_metadata = {
-                    "glm_fallback_attempted": True,
-                    "cooldown_expires_at": cooldown_expires_at.isoformat() if cooldown_expires_at else None,
-                }
-                if fallback_choice is None:
-                    response_metadata["glm_fallback_error"] = fallback_error
+            if provider_name == "codex":
+                # Single provider-selection authority (no hand-rolled
+                # cooldown peeking): resolve_provider consults the cooldown
+                # for BOTH providers, so a glm already cooling is never
+                # dispatched as a fallback.
+                try:
+                    selected_provider = resolve_provider(
+                        "codex", "glm", _provider_cooldown, _provider_now(),
+                    )
+                except ProviderUnavailable as exc:
+                    cooldown_expires_at = _provider_cooldown.expires_at("codex")
+                    skipped = str(exc)
                     return {
                         **route, "ok": False, "executed": False,
                         "execution_error": (
-                            f"codex quota cooldown active until {response_metadata['cooldown_expires_at']}; "
-                            f"glm fallback unavailable: {fallback_error}"
+                            f"codex quota cooldown active until "
+                            f"{cooldown_expires_at.isoformat() if cooldown_expires_at else None}; "
+                            f"glm fallback unavailable: {skipped}"
                         ),
-                        "escalation_reason": "worker_failed", **response_metadata,
+                        "escalation_reason": "worker_failed",
+                        "glm_fallback_skipped": skipped,
+                        "cooldown_expires_at": (
+                            cooldown_expires_at.isoformat() if cooldown_expires_at else None
+                        ),
                     }
-                provider_choice = fallback_choice
-                provider_name = "glm"
-                response_metadata.update(
-                    provider_switched=True, original_provider="codex",
-                    switch_reason="quota_exhaustion",
-                )
+                if selected_provider == "glm":
+                    cooldown_expires_at = _provider_cooldown.expires_at("codex")
+                    fallback_choice, fallback_error = _glm_fallback_choice(
+                        paid_host, implementation_mode=implementation_mode,
+                    )
+                    if fallback_choice is None:
+                        # Skipped before any dispatch (flag, qualification or
+                        # launcher availability) — never reported as attempted.
+                        return {
+                            **route, "ok": False, "executed": False,
+                            "execution_error": (
+                                f"codex quota cooldown active until "
+                                f"{cooldown_expires_at.isoformat() if cooldown_expires_at else None}; "
+                                f"glm fallback unavailable: {fallback_error}"
+                            ),
+                            "escalation_reason": "worker_failed",
+                            "glm_fallback_skipped": fallback_error,
+                            "cooldown_expires_at": (
+                                cooldown_expires_at.isoformat() if cooldown_expires_at else None
+                            ),
+                        }
+                    provider_choice = fallback_choice
+                    provider_name = "glm"
+                    response_metadata = {
+                        "glm_fallback_attempted": True,
+                        "cooldown_expires_at": (
+                            cooldown_expires_at.isoformat() if cooldown_expires_at else None
+                        ),
+                        "provider_switched": True, "original_provider": "codex",
+                        "switch_reason": "quota_exhaustion",
+                    }
             provider_functions = (
                 _PAID_PROVIDER_WRITE_FUNCTION_NAMES if implementation_mode
                 else _PAID_PROVIDER_FUNCTION_NAMES
@@ -1818,6 +1875,7 @@ def run_task(task: dict) -> dict:
                     }
             else:
                 if provider_name == "glm":
+                    glm_attempted = True
                     result = _execute_glm_read_fallback(
                         paid_objective, task, route["route"]["host"], provider_fn,
                     )
@@ -1860,43 +1918,56 @@ def run_task(task: dict) -> dict:
                                 "codex", observed_at + retry, now=observed_at,
                             )
                             response_metadata = {
-                                "glm_fallback_attempted": True,
                                 "cooldown_expires_at": cooldown_expires_at.isoformat(),
                             }
-                            fallback_choice, fallback_error = _glm_fallback_choice(
-                                route["route"]["host"], implementation_mode=False,
-                            )
-                            if fallback_choice is not None:
-                                fallback_fn_name = _PAID_PROVIDER_FUNCTION_NAMES.get("glm")
-                                fallback_fn = globals().get(fallback_fn_name) if fallback_fn_name else None
-                                fallback_result = (
-                                    _execute_glm_read_fallback(
-                                        paid_objective, task, route["route"]["host"], fallback_fn,
-                                    ) if fallback_fn else {
-                                        "ok": False, "error": "glm provider implementation is unavailable",
-                                    }
+                            # Same single provider-selection authority as the
+                            # pre-dispatch branch: consult the glm cooldown
+                            # too, not just codex's.
+                            try:
+                                selected_provider = resolve_provider(
+                                    "codex", "glm", _provider_cooldown, observed_at,
                                 )
-                                if fallback_result.get("ok") and str(fallback_result.get("output") or "").strip():
-                                    provider_choice = fallback_choice
-                                    provider_name = "glm"
-                                    executor_name = "glm"
-                                    response_metadata.update(
-                                        provider_switched=True, original_provider="codex",
-                                        switch_reason="quota_exhaustion",
-                                    )
-                                    fallback_result.update(response_metadata)
-                                    fallback_result["model"] = (
-                                        fallback_result.get("model")
-                                        or fallback_choice["concrete_model_label"]
-                                    )
-                                    fallback_result["host_id"] = route["route"]["host"]
-                                    result = fallback_result
-                                else:
-                                    response_metadata["glm_fallback_error"] = (
-                                        fallback_result.get("error") or "claude-glm returned no usable output"
-                                    )
+                            except ProviderUnavailable as exc:
+                                response_metadata["glm_fallback_skipped"] = str(exc)
                             else:
-                                response_metadata["glm_fallback_error"] = fallback_error
+                                fallback_choice, fallback_error = _glm_fallback_choice(
+                                    route["route"]["host"], implementation_mode=False,
+                                )
+                                if fallback_choice is None or selected_provider != "glm":
+                                    response_metadata["glm_fallback_skipped"] = (
+                                        fallback_error or "glm provider is not selectable"
+                                    )
+                                else:
+                                    glm_attempted = True
+                                    response_metadata["glm_fallback_attempted"] = True
+                                    fallback_fn_name = _PAID_PROVIDER_FUNCTION_NAMES.get("glm")
+                                    fallback_fn = globals().get(fallback_fn_name) if fallback_fn_name else None
+                                    fallback_result = (
+                                        _execute_glm_read_fallback(
+                                            paid_objective, task, route["route"]["host"], fallback_fn,
+                                        ) if fallback_fn else {
+                                            "ok": False, "error": "glm provider implementation is unavailable",
+                                        }
+                                    )
+                                    if fallback_result.get("ok") and str(fallback_result.get("output") or "").strip():
+                                        provider_choice = fallback_choice
+                                        provider_name = "glm"
+                                        executor_name = "glm"
+                                        response_metadata.update(
+                                            provider_switched=True, original_provider="codex",
+                                            switch_reason="quota_exhaustion",
+                                        )
+                                        fallback_result.update(response_metadata)
+                                        fallback_result["model"] = (
+                                            fallback_result.get("model")
+                                            or fallback_choice["concrete_model_label"]
+                                        )
+                                        fallback_result["host_id"] = route["route"]["host"]
+                                        result = fallback_result
+                                    else:
+                                        response_metadata["glm_fallback_error"] = (
+                                            fallback_result.get("error") or "claude-glm returned no usable output"
+                                        )
                 if (result.get("placement") or {}).get("executed_host") is None:
                     # Same truthful-failure requirement as the local
                     # branch below: a transport/protocol/pre-execution
@@ -1911,7 +1982,10 @@ def run_task(task: dict) -> dict:
                     # matching the write-lease/qualification checks
                     # elsewhere in this function that correctly stay
                     # `blocked` because they never reach dispatch at all.
-                    actual_route = _dispatch_failure_actual_route(result)
+                    # A GLM attempt that actually ran (and failed) is the
+                    # executed provider for telemetry purposes even though
+                    # the reported failure is the original codex one.
+                    actual_route = "glm" if glm_attempted else _dispatch_failure_actual_route(result)
                     _update_decision_outcome(
                         route["decision_id"], status="failed", deterministic_gate="fail",
                         escalation_reason="worker_failed", verification_outcome="fail",
@@ -1937,7 +2011,7 @@ def run_task(task: dict) -> dict:
                     escalation_reason="insufficient_capability" if gate == "pass" else "worker_failed",
                     executor=executor_name,
                     escalated=True,
-                    actual_route=executor_name,
+                    actual_route="glm" if glm_attempted else executor_name,
                     verification_outcome=gate,
                     executed_host_id=(result.get("placement") or {}).get("executed_host"),
                     paid_tokens=_usage_token_count(result.get("usage")),

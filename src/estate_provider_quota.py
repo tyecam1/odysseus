@@ -19,6 +19,7 @@ _RETRY_AT = re.compile(
     re.IGNORECASE,
 )
 _DEFAULT_QUOTA_RETRY = timedelta(minutes=30)
+_MIN_QUOTA_RETRY = timedelta(minutes=1)
 
 
 class ProviderUnavailable(RuntimeError):
@@ -31,6 +32,9 @@ def parse_quota_retry(error_text: str, now: datetime) -> Optional[timedelta]:
     Only explicit quota markers qualify. A quota message without a usable
     ``try again at H:MM [AM|PM]`` timestamp receives a conservative 30-minute
     cooldown. A parsed time earlier than ``now`` is the next day's occurrence.
+    A parsed reset at (or within a minute of) ``now`` is clamped up to one
+    minute — a zero delay would leave the provider instantly retryable and
+    the cooldown a no-op.
     """
     text = str(error_text or "")
     lowered = text.lower()
@@ -59,7 +63,7 @@ def parse_quota_retry(error_text: str, now: datetime) -> Optional[timedelta]:
 
     if retry_at < now:
         retry_at += timedelta(days=1)
-    return retry_at - now
+    return max(retry_at - now, _MIN_QUOTA_RETRY)
 
 
 class ProviderCooldown:
@@ -75,12 +79,21 @@ class ProviderCooldown:
 
     def set(self, provider: str, until: datetime | timedelta, *,
             now: Optional[datetime] = None) -> datetime:
-        """Set ``provider`` cooling until an absolute time or for a delay."""
+        """Set ``provider`` cooling until an absolute time or for a delay.
+
+        Monotonic per provider: while an existing cooldown is still active
+        at ``current``, a new (even shorter) expiry may only extend it —
+        a late, smaller observation of the same exhaustion must never
+        reopen the provider early. An expired entry imposes no constraint.
+        """
         current = now or self._time_fn()
         expires_at = current + until if isinstance(until, timedelta) else until
         if not isinstance(expires_at, datetime):
             raise TypeError("until must be a datetime or timedelta")
         with self._lock:
+            existing = self._until.get(provider)
+            if existing is not None and existing > current:
+                expires_at = max(existing, expires_at)
             self._until[provider] = expires_at
         return expires_at
 

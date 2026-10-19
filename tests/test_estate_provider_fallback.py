@@ -164,8 +164,10 @@ def test_glm_unavailable_preserves_original_codex_failure(fallback_router, monke
     result = estate_router.run_task(_task())
 
     assert result["execution"] == original
-    assert result["glm_fallback_attempted"] is True
-    assert result["glm_fallback_error"] == "launcher missing"
+    # Skipped before any dispatch (launcher availability): reported as
+    # skipped, never as an attempted fallback.
+    assert result["glm_fallback_skipped"] == "launcher missing"
+    assert "glm_fallback_attempted" not in result
     assert "provider_switched" not in result
 
 
@@ -205,6 +207,82 @@ def test_glm_429_balance_rejection_preserves_original_failure(fallback_router, m
     assert result["glm_fallback_error"] == BALANCE_429
     assert "provider_switched" not in result
     assert estate_router._provider_cooldown.active("glm", NOW) is False
+
+
+def test_glm_read_fallback_placement_is_truthful_not_attested(fallback_router, monkeypatch):
+    estate_router._provider_cooldown.set("codex", NOW + timedelta(minutes=30), now=NOW)
+    monkeypatch.setattr(
+        estate_router, "_dispatch_read_only",
+        lambda *args, **kwargs: pytest.fail("active cooldown must not dispatch codex"),
+    )
+    monkeypatch.setattr(estate_router, "execute_claude_glm", lambda *args, **kwargs: {
+        "ok": True, "provider": "glm", "model": "glm-5.3", "output": "done",
+    })
+
+    result = estate_router.run_task(_task())
+
+    # Host-local GLM runs bypass the worker protocol: executed_host is
+    # truthful, but the run is not worker-attested and no host was observed
+    # by an attestation.
+    assert result["execution"]["placement"] == {
+        "routed_host": HOST, "executed_host": HOST, "attested": False,
+        "transport": "local", "observed_host": None,
+    }
+
+
+def test_glm_unavailable_error_requires_balance_markers_with_429():
+    live_lab_error = (
+        "Request rejected (429) · [1113][Insufficient balance or no resource package. "
+        "Please recharge.]"
+    )
+    assert estate_router._glm_unavailable_error(live_lab_error) is True
+    # A bare 429 (generic rate limiting) is NOT provider-balance exhaustion.
+    assert estate_router._glm_unavailable_error("HTTP 429: Too Many Requests") is False
+    assert estate_router._glm_unavailable_error("codex exited 1: upstream said 429, retry later") is False
+
+
+def test_failed_glm_attempt_records_glm_as_actual_route(fallback_router, monkeypatch):
+    estate_router._provider_cooldown.set("codex", NOW + timedelta(minutes=30), now=NOW)
+    monkeypatch.setattr(
+        estate_router, "_dispatch_read_only",
+        lambda *args, **kwargs: pytest.fail("active cooldown must not dispatch codex"),
+    )
+    monkeypatch.setattr(estate_router, "execute_claude_glm", lambda *args, **kwargs: {
+        "ok": False, "provider": "glm", "error": "claude-glm exited 1",
+    })
+    outcomes = []
+    monkeypatch.setattr(estate_router, "_update_decision_outcome",
+                        lambda decision_id, **kwargs: outcomes.append(kwargs))
+
+    result = estate_router.run_task(_task())
+
+    assert result["glm_fallback_attempted"] is True
+    assert result["glm_fallback_error"] == "claude-glm exited 1"
+    # GLM was the provider that actually executed (and failed) even though
+    # the reported failure is the codex cooldown: actual_route must say glm,
+    # not the reset codex executor label.
+    assert outcomes[-1]["actual_route"] == "glm"
+
+
+def test_both_providers_cooling_reports_glm_unavailable(fallback_router, monkeypatch):
+    estate_router._provider_cooldown.set("codex", NOW + timedelta(minutes=30), now=NOW)
+    estate_router._provider_cooldown.set("glm", NOW + timedelta(minutes=5), now=NOW)
+    monkeypatch.setattr(
+        estate_router, "_dispatch_read_only",
+        lambda *args, **kwargs: pytest.fail("cooling codex must not dispatch"),
+    )
+    monkeypatch.setattr(
+        estate_router, "execute_claude_glm",
+        lambda *args, **kwargs: pytest.fail("cooling glm must not dispatch"),
+    )
+
+    result = estate_router.run_task(_task())
+
+    assert result["executed"] is False
+    assert result["ok"] is False
+    assert result["escalation_reason"] == "worker_failed"
+    assert "both cooling" in result["glm_fallback_skipped"]
+    assert "glm_fallback_attempted" not in result
 
 
 def test_write_admission_switches_provider_before_single_execution_row(
@@ -298,6 +376,8 @@ def test_glm_write_uses_same_lease_worktree_branch_and_lifecycle(
 def test_codex_write_quota_failure_records_cooldown_without_midflight_switch(
         write_db, monkeypatch):
     _lease()
+    from datetime import datetime
+    monkeypatch.setattr(lane, "_now", lambda: datetime(2026, 10, 19, 10, 0, 0))
     worker = FakeWorker(monkeypatch, head="a" * 40, path="/w/feat")
     monkeypatch.setattr(
         estate_router, "execute_claude_glm",
@@ -320,6 +400,33 @@ def test_codex_write_quota_failure_records_cooldown_without_midflight_switch(
     assert row.lifecycle_state == "failed"
     assert payload["quota_exhaustion"] is True
     assert payload["cooldown_expires_at"] == "2026-10-19T14:30:00"
+
+
+def test_admission_reuse_reports_the_existing_rows_provider(write_db, monkeypatch):
+    _lease()
+    with get_db_session() as db:
+        db.add(EstateExecution(
+            id="E-existing", decision_id="D0", objective="first change",
+            executor="codex-write", provider="codex", host_id=HOST,
+            repo_id="odysseus", lease_id="L1", worktree_path="/w/feat",
+            branch="feat/glm-quota-fallback", lifecycle_state="running",
+            worktree_resolution="unresolved", submitted_at=NOW,
+        ))
+
+    result = lane.execute_write_via_worker(
+        "second change", repo_id="odysseus", host_id=HOST,
+        provider="glm", executor="glm-write",
+        provider_runner=lambda *args, **kwargs: pytest.fail(
+            "admission reuse must not dispatch a new provider run"),
+    )
+
+    # The reused execution row is a codex row: the response must describe
+    # the row's own provider/executor, not the glm-write request that
+    # collided with it.
+    assert result["dispatch"] == "reused_in_flight"
+    assert result["execution_id"] == "E-existing"
+    assert result["provider"] == "codex"
+    assert result["executor"] == "codex-write"
 
 
 def test_fallback_write_without_active_lease_is_refused_like_codex_write(
