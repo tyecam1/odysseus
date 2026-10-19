@@ -91,6 +91,8 @@ hosts:
     worker:
       enabled: true
       transport: local
+      # Operator enablement is required before adding `glm` and `glm-write`
+      # here. Qualification evidence alone does not change runtime routing.
       qualified_executors: [deterministic, local, codex, codex-write]
       qualification_evidence:
         - docs/aoteru-lm4-production-canary-evidence.md

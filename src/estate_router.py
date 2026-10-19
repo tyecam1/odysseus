@@ -31,6 +31,7 @@ import json
 import re
 import socket
 import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -40,6 +41,7 @@ from src.runtime_paths import get_app_root
 from src.park_lease_ops import active_lease_for_repo
 from src import worktree_ops
 from src import estate_worker_procs as _estate_worker_procs
+from src.estate_provider_quota import ProviderCooldown, parse_quota_retry
 from src.estate_worker_procs import (
     _kill_process_tree as _worker_kill_process_tree,
     _proc_is_live_nonzombie,
@@ -49,6 +51,11 @@ from src.estate_worker_procs import (
 )
 
 _CONFIG_DIR = Path(get_app_root()) / "config"
+_provider_cooldown = ProviderCooldown()
+
+
+def _provider_now() -> datetime:
+    return datetime.now()
 
 
 class RoutingConfigError(RuntimeError):
@@ -818,7 +825,8 @@ def _update_decision_outcome(decision_id: str, *, status: str, deterministic_gat
                              executor: Optional[str] = None, escalated: Optional[bool] = None,
                              actual_route: Optional[str] = None,
                              verification_outcome: Optional[str] = None,
-                             executed_host_id: Optional[str] = None) -> None:
+                             executed_host_id: Optional[str] = None,
+                             paid_tokens: Optional[int] = None) -> None:
     """Execution happens after `resolve_route()` already wrote its
     decision row — update that same row with the real outcome rather than
     writing a second telemetry row for one routed task (`RoutingDecision`
@@ -849,6 +857,8 @@ def _update_decision_outcome(decision_id: str, *, status: str, deterministic_gat
                     row.verification_outcome = verification_outcome
                 if executed_host_id is not None:
                     row.executed_host_id = executed_host_id
+                if paid_tokens is not None:
+                    row.paid_tokens = paid_tokens
     except Exception:
         import logging
         logging.getLogger(__name__).exception("routing_decisions outcome update failed; execution result is unaffected")
@@ -1104,6 +1114,110 @@ def execute_codex(objective: str, *, timeout: float = 180.0, cwd: Optional[str] 
     )
 
 
+def _resolve_claude_glm_launcher() -> tuple[Optional[str], str]:
+    """Resolve only the host-local GLM launcher; never substitute Claude."""
+    import shutil
+
+    candidates = [shutil.which("claude-glm")]
+    # Non-login shells commonly omit ~/.local/bin on Linux. This is the
+    # governed launcher location on the lab and is checked explicitly.
+    candidates.append(str(Path.home() / ".local" / "bin" / "claude-glm"))
+    if __import__("os").name == "nt":
+        candidates.insert(1, str(Path.home() / ".local" / "bin" / "claude-glm.cmd"))
+    for candidate in candidates:
+        if candidate and Path(candidate).is_file():
+            return candidate, "available"
+    return None, "claude-glm launcher is unavailable on this host"
+
+
+def _glm_unavailable_error(error_text: str) -> bool:
+    text = str(error_text or "").lower()
+    return "429" in text or "insufficient balance" in text or "no resource package" in text
+
+
+def execute_claude_glm(objective: str, *, timeout: float = 180.0,
+                       cwd: Optional[str] = None) -> dict:
+    """Run the host-local GLM Claude Code launcher with inherited context."""
+    import json as _json
+    import subprocess
+    import time
+
+    launcher, detail = _resolve_claude_glm_launcher()
+    if not launcher:
+        return {"ok": False, "provider": "glm", "error": detail,
+                "error_code": "glm_unavailable", "unavailable": True}
+    started = time.monotonic()
+    try:
+        proc = subprocess.Popen(
+            [launcher, "--print", "--output-format", "json"],
+            cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True,
+        )
+        stdout, stderr = proc.communicate(objective, timeout=timeout)
+        latency_ms = int((time.monotonic() - started) * 1000)
+        if proc.returncode != 0:
+            error = f"claude-glm exited {proc.returncode}: {(stderr or stdout or '')[-500:]}"
+            result = {"ok": False, "provider": "glm", "latency_ms": latency_ms, "error": error}
+            if _glm_unavailable_error(error):
+                result.update(error_code="glm_unavailable", unavailable=True)
+            return result
+        raw = (stdout or "").strip()
+        try:
+            payload = _json.loads(raw)
+        except _json.JSONDecodeError:
+            return {"ok": False, "provider": "glm", "latency_ms": latency_ms,
+                    "error": "claude-glm returned malformed JSON"}
+        if not isinstance(payload, dict) or payload.get("is_error"):
+            error = str(payload.get("error") if isinstance(payload, dict) else "invalid response")
+            result = {"ok": False, "provider": "glm", "latency_ms": latency_ms, "error": error}
+            if _glm_unavailable_error(error):
+                result.update(error_code="glm_unavailable", unavailable=True)
+            return result
+        output = payload.get("result") or payload.get("output") or payload.get("text") or ""
+        result = {
+            "ok": bool(str(output).strip()), "provider": "glm",
+            "model": payload.get("model") or "glm-5.3", "output": str(output),
+            "latency_ms": latency_ms,
+        }
+        if isinstance(payload.get("usage"), dict):
+            result["usage"] = payload["usage"]
+        if not result["ok"]:
+            result["error"] = "claude-glm returned an empty response"
+        return result
+    except FileNotFoundError:
+        return {"ok": False, "provider": "glm",
+                "error": "claude-glm launcher is unavailable on this host",
+                "error_code": "glm_unavailable", "unavailable": True}
+    except subprocess.TimeoutExpired:
+        try:
+            proc.kill()
+            proc.communicate(timeout=5)
+        except Exception:
+            pass
+        return {"ok": False, "provider": "glm",
+                "error": f"claude-glm timed out after {timeout}s",
+                "latency_ms": int((time.monotonic() - started) * 1000)}
+    except Exception as exc:
+        return {"ok": False, "provider": "glm", "error": str(exc),
+                "latency_ms": int((time.monotonic() - started) * 1000)}
+
+
+def execute_claude_glm_write_durable(objective: str, *, repo_id: str, host_id: str,
+                                     decision_id: Optional[str] = None,
+                                     wait_timeout: float = 30.0,
+                                     timeout: float = 1800.0,
+                                     cooldown_expires_at: Optional[str] = None) -> dict:
+    """Admit GLM through the existing lease-bound EstateExecution lane."""
+    from src.estate_write_lane import execute_write_via_worker
+
+    return execute_write_via_worker(
+        objective, repo_id=repo_id, host_id=host_id, decision_id=decision_id,
+        wait_timeout=wait_timeout, timeout=timeout, provider="glm",
+        executor="glm-write", provider_runner=execute_claude_glm,
+        concrete_model="glm-5.3", cooldown_expires_at=cooldown_expires_at,
+    )
+
+
 def _codex_write_authority(repo_id: str, host_id: str) -> dict:
     """Resolve the repo and prove its existing lease without acquiring one."""
     if resolve_repo_path(repo_id) is None:
@@ -1186,6 +1300,10 @@ def _estate_execution_provenance(execution) -> dict:
         "result": json.loads(execution.result_json) if execution.result_json else None,
         "error": execution.error,
         "finalization": json.loads(execution.finalization_json) if execution.finalization_json else None,
+        "provider_selection": (
+            json.loads(execution.worker_attestation_json)
+            if execution.worker_attestation_json else None
+        ),
     }
 
 
@@ -1311,9 +1429,12 @@ def execute_codex_write_durable(objective: str, *, repo_id: str, host_id: str,
 # (and any future caller) monkeypatch `estate_router.execute_codex` the
 # same way they already monkeypatch `execute_local`; binding the object
 # here at import time would silently stop honouring that patch.
-_PAID_PROVIDER_FUNCTION_NAMES = {"codex": "execute_codex"}
+_PAID_PROVIDER_FUNCTION_NAMES = {"codex": "execute_codex", "glm": "execute_claude_glm"}
 # Stage 6: the write lane dispatches through the worker on route.host.
-_PAID_PROVIDER_WRITE_FUNCTION_NAMES = {"codex": "execute_write_via_worker"}
+_PAID_PROVIDER_WRITE_FUNCTION_NAMES = {
+    "codex": "execute_write_via_worker",
+    "glm-write": "execute_claude_glm_write_durable",
+}
 
 
 def _resolve_paid_provider(alias: Optional[str]) -> dict:
@@ -1335,6 +1456,69 @@ def _resolve_paid_provider(alias: Optional[str]) -> dict:
         "provider": provider_name,
         "concrete_model_label": provider_entry.get("concrete_model_label", provider_name),
     }
+
+
+def _paid_provider_entry(provider_name: str) -> Optional[dict]:
+    return next(
+        (entry for entry in (_load_yaml("models").get("paid_providers") or [])
+         if entry.get("name") == provider_name),
+        None,
+    )
+
+
+def _glm_fallback_choice(host_id: Optional[str], *, implementation_mode: bool) -> tuple[Optional[dict], Optional[str]]:
+    """Resolve governed qualification separately from live availability."""
+    provider = _paid_provider_entry("glm")
+    if not provider or provider.get("allow_quota_fallback") is not True:
+        return None, "glm quota fallback is not enabled in config/models.yaml"
+    host = next((entry for entry in (_load_yaml("estate").get("hosts") or [])
+                 if entry.get("id") == host_id), None)
+    required = "glm-write" if implementation_mode else "glm"
+    if required not in (((host or {}).get("worker") or {}).get("qualified_executors") or []):
+        return None, f"executor {required!r} not qualified on {host_id!r}"
+    if host_id != current_host_id():
+        return None, f"claude-glm launcher availability is not attested on remote host {host_id!r}"
+    launcher, detail = _resolve_claude_glm_launcher()
+    if not launcher:
+        return None, detail
+    return {
+        "provider": "glm",
+        "concrete_model_label": provider.get("concrete_model_label") or "glm-5.3",
+        "launcher": launcher,
+    }, None
+
+
+def _glm_placement(host_id: str) -> dict:
+    host = next((entry for entry in (_load_yaml("estate").get("hosts") or [])
+                 if entry.get("id") == host_id), None) or {}
+    return {
+        "routed_host": host_id, "executed_host": host_id, "attested": True,
+        "transport": ((host.get("worker") or {}).get("transport")), "observed_host": host_id,
+    }
+
+
+def _execute_glm_read_fallback(objective: str, task: dict, host_id: str,
+                               provider_fn: Callable[..., dict]) -> dict:
+    cwd = None
+    if task.get("repo"):
+        cwd = resolve_repo_path(task["repo"])
+        if cwd is None:
+            return {"ok": False, "provider": "glm", "error_code": "glm_unavailable",
+                    "unavailable": True,
+                    "error": f"repo {task['repo']!r} does not resolve on GLM fallback host {host_id!r}"}
+    result = dict(provider_fn(objective, timeout=180.0, cwd=cwd))
+    result["placement"] = _glm_placement(host_id)
+    return result
+
+
+def _usage_token_count(usage) -> Optional[int]:
+    if not isinstance(usage, dict):
+        return None
+    values = [usage.get(name) for name in ("input_tokens", "output_tokens")]
+    if any(isinstance(value, int) and not isinstance(value, bool) for value in values):
+        return sum(value for value in values if isinstance(value, int) and not isinstance(value, bool))
+    total = usage.get("total_tokens")
+    return total if isinstance(total, int) and not isinstance(total, bool) else None
 
 
 def _dispatch_read_only(host_id: str, executor: str, task: dict, *, concrete_model: Optional[str] = None,
@@ -1482,23 +1666,52 @@ def run_task(task: dict) -> dict:
                 and allow_paid and (task.get("objective") is not None):
             provider_choice = _resolve_paid_provider(route["route"].get("model_alias"))
             provider_name = provider_choice.get("provider")
+            response_metadata = {}
+            cooldown_expires_at = None
+            paid_host = route["route"].get("host")
+            if provider_name == "codex" and _provider_cooldown.active("codex"):
+                cooldown_expires_at = _provider_cooldown.expires_at("codex")
+                fallback_choice, fallback_error = _glm_fallback_choice(
+                    paid_host, implementation_mode=implementation_mode,
+                )
+                response_metadata = {
+                    "glm_fallback_attempted": True,
+                    "cooldown_expires_at": cooldown_expires_at.isoformat() if cooldown_expires_at else None,
+                }
+                if fallback_choice is None:
+                    response_metadata["glm_fallback_error"] = fallback_error
+                    return {
+                        **route, "ok": False, "executed": False,
+                        "execution_error": (
+                            f"codex quota cooldown active until {response_metadata['cooldown_expires_at']}; "
+                            f"glm fallback unavailable: {fallback_error}"
+                        ),
+                        "escalation_reason": "worker_failed", **response_metadata,
+                    }
+                provider_choice = fallback_choice
+                provider_name = "glm"
+                response_metadata.update(
+                    provider_switched=True, original_provider="codex",
+                    switch_reason="quota_exhaustion",
+                )
             provider_functions = (
                 _PAID_PROVIDER_WRITE_FUNCTION_NAMES if implementation_mode
                 else _PAID_PROVIDER_FUNCTION_NAMES
             )
-            provider_fn_name = provider_functions.get(provider_name)
+            provider_key = "glm-write" if implementation_mode and provider_name == "glm" else provider_name
+            provider_fn_name = provider_functions.get(provider_key)
             provider_fn = globals().get(provider_fn_name) if provider_fn_name else None
             if provider_name is None or provider_fn is None:
                 return {**route, "executed": False, "execution_error": provider_choice.get(
                     "reason", f"paid provider {provider_name!r} has no "
                     f"{'write ' if implementation_mode else ''}implementation",
-                )}
+                ), **response_metadata}
             objective = task.get("objective")
             paid_objective = objective if isinstance(objective, str) else str(objective)
             executor_name = provider_name
-            paid_host = route["route"].get("host")
             paid_entry = next((h for h in (route.get("hosts_checked") or []) if h.get("host_id") == paid_host), None) or {}
-            if not implementation_mode and "codex" not in (paid_entry.get("qualified_executors") or []):
+            required_read_executor = provider_name
+            if not implementation_mode and required_read_executor not in (paid_entry.get("qualified_executors") or []):
                 # Stage 5 rule, enforced for the paid lane too (Stage 7
                 # finding 2): never dispatch an executor not qualified on
                 # route.host.
@@ -1507,10 +1720,10 @@ def run_task(task: dict) -> dict:
                     escalation_reason="worker_failed", verification_outcome="fail",
                 )
                 return {**route, "ok": False, "executed": False,
-                        "execution_error": f"executor 'codex' not qualified on {paid_host!r}",
-                        "escalation_reason": "worker_failed"}
+                        "execution_error": f"executor {required_read_executor!r} not qualified on {paid_host!r}",
+                        "escalation_reason": "worker_failed", **response_metadata}
             if implementation_mode:
-                executor_name = f"{provider_name}-write"
+                executor_name = provider_key if provider_name == "glm" else f"{provider_name}-write"
                 error = None
                 repo_id = task.get("repo")
                 # Stage 6: the write executes on route.host through its
@@ -1524,8 +1737,8 @@ def run_task(task: dict) -> dict:
                     error = "implementation mode requires task.repo and an existing active write lease"
                 elif host_id is None:
                     error = "implementation route has no host"
-                elif "codex-write" not in (host_entry.get("qualified_executors") or []):
-                    error = f"executor 'codex-write' not qualified on {host_id!r}"
+                elif executor_name not in (host_entry.get("qualified_executors") or []):
+                    error = f"executor {executor_name!r} not qualified on {host_id!r}"
                 else:
                     from src.estate_write_lane import _lease_authority
                     authority = _lease_authority(repo_id, host_id)
@@ -1542,9 +1755,17 @@ def run_task(task: dict) -> dict:
                         "execution_error": error,
                         "escalation_reason": "write_lease_missing",
                         "verification_outcome": "fail",
+                        **response_metadata,
                     }
-                result = provider_fn(paid_objective, repo_id=repo_id, host_id=host_id,
-                                      decision_id=route["decision_id"])
+                provider_kwargs = {
+                    "repo_id": repo_id, "host_id": host_id,
+                    "decision_id": route["decision_id"],
+                }
+                if provider_name == "glm":
+                    provider_kwargs["cooldown_expires_at"] = (
+                        cooldown_expires_at.isoformat() if cooldown_expires_at else None
+                    )
+                result = provider_fn(paid_objective, **provider_kwargs)
                 if result.get("authority_denied"):
                     _update_decision_outcome(
                         route["decision_id"], status="blocked", deterministic_gate="fail",
@@ -1556,6 +1777,7 @@ def run_task(task: dict) -> dict:
                         "execution_error": result["error"],
                         "escalation_reason": "write_lease_missing",
                         "verification_outcome": "fail",
+                        **response_metadata,
                     }
                 if result.get("ok") is False and result.get("error_code"):
                     # Admission refusal under the S6.1 table (unresolved /
@@ -1570,6 +1792,7 @@ def run_task(task: dict) -> dict:
                         **route, "ok": False, "executed": False,
                         "execution_error": result.get("error"), "execution": result,
                         "escalation_reason": "write_lease_missing", "verification_outcome": "fail",
+                        **response_metadata,
                     }
                 if result.get("lifecycle_state") in ("accepted", "running"):
                     # Durable execution still in flight past
@@ -1581,7 +1804,7 @@ def run_task(task: dict) -> dict:
                     # actually finishes, the same code path a fast
                     # completion below already went through.
                     reason = (
-                        f"implementation-mode Codex execution accepted on {route['route']['host']} "
+                        f"implementation-mode {executor_name} execution accepted on {route['route']['host']} "
                         "under the active repo lease -- poll GET /api/estate/run/{execution_id} "
                         "for the terminal result"
                     )
@@ -1591,15 +1814,89 @@ def run_task(task: dict) -> dict:
                         "dispatch": result.get("dispatch"), "next_action": result.get("next_action"),
                         "deterministic_gate": "pending", "verification_outcome": "pending",
                         "escalation_reason": None, "reason": reason,
+                        **response_metadata,
                     }
             else:
-                # Dispatched to the worker on route['route']['host'] rather
-                # than called in-process (Stage 3, D2): the worker resolves
-                # `task['repo']` to a real path on *its own* host (see
-                # `_verb_execute` -> `resolve_repo_path`), which is what
-                # actually grounds a repo-aware task now that host
-                # selection can name a host other than this backend.
-                result = _dispatch_read_only(route["route"]["host"], "codex", task, timeout=180.0)
+                if provider_name == "glm":
+                    result = _execute_glm_read_fallback(
+                        paid_objective, task, route["route"]["host"], provider_fn,
+                    )
+                    if result.get("ok") and str(result.get("output") or "").strip():
+                        result.update(response_metadata)
+                        result["model"] = result.get("model") or provider_choice["concrete_model_label"]
+                        result["host_id"] = route["route"]["host"]
+                    else:
+                        fallback_error = result.get("error") or "claude-glm returned no usable output"
+                        response_metadata.pop("provider_switched", None)
+                        response_metadata.pop("original_provider", None)
+                        response_metadata.pop("switch_reason", None)
+                        response_metadata["glm_fallback_error"] = fallback_error
+                        result = {
+                            "ok": False, "provider": "codex",
+                            "error": (
+                                f"codex quota cooldown active until "
+                                f"{response_metadata.get('cooldown_expires_at')}"
+                            ),
+                            "cooldown_expires_at": response_metadata.get("cooldown_expires_at"),
+                            "placement": {
+                                "routed_host": route["route"]["host"], "executed_host": None,
+                                "attested": False, "transport": (paid_entry.get("transport")),
+                                "observed_host": None,
+                            },
+                        }
+                        provider_name = "codex"
+                        executor_name = "codex"
+                        provider_choice = _resolve_paid_provider(route["route"].get("model_alias"))
+                else:
+                    # Codex read-only remains worker-attested. GLM fallback is
+                    # host-local and therefore admitted only when route.host is
+                    # this host by `_glm_fallback_choice` above.
+                    result = _dispatch_read_only(route["route"]["host"], "codex", task, timeout=180.0)
+                    if not result.get("ok"):
+                        observed_at = _provider_now()
+                        retry = parse_quota_retry(str(result.get("error") or ""), observed_at)
+                        if retry is not None:
+                            cooldown_expires_at = _provider_cooldown.set(
+                                "codex", observed_at + retry, now=observed_at,
+                            )
+                            response_metadata = {
+                                "glm_fallback_attempted": True,
+                                "cooldown_expires_at": cooldown_expires_at.isoformat(),
+                            }
+                            fallback_choice, fallback_error = _glm_fallback_choice(
+                                route["route"]["host"], implementation_mode=False,
+                            )
+                            if fallback_choice is not None:
+                                fallback_fn_name = _PAID_PROVIDER_FUNCTION_NAMES.get("glm")
+                                fallback_fn = globals().get(fallback_fn_name) if fallback_fn_name else None
+                                fallback_result = (
+                                    _execute_glm_read_fallback(
+                                        paid_objective, task, route["route"]["host"], fallback_fn,
+                                    ) if fallback_fn else {
+                                        "ok": False, "error": "glm provider implementation is unavailable",
+                                    }
+                                )
+                                if fallback_result.get("ok") and str(fallback_result.get("output") or "").strip():
+                                    provider_choice = fallback_choice
+                                    provider_name = "glm"
+                                    executor_name = "glm"
+                                    response_metadata.update(
+                                        provider_switched=True, original_provider="codex",
+                                        switch_reason="quota_exhaustion",
+                                    )
+                                    fallback_result.update(response_metadata)
+                                    fallback_result["model"] = (
+                                        fallback_result.get("model")
+                                        or fallback_choice["concrete_model_label"]
+                                    )
+                                    fallback_result["host_id"] = route["route"]["host"]
+                                    result = fallback_result
+                                else:
+                                    response_metadata["glm_fallback_error"] = (
+                                        fallback_result.get("error") or "claude-glm returned no usable output"
+                                    )
+                            else:
+                                response_metadata["glm_fallback_error"] = fallback_error
                 if (result.get("placement") or {}).get("executed_host") is None:
                     # Same truthful-failure requirement as the local
                     # branch below: a transport/protocol/pre-execution
@@ -1628,6 +1925,7 @@ def run_task(task: dict) -> dict:
                         "escalation_reason": "worker_failed",
                         "verification_outcome": "fail",
                         "placement": result.get("placement"),
+                        **response_metadata,
                     }
             gate = "pass" if result.get("ok") and (result.get("output") or "").strip() else "fail"
             if not implementation_mode:
@@ -1642,6 +1940,7 @@ def run_task(task: dict) -> dict:
                     actual_route=executor_name,
                     verification_outcome=gate,
                     executed_host_id=(result.get("placement") or {}).get("executed_host"),
+                    paid_tokens=_usage_token_count(result.get("usage")),
                 )
             # implementation_mode, terminal within execute_codex_write_durable's
             # wait_timeout: the decision outcome was already recorded by
@@ -1665,6 +1964,7 @@ def run_task(task: dict) -> dict:
                 "deterministic_gate": gate, "verification_outcome": gate,
                 "escalation_reason": "insufficient_capability" if gate == "pass" else "worker_failed",
                 "placement": result.get("placement"),
+                **response_metadata,
             }
         return {**route, "executed": False}
 

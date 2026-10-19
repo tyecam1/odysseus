@@ -48,6 +48,16 @@
 paid_providers:
   - name: codex
     concrete_model_label: codex-cli
+  - name: glm
+    concrete_model_label: glm-5.3
+    launcher: claude-glm
+    candidate_only: true
+    allow_quota_fallback: true
+    note: >-
+      Evidence-gated qualification: docs/glm-qualification-evidence records
+      a GLM-5.3 bounded module task passing 20/20 deterministic tests after
+      one test-defect repair; launcher readiness was verified on the
+      control-plane host. Qualification evidence is not live availability.
 default_paid_provider: codex
 
 capabilities:

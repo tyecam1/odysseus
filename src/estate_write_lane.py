@@ -158,9 +158,20 @@ def _record_outcome(row, state: str, host_id: str, result: Optional[dict] = None
         row.decision_id, status="complete" if gate == "pass" else "failed",
         deterministic_gate=gate, latency_ms=(result or {}).get("latency_ms"),
         escalation_reason="insufficient_capability" if gate == "pass" else "worker_failed",
-        executor="codex-write", escalated=True, actual_route="codex-write",
+        executor=row.executor, escalated=True, actual_route=row.executor,
         verification_outcome=gate, executed_host_id=host_id,
+        paid_tokens=_usage_tokens((result or {}).get("usage")),
     )
+
+
+def _usage_tokens(usage) -> Optional[int]:
+    if not isinstance(usage, dict):
+        return None
+    values = [usage.get(name) for name in ("input_tokens", "output_tokens")]
+    if any(isinstance(value, int) and not isinstance(value, bool) for value in values):
+        return sum(value for value in values if isinstance(value, int) and not isinstance(value, bool))
+    total = usage.get("total_tokens")
+    return total if isinstance(total, int) and not isinstance(total, bool) else None
 
 
 # ---------------------------------------------------------------------
@@ -216,13 +227,17 @@ def _admission_outcome(blocker) -> dict:
 
 def execute_write_via_worker(objective: str, *, repo_id: str, host_id: str,
                              decision_id: Optional[str] = None,
-                             wait_timeout: float = 30.0, timeout: float = 1800.0) -> dict:
+                             wait_timeout: float = 30.0, timeout: float = 1800.0,
+                             provider: str = "codex", executor: str = "codex-write",
+                             provider_runner=None, concrete_model: Optional[str] = None,
+                             cooldown_expires_at: Optional[str] = None) -> dict:
     from sqlalchemy.exc import IntegrityError
     from core.database import EstateExecution, ParkLease, lease_serialized_transaction
 
+    response_provider = executor if provider == "codex" else provider
     authority = _lease_authority(repo_id, host_id)                                   # step 1
     if not authority["ok"]:
-        return {"ok": False, "provider": "codex-write", "authority_denied": True,
+        return {"ok": False, "provider": response_provider, "authority_denied": True,
                 "error": authority["error"], "error_code": authority["code"]}
     lease_id, branch, worktree_path = authority["lease_id"], authority["branch"], authority["worktree_path"]
 
@@ -236,10 +251,10 @@ def execute_write_via_worker(objective: str, *, repo_id: str, host_id: str,
             blocker = park_lease_ops._unresolved_execution(db, lease_id)
             if blocker is not None:
                 reuse = _admission_outcome(blocker)
-                return {"ok": True, "provider": "codex-write", **reuse,
+                return {"ok": True, "provider": response_provider, **reuse,
                         "next_action": _next_action_observe(reuse["execution_id"])}
     except _Refusal as refusal:
-        return {"ok": False, "provider": "codex-write", "authority_denied": False,
+        return {"ok": False, "provider": response_provider, "authority_denied": False,
                 "error_code": refusal.code, "error": str(refusal), **refusal.extra}
 
     verify, exc = _worker(host_id, "worktree.verify",                                  # step 2
@@ -249,15 +264,15 @@ def execute_write_via_worker(objective: str, *, repo_id: str, host_id: str,
         # Verification could not complete (budget exhausted, a live earlier
         # verification, transport): no row, no state change -- a transient,
         # retryable availability outcome, never an authority verdict.
-        return {"ok": False, "provider": "codex-write", "authority_denied": False, "retryable": True,
+        return {"ok": False, "provider": response_provider, "authority_denied": False, "retryable": True,
                 "error_code": "worktree_verification_unavailable",
                 "error": f"worktree verification on {host_id!r} did not complete: {exc.code}: {exc}"}
     if exc is not None or not verify.get("ok"):
-        return {"ok": False, "provider": "codex-write", "authority_denied": True, "error_code": "authority_denied",
+        return {"ok": False, "provider": response_provider, "authority_denied": True, "error_code": "authority_denied",
                 "error": f"worktree verification failed on {host_id!r}: "
                          f"{getattr(exc, 'code', '') or ''} {exc or verify.get('reason')}".strip()}
     if verify.get("clean") is not True:
-        return {"ok": False, "provider": "codex-write", "authority_denied": True, "error_code": "worktree_not_clean",
+        return {"ok": False, "provider": response_provider, "authority_denied": True, "error_code": "worktree_not_clean",
                 "error": f"leased worktree {worktree_path!r} on {host_id!r} is not clean"}
     admission_head = verify.get("head_sha")
 
@@ -278,49 +293,114 @@ def execute_write_via_worker(objective: str, *, repo_id: str, host_id: str,
             blocker = park_lease_ops._unresolved_execution(db, lease_id)                  # step 4
             if blocker is not None:
                 reuse = _admission_outcome(blocker)
-                return {"ok": True, "provider": "codex-write", **reuse,
+                return {"ok": True, "provider": response_provider, **reuse,
                         "next_action": _next_action_observe(reuse["execution_id"])}
             now = _now()
+            handle = dict(PLACEHOLDER)
+            selection_evidence = None
+            if provider_runner is not None:
+                handle = {
+                    "dispatch_state": "provider_runner", "provider": provider,
+                    "model": concrete_model, "cooldown_expires_at": cooldown_expires_at,
+                }
+                selection_evidence = json.dumps({
+                    "provider": provider, "executor": executor, "model": concrete_model,
+                    "host_id": host_id, "cooldown_expires_at": cooldown_expires_at,
+                    "verification_result": "pending",
+                }, sort_keys=True)
             db.add(EstateExecution(                                                        # step 5
                 id=execution_id, decision_id=decision_id, objective=objective,
-                executor="codex-write", provider="codex", host_id=host_id, repo_id=repo_id,
+                executor=executor, provider=provider, host_id=host_id, repo_id=repo_id,
                 lease_id=lease_id, worktree_path=worktree_path, branch=branch,
                 lifecycle_state="accepted", worktree_resolution="unresolved",
-                worker_handle_json=json.dumps(PLACEHOLDER),
+                worker_handle_json=json.dumps(handle, sort_keys=True),
+                worker_attestation_json=selection_evidence,
                 execution_deadline_at=now + timedelta(seconds=timeout),
                 admission_head_sha=admission_head, submitted_at=now,
             ))
             db.flush()
     except _Refusal as refusal:
-        return {"ok": False, "provider": "codex-write", "authority_denied": refusal.code == "write_lease_missing",
+        return {"ok": False, "provider": response_provider, "authority_denied": refusal.code == "write_lease_missing",
                 "error_code": refusal.code, "error": str(refusal), **refusal.extra}
     except IntegrityError:
         # The unresolved-row index caught a truly concurrent admission.
         with lease_serialized_transaction(lease_id=lease_id) as db:
             blocker = park_lease_ops._unresolved_execution(db, lease_id)
             if blocker is None:
-                return {"ok": False, "provider": "codex-write", "error_code": "admission_conflict",
+                return {"ok": False, "provider": response_provider, "error_code": "admission_conflict",
                         "error": f"admission conflict on lease {lease_id} could not be resolved"}
             try:
                 reuse = _admission_outcome(blocker)
             except _Refusal as refusal:
-                return {"ok": False, "provider": "codex-write", "error_code": refusal.code,
+                return {"ok": False, "provider": response_provider, "error_code": refusal.code,
                         "error": str(refusal), **refusal.extra}
-        return {"ok": True, "provider": "codex-write", **reuse,
+        return {"ok": True, "provider": response_provider, **reuse,
                 "next_action": _next_action_observe(reuse["execution_id"])}
 
-    _dispatch_start(execution_id)                                                          # steps 6-7
-    thread = threading.Thread(target=_observe_worker_execution, args=(execution_id,),       # step 8
-                              name=f"estate-observe-{execution_id}", daemon=True)
+    if provider_runner is None:
+        _dispatch_start(execution_id)                                                      # steps 6-7
+        target = _observe_worker_execution
+        args = (execution_id,)
+        thread_name = f"estate-observe-{execution_id}"
+    else:
+        target = _run_provider_execution
+        args = (execution_id, provider_runner, timeout, concrete_model, cooldown_expires_at)
+        thread_name = f"estate-{provider}-write-{execution_id}"
+    thread = threading.Thread(target=target, args=args, name=thread_name, daemon=True)       # step 8
     thread.start()
     thread.join(wait_timeout)                                                              # step 9
     row = _load_row(execution_id)
-    response = {"ok": True, "provider": "codex-write", "execution_id": execution_id, "dispatch": "new",
+    response = {"ok": True, "provider": response_provider, "execution_id": execution_id, "dispatch": "new",
                 "lifecycle_state": row.lifecycle_state if row else "accepted",
                 "next_action": _next_action_observe(execution_id)}
     if row is not None and row.lifecycle_state in _TERMINAL:
         response["result"] = json.loads(row.result_json) if row.result_json else None
     return response
+
+
+def _run_provider_execution(execution_id: str, provider_runner, timeout: float,
+                            concrete_model: Optional[str], cooldown_expires_at: Optional[str]) -> None:
+    """Run a qualified host-local provider after the shared admission gate.
+
+    The provider is selected before the row exists. Once admitted, this
+    function owns that one row to terminal state and never switches provider.
+    """
+    row = _load_row(execution_id)
+    if row is None:
+        return
+    started = _now()
+    if not _transition(execution_id, ("accepted",), lifecycle_state="running",
+                       started_at=started, last_observed_at=started):
+        return
+    try:
+        result = dict(provider_runner(
+            row.objective, timeout=timeout, cwd=row.worktree_path,
+        ))
+    except Exception as exc:
+        result = {"ok": False, "provider": row.provider, "error": str(exc)}
+    result.setdefault("provider", row.provider)
+    if concrete_model:
+        result.setdefault("model", concrete_model)
+    result["host_id"] = row.host_id
+    result["cooldown_expires_at"] = cooldown_expires_at
+    state = "succeeded" if result.get("ok") else (
+        "timed_out" if "timed out" in str(result.get("error") or "").lower() else "failed"
+    )
+    gate = "pass" if state == "succeeded" and str(result.get("output") or "").strip() else "fail"
+    result["verification_result"] = gate
+    finished = _now()
+    if _transition(
+        execution_id, ("running",), lifecycle_state=state, finished_at=finished,
+        last_observed_at=finished, result_json=json.dumps(result),
+        error=None if result.get("ok") else result.get("error"),
+        exit_status="0" if result.get("ok") else "1",
+        worker_attestation_json=json.dumps({
+            "provider": row.provider, "executor": row.executor, "model": result.get("model"),
+            "host_id": row.host_id, "cooldown_expires_at": cooldown_expires_at,
+            "verification_result": gate, "usage": result.get("usage"),
+        }, sort_keys=True),
+    ):
+        _record_outcome(row, state, row.host_id, result)
 
 
 def _start_payload(row) -> dict:
@@ -489,7 +569,16 @@ def _apply_view(execution_id: str, view: dict, *, start_answer: bool = False, fe
             _record_outcome(row, "interrupted", row.host_id)
         return
     if state in _TERMINAL:
-        result = view.get("result") or {}
+        result = dict(view.get("result") or {})
+        if row.provider == "codex" and not result.get("ok"):
+            retry = _router.parse_quota_retry(str(result.get("error") or ""), now)
+            if retry is not None:
+                expires_at = _router._provider_cooldown.set("codex", now + retry, now=now)
+                result["quota_exhaustion"] = True
+                result["cooldown_expires_at"] = expires_at.isoformat()
+                result["provider"] = "codex"
+                result["host_id"] = row.host_id
+                result["verification_result"] = "fail"
         if _transition(execution_id, ("running",), lifecycle_state=state, finished_at=now,
                        result_json=json.dumps(result), exit_status="0" if state == "succeeded" else "1",
                        error=None if state == "succeeded" else result.get("error")):
