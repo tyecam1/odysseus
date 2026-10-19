@@ -216,6 +216,14 @@ def run_instagram_import(
     }
     line = append_import_run(accounting, log_path)
     logger.info("Instagram import run: %s", line)
+    if default_importer:
+        # Governed handoff (deterministic, own accounting log beside the run log): a failure never fails the import.
+        try:
+            from src.instagram_handoff import run_instagram_handoff
+
+            run_instagram_handoff(Path(log_path).parent / "handoff")
+        except Exception as exc:
+            logger.warning("Instagram handoff failed: %s", type(exc).__name__)
     return accounting
 
 
