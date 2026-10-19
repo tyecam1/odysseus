@@ -296,7 +296,6 @@ def test_a_held_lock_degrades_the_turn_and_the_operator_api_reports_503(estate, 
     "From now on use Jin for compost questions - Bob",
     "From now on keep answers short lol jk",
     "she says from now on keep answers short",
-    "maybe from now on keep answers short",
 ])
 def test_reported_hedged_signed_or_joking_text_creates_no_evidence_or_offer(estate, prompt):
     reply = _turn(estate, prompt, persona="auto", session="f6")

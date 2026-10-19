@@ -294,8 +294,8 @@ class OfferBook:
         for callers without the execute scope: their latches live in a separate small structure."""
         tier = "execute" if privileged else "read-only"
         max_owners, max_sessions = self.latch_limits[tier]
-        if not session_id and (not privileged or not _owner_value(owner)):
-            return  # round 9: a read-only or anonymous caller never latches a whole owner bucket (it could reach other callers)
+        # Round 10: a no-session flagged turn latches its OWN owner bucket in its OWN tier (anonymous callers share one bucket,
+        # so every anonymous caller is latched for the window - fail-safe); a read-only tier never reaches execute callers.
         key = str(session_id) if session_id else self.OWNER_WIDE
         with self._latch_lock:
             owners = self._latch[tier]

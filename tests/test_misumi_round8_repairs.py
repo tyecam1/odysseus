@@ -46,9 +46,9 @@ def consults(estate, monkeypatch):
     """Record the lead's model call (including the advisory note) and make every consult answer."""
     seen = {"consulted": [], "advisory": []}
 
-    async def fake_consult(prompt, target, backend, model, lead="aoteru"):
+    async def fake_consult(prompt, target, backend, model, lead="aoteru", structured=False):
         seen["consulted"].append((target, lead))
-        return f"OK: {target} notes"
+        return "ANGLE: Try a warmer paint colour" if structured else f"OK: {target} notes"  # round 10: structured shape
 
     async def fake_turn(prompt, persona, **kwargs):
         estate["calls"].append({"prompt": prompt, "style": dict(kwargs.get("style_values") or {})})

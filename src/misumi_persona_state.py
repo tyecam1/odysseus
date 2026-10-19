@@ -251,7 +251,7 @@ _THIRD_PARTY = (
     re.compile(r"\b(?:reckons?|apparently|supposedly|allegedly|according\s+to|i\s+(?:heard|read)|rumou?r(?:s|ed)?|"
                r"(?:he|she|they|mum|mom|mam|dad|my\s+\w+|\w+'s\s+\w+)\s+(?:says|said|thinks|reckons|suggests|suggested|wants\s+"
                r"(?:us|me|you)\s+to|told\s+(?:me|us))|someone\s+(?:said|says|told)|people\s+say|they\s+say|"
-               r"maybe|perhaps|we\s+(?:should|could|might|ought\s+to)|might\s+be\s+(?:good|nice|worth|better))\b", re.IGNORECASE),
+               r"we\s+(?:should|could|might|ought\s+to)\s+(?:all|both)\b)\b", re.IGNORECASE),
     re.compile(r"\b(?:lol|lmao|lmfao|rofl|jk|j/k|just\s+(?:kidding|joking)|kidding|joking|haha\w*|hehe\w*|not\s+really)\b|"
                r"(?:^|\s)/s\s*$|[\U0001F602\U0001F923\U0001F61C\U0001F609\U0001F643]", re.IGNORECASE),
 )
@@ -371,7 +371,9 @@ _SIGNALS: tuple[tuple[str, str, str, re.Pattern[str]], ...] = tuple(
         ("structure", "bullets", "request",
          r"(?<!no )(?<!without )\b(?:bullet(?:ed)?(?:\s+points?)?|as\s+a\s+list|in\s+a\s+list)\b"),
         ("structure", "stepwise", "request", r"\b(?:step[- ]by[- ]step|numbered\s+steps|as\s+steps)\b"),
-        ("structure", "prose", "request", r"\b(?:in\s+prose|as\s+paragraphs|no\s+bullet(?:\s+points)?|without\s+bullets)\b"),
+        ("structure", "prose", "request",
+         r"\b(?:in\s+(?:full\s+|plain\s+|proper\s+)?prose|as\s+paragraphs|in\s+(?:full|proper|complete)\s+sentences|"
+         r"no\s+bullet(?:\s+points)?|without\s+bullets)\b"),
         ("intervention_style", "proactive", "request",
          r"\b(?:be\s+(?:more\s+)?proactive|suggest\s+(?:next\s+steps|what\s+to\s+do\s+next)"
          r"|tell\s+me\s+what\s+to\s+do\s+next|offer\s+(?:next\s+steps|suggestions))\b"),
@@ -915,7 +917,7 @@ def unsaved_preference(prompt: str) -> dict[str, str] | None:
     if _DATA_TASK.search(text):
         return None
     stripped = _full(prompt).strip()
-    if any(_THIRD_PARTY[index].search(stripped) for index in (0, 1, 2, 3)):
+    if any(_THIRD_PARTY[index].search(stripped) for index in (0, 2, 3)):
         return None  # a group greeting, a signature line, headers/forwards, or a group address: someone else's message
     greeting = _GREETING_NAME.match(stripped)
     if greeting and greeting.group(1).lower() != "there" and not _is_assistant_name(greeting.group(1)):

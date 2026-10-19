@@ -35,11 +35,11 @@ BANK = [
     ("Could you use bullet points from now on?", "notice"),
     ("haha from now on keep answers short", "notice"),
     ("from now on keep answers short lol", "notice"),
-    ("Maybe from now on keep answers short", "notice"),
+    ("Maybe from now on keep answers short", "offer"),        # round 10: a hedge on the user's OWN request
     ("Apparently I ramble, so from now on keep it short", "notice"),
     ("From now on use plain English. Cheers, Sam", "notice"),
-    ("Perhaps going forward use bullet points", "notice"),
-    ("we should probably always use bullet points", "notice"),
+    ("Perhaps going forward use bullet points", "offer"),     # round 10: a hedge on the user's OWN request
+    ("we should probably always use bullet points", "offer"),  # round 10: first-person plural is the user's own
     ("jk from now on use numbered steps", "notice"),
     ("Will you keep answers short from now on?", "notice"),
     ("My partner says you ramble, from now on keep it brief", "notice"),

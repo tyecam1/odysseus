@@ -273,7 +273,10 @@ _R_HAZARD = (
     r"hit|beat\w*|punch\w*|kick\w*|slap\w*|stab\w*|threat\w*|violen\w*|abus\w*|assault\w*|shout\w*|threw|throw\w*|weapon\w*|"
     r"gun|follow\w*|stalk\w*|blackmail\w*|bull(?:y|ied|ying)|grabb\w*|push\w*|car|cars|bike|road|traffic|crash\w*|"
     r"missing|lost|trapped|stuck|locked\s+in|caught\s+in|drown\w*|water|pond|pool|bath|drunk|drank|drink\w*|ate|eaten|"
-    r"party|taken\s+something|cut\s+(?:open|deep|badly|(?:him|her|my|them|your)sel\w*|his|her|my|their))\b"
+    r"party|taken\s+something|cut\s+(?:open|deep|badly|(?:him|her|my|them|your)sel\w*|his|her|my|their)|"
+    r"gasp\w*|fitting|foam\w*|roar\w*|(?:not|isn'?t|stopped|won'?t\s+stop)\s+(?:crying|responding|moving|waking)|"
+    r"respond\w*|unrespons\w*|(?:worst|terrible|sudden|thunderclap)\s+(?:ever\s+)?headache|headache|"
+    r"lying\s+(?:on|in|there|still|face)|rolled\s+off|roll\w*\s+off|seiz\w*|convuls\w*|fit\b)\b"
 )
 _R_PERSON_RE, _R_BODY_RE, _R_HAZARD_RE = (re.compile(p) for p in (_R_PERSON, _R_BODY, _R_HAZARD))
 
