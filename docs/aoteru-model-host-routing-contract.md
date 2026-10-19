@@ -474,3 +474,79 @@ Odysseus SQLite           # jobs, outcomes, routing telemetry/policy evaluation 
 ```
 
 If equivalent existing surfaces already own any of these concerns, extend them instead of duplicating them.
+
+## Codex usage-limit → GLM failover (operator priority, 2026-10-19)
+
+**Required behaviour:** A confirmed Codex usage/quota exhaustion is a
+**provider-availability event**, not a reason to stop or park an otherwise
+eligible development task. On this condition the central Odysseus router must
+choose **GLM as the preferred alternative** for each eligible task role.
+Codex remains the preferred paid code worker when healthy; this does not
+create a second router or permanently pin providers inside task prompts.
+
+**Reconcile the current architecture before implementation.** As of the
+instruction date, GitHub PR #38 implements a **candidate-only** GLM provider
+via an existing host-local `claude-glm` Claude Code sidecar, and is not
+merged into `dev`. The presence of the launcher and the subscription are not
+the same as runtime qualification. Reconcile PR #38 with live `dev` and
+the existing model-role evaluation owner (PR #91) rather than creating a
+separate GLM integration. No local secret, endpoint or bearer token belongs in
+Git, prompt text, logs or the backend config.
+
+### Deterministic failover contract
+
+1. Classify failed Codex calls by typed evidence: quota/usage limit; transient
+   transport; authentication; executor/sandbox failure; tool/application
+   exception; timeout; other. Only **verified provider quota exhaustion**
+   triggers this policy. A generic non-zero exit code is insufficient.
+2. Record the unavailable provider and any **authoritatively returned reset
+   time** in bounded provider-health state, with a non-spamming cooldown.
+   An inferred or past reset time must not be presented as fact.
+3. Resolve repository and worker-host authority **before** selecting the
+   alternate provider. Check the live `config/models.yaml` provider entry,
+   host-qualified executor, real launcher availability, credential readiness
+   only through non-secret status, allowed task role, security/data locality,
+   provider capacity and task's verification floor.
+4. If **GLM is qualified**, dispatch the **same bounded objective** to GLM
+   through the existing Odysseus `/api/estate/run` lifecycle; preserve the
+   task/lease/worktree scope, budget, exact implementer identity and
+   execution trace. Do not recursively retry Codex, create another queue,
+   or silently change task consequences/permissions.
+5. If GLM remains **candidate-only**, it can be used for an explicitly
+   authorised bounded qualification experiment under PR #38's contract,
+   but the quota fallback must **not** silently set
+   `candidate_opt_in` or `allow_unqualified_candidate`. Qualify the
+   implementation route with realistic paired work, permissions and
+   deterministic tests before production activation.
+6. If no qualified GLM is available, proceed with independent deterministic
+   work and any other eligible worker according to the current provider
+   policy. Record a truthful `no_qualified_fallback` blocker for the
+   affected unit, not for the entire long-horizon programme.
+7. **Independence survives fallback:** if GLM implemented a change, GLM may
+   not self-certify a required independent model review. Use a distinct
+   qualified verifier or retain explicit Codex/Sol review debt until available.
+   Routine deterministic tests are not a substitute for mandated high-risk
+   independent review. Do not merge/deploy safety-sensitive unverified code.
+8. Recheck Codex availability only when the recorded cooldown expires or a
+   new authorised signal arrives, then restore the normal preferred route.
+   A failed Codex first call must never cause an unbounded retry storm.
+
+### Acceptance tests and operational proof
+
+- Simulate a **realistic parsed** Codex quota error and prove one GLM
+  selection when eligible, with no repeated Codex invocation in cooldown.
+- Prove a non-quota Codex error does **not** silently trigger GLM failover.
+- Prove missing launcher, wrong host, disabled/candidate-only GLM,
+  unavailable credentials or disallowed data each fail closed.
+- For implementation mode, prove the pre-existing lease and isolated
+  worktree are enforced unchanged across the provider switch.
+- Prove role and model identities, quota reason, trace, tokens/cost where
+  observable, tests and pending independent review remain auditable.
+- Prove that an unavailable GLM does not freeze independent eligible work.
+- Demonstrate a live Codex-quota-limit → qualified-GLM route with verbatim
+  provider/host execution evidence before claiming **automatic fallback
+  operational**. Tests and documentation alone are not operational proof.
+
+This policy changes model **availability preference**, not the repository's
+established shipping-first priority or any authority, review, release and
+permission requirement.
