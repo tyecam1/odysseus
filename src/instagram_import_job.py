@@ -165,7 +165,7 @@ def run_instagram_import(
                 continue
             for permalink, occurrence in posts.items():
                 current = winners.get(permalink)
-                if current is None or occurrence["timestamp"] > current[0]:
+                if current is None or occurrence["timestamp"] >= current[0]:   # a tie goes to the later snapshot
                     winners[permalink] = (
                         occurrence["timestamp"],
                         posts_path,

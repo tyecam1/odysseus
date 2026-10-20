@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import base64
 import collections
+import hashlib
 import json
 import logging
 import os
@@ -34,6 +35,7 @@ LOCK_NAME = ".work-items.lock"
 MAX_ROWS_PER_BATCH = 5000   # a growing outbox is consumed in bounded batches, oldest first
 DEFAULT_THRESHOLD = 25
 _SAFE_REASON = re.compile(r"^(?:phd|misumi):[a-z0-9 ]{1,30}$")
+_CONFIDENCES = frozenset({"none", "low", "medium", "high"})   # the outbox is data, never trusted text, in a public digest
 
 # domain -> (owner repo, base branch, review path template, outbox file)
 OWNERS: dict[str, dict[str, str]] = {
@@ -61,10 +63,21 @@ def _publishing_enabled() -> bool:
     return os.getenv("ODYSSEUS_INSTAGRAM_WORKITEM_PUBLISH", "0") == "1" and "PYTEST_CURRENT_TEST" not in os.environ
 
 
-def build_digest(domain: str, rows: list[dict[str, Any]], *, stamp: str, total_routed: int) -> str:
+def build_digest(
+    domain: str, rows: list[dict[str, Any]], *, stamp: str, total_routed: int, batch: Optional[dict[str, Any]] = None
+) -> str:
     """Aggregate markdown for one domain batch: counts, confidence and cue words only."""
     owner = OWNERS[domain]
-    confidence = collections.Counter(str(r.get("confidence") or "unknown") for r in rows)
+    confidence = collections.Counter(
+        r["confidence"] if isinstance(r.get("confidence"), str) and r["confidence"] in _CONFIDENCES else "unknown" for r in rows
+    )
+    batch = batch or {}
+    batch_text = (
+        f"- Source batch: outbox rows {batch['start'] + 1}-{batch['end']} of `{domain}.jsonl` (sha256 `{batch['sha256'][:16]}`); "
+        f"{batch.get('invalid', 0)} unreadable, {batch.get('retracted', 0)} retraction and {batch.get('duplicates', 0)} duplicate rows "
+        "excluded.\n"
+        if {"start", "end", "sha256"} <= set(batch) else ""
+    )
     cues = collections.Counter(
         reason.split(":", 1)[1] for r in rows for reason in r.get("reasons", [])
         if isinstance(reason, str) and _SAFE_REASON.match(reason) and reason.startswith(("phd:", "misumi:"))
@@ -73,7 +86,8 @@ def build_digest(domain: str, rows: list[dict[str, Any]], *, stamp: str, total_r
     conf_text = ", ".join(f"{count} {name}" for name, count in sorted(confidence.items()))
     if domain == "obsidian-phd":
         head = (
-            f"---\ntitle: Instagram Saved - {len(rows)} new research leads ({stamp})\nstatus: proposed\ncreated: {stamp[:10]}\n"
+            f"---\ntitle: Instagram Saved - {len(rows)} new research leads ({stamp})\nartifact_type: review\nstatus: proposed\n"
+            "review_only: true\ncanonical_edits: false\n" f"created: {stamp[:10]}\n"
             "owner: obsidian-phd\norigin: odysseus instagram_saved_import + instagram_handoff (deterministic, no model)\n"
             "evidence_ceiling: lead_only_metadata\npromotion: human-gated (nothing here is canonical)\n---\n\n"
             f"# Instagram Saved: {len(rows)} new research-lead candidates (review area only)\n\n"
@@ -100,6 +114,7 @@ def build_digest(domain: str, rows: list[dict[str, Any]], *, stamp: str, total_r
         head
         + f"## Batch summary (aggregate only; no permalinks or caption text)\n- New items routed to {owner['label']}: **{len(rows)}** "
         f"({conf_text}); routed to this domain so far: {total_routed}.\n- Cue words: {cue_text}.\n"
+        + batch_text +
         f"- Pointers: lab outbox `data/instagram/handoff/{domain}.jsonl` (mode 0600); retrieval via Odysseus "
         f"`search_instagram_items(domain=\"{domain}\")`.\n" + tail
     )
@@ -112,12 +127,19 @@ def _gh(args: list[str], *, stdin: Optional[str] = None) -> str:
     return result.stdout
 
 
-def publish_pull_request(domain: str, digest: str, *, stamp: str, run: Callable[..., str] = _gh) -> str:
-    """Open a pull request holding the digest in the owner repository (branch + one new file; never merges)."""
+def publish_pull_request(
+    domain: str, digest: str, *, stamp: str, batch_id: str = "", run: Callable[..., str] = _gh
+) -> str:
+    """Open a pull request holding the digest in the owner repository (branch + one new file; never merges).
+
+    ``batch_id`` (outbox row range) is part of the branch, file and title, so two distinct batches can never share a PR even
+    when they are generated within the same second, and one batch always maps to exactly one PR.
+    """
     owner = OWNERS[domain]
     repo, base = owner["repo"], owner["base"]
-    path = owner["path"].format(stamp=stamp[:10] + "-" + stamp[11:19].replace(":", ""))
-    branch = f"review/instagram-{domain}-{stamp[:10]}-{stamp[11:19].replace(':', '')}"
+    tag = stamp[:10] + "-" + stamp[11:19].replace(":", "") + (f"-{batch_id}" if batch_id else "")
+    path = owner["path"].format(stamp=tag)
+    branch = f"review/instagram-{domain}-{tag}"
 
     def exists(args: list[str]) -> bool:
         try:
@@ -133,7 +155,7 @@ def publish_pull_request(domain: str, digest: str, *, stamp: str, run: Callable[
         base_sha = run(["api", f"repos/{repo}/git/ref/heads/{base}", "--jq", ".object.sha"]).strip()
         run(["api", "-X", "POST", f"repos/{repo}/git/refs", "-f", f"ref=refs/heads/{branch}", "-f", f"sha={base_sha}"])
     if not exists(["api", f"repos/{repo}/contents/{path}?ref={branch}", "--jq", ".sha"]):
-        run(["api", "-X", "PUT", f"repos/{repo}/contents/{path}", "-f", f"message=docs(review): Instagram Saved {owner['label']} batch {stamp[:10]}",
+        run(["api", "-X", "PUT", f"repos/{repo}/contents/{path}", "-f", f"message=docs(review): Instagram Saved {owner['label']} batch {stamp[:10]}{' ' + batch_id if batch_id else ''}",
              "-f", f"branch={branch}", "-f", "content=" + base64.b64encode(digest.encode("utf-8")).decode("ascii")])
     body = (
         "## Summary\nAutomatic aggregate digest of newly routed Instagram Saved items for owner review. Counts and cue words only; "
@@ -143,7 +165,7 @@ def publish_pull_request(domain: str, digest: str, *, stamp: str, run: Callable[
         "## How to Test\n1. Open the new file and confirm it holds only counts and cue words.\n2. `git diff --stat` shows one added file.\n"
     )
     url = run(["pr", "create", "-R", repo, "--base", base, "--head", branch, "--title",
-               f"docs(review): Instagram Saved {owner['label']} batch {stamp[:10]}", "--body", body]).strip()
+               f"docs(review): Instagram Saved {owner['label']} batch {stamp[:10]}{' ' + batch_id if batch_id else ''}", "--body", body]).strip()
     return url.splitlines()[-1] if url else ""
 
 
@@ -163,6 +185,13 @@ def _save_state(path: Path, state: dict[str, Any]) -> None:
         handle.flush()
         os.fsync(handle.fileno())
     os.replace(tmp, path)
+
+
+def _read_outbox(outbox: Path) -> list[str]:
+    """Complete (newline-terminated) outbox lines only: a torn final write is left for the next run, never counted or lost."""
+    text = outbox.read_bytes().decode("utf-8", errors="replace")
+    complete = text[: text.rfind("\n") + 1]
+    return complete.splitlines()
 
 
 def run_instagram_work_items(
@@ -197,49 +226,72 @@ def _run_locked(out: Path, *, publisher, threshold, now) -> dict[str, Any]:
     for domain in OWNERS:
         outbox = out / f"{domain}.jsonl"
         try:
-            lines = [line for line in outbox.read_text(encoding="utf-8").splitlines() if line.strip()]
+            lines = _read_outbox(outbox)
         except FileNotFoundError:
             outcome[domain] = "no_outbox"
             continue
         entry = state.get(domain, {})
         done = int(entry.get("handed_over", 0))
+        if done > len(lines):                 # outbox shorter than the recorded offset: rotated or truncated, never guess
+            logger.warning("Instagram work items: %s outbox has %d rows but %d were handed over", domain, len(lines), done)
+            outcome[domain] = "outbox_shorter_than_state"
+            continue
         pending = entry.get("pending") if isinstance(entry.get("pending"), dict) else None
         end = min(len(lines), done + MAX_ROWS_PER_BATCH)
         stamp = now_stamp
         if pending:                       # a publish that failed part-way is retried with the SAME batch, stamp and branch
             end, stamp = min(int(pending.get("end", end)), len(lines)), str(pending.get("stamp", now_stamp))
-        rows: list[dict[str, Any]] = []
-        for line in lines[done:end]:
+        # Replay the window in order: a pointer counts once however often it was written (at-least-once appends), and one
+        # withdrawn by a later retraction in the same window is not a new lead at all.
+        active: dict[str, dict[str, Any]] = {}
+        invalid = retracted = duplicates = 0
+        for index, line in enumerate(lines[done:end]):
+            if not line.strip():
+                continue                      # a blank line carries nothing and loses nothing
             try:
                 value = json.loads(line)
             except ValueError:
+                invalid += 1
                 continue
-            if isinstance(value, dict):
-                rows.append(value)
+            if not isinstance(value, dict):
+                invalid += 1
+                continue
+            identity = str(value.get("permalink") or f"row{index}")
+            if value.get("retracted"):
+                retracted += 1
+                active.pop(identity, None)
+            else:
+                duplicates += identity in active
+                active[identity] = value
+        rows = list(active.values())
         if len(rows) < limit:
             outcome[domain] = f"pending_{len(rows)}"
             continue
-        digest = build_digest(domain, rows, stamp=stamp, total_routed=end)
+        batch = {"start": done, "end": end, "invalid": invalid, "retracted": retracted, "duplicates": duplicates,
+                 "sha256": hashlib.sha256("\n".join(lines[done:end]).encode("utf-8")).hexdigest()}
+        batch_id = f"rows{done + 1}-{end}"
+        digest = build_digest(domain, rows, stamp=stamp, total_routed=end, batch=batch)
         local = out / "digests"
         local.mkdir(parents=True, exist_ok=True, mode=0o700)
-        target = local / f"{domain}-{stamp.replace(':', '')}.md"
+        target = local / f"{domain}-{stamp.replace(':', '')}-{batch_id}.md"
         fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(digest)
+        record = {"handed_over": end, "last_batch": stamp, "last_range": [done, end], "last_batch_sha256": batch["sha256"]}
         if publish is None:  # default: the digest is the hand-over (local, aggregate only); an executor or the owner picks it up
-            state[domain] = {"handed_over": end, "last_batch": stamp, "last_url": ""}
+            state[domain] = {**record, "last_url": ""}
             _save_state(state_path, state)
             outcome[domain] = "digest_written"
             continue
         state[domain] = {**entry, "pending": {"stamp": stamp, "end": end}}   # recorded BEFORE any remote write
         _save_state(state_path, state)
         try:
-            url = publish(domain, digest, stamp=stamp)
+            url = publish(domain, digest, stamp=stamp, batch_id=batch_id)
         except Exception as exc:  # retried on the next run with the same batch; handed_over does not advance
             logger.warning("Instagram work-item publish failed for %s: %s", domain, type(exc).__name__)
             outcome[domain] = "publish_failed"
             continue
-        state[domain] = {"handed_over": end, "last_batch": stamp, "last_url": url}
+        state[domain] = {**record, "last_url": url}
         _save_state(state_path, state)
         outcome[domain] = "published"
     return outcome

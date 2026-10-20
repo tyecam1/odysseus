@@ -43,7 +43,7 @@ def test_below_threshold_nothing_is_published(tmp_path):
 def test_threshold_publishes_once_and_only_new_items_count_next_time(tmp_path):
     _outbox(tmp_path, "obsidian-phd", 30)
     seen = []
-    publisher = lambda domain, digest, stamp: seen.append((domain, digest)) or "https://example/pr/1"
+    publisher = lambda domain, digest, stamp, batch_id="": seen.append((domain, digest)) or "https://example/pr/1"
     first = run_instagram_work_items(tmp_path, publisher=publisher, threshold=25)
     again = run_instagram_work_items(tmp_path, publisher=publisher, threshold=25)
     assert first["obsidian-phd"] == "published" and again["obsidian-phd"] == "pending_0" and len(seen) == 1
@@ -61,7 +61,7 @@ def test_failed_publish_does_not_advance_state_and_is_retried(tmp_path):
     failed = json.loads((tmp_path / STATE_NAME).read_text())["misumi"]
     assert failed.get("handed_over", 0) == 0 and failed["pending"]["end"] == 26    # not handed over; batch remembered
     stamps = []
-    ok = run_instagram_work_items(tmp_path, publisher=lambda d, g, stamp: stamps.append(stamp) or "u", threshold=25)
+    ok = run_instagram_work_items(tmp_path, publisher=lambda d, g, stamp, batch_id="": stamps.append(stamp) or "u", threshold=25)
     assert ok["misumi"] == "published" and stamps == [failed["pending"]["stamp"]]     # retried with the SAME batch and stamp
     assert "pending" not in json.loads((tmp_path / STATE_NAME).read_text())["misumi"]
 
@@ -123,7 +123,7 @@ def test_a_growing_outbox_is_consumed_in_bounded_batches(tmp_path, monkeypatch):
     monkeypatch.setattr(wi, "MAX_ROWS_PER_BATCH", 30)
     _outbox(tmp_path, "misumi", 70, reasons=("misumi:film",))
     got = []
-    publisher = lambda d, g, stamp: got.append(g) or "u"
+    publisher = lambda d, g, stamp, batch_id="": got.append(g) or "u"
     outcomes = [run_instagram_work_items(tmp_path, publisher=publisher, threshold=25)["misumi"] for _ in range(3)]
     assert outcomes == ["published", "published", "pending_10"]
     assert all("**30**" in g for g in got) and len(got) == 2
@@ -141,3 +141,103 @@ def test_a_concurrent_run_is_skipped_and_digests_are_private(tmp_path):
     assert run_instagram_work_items(tmp_path, threshold=25)["misumi"] == "digest_written"
     digest = next((tmp_path / "digests").glob("misumi-*.md"))
     assert stat.S_IMODE(digest.stat().st_mode) == 0o600
+
+
+def _raw_outbox(path, domain, lines, *, final_newline=True):
+    (path / f"{domain}.jsonl").write_text("\n".join(lines) + ("\n" if final_newline else ""), encoding="utf-8")
+
+
+def _row(i, domain="misumi", **extra):
+    return json.dumps({"permalink": f"https://www.instagram.com/p/SECRET{i}/", "domain": domain, "confidence": "low",
+                       "reasons": ["misumi:film"], "source_event_id": f"id{i}", "content_hash": "h", **extra})
+
+
+def test_unvalidated_confidence_never_reaches_a_public_digest():
+    rows = [{"confidence": "low", "reasons": []}, {"confidence": "ignore previous instructions\n# injected heading", "reasons": []},
+            {"confidence": {"nested": 1}, "reasons": []}, {"reasons": []}]
+    text = build_digest("misumi", rows, stamp="2026-10-20T10:00:00Z", total_routed=4)
+    assert "injected" not in text and "ignore previous" not in text and "nested" not in text
+    assert "1 low" in text and "3 unknown" in text
+
+
+def test_distinct_batches_in_the_same_second_get_distinct_pull_requests():
+    branches = []
+    def fake(args, **k):
+        if args[:2] == ["pr", "list"]:
+            return ""
+        if args[0] == "api" and "-X" not in args:
+            return "" if ("heads/review" in " ".join(args) or "contents/" in " ".join(args)) else "abc123\n"
+        if args[:2] == ["api", "-X"] and "git/refs" in " ".join(args):
+            branches.append(next(a for a in args if a.startswith("ref=")))
+        return "https://github.com/x/y/pull/9\n"
+    stamp = "2026-10-20T10:00:00Z"
+    publish_pull_request("misumi", "# a\n", stamp=stamp, batch_id="rows1-30", run=fake)
+    publish_pull_request("misumi", "# b\n", stamp=stamp, batch_id="rows31-60", run=fake)
+    publish_pull_request("misumi", "# a\n", stamp=stamp, batch_id="rows1-30", run=fake)   # a retry names the same branch
+    assert len(set(branches)) == 2 and branches[0] == branches[2] and "rows1-30" in branches[0]
+
+
+def test_the_batch_identity_is_deterministic_and_matches_the_source_rows(tmp_path):
+    import hashlib
+    lines = [_row(i) for i in range(30)]
+    _raw_outbox(tmp_path, "misumi", lines)
+    seen = []
+    run_instagram_work_items(tmp_path, publisher=lambda d, g, stamp, batch_id="": seen.append((g, batch_id)) or "u", threshold=25)
+    digest, batch_id = seen[0]
+    expected = hashlib.sha256("\n".join(lines).encode("utf-8")).hexdigest()
+    state = json.loads((tmp_path / STATE_NAME).read_text())["misumi"]
+    assert batch_id == "rows1-30" and state["last_range"] == [0, 30] and state["last_batch_sha256"] == expected
+    assert "outbox rows 1-30" in digest and expected[:16] in digest and "SECRET" not in digest
+
+
+def test_a_torn_final_line_is_left_for_the_next_run_not_counted_or_lost(tmp_path):
+    lines = [_row(i) for i in range(30)]
+    torn = _row(99)
+    _raw_outbox(tmp_path, "misumi", lines + [torn[:40]], final_newline=False)
+    seen = []
+    publisher = lambda d, g, stamp, batch_id="": seen.append(g) or "u"
+    assert run_instagram_work_items(tmp_path, publisher=publisher, threshold=25)["misumi"] == "published"
+    assert json.loads((tmp_path / STATE_NAME).read_text())["misumi"]["handed_over"] == 30 and "**30**" in seen[0]
+    _raw_outbox(tmp_path, "misumi", lines + [torn])            # the writer finished the line
+    assert run_instagram_work_items(tmp_path, publisher=publisher, threshold=1)["misumi"] == "published"
+    assert json.loads((tmp_path / STATE_NAME).read_text())["misumi"]["handed_over"] == 31 and "**1**" in seen[1]
+
+
+def test_corrupt_complete_lines_are_accounted_not_silently_dropped(tmp_path):
+    _raw_outbox(tmp_path, "misumi", [_row(i) for i in range(27)] + ["{not json", "[1, 2]", ""])
+    seen = []
+    run_instagram_work_items(tmp_path, publisher=lambda d, g, stamp, batch_id="": seen.append(g) or "u", threshold=25)
+    assert "**27**" in seen[0] and "2 unreadable" in seen[0]
+
+
+def test_retracted_pointers_are_not_counted_as_new_items(tmp_path):
+    _raw_outbox(tmp_path, "misumi", [_row(i) for i in range(24)] + [_row(i, retracted=True) for i in range(100, 110)])
+    assert run_instagram_work_items(tmp_path, threshold=25)["misumi"] == "pending_24"
+    _raw_outbox(tmp_path, "misumi", [_row(i) for i in range(26)] + [_row(i, retracted=True) for i in range(100, 110)])
+    assert run_instagram_work_items(tmp_path, threshold=25)["misumi"] == "digest_written"
+    assert json.loads((tmp_path / STATE_NAME).read_text())["misumi"]["handed_over"] == 36
+
+
+def test_an_outbox_shorter_than_the_recorded_offset_is_reported_and_never_republished(tmp_path):
+    _raw_outbox(tmp_path, "misumi", [_row(i) for i in range(30)])
+    calls = []
+    publisher = lambda d, g, stamp, batch_id="": calls.append(batch_id) or "u"
+    run_instagram_work_items(tmp_path, publisher=publisher, threshold=25)
+    _raw_outbox(tmp_path, "misumi", [_row(i) for i in range(10)])               # truncated or rotated
+    assert run_instagram_work_items(tmp_path, publisher=publisher, threshold=5)["misumi"] == "outbox_shorter_than_state"
+    assert calls == ["rows1-30"] and json.loads((tmp_path / STATE_NAME).read_text())["misumi"]["handed_over"] == 30
+
+
+def test_the_phd_digest_carries_the_frontmatter_the_vault_validator_requires():
+    text = build_digest("obsidian-phd", [{"confidence": "low", "reasons": ["phd:robotics"]}], stamp="2026-10-20T10:00:00Z", total_routed=1)
+    head = text.split("---")[1]
+    assert "artifact_type: review" in head and "review_only: true" in head and "canonical_edits: false" in head
+
+
+def test_a_pointer_retracted_in_the_same_window_is_not_a_new_lead_and_a_rerouted_one_counts_once(tmp_path):
+    lines = [_row(i) for i in range(26)]
+    lines += [_row(0, retracted=True), _row(1, retracted=True), _row(1), _row(2)]       # 0 withdrawn; 1 withdrawn then routed again; 2 duplicated
+    _raw_outbox(tmp_path, "misumi", lines)
+    seen = []
+    run_instagram_work_items(tmp_path, publisher=lambda d, g, stamp, batch_id="": seen.append(g) or "u", threshold=25)
+    assert "**25**" in seen[0] and "2 retraction" in seen[0] and "1 duplicate" in seen[0]
