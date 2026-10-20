@@ -120,11 +120,29 @@ def build_digest(
     )
 
 
+def _gh_binary() -> str:
+    """The lab unit runs with NoNewPrivileges, which a snap-packaged gh cannot start under: point this at a plain binary."""
+    return os.getenv("ODYSSEUS_GH_BIN") or "gh"
+
+
 def _gh(args: list[str], *, stdin: Optional[str] = None) -> str:
-    result = subprocess.run(["gh", *args], input=stdin, capture_output=True, text=True, timeout=60, check=False)
+    try:
+        result = subprocess.run([_gh_binary(), *args], input=stdin, capture_output=True, text=True, timeout=60, check=False)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError(f"gh could not run ({type(exc).__name__})") from exc
     if result.returncode != 0:
-        raise RuntimeError(f"gh {' '.join(args[:2])} failed ({result.returncode})")
+        detail = " ".join((result.stderr or "").split())[:160]    # gh error text names the failed call, never credentials
+        raise RuntimeError(f"gh {' '.join(args[:2])} failed ({result.returncode}): {detail}")
     return result.stdout
+
+
+def _gh_ready() -> Optional[str]:
+    """None when gh can run in this process (service sandbox included); otherwise a short reason."""
+    try:
+        _gh(["--version"])
+    except RuntimeError as exc:
+        return str(exc)
+    return None
 
 
 def publish_pull_request(
@@ -223,6 +241,9 @@ def _run_locked(out: Path, *, publisher, threshold, now) -> dict[str, Any]:
     state = _load_state(state_path)
     publish = publisher if publisher is not None else (publish_pull_request if _publishing_enabled() else None)
     outcome: dict[str, Any] = {}
+    blocked = _gh_ready() if publish is publish_pull_request else None
+    if blocked:                                # say so once per run; do not touch state, so nothing is lost or half-handed-over
+        logger.warning("Instagram work items: publishing is enabled but unavailable: %s", blocked)
     for domain in OWNERS:
         outbox = out / f"{domain}.jsonl"
         try:
@@ -267,6 +288,9 @@ def _run_locked(out: Path, *, publisher, threshold, now) -> dict[str, Any]:
         if len(rows) < limit:
             outcome[domain] = f"pending_{len(rows)}"
             continue
+        if blocked:
+            outcome[domain] = "publish_unavailable"
+            continue
         batch = {"start": done, "end": end, "invalid": invalid, "retracted": retracted, "duplicates": duplicates,
                  "sha256": hashlib.sha256("\n".join(lines[done:end]).encode("utf-8")).hexdigest()}
         batch_id = f"rows{done + 1}-{end}"
@@ -288,7 +312,7 @@ def _run_locked(out: Path, *, publisher, threshold, now) -> dict[str, Any]:
         try:
             url = publish(domain, digest, stamp=stamp, batch_id=batch_id)
         except Exception as exc:  # retried on the next run with the same batch; handed_over does not advance
-            logger.warning("Instagram work-item publish failed for %s: %s", domain, type(exc).__name__)
+            logger.warning("Instagram work-item publish failed for %s: %s", domain, str(exc)[:240])
             outcome[domain] = "publish_failed"
             continue
         state[domain] = {**record, "last_url": url}
