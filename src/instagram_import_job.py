@@ -225,6 +225,12 @@ def run_instagram_import(
             run_instagram_handoff(Path(log_path).parent / "handoff")
         except Exception as exc:
             logger.warning("Instagram handoff failed: %s", type(exc).__name__)
+        try:  # owner work items (aggregate digest -> owner-repo pull request); failures retry on the next run
+            from src.instagram_work_items import run_instagram_work_items
+
+            logger.info("Instagram work items: %s", run_instagram_work_items(Path(log_path).parent / "handoff"))
+        except Exception as exc:
+            logger.warning("Instagram work items failed: %s", type(exc).__name__)
     return accounting
 
 
