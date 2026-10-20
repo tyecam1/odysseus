@@ -100,3 +100,16 @@ the logon trigger races the startup trigger and usually wins. To prove the start
 (`Set-ScheduledTask -TaskName <name> -Trigger <startup trigger>`), reboot, and read the Task Scheduler Operational log (enable it with `wevtutil sl Microsoft-Windows-TaskScheduler/Operational /e:true`):
 the household tasks must show "launched ... due to system start-up". Then restore both triggers. The single-instance setting makes the loser of the race a harmless "did not launch ... already running" event.
 Register S4U principals with the plain user name (`$env:USERNAME`); `$env:USERDOMAIN` is `WORKGROUP` on that host and fails with HRESULT 0x80070534.
+
+## Lab service (Linux, systemd): deploy and verify
+
+The lab backend is the system unit `odysseus-aoteru-lab.service` (User=agent, WorkingDirectory `/home/agent/projects/odysseus-aoteru`). A restart is an ordinary deployment step for the executing `agent` identity; it is not an operator escalation. Attempt the authorised route before reporting anything as blocked.
+
+1. **Verify target and revision.** On the lab: `hostname`, `git -C /home/agent/projects/odysseus-aoteru rev-parse --short HEAD` (clean working tree), `git fetch` then `git pull --ff-only origin dev`; confirm the intended revision.
+2. **Check the actual authority, do not assume it.** `sudo -n -l` lists the commands the identity may run. The lab grants passwordless `systemctl start|stop|restart odysseus-aoteru-lab.service` only; a bare `sudo -n true` correctly asks for a password. Use the full path: `sudo -n /usr/bin/systemctl restart odysseus-aoteru-lab.service`. Before restarting, check `aoteru park-status` and `aoteru where` for active leases or sessions.
+3. **Restart, then prove the lifecycle.** `systemctl show odysseus-aoteru-lab.service -p ActiveState,SubState,ActiveEnterTimestamp,MainPID`: the unit is active, the PID changed and the timestamp is newer than the pull.
+4. **Prove the code and scheduler, not just the unit.** `journalctl -u odysseus-aoteru-lab.service --since -3min`: "Started server process", "Task scheduler started", then the infrastructure jobs the revision registers (for example `instagram_saved_import` firing on start and every six hours). An active unit alone is not evidence that scheduled work runs.
+5. **Functional smoke test.** Observe or trigger one bounded cycle and check its accounting, counts, outputs, duplicate prevention (a second pass reports nothing new) and the absence of tracebacks. For the Instagram pipeline: `data/instagram/import-runs.jsonl`, `data/instagram/handoff/handoff-runs.jsonl`, `digests/` and `work-items-state.json`; digests must contain no permalinks.
+6. **Failure and rollback.** If the unit fails or the smoke test regresses, `git -C /home/agent/projects/odysseus-aoteru checkout <previous-sha>` (the previous short sha is recorded in step 1) and restart the same way, then record the failure. Report an SSH or sudo failure only with the exact command, exit status and error text.
+
+Record the evidence (revision, PID and timestamp change, log lines, smoke-test output) in the work item or checkpoint for the change.
