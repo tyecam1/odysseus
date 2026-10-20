@@ -98,12 +98,16 @@ def _terms(*parts: Any) -> set[str]:
     return found
 
 
-def _hashtag_stems(hashtags: Any, cues: set[str]) -> set[str]:
+# Only stems that do not occur inside unrelated words (#albumin, #concerto, #vinylsiding) may match inside a compound hashtag.
+_HASHTAG_STEMS = frozenset({"anime", "manga", "film", "movie", "cinema", "recipe", "cooking"})
+
+
+def _hashtag_stems(hashtags: Any) -> set[str]:
     """Strong cues inside compound hashtags (#easyrecipes, #moviereview, #japanesecinema)."""
     stems: set[str] = set()
     for tag in hashtags if isinstance(hashtags, (list, tuple)) else []:
         for word in _WORD.findall(_normalise(tag)):
-            stems.update(cue for cue in cues if len(cue) >= 4 and cue in word)
+            stems.update(stem for stem in _HASHTAG_STEMS if stem in word)
     return stems
 
 
@@ -116,7 +120,7 @@ def classify_payload(payload: Any) -> dict[str, Any]:
     filed = _terms(collections)
     core = sorted(content & _PHD_CORE)
     generic = sorted((content | filed) & _PHD_GENERIC)
-    strong = sorted(((content | filed) & _MISUMI_STRONG) | _hashtag_stems(payload.get("hashtags"), _MISUMI_STRONG))
+    strong = sorted(((content | filed) & _MISUMI_STRONG) | _hashtag_stems(payload.get("hashtags")))
     weak = sorted((content | filed) & _MISUMI_WEAK)
     misumi = sorted(set(strong) | set(weak))
     phd = sorted(set(core) | set(generic))

@@ -213,3 +213,5 @@ def test_strong_cues_inside_compound_hashtags_count():
     assert classify_payload({"caption": "so good", "hashtags": ["easyrecipes", "udon"]})["domain"] == "misumi"
     assert classify_payload({"caption": "so good", "hashtags": ["japanesecinema"]})["domain"] == "misumi"
     assert classify_payload({"caption": "so good", "hashtags": ["travelgram"]})["domain"] == "neutral"
+    for unrelated in ("albumin", "concerto", "vinylsiding"):          # cues that live inside unrelated words never stem-match
+        assert classify_payload({"caption": "so good", "hashtags": [unrelated]})["domain"] == "neutral"

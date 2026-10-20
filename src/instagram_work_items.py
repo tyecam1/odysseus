@@ -74,7 +74,8 @@ def build_digest(
     batch = batch or {}
     batch_text = (
         f"- Source batch: outbox rows {batch['start'] + 1}-{batch['end']} of `{domain}.jsonl` (sha256 `{batch['sha256'][:16]}`); "
-        f"{batch.get('invalid', 0)} unreadable and {batch.get('retracted', 0)} retracted rows excluded.\n"
+        f"{batch.get('invalid', 0)} unreadable, {batch.get('retracted', 0)} retraction and {batch.get('duplicates', 0)} duplicate rows "
+        "excluded.\n"
         if {"start", "end", "sha256"} <= set(batch) else ""
     )
     cues = collections.Counter(
@@ -85,7 +86,8 @@ def build_digest(
     conf_text = ", ".join(f"{count} {name}" for name, count in sorted(confidence.items()))
     if domain == "obsidian-phd":
         head = (
-            f"---\ntitle: Instagram Saved - {len(rows)} new research leads ({stamp})\nstatus: proposed\ncreated: {stamp[:10]}\n"
+            f"---\ntitle: Instagram Saved - {len(rows)} new research leads ({stamp})\nartifact_type: review\nstatus: proposed\n"
+            "review_only: true\ncanonical_edits: false\n" f"created: {stamp[:10]}\n"
             "owner: obsidian-phd\norigin: odysseus instagram_saved_import + instagram_handoff (deterministic, no model)\n"
             "evidence_ceiling: lead_only_metadata\npromotion: human-gated (nothing here is canonical)\n---\n\n"
             f"# Instagram Saved: {len(rows)} new research-lead candidates (review area only)\n\n"
@@ -239,9 +241,11 @@ def _run_locked(out: Path, *, publisher, threshold, now) -> dict[str, Any]:
         stamp = now_stamp
         if pending:                       # a publish that failed part-way is retried with the SAME batch, stamp and branch
             end, stamp = min(int(pending.get("end", end)), len(lines)), str(pending.get("stamp", now_stamp))
-        rows: list[dict[str, Any]] = []
-        invalid = retracted = 0
-        for line in lines[done:end]:
+        # Replay the window in order: a pointer counts once however often it was written (at-least-once appends), and one
+        # withdrawn by a later retraction in the same window is not a new lead at all.
+        active: dict[str, dict[str, Any]] = {}
+        invalid = retracted = duplicates = 0
+        for index, line in enumerate(lines[done:end]):
             if not line.strip():
                 continue                      # a blank line carries nothing and loses nothing
             try:
@@ -251,14 +255,19 @@ def _run_locked(out: Path, *, publisher, threshold, now) -> dict[str, Any]:
                 continue
             if not isinstance(value, dict):
                 invalid += 1
-            elif value.get("retracted"):
-                retracted += 1                # a pointer withdrawn by reclassification is not a new item
+                continue
+            identity = str(value.get("permalink") or f"row{index}")
+            if value.get("retracted"):
+                retracted += 1
+                active.pop(identity, None)
             else:
-                rows.append(value)
+                duplicates += identity in active
+                active[identity] = value
+        rows = list(active.values())
         if len(rows) < limit:
             outcome[domain] = f"pending_{len(rows)}"
             continue
-        batch = {"start": done, "end": end, "invalid": invalid, "retracted": retracted,
+        batch = {"start": done, "end": end, "invalid": invalid, "retracted": retracted, "duplicates": duplicates,
                  "sha256": hashlib.sha256("\n".join(lines[done:end]).encode("utf-8")).hexdigest()}
         batch_id = f"rows{done + 1}-{end}"
         digest = build_digest(domain, rows, stamp=stamp, total_routed=end, batch=batch)

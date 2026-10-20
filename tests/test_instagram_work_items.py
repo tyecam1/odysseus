@@ -226,3 +226,18 @@ def test_an_outbox_shorter_than_the_recorded_offset_is_reported_and_never_republ
     _raw_outbox(tmp_path, "misumi", [_row(i) for i in range(10)])               # truncated or rotated
     assert run_instagram_work_items(tmp_path, publisher=publisher, threshold=5)["misumi"] == "outbox_shorter_than_state"
     assert calls == ["rows1-30"] and json.loads((tmp_path / STATE_NAME).read_text())["misumi"]["handed_over"] == 30
+
+
+def test_the_phd_digest_carries_the_frontmatter_the_vault_validator_requires():
+    text = build_digest("obsidian-phd", [{"confidence": "low", "reasons": ["phd:robotics"]}], stamp="2026-10-20T10:00:00Z", total_routed=1)
+    head = text.split("---")[1]
+    assert "artifact_type: review" in head and "review_only: true" in head and "canonical_edits: false" in head
+
+
+def test_a_pointer_retracted_in_the_same_window_is_not_a_new_lead_and_a_rerouted_one_counts_once(tmp_path):
+    lines = [_row(i) for i in range(26)]
+    lines += [_row(0, retracted=True), _row(1, retracted=True), _row(1), _row(2)]       # 0 withdrawn; 1 withdrawn then routed again; 2 duplicated
+    _raw_outbox(tmp_path, "misumi", lines)
+    seen = []
+    run_instagram_work_items(tmp_path, publisher=lambda d, g, stamp, batch_id="": seen.append(g) or "u", threshold=25)
+    assert "**25**" in seen[0] and "2 retraction" in seen[0] and "1 duplicate" in seen[0]

@@ -349,3 +349,17 @@ def test_equal_saved_time_in_two_snapshots_goes_to_the_later_snapshot(tmp_path, 
     _snapshot(exports, "2026-10-18", _post(permalink, 200, "later export"))
     run_instagram_import(exports, tmp_path / "data" / "instagram" / "runs.jsonl")
     assert read_source_event_payload(_job_row(permalink)["payload_ref"])["caption"] == "later export"
+
+
+def test_an_older_snapshot_resurfacing_with_an_equal_saved_time_does_not_regress_the_revision(tmp_path, instagram_job_rows):
+    exports = tmp_path / "exports"
+    permalink = f"{TEST_PERMALINK_PREFIX}REGRESS/"
+    _snapshot(exports, "2026-10-01", _post(permalink, 200, "older export"))
+    _snapshot(exports, "2026-10-18", _post(permalink, 200, "newer export"))
+    run_log = tmp_path / "data" / "instagram" / "runs.jsonl"
+    run_instagram_import(exports, run_log)
+    (exports / "2026-10-18" / "saved_posts.json").write_text("{not json", encoding="utf-8")      # newer snapshot mid-redownload
+    accounting = run_instagram_import(exports, run_log)
+    assert accounting["failed"] == 1 and accounting["superseded"] == 1 and accounting["revised"] == 0
+    assert read_source_event_payload(_job_row(permalink)["payload_ref"])["caption"] == "newer export"
+    assert _job_row(permalink)["revision_count"] == 0
