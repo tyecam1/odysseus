@@ -27,7 +27,14 @@ DEFAULT_INTERVAL_HOURS = 6.0
 DEFAULT_EXPORTS_DIR = Path.home() / "data" / "ingestion" / "instagram" / "exports"
 DEFAULT_RUN_LOG = Path(DATA_DIR) / "instagram" / "import-runs.jsonl"
 
-_COUNT_KEYS = ("created", "revised", "unchanged", "superseded", "failed")
+_COUNT_KEYS = (
+    "created",
+    "revised",
+    "unchanged",
+    "provenance_updated",
+    "superseded",
+    "failed",
+)
 
 
 def _positive_hours(value: Optional[str]) -> float:

@@ -421,6 +421,128 @@ def test_payload_provenance_outside_export_root_falls_back_to_full_path(tmp_path
     assert payload["saved_posts_file"] == paths[0]
 
 
+def test_freshness_guard_upgrades_legacy_provenance_without_revision(
+    tmp_path, monkeypatch
+):
+    export_root = tmp_path / "exports"
+    snapshot = export_root / "2026-10-18"
+    snapshot.mkdir(parents=True)
+    posts_path, collections_path = _write_exports(
+        snapshot,
+        _fixture(POSTS_FIXTURE)[:1],
+        _fixture(COLLECTIONS_FIXTURE),
+    )
+    permalink = "https://www.instagram.com/p/REDACTED_PERMALINK0/"
+
+    monkeypatch.chdir(snapshot)
+    import_instagram_saved_export(
+        "saved_posts.json",
+        "saved_collections.json",
+        enforce_freshness=True,
+    )
+    before = _rows()[permalink]
+    legacy_payload = read_source_event_payload(before["payload_ref"])
+
+    result = import_instagram_saved_export(
+        posts_path,
+        collections_path,
+        enforce_freshness=True,
+        export_root=export_root,
+    )
+    after = _rows()[permalink]
+    updated_payload = read_source_event_payload(after["payload_ref"])
+
+    assert legacy_payload["saved_posts_file"] == "saved_posts.json"
+    assert legacy_payload["saved_collections_file"] == "saved_collections.json"
+    assert result["counts"] == {
+        "created": 0,
+        "revised": 0,
+        "unchanged": 0,
+        "superseded": 0,
+        "provenance_updated": 1,
+        "processed": 1,
+        "failed": 0,
+    }
+    assert after["revision_count"] == before["revision_count"] == 0
+    assert after["content_hash"] == before["content_hash"]
+    assert after["status"] == before["status"] == "received"
+    assert updated_payload["saved_posts_file"] == "2026-10-18/saved_posts.json"
+    assert updated_payload["saved_collections_file"] == (
+        "2026-10-18/saved_collections.json"
+    )
+
+
+def test_same_saved_at_membership_change_revises_once_then_is_superseded(tmp_path):
+    export_root = tmp_path / "exports"
+    snapshot = export_root / "2026-10-18"
+    snapshot.mkdir(parents=True)
+    posts = _fixture(POSTS_FIXTURE)[:1]
+    paths = _write_exports(snapshot, posts, [])
+    permalink = "https://www.instagram.com/p/REDACTED_PERMALINK0/"
+
+    import_instagram_saved_export(
+        *paths,
+        enforce_freshness=True,
+        export_root=export_root,
+    )
+    before = _rows()[permalink]
+    paths = _write_exports(snapshot, posts, _fixture(COLLECTIONS_FIXTURE))
+
+    revised = import_instagram_saved_export(
+        *paths,
+        enforce_freshness=True,
+        export_root=export_root,
+    )
+    after_revision = _rows()[permalink]
+    repeated = import_instagram_saved_export(
+        *paths,
+        enforce_freshness=True,
+        export_root=export_root,
+    )
+    after_repeat = _rows()[permalink]
+
+    assert revised["counts"]["revised"] == 1
+    assert revised["counts"]["superseded"] == 0
+    assert revised["counts"]["provenance_updated"] == 0
+    assert after_revision["content_hash"] != before["content_hash"]
+    assert after_revision["revision_count"] == 1
+    assert after_revision["status"] == "revised"
+    assert repeated["counts"]["revised"] == 0
+    assert repeated["counts"]["superseded"] == 1
+    assert repeated["counts"]["provenance_updated"] == 0
+    assert after_repeat == after_revision
+
+
+def test_fully_identical_legacy_provenance_is_still_superseded(
+    tmp_path, monkeypatch
+):
+    _write_exports(
+        tmp_path,
+        _fixture(POSTS_FIXTURE)[:1],
+        _fixture(COLLECTIONS_FIXTURE),
+    )
+    permalink = "https://www.instagram.com/p/REDACTED_PERMALINK0/"
+    monkeypatch.chdir(tmp_path)
+    import_instagram_saved_export(
+        "saved_posts.json",
+        "saved_collections.json",
+        enforce_freshness=True,
+    )
+    before = _rows()[permalink]
+
+    repeated = import_instagram_saved_export(
+        "saved_posts.json",
+        "saved_collections.json",
+        enforce_freshness=True,
+    )
+
+    assert repeated["counts"]["superseded"] == 1
+    assert repeated["counts"]["provenance_updated"] == 0
+    assert repeated["counts"]["processed"] == 0
+    assert repeated["imported"] == []
+    assert _rows()[permalink] == before
+
+
 def test_legacy_bare_basename_provenance_rows_remain_readable(tmp_path):
     legacy_payload = {
         "kind": "instagram_saved_post",

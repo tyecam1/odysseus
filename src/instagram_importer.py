@@ -29,6 +29,9 @@ from urllib.parse import urlsplit, urlunsplit
 
 from src.source_events import (
     SourceEventValidationError,
+    _hash_content,
+    _payload_ref_json,
+    read_source_event_payload,
     record_source_event,
     store_source_event_payload,
 )
@@ -373,8 +376,9 @@ def _provenance_path(path: str, export_root: str | os.PathLike[str] | None) -> s
     Every export snapshot names its files ``saved_posts.json`` /
     ``saved_collections.json``, so a bare basename cannot identify the winning
     snapshot.  With an ``export_root`` the posix-style root-relative path is
-    recorded; otherwise the full path.  Rows written by older versions whose
-    provenance is a bare basename are never rewritten and remain readable.
+    recorded; otherwise the full path. Rows written by older versions whose
+    provenance is a bare basename are upgraded in place by the freshness-aware
+    scheduled job.
     """
     if export_root is None:
         return path
@@ -382,6 +386,64 @@ def _provenance_path(path: str, export_root: str | os.PathLike[str] | None) -> s
         return Path(path).relative_to(Path(export_root)).as_posix()
     except ValueError:
         return path
+
+
+def _payload_counts(
+    post: dict[str, Any],
+    collection_records: list[dict[str, Any]],
+    private_payload: dict[str, Any],
+) -> dict[str, int]:
+    return {
+        "saved_at": post["timestamp"],
+        "item_count": len(post["item_indices"]),
+        "collection_count": len(private_payload["collections"]),
+        "collection_membership_count": len(collection_records),
+    }
+
+
+def _source_event_envelopes(
+    permalink: str,
+    payload_pointer: dict[str, str],
+    counts: dict[str, int],
+    missing_optional_fields: list[str],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    content = {
+        "permalink": permalink,
+        **counts,
+        "payload_sha256": payload_pointer["sha256"],
+        "payload_ref": payload_pointer["path"],
+    }
+    metadata = {
+        **payload_pointer,
+        "source_kind": "instagram_saved_post",
+        **counts,
+        "evidence_ceiling": EVIDENCE_CEILING,
+        "missing_optional_fields": missing_optional_fields,
+    }
+    return content, metadata
+
+
+def _is_provenance_only_change(
+    prior_metadata: dict[str, Any],
+    prior_payload: Any,
+    incoming_payload: dict[str, Any],
+    incoming_counts: dict[str, int],
+) -> bool:
+    if not isinstance(prior_payload, dict):
+        return False
+    if any(prior_metadata.get(key) != value for key, value in incoming_counts.items()):
+        return False
+
+    provenance_fields = {"saved_posts_file", "saved_collections_file"}
+    prior_content = {
+        key: value for key, value in prior_payload.items() if key not in provenance_fields
+    }
+    incoming_content = {
+        key: value for key, value in incoming_payload.items() if key not in provenance_fields
+    }
+    prior_paths = {key: prior_payload.get(key) for key in provenance_fields}
+    incoming_paths = {key: incoming_payload.get(key) for key in provenance_fields}
+    return prior_content == incoming_content and prior_paths != incoming_paths
 
 
 def import_instagram_saved_export(
@@ -424,10 +486,19 @@ def import_instagram_saved_export(
     imported: list[dict[str, Any]] = []
     counts = {"created": 0, "revised": 0, "unchanged": 0}
     if enforce_freshness:
-        counts["superseded"] = 0
+        counts.update({"superseded": 0, "provenance_updated": 0})
     for permalink in sorted(posts):
         post = posts[permalink]
         collection_records = memberships.get(permalink, [])
+        private_payload = _private_payload(
+            post,
+            collection_records,
+            posts_provenance,
+            collections_provenance,
+            permalink,
+        )
+        incoming_payload_sha256 = _hash_content(private_payload)
+        payload_counts = _payload_counts(post, collection_records, private_payload)
 
         db = SessionLocal()
         try:
@@ -442,6 +513,7 @@ def import_instagram_saved_export(
             existed_before = existing is not None
             prior_hash = existing.content_hash if existing is not None else None
             prior_timestamp = None
+            prior_metadata: dict[str, Any] = {}
             if enforce_freshness and existing is not None:
                 try:
                     prior_metadata = json.loads(existing.payload_ref or "")
@@ -454,38 +526,75 @@ def import_instagram_saved_export(
             db.close()
 
         if prior_timestamp is not None and post["timestamp"] <= prior_timestamp:
-            counts["superseded"] += 1
-            continue
+            prior_payload_sha256 = prior_metadata.get("sha256")
+            if not isinstance(prior_payload_sha256, str):
+                prior_payload_sha256 = prior_metadata.get("payload_sha256")
+            if incoming_payload_sha256 == prior_payload_sha256:
+                counts["superseded"] += 1
+                continue
 
-        private_payload = _private_payload(
-            post,
-            collection_records,
-            posts_provenance,
-            collections_provenance,
-            permalink,
-        )
+            try:
+                prior_payload = read_source_event_payload(prior_metadata)
+            except (OSError, SourceEventValidationError, json.JSONDecodeError):
+                prior_payload = None
+            if _is_provenance_only_change(
+                prior_metadata,
+                prior_payload,
+                private_payload,
+                payload_counts,
+            ):
+                payload_pointer = store_source_event_payload(
+                    "instagram", permalink, private_payload
+                )
+                _, metadata = _source_event_envelopes(
+                    permalink,
+                    payload_pointer,
+                    payload_counts,
+                    post["missing_optional_fields"],
+                )
+                db = SessionLocal()
+                try:
+                    row = (
+                        db.query(SourceEvent)
+                        .filter(
+                            SourceEvent.source == "instagram",
+                            SourceEvent.external_id == permalink,
+                        )
+                        .one()
+                    )
+                    row.payload_ref = _payload_ref_json(metadata)
+                    db.commit()
+                    db.refresh(row)
+                    db.expunge(row)
+                except Exception:
+                    db.rollback()
+                    raise
+                finally:
+                    db.close()
+
+                counts["provenance_updated"] += 1
+                imported.append({
+                    "external_id": permalink,
+                    "id": row.id,
+                    "collection_count": payload_counts["collection_count"],
+                    "payload_ref": payload_pointer,
+                    "saved_at": post["timestamp"],
+                    "imported_at": row.received_at.isoformat() if row.received_at else None,
+                    "evidence_ceiling": EVIDENCE_CEILING,
+                    "missing_optional_fields": post["missing_optional_fields"],
+                    "outcome": "provenance_updated",
+                })
+                continue
+
         payload_pointer = store_source_event_payload(
             "instagram", permalink, private_payload
         )
-        content = {
-            "permalink": permalink,
-            "saved_at": post["timestamp"],
-            "item_count": len(post["item_indices"]),
-            "collection_count": len(private_payload["collections"]),
-            "collection_membership_count": len(collection_records),
-            "payload_sha256": payload_pointer["sha256"],
-            "payload_ref": payload_pointer["path"],
-        }
-        metadata = {
-            **payload_pointer,
-            "source_kind": "instagram_saved_post",
-            "saved_at": post["timestamp"],
-            "item_count": len(post["item_indices"]),
-            "collection_count": len(private_payload["collections"]),
-            "collection_membership_count": len(collection_records),
-            "evidence_ceiling": EVIDENCE_CEILING,
-            "missing_optional_fields": post["missing_optional_fields"],
-        }
+        content, metadata = _source_event_envelopes(
+            permalink,
+            payload_pointer,
+            payload_counts,
+            post["missing_optional_fields"],
+        )
 
         try:
             row = record_source_event(
@@ -523,7 +632,12 @@ def import_instagram_saved_export(
             "outcome": outcome,
         })
 
-    counts["processed"] = counts["created"] + counts["revised"] + counts["unchanged"]
+    counts["processed"] = (
+        counts["created"]
+        + counts["revised"]
+        + counts["unchanged"]
+        + counts.get("provenance_updated", 0)
+    )
     counts["failed"] = len(failed)
     return {"imported": imported, "failed": failed, "counts": counts}
 

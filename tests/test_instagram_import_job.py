@@ -32,6 +32,7 @@ def _record(timestamp: str, **counts):
         "created": counts.get("created", 0),
         "revised": counts.get("revised", 0),
         "unchanged": counts.get("unchanged", 0),
+        "provenance_updated": counts.get("provenance_updated", 0),
         "superseded": counts.get("superseded", 0),
         "failed": counts.get("failed", 0),
         "duration_ms": counts.get("duration_ms", 1),
@@ -155,6 +156,38 @@ def test_unchanged_import_is_counted_as_a_clean_noop(tmp_path):
     assert last_import_run(run_log) == accounting
 
 
+def test_provenance_updates_are_aggregated_and_written_to_run_log(tmp_path):
+    snapshot = tmp_path / "exports" / "2026-10-18"
+    snapshot.mkdir(parents=True)
+    (snapshot / "saved_posts.json").write_text("[]", encoding="utf-8")
+    (snapshot / "saved_collections.json").write_text("[]", encoding="utf-8")
+
+    def provenance_update(posts, collections):
+        return {
+            "counts": {
+                "created": 0,
+                "revised": 0,
+                "unchanged": 0,
+                "provenance_updated": 1772,
+                "processed": 1772,
+                "failed": 0,
+            }
+        }
+
+    run_log = tmp_path / "data" / "instagram" / "runs.jsonl"
+    accounting = run_instagram_import(
+        tmp_path / "exports",
+        run_log,
+        importer=provenance_update,
+    )
+
+    assert accounting["provenance_updated"] == 1772
+    assert last_import_run(run_log) == accounting
+    assert json.loads(run_log.read_text(encoding="utf-8").strip())[
+        "provenance_updated"
+    ] == 1772
+
+
 def test_missing_exports_directory_is_clean_zero_count_run(tmp_path, caplog):
     run_log = tmp_path / "data" / "instagram" / "runs.jsonl"
 
@@ -200,7 +233,7 @@ def test_newest_occurrence_wins_across_snapshots_and_reimport_is_noop(
     assert second_row == first_row
 
 
-def test_older_cross_run_occurrence_is_counted_as_superseded(
+def test_older_cross_run_changed_occurrence_is_counted_as_revision(
     tmp_path, instagram_job_rows
 ):
     exports = tmp_path / "exports"
@@ -219,11 +252,12 @@ def test_older_cross_run_occurrence_is_counted_as_superseded(
     after = _job_row(permalink)
 
     assert accounting["created"] == 0
-    assert accounting["revised"] == 0
+    assert accounting["revised"] == 1
     assert accounting["unchanged"] == 0
-    assert accounting["superseded"] == 1
+    assert accounting["superseded"] == 0
     assert accounting["failed"] == 0
-    assert after == before
+    assert after["content_hash"] != before["content_hash"]
+    assert after["revision_count"] == before["revision_count"] + 1
 
 
 def _scheduler_with_instagram_runner(runner):
