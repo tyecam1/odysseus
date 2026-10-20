@@ -73,24 +73,30 @@ def _provider_dispatch_lock(provider: str) -> threading.Lock:
 
 
 def _set_provider_cooldown(provider: str, kind: str, until: datetime, *, now: datetime) -> datetime:
-    existing = _provider_cooldown.expires_at(provider, now)
-    expires_at = _provider_cooldown.set(provider, until, now=now)
-    kinds = getattr(_provider_cooldown, "_aoteru_kinds", None)
-    if not isinstance(kinds, dict):
-        kinds = {}
-        setattr(_provider_cooldown, "_aoteru_kinds", kinds)
-    # ProviderCooldown is monotonic. A shorter throttle observation must not
-    # relabel an already-active long exhaustion expiry as throttle accounting.
-    if existing is None or until > existing:
-        kinds[provider] = kind
-    return expires_at
+    # Hold the registry's own (reentrant) lock so the kinds label is written
+    # atomically with ProviderCooldown.set: a concurrent _cooldown_metadata
+    # reader must never pair an expiry with a stale or torn label.
+    with _provider_cooldown._lock:
+        existing = _provider_cooldown.expires_at(provider, now)
+        expires_at = _provider_cooldown.set(provider, until, now=now)
+        kinds = getattr(_provider_cooldown, "_aoteru_kinds", None)
+        if not isinstance(kinds, dict):
+            kinds = {}
+            setattr(_provider_cooldown, "_aoteru_kinds", kinds)
+        # ProviderCooldown is monotonic. A shorter throttle observation must not
+        # relabel an already-active long exhaustion expiry as throttle accounting.
+        if existing is None or until > existing:
+            kinds[provider] = kind
+        return expires_at
 
 
 def _cooldown_metadata(provider: str, expires_at: Optional[datetime]) -> dict:
     if expires_at is None:
         return {}
-    kinds = getattr(_provider_cooldown, "_aoteru_kinds", {})
-    field = "throttle_cooldown" if kinds.get(provider) == "throttle" else "cooldown_expires_at"
+    with _provider_cooldown._lock:
+        kinds = getattr(_provider_cooldown, "_aoteru_kinds", {})
+        kind = kinds.get(provider)
+    field = "throttle_cooldown" if kind == "throttle" else "cooldown_expires_at"
     return {field: expires_at.isoformat()}
 
 
@@ -104,12 +110,20 @@ def _ensure_provider_cooldowns_rehydrated(now: Optional[datetime] = None) -> Non
         if getattr(registry, "_aoteru_rehydrated", False):
             return
         try:
+            from sqlalchemy import or_
             from core.database import EstateExecution, SessionLocal
             db = SessionLocal()
             try:
+                # Never scan the whole execution history: only rows whose
+                # result payload can mention a cooldown are candidates, and
+                # only the newest slice can still carry a live expiry.
                 rows = db.query(EstateExecution).filter(
                     EstateExecution.result_json.isnot(None),
-                ).order_by(EstateExecution.submitted_at.desc()).all()
+                    or_(
+                        EstateExecution.result_json.like("%cooldown_expires_at%"),
+                        EstateExecution.result_json.like("%throttle_cooldown%"),
+                    ),
+                ).order_by(EstateExecution.submitted_at.desc()).limit(200).all()
             finally:
                 db.close()
         except Exception:
@@ -118,37 +132,42 @@ def _ensure_provider_cooldowns_rehydrated(now: Optional[datetime] = None) -> Non
             # first use can retry the durable read.
             return
         restored: set[str] = set()
-        for row in rows:
-            try:
-                result = json.loads(row.result_json or "{}")
-            except (TypeError, json.JSONDecodeError):
-                continue
-            if not isinstance(result, dict):
-                continue
-            provider = result.get("provider") or row.provider
-            if not isinstance(provider, str) or provider in restored:
-                continue
-            field = next(
-                (name for name in ("cooldown_expires_at", "throttle_cooldown")
-                 if isinstance(result.get(name), str)),
-                None,
-            )
-            if field is None:
-                continue
-            try:
-                expires_at = datetime.fromisoformat(result[field].replace("Z", "+00:00"))
-                compare_now = observed_at
-                if expires_at.tzinfo is not None and compare_now.tzinfo is None:
-                    expires_at = expires_at.astimezone().replace(tzinfo=None)
-                elif expires_at.tzinfo is None and compare_now.tzinfo is not None:
-                    compare_now = compare_now.astimezone().replace(tzinfo=None)
-            except (TypeError, ValueError):
-                continue
-            if expires_at <= compare_now:
-                continue
-            kind = "throttle" if field == "throttle_cooldown" else "exhaustion"
-            _set_provider_cooldown(provider, kind, expires_at, now=observed_at)
-            restored.add(provider)
+        try:
+            for row in rows:
+                try:
+                    result = json.loads(row.result_json or "{}")
+                except (TypeError, json.JSONDecodeError):
+                    continue
+                if not isinstance(result, dict):
+                    continue
+                provider = result.get("provider") or row.provider
+                if not isinstance(provider, str) or provider in restored:
+                    continue
+                field = next(
+                    (name for name in ("cooldown_expires_at", "throttle_cooldown")
+                     if isinstance(result.get(name), str)),
+                    None,
+                )
+                if field is None:
+                    continue
+                try:
+                    expires_at = datetime.fromisoformat(result[field].replace("Z", "+00:00"))
+                    compare_now = observed_at
+                    if expires_at.tzinfo is not None and compare_now.tzinfo is None:
+                        expires_at = expires_at.astimezone().replace(tzinfo=None)
+                    elif expires_at.tzinfo is None and compare_now.tzinfo is not None:
+                        compare_now = compare_now.astimezone().replace(tzinfo=None)
+                except (TypeError, ValueError):
+                    continue
+                if expires_at <= compare_now:
+                    continue
+                kind = "throttle" if field == "throttle_cooldown" else "exhaustion"
+                _set_provider_cooldown(provider, kind, expires_at, now=observed_at)
+                restored.add(provider)
+        except Exception:
+            # A malformed durable row must not wedge hydration permanently;
+            # leave the registry unmarked so a later use retries the read.
+            return
         setattr(registry, "_aoteru_rehydrated", True)
 
 
@@ -1289,6 +1308,12 @@ def execute_claude_glm(objective: str, *, timeout: float = 180.0,
             cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, text=True, start_new_session=True,
         )
+        # start_new_session=True fixes the new process group's id to the
+        # leader's pid at spawn. Capture it now (codex-lane pattern) instead
+        # of rediscovering it via os.getpgid(proc.pid) at timeout: a leader
+        # that already exited no longer resolves and getpgid raises, which
+        # would silently spare any surviving descendant sharing this pgid.
+        process_group_id = proc.pid
         stdout, stderr = proc.communicate(objective, timeout=timeout)
         latency_ms = int((time.monotonic() - started) * 1000)
         if proc.returncode != 0:
@@ -1329,7 +1354,7 @@ def execute_claude_glm(objective: str, *, timeout: float = 180.0,
                 "error_code": "glm_unavailable", "unavailable": True}
     except subprocess.TimeoutExpired:
         try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            os.killpg(process_group_id, signal.SIGKILL)
         except (ProcessLookupError, PermissionError):
             pass
         try:

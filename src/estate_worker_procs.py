@@ -49,6 +49,12 @@ def execute_glm_write(objective: str, *, cwd: str, timeout: float,
             cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, text=True, start_new_session=True,
         )
+        # start_new_session=True fixes the new process group's id to the
+        # leader's pid at spawn. Capture it now (codex-lane pattern) instead
+        # of rediscovering it via os.getpgid(proc.pid) at timeout: a leader
+        # that already exited no longer resolves and getpgid raises, which
+        # would silently spare any surviving descendant sharing this pgid.
+        process_group_id = proc.pid
         if on_started is not None:
             on_started(proc.pid)
         stdout, stderr = proc.communicate(objective, timeout=timeout)
@@ -86,7 +92,7 @@ def execute_glm_write(objective: str, *, cwd: str, timeout: float,
     except subprocess.TimeoutExpired:
         if proc is not None:
             try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                os.killpg(process_group_id, signal.SIGKILL)
             except (ProcessLookupError, PermissionError):
                 pass
             try:
