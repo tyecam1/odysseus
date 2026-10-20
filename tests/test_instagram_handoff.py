@@ -215,3 +215,24 @@ def test_strong_cues_inside_compound_hashtags_count():
     assert classify_payload({"caption": "so good", "hashtags": ["travelgram"]})["domain"] == "neutral"
     for unrelated in ("albumin", "concerto", "vinylsiding"):          # cues that live inside unrelated words never stem-match
         assert classify_payload({"caption": "so good", "hashtags": [unrelated]})["domain"] == "neutral"
+
+
+def test_odd_payload_shapes_never_raise_and_hyphenated_tooling_terms_count():
+    assert classify_payload({"caption": "robot gripper", "collections": 1, "hashtags": "x"})["domain"] == "obsidian-phd"
+    assert classify_payload({"caption": "AI-agent research paper", "collections": [{"name": "phd"}]})["domain"] == "neutral"
+
+
+def test_a_routed_row_without_a_handoff_record_neither_duplicates_nor_loses_its_retraction(rows, tmp_path):
+    out = tmp_path / "handoff"
+    keep = _save("norec1", "cobot gripper research for assembly line")
+    drop = _save("norec2", "just a nice view")
+    run_instagram_handoff(out)
+    for permalink in (keep, drop):                                  # simulate a row whose handoff record was lost
+        with get_db_session() as db:
+            row = db.query(SourceEvent).filter(SourceEvent.external_id == permalink).one()
+            row.payload = None
+            row.domain = "obsidian-phd"
+    n = len(_lines(out / "obsidian-phd.jsonl"))
+    result = run_instagram_handoff(out)
+    lines = _lines(out / "obsidian-phd.jsonl")
+    assert result["retracted"] == 1 and len(lines) == n + 1 and lines[-1]["retracted"] and lines[-1]["permalink"] == drop

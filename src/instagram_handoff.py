@@ -115,7 +115,8 @@ def classify_payload(payload: Any) -> dict[str, Any]:
     """Return ``{"domain", "confidence", "reasons"}`` for one private saved-post payload (pure, deterministic)."""
     if not isinstance(payload, dict):
         return {"domain": DOMAIN_NEUTRAL, "confidence": "none", "reasons": ["no_payload"]}
-    collections = [c.get("name") for c in payload.get("collections") or [] if isinstance(c, dict)]
+    raw_collections = payload.get("collections")
+    collections = [c.get("name") for c in raw_collections if isinstance(c, dict)] if isinstance(raw_collections, (list, tuple)) else []
     content = _terms(payload.get("caption"), payload.get("title"), payload.get("hashtags"), payload.get("caption_variants"))
     filed = _terms(collections)
     core = sorted(content & _PHD_CORE)
@@ -125,8 +126,9 @@ def classify_payload(payload: Any) -> dict[str, Any]:
     misumi = sorted(set(strong) | set(weak))
     phd = sorted(set(core) | set(generic))
     reasons = [f"phd:{cue}" for cue in phd[:5]] + [f"misumi:{cue}" for cue in misumi[:5]]
+    parts = {piece for term in content for piece in re.split(r"[-_]", term)}        # "ai-agent", "claude_ai" count as tooling
     phd_route = (bool(core) and len(phd) >= _MIN_SCORE) or (
-        "phd" in filed and len(generic) >= _MIN_SCORE and not content & _AGENT_TOOLING)
+        "phd" in filed and len(generic) >= _MIN_SCORE and not (content | parts) & _AGENT_TOOLING)
     misumi_route = bool(strong) or len(misumi) >= _MIN_SCORE
     if phd_route and misumi_route:
         if abs(len(phd) - len(misumi)) < _MIN_MARGIN:
@@ -197,20 +199,20 @@ def run_instagram_handoff(
                 continue
             verdict = classify_payload(payload)
             domain = verdict["domain"]
-            prior = record.get("domain") if record else None
+            prior = record.get("domain") if record else row.domain     # no record: trust the stored domain, never re-emit or skip a retraction
             row.domain = domain
             row.payload = json.dumps({"handoff": {
                 "version": HANDOFF_VERSION, "content_hash": row.content_hash, "domain": domain,
                 "confidence": verdict["confidence"], "reasons": verdict["reasons"], "classified_at": stamp,
             }}, sort_keys=True, separators=(",", ":"))
-            if prior is not None and prior != domain:
+            if record and prior != domain:
                 counts["reclassified"] += 1
-                if prior in ROUTED_DOMAINS:        # the owner was handed this pointer earlier: say it no longer applies
-                    counts["retracted"] += 1
-                    _private_append(out / f"{prior}.jsonl", json.dumps({
-                        "permalink": row.external_id, "domain": prior, "retracted": True, "reclassified_to": domain,
-                        "source_event_id": row.id, "handoff_version": HANDOFF_VERSION, "handed_off_at": stamp,
-                    }, sort_keys=True, separators=(",", ":")))
+            if prior in ROUTED_DOMAINS and prior != domain:    # the owner was handed this pointer earlier: say it no longer applies
+                counts["retracted"] += 1
+                _private_append(out / f"{prior}.jsonl", json.dumps({
+                    "permalink": row.external_id, "domain": prior, "retracted": True, "reclassified_to": domain,
+                    "source_event_id": row.id, "handoff_version": HANDOFF_VERSION, "handed_off_at": stamp,
+                }, sort_keys=True, separators=(",", ":")))
             if domain == DOMAIN_NEUTRAL:
                 counts["retained_neutral"] += 1
                 continue

@@ -11,6 +11,8 @@ failed publish is retried by the next scheduled run and a successful one is neve
 
 from __future__ import annotations
 
+from src import instagram_handoff as _handoff
+
 import base64
 import collections
 import hashlib
@@ -34,7 +36,11 @@ STATE_NAME = "work-items-state.json"
 LOCK_NAME = ".work-items.lock"
 MAX_ROWS_PER_BATCH = 5000   # a growing outbox is consumed in bounded batches, oldest first
 DEFAULT_THRESHOLD = 25
-_SAFE_REASON = re.compile(r"^(?:phd|misumi):[a-z0-9 ]{1,30}$")
+# Only cue words the classifier itself can emit may appear in a public digest (a syntactic filter would let free text through).
+_REASON_VOCAB = frozenset(
+    [f"phd:{cue}" for cue in _handoff._PHD_CORE | _handoff._PHD_GENERIC]
+    + [f"misumi:{cue}" for cue in _handoff._MISUMI_STRONG | _handoff._MISUMI_WEAK]
+)
 _CONFIDENCES = frozenset({"none", "low", "medium", "high"})   # the outbox is data, never trusted text, in a public digest
 
 # domain -> (owner repo, base branch, review path template, outbox file)
@@ -80,7 +86,7 @@ def build_digest(
     )
     cues = collections.Counter(
         reason.split(":", 1)[1] for r in rows for reason in r.get("reasons", [])
-        if isinstance(reason, str) and _SAFE_REASON.match(reason) and reason.startswith(("phd:", "misumi:"))
+        if isinstance(reason, str) and reason in _REASON_VOCAB
     )
     cue_text = ", ".join(f"`{cue}` {count}" for cue, count in cues.most_common(12)) or "none recorded"
     conf_text = ", ".join(f"{count} {name}" for name, count in sorted(confidence.items()))
@@ -113,7 +119,7 @@ def build_digest(
     return (
         head
         + f"## Batch summary (aggregate only; no permalinks or caption text)\n- New items routed to {owner['label']}: **{len(rows)}** "
-        f"({conf_text}); routed to this domain so far: {total_routed}.\n- Cue words: {cue_text}.\n"
+        f"({conf_text}); outbox rows processed so far: {total_routed}.\n- Cue words: {cue_text}.\n"
         + batch_text +
         f"- Pointers: lab outbox `data/instagram/handoff/{domain}.jsonl` (mode 0600); retrieval via Odysseus "
         f"`search_instagram_items(domain=\"{domain}\")`.\n" + tail
@@ -258,15 +264,24 @@ def _run_locked(out: Path, *, publisher, threshold, now) -> dict[str, Any]:
             outcome[domain] = "outbox_shorter_than_state"
             continue
         pending = entry.get("pending") if isinstance(entry.get("pending"), dict) else None
-        end = min(len(lines), done + MAX_ROWS_PER_BATCH)
         stamp = now_stamp
+        stop = len(lines)                 # scan on past retractions/corrupt rows until a full batch of pointers or the end
         if pending:                       # a publish that failed part-way is retried with the SAME batch, stamp and branch
-            end, stamp = min(int(pending.get("end", end)), len(lines)), str(pending.get("stamp", now_stamp))
+            stop, stamp = int(pending.get("end", 0)), str(pending.get("stamp", now_stamp))
+            if stop > len(lines):         # the batch was (partly) published remotely: never re-cut it from a shorter outbox
+                logger.warning("Instagram work items: %s pending batch ends at %d but the outbox has %d rows", domain, stop, len(lines))
+                outcome[domain] = "outbox_shorter_than_pending"
+                continue
         # Replay the window in order: a pointer counts once however often it was written (at-least-once appends), and one
         # withdrawn by a later retraction in the same window is not a new lead at all.
         active: dict[str, dict[str, Any]] = {}
         invalid = retracted = duplicates = 0
-        for index, line in enumerate(lines[done:end]):
+        end = done
+        for index, line in enumerate(lines[done:stop]):
+            end = done + index + 1
+            if not pending and len(active) >= MAX_ROWS_PER_BATCH:
+                end -= 1
+                break
             if not line.strip():
                 continue                      # a blank line carries nothing and loses nothing
             try:
@@ -311,6 +326,8 @@ def _run_locked(out: Path, *, publisher, threshold, now) -> dict[str, Any]:
         _save_state(state_path, state)
         try:
             url = publish(domain, digest, stamp=stamp, batch_id=batch_id)
+            if not isinstance(url, str) or not url.strip():
+                raise RuntimeError("no confirmed pull request URL")        # never advance state on an unconfirmed publish
         except Exception as exc:  # retried on the next run with the same batch; handed_over does not advance
             logger.warning("Instagram work-item publish failed for %s: %s", domain, str(exc)[:240])
             outcome[domain] = "publish_failed"
