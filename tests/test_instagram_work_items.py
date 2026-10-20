@@ -241,3 +241,35 @@ def test_a_pointer_retracted_in_the_same_window_is_not_a_new_lead_and_a_rerouted
     seen = []
     run_instagram_work_items(tmp_path, publisher=lambda d, g, stamp, batch_id="": seen.append(g) or "u", threshold=25)
     assert "**25**" in seen[0] and "2 retraction" in seen[0] and "1 duplicate" in seen[0]
+
+
+def test_publish_uses_the_configured_gh_binary_and_reports_why_it_failed(monkeypatch):
+    import src.instagram_work_items as wi
+    seen = []
+
+    class Done:
+        returncode, stdout, stderr = 1, "", "snap-confine is packaged without necessary permissions\nand cannot continue"
+
+    monkeypatch.setenv("ODYSSEUS_GH_BIN", "/opt/plain/gh")
+    monkeypatch.setattr(wi.subprocess, "run", lambda cmd, **k: seen.append(cmd) or Done())
+    with pytest.raises(RuntimeError) as err:
+        wi._gh(["api", "x"])
+    assert seen[0][0] == "/opt/plain/gh" and "failed (1)" in str(err.value) and "snap-confine is packaged" in str(err.value)
+    assert wi._gh_ready() and "snap-confine" in wi._gh_ready()
+
+    def missing(cmd, **k):
+        raise FileNotFoundError(cmd[0])
+    monkeypatch.setattr(wi.subprocess, "run", missing)
+    assert "could not run" in wi._gh_ready()
+
+
+def test_an_unusable_gh_blocks_publishing_without_losing_or_half_handing_over_a_batch(tmp_path, monkeypatch):
+    import src.instagram_work_items as wi
+    monkeypatch.setattr(wi, "_publishing_enabled", lambda: True)
+    monkeypatch.setattr(wi, "_gh_ready", lambda: "gh could not run (FileNotFoundError)")
+    _raw_outbox(tmp_path, "misumi", [_row(i) for i in range(30)])
+    assert run_instagram_work_items(tmp_path, threshold=25)["misumi"] == "publish_unavailable"
+    assert not (tmp_path / STATE_NAME).exists() and not (tmp_path / "digests").exists()
+    monkeypatch.setattr(wi, "_gh_ready", lambda: None)
+    monkeypatch.setattr(wi, "publish_pull_request", lambda domain, digest, stamp, batch_id="": "https://example/pr/5")
+    assert run_instagram_work_items(tmp_path, threshold=25)["misumi"] == "published"       # the very same batch goes out once gh works
