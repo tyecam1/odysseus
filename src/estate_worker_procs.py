@@ -1,7 +1,9 @@
 """Host-local process primitives used by the estate worker."""
 from __future__ import annotations
 
+import json
 import os
+import signal
 import subprocess
 import time
 from pathlib import Path
@@ -17,6 +19,86 @@ class ProcessLayerError(RuntimeError):
     def __init__(self, code: str, message: str):
         super().__init__(message)
         self.code = code
+
+
+def glm_launcher_path() -> Optional[str]:
+    """Return the governed host-local GLM launcher used by write runners."""
+    launcher = Path.home() / ".local" / "bin" / ("claude-glm.cmd" if os.name == "nt" else "claude-glm")
+    return str(launcher) if launcher.is_file() and os.access(launcher, os.X_OK) else None
+
+
+def execute_glm_write(objective: str, *, cwd: str, timeout: float,
+                      on_started=None) -> dict:
+    """Invoke GLM from inside the worker's already-tracked runner unit.
+
+    The caller owns the transient systemd unit and spool decisions. This
+    helper owns only the launcher's child process and response parsing; it
+    never fabricates model identity when the launcher omits it.
+    """
+    launcher = glm_launcher_path()
+    if launcher is None:
+        return {
+            "ok": False, "provider": "glm", "error_code": "glm_unavailable",
+            "unavailable": True, "error": "claude-glm launcher is unavailable on this worker",
+        }
+    started = time.monotonic()
+    proc = None
+    try:
+        proc = subprocess.Popen(
+            [launcher, "--print", "--permission-mode", "acceptEdits", "--output-format", "json"],
+            cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, start_new_session=True,
+        )
+        if on_started is not None:
+            on_started(proc.pid)
+        stdout, stderr = proc.communicate(objective, timeout=timeout)
+        latency_ms = int((time.monotonic() - started) * 1000)
+        if proc.returncode != 0:
+            return {
+                "ok": False, "provider": "glm", "latency_ms": latency_ms,
+                "error": f"claude-glm exited {proc.returncode}: {(stderr or stdout or '')[-500:]}",
+            }
+        try:
+            payload = json.loads((stdout or "").strip())
+        except json.JSONDecodeError:
+            return {"ok": False, "provider": "glm", "latency_ms": latency_ms,
+                    "error": "claude-glm returned malformed JSON"}
+        if not isinstance(payload, dict) or payload.get("is_error"):
+            error = payload.get("error") if isinstance(payload, dict) else "invalid response"
+            return {"ok": False, "provider": "glm", "latency_ms": latency_ms, "error": str(error)}
+        output = payload.get("result") or payload.get("output") or payload.get("text") or ""
+        model = payload.get("model") if "model" in payload else None
+        result = {
+            "ok": bool(str(output).strip()), "provider": "glm", "model": model,
+            "model_evidence": "launcher_response" if model is not None else "unattributed",
+            "output": str(output), "latency_ms": latency_ms,
+        }
+        if isinstance(payload.get("usage"), dict):
+            result["usage"] = payload["usage"]
+        if not result["ok"]:
+            result["error"] = "claude-glm returned an empty response"
+        return result
+    except FileNotFoundError:
+        return {
+            "ok": False, "provider": "glm", "error_code": "glm_unavailable",
+            "unavailable": True, "error": "claude-glm launcher is unavailable on this worker",
+        }
+    except subprocess.TimeoutExpired:
+        if proc is not None:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+            try:
+                proc.communicate(timeout=5)
+            except (subprocess.TimeoutExpired, OSError):
+                pass
+        return {"ok": False, "provider": "glm",
+                "error": f"claude-glm timed out after {timeout}s",
+                "latency_ms": int((time.monotonic() - started) * 1000)}
+    except Exception as exc:
+        return {"ok": False, "provider": "glm", "error": str(exc),
+                "latency_ms": int((time.monotonic() - started) * 1000)}
 
 
 # Win32 constants (avoids a ctypes.wintypes/win32con dependency for the

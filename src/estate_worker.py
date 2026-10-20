@@ -332,6 +332,7 @@ def _verb_health(payload: dict) -> dict:
         raise WorkerError("bad_request", "health payload must be empty")
     reachable, _models, ollama_error = _ollama_inventory()
     codex_available, codex_detail = estate_router._codex_available()
+    glm_launcher = estate_worker_procs.glm_launcher_path()
     gpu_active, gpu_reason = estate_router.experiment_priority_active()
     # Raw GPU readings only, and only on a host whose registry entry opts in (worker.gpu_admission); the
     # router classifies them. No block -> no sampling cost and no behaviour change.
@@ -340,6 +341,8 @@ def _verb_health(payload: dict) -> dict:
     return {
         "ollama": {"reachable": reachable, "base_url": _OLLAMA_BASE, "error": ollama_error},
         "codex": {"available": codex_available, "detail": codex_detail},
+        "glm": {"available": glm_launcher is not None,
+                "detail": glm_launcher or "claude-glm launcher is unavailable on this worker"},
         "gpu_yield": {"active": gpu_active, "reason": gpu_reason},
         "gpu_load": gpu_load,
         "in_flight": _in_flight_execution_ids(),
@@ -393,6 +396,7 @@ def _verb_inventory(payload: dict) -> dict:
             length, known = 0, False
         context[model] = {"length": length, "known": known}
     codex_available, _detail = estate_router._codex_available()
+    glm_available = estate_worker_procs.glm_launcher_path() is not None
     registry = estate_router._load_yaml("repositories")
     repos = []
     for entry in registry.get("repos", []):
@@ -414,6 +418,7 @@ def _verb_inventory(payload: dict) -> dict:
             "local": reachable,
             "codex": codex_available,
             "codex-write": codex_available and _detached_spawn_verified() and _write_prerequisites_ok(),
+            "glm-write": glm_available and _detached_spawn_verified() and _write_prerequisites_ok(),
         },
         "repos": repos,
         "hardware": _hardware(),
@@ -623,7 +628,7 @@ STARTING_STALE_SECONDS = 60
 SPOOL_COMPACT_AFTER_RELEASE_SECONDS = 7 * 24 * 60 * 60
 _DEFAULT_PREPARE_WAIT_S = 90.0
 _DEFAULT_GIT_UNIT_WAIT_S = 120.0
-_WRITE_KINDS = frozenset({"codex-write"})
+_WRITE_KINDS = frozenset({"codex-write", "glm-write"})
 _DECISION_FS_PROBED: dict = {}
 _CURRENT_DEADLINE_S = _PerCall(value=None)
 
@@ -1013,13 +1018,15 @@ def _validate_start(payload: dict) -> None:
             raise WorkerError("bad_request", "noop-sleep is available only in worker self-test mode")
         _timeout(payload, 1.0)
         return
-    if kind != "codex-write":
+    if kind not in _WRITE_KINDS:
         raise WorkerError("bad_request", f"unsupported start kind {kind!r}")
     lease = payload.get("lease")
     if not isinstance(lease, dict) or not isinstance(lease.get("lease_id"), str):
-        raise WorkerError("bad_request", "codex-write start requires a lease")
+        raise WorkerError("bad_request", f"{kind} start requires a lease")
     if not isinstance(payload.get("objective"), str):
-        raise WorkerError("bad_request", "codex-write start requires objective")
+        raise WorkerError("bad_request", f"{kind} start requires objective")
+    if kind == "glm-write" and estate_worker_procs.glm_launcher_path() is None:
+        raise WorkerError("executor_unavailable", "claude-glm launcher is unavailable on this worker")
     _timeout(payload, 1800.0)
     verified = _worktree_verification(payload.get("repo_id"), lease.get("worktree_path"), lease.get("branch"))
     if not verified["ok"]:
@@ -1182,7 +1189,7 @@ def _run_spooled(execution_id: str) -> int:
             on_started(os.getpid())
             time.sleep(_timeout(request, 1.0))
             result = {"ok": True, "output": "noop-sleep complete", "provider": "selftest"}
-        elif kind == "codex-write":
+        elif kind in _WRITE_KINDS:
             lease = request.get("lease") or {}
             # Re-check AFTER winning the execute decision: the tree must still
             # be clean at the admitted HEAD, or the writer never runs.
@@ -1197,14 +1204,22 @@ def _run_spooled(execution_id: str) -> int:
                     or (lease.get("expected_head_sha") and now_verified.get("head_sha") != lease["expected_head_sha"]):
                 raise WorkerError("authority_denied", "worktree changed between admission and runner start; "
                                                       "writer not run")
-            result = estate_router._execute_codex_with_sandbox(
-                request.get("objective", ""),
-                sandbox="workspace-write",
-                provider="codex",
-                timeout=_timeout(request, 1800.0),
-                cwd=lease.get("worktree_path"),
-                on_started=on_started,
-            )
+            if kind == "codex-write":
+                result = estate_router._execute_codex_with_sandbox(
+                    request.get("objective", ""),
+                    sandbox="workspace-write",
+                    provider="codex",
+                    timeout=_timeout(request, 1800.0),
+                    cwd=lease.get("worktree_path"),
+                    on_started=on_started,
+                )
+            else:
+                result = estate_worker_procs.execute_glm_write(
+                    request.get("objective", ""),
+                    timeout=_timeout(request, 1800.0),
+                    cwd=lease.get("worktree_path"),
+                    on_started=on_started,
+                )
         else:
             raise WorkerError("bad_request", f"unsupported spooled kind {kind!r}")
     except Exception as exc:

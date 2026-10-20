@@ -12,7 +12,9 @@ from datetime import datetime, timedelta
 from typing import Callable, Optional
 
 
-_QUOTA_MARKERS = ("usage limit", "rate limit", "quota exceeded")
+_EXHAUSTION_MARKERS = ("usage limit", "quota exceeded")
+_THROTTLE_MARKERS = ("rate limit", "too many requests", "throttl")
+_THROTTLE_429 = re.compile(r"\b429\b.*(?:too many requests|rate[ -]?limit|throttl)", re.IGNORECASE | re.DOTALL)
 _RETRY_AT = re.compile(
     r"try\s+again\s+at\s+(?P<hour>\d{1,2}):(?P<minute>\d{2})"
     r"(?:\s*(?P<meridiem>[ap](?:\.?m\.?)?))?",
@@ -20,16 +22,22 @@ _RETRY_AT = re.compile(
 )
 _DEFAULT_QUOTA_RETRY = timedelta(minutes=30)
 _MIN_QUOTA_RETRY = timedelta(minutes=1)
+_THROTTLE_RETRY = timedelta(seconds=60)
 
 
 class ProviderUnavailable(RuntimeError):
     """No provider in the bounded preferred/fallback chain is available."""
 
 
-def parse_quota_retry(error_text: str, now: datetime) -> Optional[timedelta]:
-    """Return the retry delay encoded by a quota error.
+def parse_quota_retry(error_text: str, now: datetime) -> Optional[tuple[str, timedelta]]:
+    """Return ``(kind, retry_delay)`` for provider capacity failures.
 
-    Only explicit quota markers qualify. A quota message without a usable
+    Genuine account exhaustion (``usage limit`` / ``quota exceeded``) may
+    carry a reset time and retains the existing conservative parsing rules.
+    Transient throttling (``rate limit`` or explicit 429-throttle text) is a
+    distinct kind with a fixed 60-second delay: it must never be promoted to
+    the long exhaustion path merely because a clock-like string is present.
+    An exhaustion message without a usable
     ``try again at H:MM [AM|PM]`` timestamp receives a conservative 30-minute
     cooldown. A parsed time earlier than ``now`` is the next day's occurrence.
     A parsed reset at (or within a minute of) ``now`` is clamped up to one
@@ -38,12 +46,14 @@ def parse_quota_retry(error_text: str, now: datetime) -> Optional[timedelta]:
     """
     text = str(error_text or "")
     lowered = text.lower()
-    if not any(marker in lowered for marker in _QUOTA_MARKERS):
+    if any(marker in lowered for marker in _THROTTLE_MARKERS) or _THROTTLE_429.search(text):
+        return "throttle", _THROTTLE_RETRY
+    if not any(marker in lowered for marker in _EXHAUSTION_MARKERS):
         return None
 
     match = _RETRY_AT.search(text)
     if match is None:
-        return _DEFAULT_QUOTA_RETRY
+        return "exhaustion", _DEFAULT_QUOTA_RETRY
 
     try:
         hour = int(match.group("hour"))
@@ -59,11 +69,11 @@ def parse_quota_retry(error_text: str, now: datetime) -> Optional[timedelta]:
             raise ValueError("24-hour clock hour out of range")
         retry_at = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
     except (TypeError, ValueError):
-        return _DEFAULT_QUOTA_RETRY
+        return "exhaustion", _DEFAULT_QUOTA_RETRY
 
     if retry_at < now:
         retry_at += timedelta(days=1)
-    return max(retry_at - now, _MIN_QUOTA_RETRY)
+    return "exhaustion", max(retry_at - now, _MIN_QUOTA_RETRY)
 
 
 class ProviderCooldown:

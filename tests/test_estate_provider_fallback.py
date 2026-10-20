@@ -2,6 +2,7 @@
 import json
 import os
 import socket
+import threading
 from datetime import datetime, timedelta
 
 import pytest
@@ -82,6 +83,7 @@ def fallback_router(tmp_path, monkeypatch):
     clock = [NOW]
     monkeypatch.setattr(estate_router, "_provider_now", lambda: clock[0])
     monkeypatch.setattr(estate_router, "_provider_cooldown", ProviderCooldown(lambda: clock[0]))
+    monkeypatch.setattr(estate_router, "_ensure_provider_cooldowns_rehydrated", lambda now=None: None)
     monkeypatch.setattr(estate_router, "resolve_repo_path", lambda repo_id: "/worktree")
     return clock
 
@@ -312,7 +314,7 @@ def test_write_admission_switches_provider_before_single_execution_row(
     assert result["execution"]["provider"] == "glm"
     assert captured == {
         "objective": "implement it", "repo_id": "odysseus", "host_id": HOST,
-        "decision_id": "D", "cooldown_expires_at": "2026-10-19T14:30:00",
+        "decision_id": "D", "requested_alias": "code-strong",
     }
 
 
@@ -346,19 +348,22 @@ def _row(execution_id):
 def test_glm_write_uses_same_lease_worktree_branch_and_lifecycle(
         write_db, monkeypatch):
     _lease()
-    FakeWorker(monkeypatch, head="a" * 40, path="/w/feat")
-    calls = []
-
-    def runner(objective, **kwargs):
-        calls.append((objective, kwargs))
-        return {"ok": True, "provider": "glm", "model": "glm-5.3", "output": "changed",
-                "usage": {"input_tokens": 3, "output_tokens": 2}}
+    worker = FakeWorker(monkeypatch, head="a" * 40, path="/w/feat")
 
     result = lane.execute_write_via_worker(
-        "change it", repo_id="odysseus", host_id=HOST, wait_timeout=2,
-        provider="glm", executor="glm-write", provider_runner=runner,
-        concrete_model="glm-5.3", cooldown_expires_at="2026-10-19T14:30:00",
+        "change it", repo_id="odysseus", host_id=HOST, wait_timeout=0,
+        provider="glm", executor="glm-write", requested_alias="code-strong",
     )
+    execution_id = result["execution_id"]
+    start_payload = next(payload for _host, verb, payload in worker.calls if verb == "start")
+    assert start_payload["kind"] == "glm-write"
+    worker.set_state(execution_id, "running", quiescent=False)
+    lane._apply_view(execution_id, worker._view(execution_id))
+    worker.set_state(execution_id, "succeeded", result={
+        "ok": True, "provider": "glm", "model": "launcher-model-v1", "output": "changed",
+        "usage": {"input_tokens": 3, "output_tokens": 2},
+    })
+    lane._apply_view(execution_id, worker._view(execution_id))
     row = _row(result["execution_id"])
     payload = json.loads(row.result_json)
 
@@ -367,10 +372,10 @@ def test_glm_write_uses_same_lease_worktree_branch_and_lifecycle(
         "L1", "/w/feat", "feat/glm-quota-fallback",
     )
     assert row.lifecycle_state == "succeeded" and row.worktree_resolution == "unresolved"
-    assert payload["model"] == "glm-5.3"
-    assert payload["cooldown_expires_at"] == "2026-10-19T14:30:00"
+    assert payload["model"] == "launcher-model-v1"
+    assert payload["model_evidence"] == "launcher_response"
     assert payload["verification_result"] == "pass"
-    assert calls == [("change it", {"timeout": 1800.0, "cwd": "/w/feat"})]
+    assert json.loads(row.worker_attestation_json)["model"] == "launcher-model-v1"
 
 
 def test_codex_write_quota_failure_records_cooldown_without_midflight_switch(
@@ -416,8 +421,6 @@ def test_admission_reuse_reports_the_existing_rows_provider(write_db, monkeypatc
     result = lane.execute_write_via_worker(
         "second change", repo_id="odysseus", host_id=HOST,
         provider="glm", executor="glm-write",
-        provider_runner=lambda *args, **kwargs: pytest.fail(
-            "admission reuse must not dispatch a new provider run"),
     )
 
     # The reused execution row is a codex row: the response must describe
@@ -453,3 +456,162 @@ def test_resolve_provider_both_cooling_raises():
     cooldown.set("glm", NOW + timedelta(minutes=5), now=NOW)
     with pytest.raises(ProviderUnavailable):
         resolve_provider("codex", "glm", cooldown, NOW)
+
+
+def test_candidate_only_provider_is_refused_as_primary(fallback_router):
+    models_path = estate_router._CONFIG_DIR / "models.yaml"
+    models = yaml.safe_load(models_path.read_text())
+    models["default_paid_provider"] = "glm"
+    models["capabilities"][0]["paid_provider"] = "glm"
+    models_path.write_text(yaml.safe_dump(models))
+
+    choice = estate_router._resolve_paid_provider("code-strong")
+
+    assert choice["provider"] is None
+    assert "candidate_only" in choice["reason"]
+    assert "glm" not in estate_router._PAID_PROVIDER_FUNCTION_NAMES
+    assert "glm-write" not in estate_router._PAID_PROVIDER_WRITE_FUNCTION_NAMES
+
+
+def test_transient_throttle_uses_short_separate_cooldown(fallback_router, monkeypatch):
+    monkeypatch.setattr(estate_router, "_dispatch_read_only", lambda *args, **kwargs: {
+        "ok": False, "provider": "codex", "error": "HTTP 429: Too Many Requests",
+        "placement": _placement(),
+    })
+    monkeypatch.setattr(estate_router, "execute_claude_glm", lambda *args, **kwargs: {
+        "ok": True, "provider": "glm", "model": "response-model", "output": "done",
+    })
+
+    result = estate_router.run_task(_task())
+
+    assert result["throttle_cooldown"] == "2026-10-19T14:01:00"
+    assert "cooldown_expires_at" not in result
+    assert result["switch_reason"] == "provider_throttled"
+    assert estate_router._provider_cooldown.remaining("codex", NOW) == timedelta(seconds=60)
+
+
+def test_paid_provider_dispatch_is_single_flight(fallback_router, monkeypatch):
+    original_resolve = estate_router.resolve_provider
+    selection_barrier = threading.Barrier(2)
+    selections = 0
+    selection_guard = threading.Lock()
+
+    def synchronize_initial_selection(*args, **kwargs):
+        nonlocal selections
+        selected = original_resolve(*args, **kwargs)
+        with selection_guard:
+            selections += 1
+            synchronize = selections <= 2
+        if synchronize:
+            selection_barrier.wait(timeout=5)
+        return selected
+
+    monkeypatch.setattr(estate_router, "resolve_provider", synchronize_initial_selection)
+    codex_calls = []
+
+    def exhausted(*args, **kwargs):
+        codex_calls.append(1)
+        return {"ok": False, "provider": "codex", "error": QUOTA_ERROR, "placement": _placement()}
+
+    monkeypatch.setattr(estate_router, "_dispatch_read_only", exhausted)
+    monkeypatch.setattr(estate_router, "execute_claude_glm", lambda *args, **kwargs: {
+        "ok": True, "provider": "glm", "model": "response-model", "output": "done",
+    })
+    results = []
+    threads = [threading.Thread(target=lambda: results.append(estate_router.run_task(_task()))) for _ in range(2)]
+
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert len(results) == 2
+    assert codex_calls == [1]
+
+
+def test_cooldown_rehydrates_from_persisted_execution(write_db, monkeypatch):
+    expires = NOW + timedelta(minutes=30)
+    with get_db_session() as db:
+        db.add(EstateExecution(
+            id="E-cooldown", objective="x", executor="codex-write", provider="codex",
+            host_id=HOST, repo_id="odysseus", lifecycle_state="failed",
+            worktree_resolution="unresolved", submitted_at=NOW,
+            result_json=json.dumps({
+                "ok": False, "provider": "codex", "quota_exhaustion": True,
+                "cooldown_expires_at": expires.isoformat(),
+            }),
+        ))
+    fresh = ProviderCooldown(lambda: NOW)
+    monkeypatch.setattr(estate_router, "_provider_cooldown", fresh)
+    monkeypatch.setattr(estate_router, "_provider_now", lambda: NOW)
+
+    estate_router._ensure_provider_cooldowns_rehydrated()
+
+    assert fresh.expires_at("codex", NOW) == expires
+
+
+def test_glm_terminal_without_model_is_unattributed(write_db, monkeypatch):
+    _lease()
+    worker = FakeWorker(monkeypatch, head="a" * 40, path="/w/feat")
+    admitted = lane.execute_write_via_worker(
+        "change it", repo_id="odysseus", host_id=HOST, wait_timeout=0,
+        provider="glm", executor="glm-write", requested_alias="code-strong",
+    )
+    execution_id = admitted["execution_id"]
+    worker.set_state(execution_id, "running", quiescent=False)
+    lane._apply_view(execution_id, worker._view(execution_id))
+    worker.set_state(execution_id, "succeeded", result={
+        "ok": True, "provider": "glm", "output": "changed",
+    })
+    lane._apply_view(execution_id, worker._view(execution_id))
+
+    payload = json.loads(_row(execution_id).result_json)
+    assert payload["model"] is None
+    assert payload["model_evidence"] == "unattributed"
+
+
+def test_running_glm_unknown_after_restart_settles_and_recovers(write_db, monkeypatch):
+    _lease()
+    worker = FakeWorker(monkeypatch, head="a" * 40, path="/w/feat")
+    admitted = lane.execute_write_via_worker(
+        "change it", repo_id="odysseus", host_id=HOST, wait_timeout=0,
+        provider="glm", executor="glm-write",
+    )
+    execution_id = admitted["execution_id"]
+    worker.set_state(execution_id, "running", quiescent=False)
+    lane._apply_view(execution_id, worker._view(execution_id))
+    worker.executions.pop(execution_id)
+
+    lane._apply_view(execution_id, worker._view(execution_id))
+
+    row = _row(execution_id)
+    assert row.lifecycle_state == "interrupted"
+    recovered = lane.recover_execution_lease(
+        execution_id, lease_id="L1", host_id=HOST, repo_id="odysseus",
+        branch="feat/glm-quota-fallback", worktree_path="/w/feat",
+    )
+    assert recovered["recovered"] is True
+
+
+def test_apply_view_records_glm_exhaustion_cooldown(write_db, monkeypatch):
+    _lease()
+    monkeypatch.setattr(lane, "_now", lambda: NOW)
+    monkeypatch.setattr(estate_router, "_provider_now", lambda: NOW)
+    worker = FakeWorker(monkeypatch, head="a" * 40, path="/w/feat")
+    admitted = lane.execute_write_via_worker(
+        "change it", repo_id="odysseus", host_id=HOST, wait_timeout=0,
+        provider="glm", executor="glm-write",
+    )
+    execution_id = admitted["execution_id"]
+    worker.set_state(execution_id, "running", quiescent=False)
+    lane._apply_view(execution_id, worker._view(execution_id))
+    worker.set_state(execution_id, "failed", result={
+        "ok": False, "provider": "glm", "error": QUOTA_ERROR,
+    })
+    lane._apply_view(execution_id, worker._view(execution_id))
+
+    payload = json.loads(_row(execution_id).result_json)
+    assert payload["quota_exhaustion"] is True
+    assert payload["cooldown_expires_at"] == "2026-10-19T14:30:00"
+    assert estate_router._provider_cooldown.active("glm", NOW)

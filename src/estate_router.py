@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import re
 import socket
+import threading
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -57,10 +58,122 @@ from src.estate_worker_procs import (
 
 _CONFIG_DIR = Path(get_app_root()) / "config"
 _provider_cooldown = ProviderCooldown()
+_provider_rehydrate_lock = threading.Lock()
+_provider_dispatch_locks_lock = threading.Lock()
+_provider_dispatch_locks: dict[str, threading.Lock] = {}
 
 
 def _provider_now() -> datetime:
     return datetime.now()
+
+
+def _provider_dispatch_lock(provider: str) -> threading.Lock:
+    with _provider_dispatch_locks_lock:
+        return _provider_dispatch_locks.setdefault(provider, threading.Lock())
+
+
+def _set_provider_cooldown(provider: str, kind: str, until: datetime, *, now: datetime) -> datetime:
+    existing = _provider_cooldown.expires_at(provider, now)
+    expires_at = _provider_cooldown.set(provider, until, now=now)
+    kinds = getattr(_provider_cooldown, "_aoteru_kinds", None)
+    if not isinstance(kinds, dict):
+        kinds = {}
+        setattr(_provider_cooldown, "_aoteru_kinds", kinds)
+    # ProviderCooldown is monotonic. A shorter throttle observation must not
+    # relabel an already-active long exhaustion expiry as throttle accounting.
+    if existing is None or until > existing:
+        kinds[provider] = kind
+    return expires_at
+
+
+def _cooldown_metadata(provider: str, expires_at: Optional[datetime]) -> dict:
+    if expires_at is None:
+        return {}
+    kinds = getattr(_provider_cooldown, "_aoteru_kinds", {})
+    field = "throttle_cooldown" if kinds.get(provider) == "throttle" else "cooldown_expires_at"
+    return {field: expires_at.isoformat()}
+
+
+def _ensure_provider_cooldowns_rehydrated(now: Optional[datetime] = None) -> None:
+    """Lazily restore active provider cooldowns from durable executions."""
+    registry = _provider_cooldown
+    if getattr(registry, "_aoteru_rehydrated", False):
+        return
+    observed_at = now or _provider_now()
+    with _provider_rehydrate_lock:
+        if getattr(registry, "_aoteru_rehydrated", False):
+            return
+        try:
+            from core.database import EstateExecution, SessionLocal
+            db = SessionLocal()
+            try:
+                rows = db.query(EstateExecution).filter(
+                    EstateExecution.result_json.isnot(None),
+                ).order_by(EstateExecution.submitted_at.desc()).all()
+            finally:
+                db.close()
+        except Exception:
+            # Routing remains available while an uninitialised/test DB is
+            # coming up. Do not mark this registry as hydrated so a later
+            # first use can retry the durable read.
+            return
+        restored: set[str] = set()
+        for row in rows:
+            try:
+                result = json.loads(row.result_json or "{}")
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if not isinstance(result, dict):
+                continue
+            provider = result.get("provider") or row.provider
+            if not isinstance(provider, str) or provider in restored:
+                continue
+            field = next(
+                (name for name in ("cooldown_expires_at", "throttle_cooldown")
+                 if isinstance(result.get(name), str)),
+                None,
+            )
+            if field is None:
+                continue
+            try:
+                expires_at = datetime.fromisoformat(result[field].replace("Z", "+00:00"))
+                compare_now = observed_at
+                if expires_at.tzinfo is not None and compare_now.tzinfo is None:
+                    expires_at = expires_at.astimezone().replace(tzinfo=None)
+                elif expires_at.tzinfo is None and compare_now.tzinfo is not None:
+                    compare_now = compare_now.astimezone().replace(tzinfo=None)
+            except (TypeError, ValueError):
+                continue
+            if expires_at <= compare_now:
+                continue
+            kind = "throttle" if field == "throttle_cooldown" else "exhaustion"
+            _set_provider_cooldown(provider, kind, expires_at, now=observed_at)
+            restored.add(provider)
+        setattr(registry, "_aoteru_rehydrated", True)
+
+
+def _observe_provider_cooldown(provider: str, result: dict, now: datetime) -> dict:
+    if result.get("ok"):
+        return {}
+    parsed = parse_quota_retry(str(result.get("error") or ""), now)
+    if parsed is None:
+        return {}
+    kind, retry = parsed
+    expires_at = _set_provider_cooldown(provider, kind, now + retry, now=now)
+    return _cooldown_metadata(provider, expires_at)
+
+
+def _dispatch_provider_singleflight(provider: str, dispatch: Callable[[], dict]) -> tuple[Optional[dict], dict]:
+    """Atomically re-check cooldown, dispatch once, then arm on failure."""
+    with _provider_dispatch_lock(provider):
+        observed_at = _provider_now()
+        _ensure_provider_cooldowns_rehydrated(observed_at)
+        if _provider_cooldown.active(provider, observed_at):
+            return None, _cooldown_metadata(
+                provider, _provider_cooldown.expires_at(provider, observed_at),
+            )
+        result = dict(dispatch())
+        return result, _observe_provider_cooldown(provider, result, observed_at)
 
 
 class RoutingConfigError(RuntimeError):
@@ -1160,6 +1273,8 @@ def execute_claude_glm(objective: str, *, timeout: float = 180.0,
                        cwd: Optional[str] = None) -> dict:
     """Run the host-local GLM Claude Code launcher with inherited context."""
     import json as _json
+    import os
+    import signal
     import subprocess
     import time
 
@@ -1172,7 +1287,7 @@ def execute_claude_glm(objective: str, *, timeout: float = 180.0,
         proc = subprocess.Popen(
             [launcher, "--print", "--output-format", "json"],
             cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, text=True,
+            stderr=subprocess.PIPE, text=True, start_new_session=True,
         )
         stdout, stderr = proc.communicate(objective, timeout=timeout)
         latency_ms = int((time.monotonic() - started) * 1000)
@@ -1195,9 +1310,12 @@ def execute_claude_glm(objective: str, *, timeout: float = 180.0,
                 result.update(error_code="glm_unavailable", unavailable=True)
             return result
         output = payload.get("result") or payload.get("output") or payload.get("text") or ""
+        model = payload.get("model") if "model" in payload else None
         result = {
             "ok": bool(str(output).strip()), "provider": "glm",
-            "model": payload.get("model") or "glm-5.3", "output": str(output),
+            "model": model,
+            "model_evidence": "launcher_response" if model is not None else "unattributed",
+            "output": str(output),
             "latency_ms": latency_ms,
         }
         if isinstance(payload.get("usage"), dict):
@@ -1211,9 +1329,12 @@ def execute_claude_glm(objective: str, *, timeout: float = 180.0,
                 "error_code": "glm_unavailable", "unavailable": True}
     except subprocess.TimeoutExpired:
         try:
-            proc.kill()
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        try:
             proc.communicate(timeout=5)
-        except Exception:
+        except (subprocess.TimeoutExpired, OSError):
             pass
         return {"ok": False, "provider": "glm",
                 "error": f"claude-glm timed out after {timeout}s",
@@ -1227,15 +1348,14 @@ def execute_claude_glm_write_durable(objective: str, *, repo_id: str, host_id: s
                                      decision_id: Optional[str] = None,
                                      wait_timeout: float = 30.0,
                                      timeout: float = 1800.0,
-                                     cooldown_expires_at: Optional[str] = None) -> dict:
+                                     requested_alias: Optional[str] = None) -> dict:
     """Admit GLM through the existing lease-bound EstateExecution lane."""
     from src.estate_write_lane import execute_write_via_worker
 
     return execute_write_via_worker(
         objective, repo_id=repo_id, host_id=host_id, decision_id=decision_id,
         wait_timeout=wait_timeout, timeout=timeout, provider="glm",
-        executor="glm-write", provider_runner=execute_claude_glm,
-        concrete_model="glm-5.3", cooldown_expires_at=cooldown_expires_at,
+        executor="glm-write", requested_alias=requested_alias,
     )
 
 
@@ -1441,20 +1561,19 @@ def execute_codex_write_durable(objective: str, *, repo_id: str, host_id: str,
 # executor/concrete_model, comes from config/models.yaml
 # (paid_providers/default_paid_provider/per-alias paid_provider) via
 # `_resolve_paid_provider` below — this dict is only the unavoidable code
-# side (an actual callable can't live in YAML). Only `codex` has a real
-# implementation today; adding a second provider means adding both a real
-# `execute_<provider>` function and an entry here, not just a config line.
+# side (an actual callable can't live in YAML). Candidate-only providers are
+# intentionally absent: GLM is reached only by the explicit cooldown fallback
+# branch below, never by this primary dispatch map.
 #
 # Maps provider name -> this module's own function *name* rather than the
 # function object directly, resolved via globals() at call time — tests
 # (and any future caller) monkeypatch `estate_router.execute_codex` the
 # same way they already monkeypatch `execute_local`; binding the object
 # here at import time would silently stop honouring that patch.
-_PAID_PROVIDER_FUNCTION_NAMES = {"codex": "execute_codex", "glm": "execute_claude_glm"}
+_PAID_PROVIDER_FUNCTION_NAMES = {"codex": "execute_codex"}
 # Stage 6: the write lane dispatches through the worker on route.host.
 _PAID_PROVIDER_WRITE_FUNCTION_NAMES = {
     "codex": "execute_write_via_worker",
-    "glm-write": "execute_claude_glm_write_durable",
 }
 
 
@@ -1472,7 +1591,17 @@ def _resolve_paid_provider(alias: Optional[str]) -> dict:
     if not provider_name:
         return {"provider": None, "reason": "no paid_provider configured for this alias and no default_paid_provider set"}
     registry = {p["name"]: p for p in models.get("paid_providers", []) if p.get("name")}
-    provider_entry = registry.get(provider_name, {})
+    provider_entry = registry.get(provider_name)
+    if provider_entry is None:
+        return {"provider": None, "reason": f"paid provider {provider_name!r} is not registered"}
+    if provider_entry.get("candidate_only") is True:
+        return {
+            "provider": None,
+            "reason": (
+                f"paid provider {provider_name!r} is candidate_only and cannot be selected "
+                "as a primary provider"
+            ),
+        }
     return {
         "provider": provider_name,
         "concrete_model_label": provider_entry.get("concrete_model_label", provider_name),
@@ -1497,14 +1626,16 @@ def _glm_fallback_choice(host_id: Optional[str], *, implementation_mode: bool) -
     required = "glm-write" if implementation_mode else "glm"
     if required not in (((host or {}).get("worker") or {}).get("qualified_executors") or []):
         return None, f"executor {required!r} not qualified on {host_id!r}"
-    if host_id != current_host_id():
-        return None, f"claude-glm launcher availability is not attested on remote host {host_id!r}"
-    launcher, detail = _resolve_claude_glm_launcher()
-    if not launcher:
-        return None, detail
+    launcher = None
+    if not implementation_mode:
+        if host_id != current_host_id():
+            return None, f"claude-glm launcher availability is not attested on remote host {host_id!r}"
+        launcher, detail = _resolve_claude_glm_launcher()
+        if not launcher:
+            return None, detail
     return {
         "provider": "glm",
-        "concrete_model_label": provider.get("concrete_model_label") or "glm-5.3",
+        "concrete_model_label": provider.get("concrete_model_label"),
         "launcher": launcher,
     }, None
 
@@ -1696,6 +1827,7 @@ def run_task(task: dict) -> dict:
             glm_attempted = False
             paid_host = route["route"].get("host")
             if provider_name == "codex":
+                _ensure_provider_cooldowns_rehydrated(_provider_now())
                 # Single provider-selection authority (no hand-rolled
                 # cooldown peeking): resolve_provider consults the cooldown
                 # for BOTH providers, so a glm already cooling is never
@@ -1706,22 +1838,24 @@ def run_task(task: dict) -> dict:
                     )
                 except ProviderUnavailable as exc:
                     cooldown_expires_at = _provider_cooldown.expires_at("codex")
+                    active_metadata = _cooldown_metadata("codex", cooldown_expires_at)
+                    cooldown_kind = "throttle" if "throttle_cooldown" in active_metadata else "quota"
                     skipped = str(exc)
                     return {
                         **route, "ok": False, "executed": False,
                         "execution_error": (
-                            f"codex quota cooldown active until "
+                            f"codex {cooldown_kind} cooldown active until "
                             f"{cooldown_expires_at.isoformat() if cooldown_expires_at else None}; "
                             f"glm fallback unavailable: {skipped}"
                         ),
                         "escalation_reason": "worker_failed",
                         "glm_fallback_skipped": skipped,
-                        "cooldown_expires_at": (
-                            cooldown_expires_at.isoformat() if cooldown_expires_at else None
-                        ),
+                        **active_metadata,
                     }
                 if selected_provider == "glm":
                     cooldown_expires_at = _provider_cooldown.expires_at("codex")
+                    active_metadata = _cooldown_metadata("codex", cooldown_expires_at)
+                    cooldown_kind = "throttle" if "throttle_cooldown" in active_metadata else "quota"
                     fallback_choice, fallback_error = _glm_fallback_choice(
                         paid_host, implementation_mode=implementation_mode,
                     )
@@ -1731,32 +1865,37 @@ def run_task(task: dict) -> dict:
                         return {
                             **route, "ok": False, "executed": False,
                             "execution_error": (
-                                f"codex quota cooldown active until "
+                                f"codex {cooldown_kind} cooldown active until "
                                 f"{cooldown_expires_at.isoformat() if cooldown_expires_at else None}; "
                                 f"glm fallback unavailable: {fallback_error}"
                             ),
                             "escalation_reason": "worker_failed",
                             "glm_fallback_skipped": fallback_error,
-                            "cooldown_expires_at": (
-                                cooldown_expires_at.isoformat() if cooldown_expires_at else None
-                            ),
+                            **active_metadata,
                         }
                     provider_choice = fallback_choice
                     provider_name = "glm"
                     response_metadata = {
                         "glm_fallback_attempted": True,
-                        "cooldown_expires_at": (
-                            cooldown_expires_at.isoformat() if cooldown_expires_at else None
-                        ),
                         "provider_switched": True, "original_provider": "codex",
-                        "switch_reason": "quota_exhaustion",
+                        "switch_reason": (
+                            "provider_throttled" if "throttle_cooldown" in active_metadata
+                            else "quota_exhaustion"
+                        ),
+                        **active_metadata,
                     }
-            provider_functions = (
-                _PAID_PROVIDER_WRITE_FUNCTION_NAMES if implementation_mode
-                else _PAID_PROVIDER_FUNCTION_NAMES
-            )
             provider_key = "glm-write" if implementation_mode and provider_name == "glm" else provider_name
-            provider_fn_name = provider_functions.get(provider_key)
+            if provider_name == "glm" and response_metadata.get("glm_fallback_attempted"):
+                provider_fn_name = (
+                    "execute_claude_glm_write_durable" if implementation_mode
+                    else "execute_claude_glm"
+                )
+            else:
+                provider_functions = (
+                    _PAID_PROVIDER_WRITE_FUNCTION_NAMES if implementation_mode
+                    else _PAID_PROVIDER_FUNCTION_NAMES
+                )
+                provider_fn_name = provider_functions.get(provider_key)
             provider_fn = globals().get(provider_fn_name) if provider_fn_name else None
             if provider_name is None or provider_fn is None:
                 return {**route, "executed": False, "execution_error": provider_choice.get(
@@ -1819,9 +1958,7 @@ def run_task(task: dict) -> dict:
                     "decision_id": route["decision_id"],
                 }
                 if provider_name == "glm":
-                    provider_kwargs["cooldown_expires_at"] = (
-                        cooldown_expires_at.isoformat() if cooldown_expires_at else None
-                    )
+                    provider_kwargs["requested_alias"] = route["route"].get("model_alias")
                 result = provider_fn(paid_objective, **provider_kwargs)
                 if result.get("authority_denied"):
                     _update_decision_outcome(
@@ -1876,12 +2013,20 @@ def run_task(task: dict) -> dict:
             else:
                 if provider_name == "glm":
                     glm_attempted = True
-                    result = _execute_glm_read_fallback(
-                        paid_objective, task, route["route"]["host"], provider_fn,
+                    result, glm_cooldown = _dispatch_provider_singleflight(
+                        "glm", lambda: _execute_glm_read_fallback(
+                            paid_objective, task, route["route"]["host"], provider_fn,
+                        ),
                     )
+                    if result is None:
+                        result = {
+                            "ok": False, "provider": "glm",
+                            "error": "glm provider cooldown is active",
+                            "placement": _glm_placement(route["route"]["host"]),
+                        }
+                    response_metadata.update(glm_cooldown)
                     if result.get("ok") and str(result.get("output") or "").strip():
                         result.update(response_metadata)
-                        result["model"] = result.get("model") or provider_choice["concrete_model_label"]
                         result["host_id"] = route["route"]["host"]
                     else:
                         fallback_error = result.get("error") or "claude-glm returned no usable output"
@@ -1889,13 +2034,18 @@ def run_task(task: dict) -> dict:
                         response_metadata.pop("original_provider", None)
                         response_metadata.pop("switch_reason", None)
                         response_metadata["glm_fallback_error"] = fallback_error
+                        cooldown_field = (
+                            "throttle_cooldown" if "throttle_cooldown" in response_metadata
+                            else "cooldown_expires_at"
+                        )
+                        cooldown_kind = "throttle" if cooldown_field == "throttle_cooldown" else "quota"
                         result = {
                             "ok": False, "provider": "codex",
                             "error": (
-                                f"codex quota cooldown active until "
-                                f"{response_metadata.get('cooldown_expires_at')}"
+                                f"codex {cooldown_kind} cooldown active until "
+                                f"{response_metadata.get(cooldown_field)}"
                             ),
-                            "cooldown_expires_at": response_metadata.get("cooldown_expires_at"),
+                            cooldown_field: response_metadata.get(cooldown_field),
                             "placement": {
                                 "routed_host": route["route"]["host"], "executed_host": None,
                                 "attested": False, "transport": (paid_entry.get("transport")),
@@ -1909,65 +2059,80 @@ def run_task(task: dict) -> dict:
                     # Codex read-only remains worker-attested. GLM fallback is
                     # host-local and therefore admitted only when route.host is
                     # this host by `_glm_fallback_choice` above.
-                    result = _dispatch_read_only(route["route"]["host"], "codex", task, timeout=180.0)
-                    if not result.get("ok"):
+                    result, observed_cooldown = _dispatch_provider_singleflight(
+                        "codex", lambda: _dispatch_read_only(
+                            route["route"]["host"], "codex", task, timeout=180.0,
+                        ),
+                    )
+                    if result is None:
+                        result = {
+                            "ok": False, "provider": "codex",
+                            "error": "codex provider cooldown is active",
+                            "placement": {
+                                "routed_host": route["route"]["host"], "executed_host": None,
+                                "attested": False, "transport": paid_entry.get("transport"),
+                                "observed_host": None,
+                            },
+                        }
+                    if observed_cooldown:
+                        response_metadata = dict(observed_cooldown)
                         observed_at = _provider_now()
-                        retry = parse_quota_retry(str(result.get("error") or ""), observed_at)
-                        if retry is not None:
-                            cooldown_expires_at = _provider_cooldown.set(
-                                "codex", observed_at + retry, now=observed_at,
+                        # Same single provider-selection authority as the
+                        # pre-dispatch branch: consult the glm cooldown
+                        # too, not just codex's.
+                        try:
+                            selected_provider = resolve_provider(
+                                "codex", "glm", _provider_cooldown, observed_at,
                             )
-                            response_metadata = {
-                                "cooldown_expires_at": cooldown_expires_at.isoformat(),
-                            }
-                            # Same single provider-selection authority as the
-                            # pre-dispatch branch: consult the glm cooldown
-                            # too, not just codex's.
-                            try:
-                                selected_provider = resolve_provider(
-                                    "codex", "glm", _provider_cooldown, observed_at,
+                        except ProviderUnavailable as exc:
+                            response_metadata["glm_fallback_skipped"] = str(exc)
+                        else:
+                            fallback_choice, fallback_error = _glm_fallback_choice(
+                                route["route"]["host"], implementation_mode=False,
+                            )
+                            if fallback_choice is None or selected_provider != "glm":
+                                response_metadata["glm_fallback_skipped"] = (
+                                    fallback_error or "glm provider is not selectable"
                                 )
-                            except ProviderUnavailable as exc:
-                                response_metadata["glm_fallback_skipped"] = str(exc)
                             else:
-                                fallback_choice, fallback_error = _glm_fallback_choice(
-                                    route["route"]["host"], implementation_mode=False,
-                                )
-                                if fallback_choice is None or selected_provider != "glm":
-                                    response_metadata["glm_fallback_skipped"] = (
-                                        fallback_error or "glm provider is not selectable"
-                                    )
-                                else:
-                                    glm_attempted = True
-                                    response_metadata["glm_fallback_attempted"] = True
-                                    fallback_fn_name = _PAID_PROVIDER_FUNCTION_NAMES.get("glm")
-                                    fallback_fn = globals().get(fallback_fn_name) if fallback_fn_name else None
-                                    fallback_result = (
-                                        _execute_glm_read_fallback(
+                                glm_attempted = True
+                                response_metadata["glm_fallback_attempted"] = True
+                                fallback_fn = globals().get("execute_claude_glm")
+                                if fallback_fn:
+                                    fallback_result, glm_cooldown = _dispatch_provider_singleflight(
+                                        "glm", lambda: _execute_glm_read_fallback(
                                             paid_objective, task, route["route"]["host"], fallback_fn,
-                                        ) if fallback_fn else {
-                                            "ok": False, "error": "glm provider implementation is unavailable",
-                                        }
+                                        ),
                                     )
-                                    if fallback_result.get("ok") and str(fallback_result.get("output") or "").strip():
-                                        provider_choice = fallback_choice
-                                        provider_name = "glm"
-                                        executor_name = "glm"
-                                        response_metadata.update(
-                                            provider_switched=True, original_provider="codex",
-                                            switch_reason="quota_exhaustion",
-                                        )
-                                        fallback_result.update(response_metadata)
-                                        fallback_result["model"] = (
-                                            fallback_result.get("model")
-                                            or fallback_choice["concrete_model_label"]
-                                        )
-                                        fallback_result["host_id"] = route["route"]["host"]
-                                        result = fallback_result
-                                    else:
-                                        response_metadata["glm_fallback_error"] = (
-                                            fallback_result.get("error") or "claude-glm returned no usable output"
-                                        )
+                                    if fallback_result is None:
+                                        fallback_result = {
+                                            "ok": False, "provider": "glm",
+                                            "error": "glm provider cooldown is active",
+                                        }
+                                    response_metadata.update(glm_cooldown)
+                                else:
+                                    fallback_result = {
+                                        "ok": False, "error": "glm provider implementation is unavailable",
+                                    }
+                                if fallback_result.get("ok") and str(fallback_result.get("output") or "").strip():
+                                    provider_choice = fallback_choice
+                                    provider_name = "glm"
+                                    executor_name = "glm"
+                                    response_metadata.update(
+                                        provider_switched=True, original_provider="codex",
+                                        switch_reason=(
+                                            "provider_throttled"
+                                            if "throttle_cooldown" in response_metadata
+                                            else "quota_exhaustion"
+                                        ),
+                                    )
+                                    fallback_result.update(response_metadata)
+                                    fallback_result["host_id"] = route["route"]["host"]
+                                    result = fallback_result
+                                else:
+                                    response_metadata["glm_fallback_error"] = (
+                                        fallback_result.get("error") or "claude-glm returned no usable output"
+                                    )
                 if (result.get("placement") or {}).get("executed_host") is None:
                     # Same truthful-failure requirement as the local
                     # branch below: a transport/protocol/pre-execution
@@ -2028,7 +2193,10 @@ def run_task(task: dict) -> dict:
                 **route, "ok": gate == "pass", "reason": reason,
                 "route": {
                     **route["route"], "executor": executor_name,
-                    "concrete_model": provider_choice["concrete_model_label"],
+                    "concrete_model": (
+                        result.get("model") if executor_name == "glm"
+                        else provider_choice["concrete_model_label"]
+                    ),
                     "reason": reason,
                 },
             }
