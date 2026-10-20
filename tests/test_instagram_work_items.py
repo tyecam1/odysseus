@@ -273,3 +273,35 @@ def test_an_unusable_gh_blocks_publishing_without_losing_or_half_handing_over_a_
     monkeypatch.setattr(wi, "_gh_ready", lambda: None)
     monkeypatch.setattr(wi, "publish_pull_request", lambda domain, digest, stamp, batch_id="": "https://example/pr/5")
     assert run_instagram_work_items(tmp_path, threshold=25)["misumi"] == "published"       # the very same batch goes out once gh works
+
+
+def test_only_classifier_vocabulary_reaches_a_public_digest():
+    rows = [{"confidence": "low", "reasons": ["misumi:private phone 123", "phd:robotics", "misumi:film"]}]
+    text = build_digest("misumi", rows, stamp="2026-10-20T10:00:00Z", total_routed=1)
+    assert "private" not in text and "123" not in text and "`film` 1" in text and "`robotics` 1" in text
+
+
+def test_an_unconfirmed_publish_never_advances_state(tmp_path):
+    _raw_outbox(tmp_path, "misumi", [_row(i) for i in range(30)])
+    assert run_instagram_work_items(tmp_path, publisher=lambda d, g, stamp, batch_id="": "", threshold=25)["misumi"] == "publish_failed"
+    assert json.loads((tmp_path / STATE_NAME).read_text())["misumi"].get("handed_over", 0) == 0
+
+
+def test_a_pending_batch_is_never_recut_from_a_shorter_outbox(tmp_path):
+    _raw_outbox(tmp_path, "misumi", [_row(i) for i in range(30)])
+    def boom(*a, **k):
+        raise RuntimeError("network")
+    run_instagram_work_items(tmp_path, publisher=boom, threshold=25)
+    _raw_outbox(tmp_path, "misumi", [_row(i) for i in range(26)])
+    calls = []
+    outcome = run_instagram_work_items(tmp_path, publisher=lambda d, g, stamp, batch_id="": calls.append(1) or "https://x/pr/1", threshold=25)
+    assert outcome["misumi"] == "outbox_shorter_than_pending" and calls == []
+
+
+def test_a_long_run_of_excluded_rows_does_not_hide_later_pointers(tmp_path, monkeypatch):
+    import src.instagram_work_items as wi
+    monkeypatch.setattr(wi, "MAX_ROWS_PER_BATCH", 30)
+    _raw_outbox(tmp_path, "misumi", [_row(i, retracted=True) for i in range(100, 160)] + [_row(i) for i in range(26)])
+    seen = []
+    out = run_instagram_work_items(tmp_path, publisher=lambda d, g, stamp, batch_id="": seen.append(batch_id) or "https://x/pr/2", threshold=25)
+    assert out["misumi"] == "published" and seen == ["rows1-86"]
