@@ -22,9 +22,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+try:  # POSIX only; the lab is Linux
+    import fcntl
+except ImportError:  # pragma: no cover
+    fcntl = None  # type: ignore[assignment]
+
 logger = logging.getLogger(__name__)
 
 STATE_NAME = "work-items-state.json"
+LOCK_NAME = ".work-items.lock"
+MAX_ROWS_PER_BATCH = 5000   # a growing outbox is consumed in bounded batches, oldest first
 DEFAULT_THRESHOLD = 25
 _SAFE_REASON = re.compile(r"^(?:phd|misumi):[a-z0-9 ]{1,30}$")
 
@@ -111,10 +118,23 @@ def publish_pull_request(domain: str, digest: str, *, stamp: str, run: Callable[
     repo, base = owner["repo"], owner["base"]
     path = owner["path"].format(stamp=stamp[:10] + "-" + stamp[11:19].replace(":", ""))
     branch = f"review/instagram-{domain}-{stamp[:10]}-{stamp[11:19].replace(':', '')}"
-    base_sha = run(["api", f"repos/{repo}/git/ref/heads/{base}", "--jq", ".object.sha"]).strip()
-    run(["api", "-X", "POST", f"repos/{repo}/git/refs", "-f", f"ref=refs/heads/{branch}", "-f", f"sha={base_sha}"])
-    run(["api", "-X", "PUT", f"repos/{repo}/contents/{path}", "-f", f"message=docs(review): Instagram Saved {owner['label']} batch {stamp[:10]}",
-         "-f", f"branch={branch}", "-f", "content=" + base64.b64encode(digest.encode("utf-8")).decode("ascii")])
+
+    def exists(args: list[str]) -> bool:
+        try:
+            return bool(run(args).strip())
+        except RuntimeError:
+            return False
+
+    # Re-runs after a partial success reuse what already exists (same stamp -> same branch, path and PR): no duplicates.
+    existing_pr = run(["pr", "list", "-R", repo, "--head", branch, "--state", "all", "--json", "url", "--jq", ".[0].url"]).strip()
+    if existing_pr:
+        return existing_pr
+    if not exists(["api", f"repos/{repo}/git/ref/heads/{branch}", "--jq", ".object.sha"]):
+        base_sha = run(["api", f"repos/{repo}/git/ref/heads/{base}", "--jq", ".object.sha"]).strip()
+        run(["api", "-X", "POST", f"repos/{repo}/git/refs", "-f", f"ref=refs/heads/{branch}", "-f", f"sha={base_sha}"])
+    if not exists(["api", f"repos/{repo}/contents/{path}?ref={branch}", "--jq", ".sha"]):
+        run(["api", "-X", "PUT", f"repos/{repo}/contents/{path}", "-f", f"message=docs(review): Instagram Saved {owner['label']} batch {stamp[:10]}",
+             "-f", f"branch={branch}", "-f", "content=" + base64.b64encode(digest.encode("utf-8")).decode("ascii")])
     body = (
         "## Summary\nAutomatic aggregate digest of newly routed Instagram Saved items for owner review. Counts and cue words only; "
         "no permalinks or caption text. Opened by the Odysseus lab job; it never merges.\n\n## Linked Issue\nInstagram Saved ingestion "
@@ -154,8 +174,22 @@ def run_instagram_work_items(
 ) -> dict[str, Any]:
     """Hand a digest to each owner whose outbox gained at least ``threshold`` new items; return per-domain outcomes."""
     out = Path(handoff_dir)
+    out.mkdir(parents=True, exist_ok=True, mode=0o700)
+    lock = open(out / LOCK_NAME, "a")
+    try:
+        if fcntl is not None:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                return {"skipped": "another_run_in_progress"}   # concurrent run (service + one-shot): never double-generate
+        return _run_locked(out, publisher=publisher, threshold=threshold, now=now)
+    finally:
+        lock.close()
+
+
+def _run_locked(out: Path, *, publisher, threshold, now) -> dict[str, Any]:
     limit = threshold if threshold is not None else _threshold()
-    stamp = (now or datetime.now(timezone.utc)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    now_stamp = (now or datetime.now(timezone.utc)).strftime("%Y-%m-%dT%H:%M:%SZ")
     state_path = out / STATE_NAME
     state = _load_state(state_path)
     publish = publisher if publisher is not None else (publish_pull_request if _publishing_enabled() else None)
@@ -167,9 +201,15 @@ def run_instagram_work_items(
         except FileNotFoundError:
             outcome[domain] = "no_outbox"
             continue
-        done = int(state.get(domain, {}).get("handed_over", 0))
+        entry = state.get(domain, {})
+        done = int(entry.get("handed_over", 0))
+        pending = entry.get("pending") if isinstance(entry.get("pending"), dict) else None
+        end = min(len(lines), done + MAX_ROWS_PER_BATCH)
+        stamp = now_stamp
+        if pending:                       # a publish that failed part-way is retried with the SAME batch, stamp and branch
+            end, stamp = min(int(pending.get("end", end)), len(lines)), str(pending.get("stamp", now_stamp))
         rows: list[dict[str, Any]] = []
-        for line in lines[done:]:
+        for line in lines[done:end]:
             try:
                 value = json.loads(line)
             except ValueError:
@@ -179,22 +219,27 @@ def run_instagram_work_items(
         if len(rows) < limit:
             outcome[domain] = f"pending_{len(rows)}"
             continue
-        digest = build_digest(domain, rows, stamp=stamp, total_routed=len(lines))
+        digest = build_digest(domain, rows, stamp=stamp, total_routed=end)
         local = out / "digests"
         local.mkdir(parents=True, exist_ok=True, mode=0o700)
-        (local / f"{domain}-{stamp.replace(':', '')}.md").write_text(digest, encoding="utf-8")
+        target = local / f"{domain}-{stamp.replace(':', '')}.md"
+        fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(digest)
         if publish is None:  # default: the digest is the hand-over (local, aggregate only); an executor or the owner picks it up
-            state[domain] = {"handed_over": len(lines), "last_batch": stamp, "last_url": ""}
+            state[domain] = {"handed_over": end, "last_batch": stamp, "last_url": ""}
             _save_state(state_path, state)
             outcome[domain] = "digest_written"
             continue
+        state[domain] = {**entry, "pending": {"stamp": stamp, "end": end}}   # recorded BEFORE any remote write
+        _save_state(state_path, state)
         try:
             url = publish(domain, digest, stamp=stamp)
-        except Exception as exc:  # retried on the next run; state does not advance
+        except Exception as exc:  # retried on the next run with the same batch; handed_over does not advance
             logger.warning("Instagram work-item publish failed for %s: %s", domain, type(exc).__name__)
             outcome[domain] = "publish_failed"
             continue
-        state[domain] = {"handed_over": len(lines), "last_batch": stamp, "last_url": url}
+        state[domain] = {"handed_over": end, "last_batch": stamp, "last_url": url}
         _save_state(state_path, state)
         outcome[domain] = "published"
     return outcome
