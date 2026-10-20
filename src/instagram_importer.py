@@ -84,6 +84,17 @@ def _direct_label(
     return None, None
 
 
+def _caption_variants(values: list[Any], first: Any) -> list[str]:
+    """Further, different Caption values on the same item (Meta emits an edited second pair on some saves)."""
+    variants: list[str] = []
+    for value in values:
+        if isinstance(value, dict) and value.get("label") == "Caption":
+            text = value.get("value")
+            if isinstance(text, str) and text != first and text not in variants:
+                variants.append(text)
+    return variants
+
+
 def _group(values: list[Any], title: str) -> tuple[Optional[dict[str, Any]], Optional[int]]:
     for index, value in enumerate(values):
         if isinstance(value, dict) and value.get("title") == title:
@@ -198,6 +209,7 @@ def _parse_saved_posts(
             "timestamp": timestamp,
             "fbid": entry.get("fbid") if isinstance(entry.get("fbid"), str) else None,
             "caption": caption,
+            "caption_variants": _caption_variants(values, caption),
             "title": title,
             "hashtags": hashtags,
             "owner": owner,
@@ -347,7 +359,9 @@ def _private_payload(
         }
         for record in collection_records
     ]
+    extra = {"caption_variants": post["caption_variants"]} if post["caption_variants"] else {}
     return {
+        **extra,
         "kind": "instagram_saved_post",
         "permalink": permalink,
         "saved_at": post["timestamp"],
@@ -430,7 +444,7 @@ def import_instagram_saved_export(
         finally:
             db.close()
 
-        if prior_timestamp is not None and post["timestamp"] <= prior_timestamp:
+        if prior_timestamp is not None and post["timestamp"] < prior_timestamp:
             counts["superseded"] += 1
             continue
 

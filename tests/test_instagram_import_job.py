@@ -193,8 +193,8 @@ def test_newest_occurrence_wins_across_snapshots_and_reimport_is_noop(
     assert first_row["revision_count"] == 0
     assert second["created"] == 0
     assert second["revised"] == 0
-    assert second["unchanged"] == 0
-    assert second["superseded"] == 1
+    assert second["unchanged"] == 1       # the re-import of the winning snapshot is a truthful no-op, not "superseded"
+    assert second["superseded"] == 0
     assert second_row == first_row
 
 
@@ -324,3 +324,28 @@ async def test_instagram_import_exception_is_logged_and_not_propagated(caplog, m
     assert scheduler._instagram_import_task is None
     assert "Infrastructure job instagram_saved_import failed" in caplog.text
     assert "stubbed import failure" in caplog.text
+
+
+def test_an_edit_that_keeps_the_saved_time_is_a_revision_not_superseded(tmp_path, instagram_job_rows):
+    exports = tmp_path / "exports"
+    permalink = f"{TEST_PERMALINK_PREFIX}EDITED/"
+    _snapshot(exports, "only", _post(permalink, 200, "first caption"))
+    run_log = tmp_path / "data" / "instagram" / "runs.jsonl"
+    run_instagram_import(exports, run_log)
+    before = _job_row(permalink)
+
+    (exports / "only" / "saved_posts.json").write_text(json.dumps([_post(permalink, 200, "edited caption")]), encoding="utf-8")
+    accounting = run_instagram_import(exports, run_log)
+
+    assert (accounting["revised"], accounting["superseded"], accounting["unchanged"]) == (1, 0, 0)
+    assert _job_row(permalink)["revision_count"] == before["revision_count"] + 1
+    assert read_source_event_payload(_job_row(permalink)["payload_ref"])["caption"] == "edited caption"
+
+
+def test_equal_saved_time_in_two_snapshots_goes_to_the_later_snapshot(tmp_path, instagram_job_rows):
+    exports = tmp_path / "exports"
+    permalink = f"{TEST_PERMALINK_PREFIX}TIE/"
+    _snapshot(exports, "2026-10-01", _post(permalink, 200, "earlier export"))
+    _snapshot(exports, "2026-10-18", _post(permalink, 200, "later export"))
+    run_instagram_import(exports, tmp_path / "data" / "instagram" / "runs.jsonl")
+    assert read_source_event_payload(_job_row(permalink)["payload_ref"])["caption"] == "later export"
