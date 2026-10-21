@@ -374,3 +374,59 @@ def test_a_duplicate_on_another_thread_waits_for_the_first_answer_and_never_writ
     second.start(); time.sleep(0.1)
     release.set(); first.join(5); second.join(5)
     assert len(results) == 2 and results[0] is results[1] and provider.writes().count("pause") == 1
+
+
+def test_a_keyboard_interrupt_inside_the_provider_still_burns_the_request_id():
+    controller, provider = _ctl()
+
+    def interrupted(device_id):
+        provider.calls.append(("pause", (device_id,)))   # the side effect happened ...
+        raise KeyboardInterrupt()                         # ... and then the call was interrupted
+
+    provider.pause = interrupted
+    with pytest.raises(KeyboardInterrupt):
+        controller.handle("pause", request_id="kbd", explicit_command=True)
+    again = controller.handle("pause", request_id="kbd", explicit_command=True)
+    assert again.status == "error" and provider.writes().count("pause") == 1
+
+
+def test_a_waiting_duplicate_gets_the_first_calls_non_success_answer_too():
+    import threading
+    import time
+
+    controller, provider = _ctl(devices=[Device("d1", "Kitchen speaker", False), Device("d2", "Kitchen display", False)])
+    release = threading.Event()
+    real = provider.devices
+    provider.devices = lambda: (release.wait(5), real())[1]
+    results = []
+    first = threading.Thread(target=lambda: results.append(controller.handle("pause", request_id="amb", explicit_command=True, device="kitchen")))
+    first.start(); time.sleep(0.1)
+    second = threading.Thread(target=lambda: results.append(controller.handle("pause", request_id="amb", explicit_command=True, device="kitchen")))
+    second.start(); time.sleep(0.1)
+    release.set(); first.join(5); second.join(5)
+    assert len(results) == 2 and all(r.status == "clarify" for r in results) and provider.writes() == []
+
+
+def test_hung_providers_stop_consuming_capacity_but_their_ids_stay_burnt(monkeypatch):
+    import threading
+    import time
+
+    import src.music_capability as module
+
+    monkeypatch.setattr(module, "_REMEMBERED_REQUESTS", 3)
+    controller, provider = _ctl()
+    controller._hung_after = 0.05
+    controller._wait_seconds = 0.2
+    gate = threading.Event()
+    real = provider.pause
+    provider.pause = lambda device_id: (gate.wait(10), real(device_id))
+    threads = [threading.Thread(target=lambda n=n: controller.handle("pause", request_id=f"hang{n}", explicit_command=True), daemon=True)
+               for n in range(3)]
+    [t.start() for t in threads]
+    time.sleep(0.3)                      # all three are hung and past _hung_after
+    provider.pause = real
+    fresh = controller.handle("volume", request_id="fresh", explicit_command=True, volume=10)
+    assert fresh.status == "done"        # capacity was not exhausted by the hung ones
+    stuck = controller.handle("pause", request_id="hang0", explicit_command=True)
+    assert stuck.status == "refused" and "still running" in stuck.message   # and a retry of a hung id never writes again
+    gate.set(); [t.join(5) for t in threads]

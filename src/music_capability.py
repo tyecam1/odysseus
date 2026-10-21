@@ -20,6 +20,7 @@ from __future__ import annotations
 import re
 import math
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Protocol, Tuple
 
@@ -121,6 +122,15 @@ def _volume_key(value: Any) -> str:
         return type(value).__name__
 
 
+class _Flight:
+    """One in-progress write: who runs it, when it started, and (once finished) its result for any waiting duplicate."""
+
+    def __init__(self, fingerprint: tuple, owner: int, started: float):
+        self.fingerprint, self.owner, self.started = fingerprint, owner, started
+        self.event = threading.Event()
+        self.result: Optional["MusicResult"] = None
+
+
 class MusicController:
     def __init__(self, provider: MusicProvider, *, max_volume: int = DEFAULT_MAX_VOLUME):
         self.provider = provider
@@ -129,10 +139,17 @@ class MusicController:
         # at-most-once per request id: a short lock guards only the bookkeeping; the provider call itself runs with NO lock held,
         # so a slow provider cannot block unrelated requests and a provider calling back into the controller cannot deadlock
         self._lock = threading.Lock()
-        self._inflight: Dict[str, Tuple[tuple, threading.Event, int]] = {}
+        self._inflight: Dict[str, _Flight] = {}
+        self._hung_after = 120.0  # a reservation older than this no longer counts toward capacity (its id stays burnt)
         self._wait_seconds = 15.0
 
     # ------------------------------------------------------------------ entry point
+    def _live_inflight(self) -> int:
+        """Reservations that are plausibly still running; one that has hung past _hung_after stops consuming capacity (but its id
+        is never reused: a retry while it is stuck is refused, so it can never cause a second write)."""
+        now = time.monotonic()
+        return sum(1 for f in self._inflight.values() if now - f.started <= self._hung_after)
+
     def handle(self, action: str, *, request_id: str, explicit_command: bool = False, guest: bool = False,
                query: str = "", kind: str = "track", device: str = "", uri: str = "", volume: Any = None) -> MusicResult:
         """Run one ``music.<action>`` request. Never raises: every failure, including unprintable inputs, is a typed result."""
@@ -153,7 +170,8 @@ class MusicController:
             if not rid:
                 return self._result(action, "refused", "A write needs a request id of 1-64 letters, digits or . _ : - so it can never run twice.", "")
             fingerprint = (action, _text(query), _text(kind), _text(device), _text(uri), _volume_key(volume))
-            event = None
+            flight = None
+            waiting_on = None
             with self._lock:
                 if rid in self._seen:
                     stored_fingerprint, stored = self._seen[rid]
@@ -161,21 +179,20 @@ class MusicController:
                         return self._result(action, "refused", "That request id was already used for a different command.", rid)
                     return stored  # a duplicate command: the same answer, no second provider call
                 if rid in self._inflight:
-                    running_fingerprint, running_event, owner = self._inflight[rid]
-                    if running_fingerprint != fingerprint:
+                    running = self._inflight[rid]
+                    if running.fingerprint != fingerprint:
                         return self._result(action, "refused", "That request id was already used for a different command.", rid)
-                    if owner == threading.get_ident():  # a provider calling back into the controller with the SAME id
+                    if running.owner == threading.get_ident():  # a provider calling back into the controller with the SAME id
                         return self._result(action, "refused", "That command is already running.", rid)
-                    event = running_event
-                elif len(self._seen) + len(self._inflight) >= _REMEMBERED_REQUESTS:
+                    waiting_on = running
+                elif len(self._seen) + self._live_inflight() >= _REMEMBERED_REQUESTS:
                     return self._result(action, "refused", "Too many playback changes this session; start a new session to continue.", rid)
                 else:
-                    self._inflight[rid] = (fingerprint, threading.Event(), threading.get_ident())
-            if event is not None:  # the same command is running on another thread: wait for ITS answer, never run it twice
-                event.wait(self._wait_seconds)
-                with self._lock:
-                    if rid in self._seen and self._seen[rid][0] == fingerprint:
-                        return self._seen[rid][1]
+                    flight = self._inflight[rid] = _Flight(fingerprint, threading.get_ident(), time.monotonic())
+            if waiting_on is not None:  # the same command is running on another thread: wait for ITS answer, never run it twice
+                waiting_on.event.wait(self._wait_seconds)
+                if waiting_on.result is not None:
+                    return waiting_on.result  # whatever the first call concluded, success or not
                 return self._result(action, "refused", "That command is still running; try again shortly.", rid)
             result = None
             try:
@@ -184,13 +201,15 @@ class MusicController:
                 result = self._failure(action, exc, rid)
             except Exception:  # noqa: BLE001 - a provider binding bug is a typed result; the id stays burnt (it may have reached the provider)
                 result = self._failure(action, ProviderError("unexpected"), rid)
-            finally:  # the reservation is ALWAYS released and waiters are woken, even if something worse than an Exception escapes
+            finally:  # the reservation is ALWAYS released and waiters woken, even for KeyboardInterrupt or worse
+                if result is None:  # something worse than an Exception escaped: the provider may have acted, so the id is burnt
+                    result = self._failure(action, ProviderError("unexpected"), rid)
                 with self._lock:
-                    running = self._inflight.pop(rid, None)
-                    if result is not None and result.status in ("done", "done_unconfirmed", "error"):
+                    self._inflight.pop(rid, None)
+                    if result.status in ("done", "done_unconfirmed", "error"):
                         self._seen[rid] = (fingerprint, result)
-                if running is not None:
-                    running[1].set()
+                flight.result = result
+                flight.event.set()
             return result
         except ProviderError as exc:
             return self._failure(str(action) if isinstance(action, str) else "", exc, "")
