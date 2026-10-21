@@ -82,11 +82,13 @@ def parse(rows: Iterable[dict]) -> List[Record]:
 
 def _floor(requested: int) -> int:
     """The evidence floor in force: whatever the caller asks for, but never below the module's own."""
-    try:
-        value = float(requested)
-        return max(MIN_MATCHED_TASKS, math.ceil(value)) if math.isfinite(value) else MIN_MATCHED_TASKS
-    except (TypeError, ValueError, OverflowError):
+    if isinstance(requested, bool):
         return MIN_MATCHED_TASKS
+    if isinstance(requested, int):  # exact, whatever its size: a huge floor stays huge (and so stays "insufficient")
+        return max(MIN_MATCHED_TASKS, requested)
+    if isinstance(requested, float) and math.isfinite(requested):
+        return max(MIN_MATCHED_TASKS, math.ceil(requested))
+    return MIN_MATCHED_TASKS
 
 
 def _mean(values: Sequence[float]) -> float:
@@ -177,7 +179,7 @@ def pareto_front(records: Sequence[Record], dimensions: Sequence[str], min_tasks
     if those are fewer than the floor the result is ``insufficient`` with an empty front (a plan never wins by running easier or
     fewer tasks). ``dominated`` maps a loser to the first dominating plan in sorted order.
     """
-    if not dimensions or any(not isinstance(unit, str) or not unit for unit in dimensions) or len(set(dimensions)) != len(dimensions):
+    if not dimensions or any(not isinstance(unit, str) or not unit.strip() or unit != unit.strip() for unit in dimensions) or len(set(dimensions)) != len(dimensions):
         raise ValueError("choose at least one distinct, named resource dimension: an efficiency comparison without a resource is not one")
     floor = _floor(min_tasks)
     by_plan: Dict[str, List[Record]] = {}

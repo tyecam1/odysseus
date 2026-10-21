@@ -242,3 +242,15 @@ def test_a_non_finite_floor_falls_back_to_the_module_floor(floor):
 def test_the_front_fails_closed_without_a_real_resource_dimension(dims):
     with pytest.raises(ValueError):
         ep.pareto_front(_front_records(a={"n": 20, "ok": 18, "cost": 1.0, "lat": 1}), dims)
+
+
+def test_a_huge_integer_floor_is_honoured_not_silently_lowered():
+    records = _matched(20, a_cost=1.0, b_cost=5.0, b_ok=lambda i: False)
+    assert ep.compare(records, "strong_solo", "team", min_matched=10 ** 400)["verdict"] == "insufficient"
+    assert ep.pareto_front(records, ("paid_cost",), min_tasks=10 ** 400)["front"] == []
+
+
+@pytest.mark.parametrize("dims", [(" ",), ("\t",), (" paid_cost",), ("paid_cost ",)])
+def test_whitespace_dimensions_are_not_named_dimensions(dims):
+    with pytest.raises(ValueError):
+        ep.pareto_front(_front_records(a={"n": 20, "ok": 18, "cost": 1.0, "lat": 1}), dims)
