@@ -988,6 +988,37 @@ def _yaml_records(text: str, rel: str, kind: str) -> Optional[List[Dict[str, obj
         return None
     records: List[Dict[str, object]] = []
     budget = {"nodes": 0}
+    # Every node under a credential-named key, found before anything is indexed. PyYAML hands an alias the SAME node object, so
+    # "items: *vault" over "secrets: &vault" is recognised here and never indexed.
+    tainted: set = set()
+
+    def taint(node, depth: int = 0) -> None:
+        if id(node) in tainted or depth > _MAX_YAML_DEPTH:
+            return
+        tainted.add(id(node))
+        for child in (node.value if isinstance(node, yaml.SequenceNode) else
+                      [part for pair in node.value for part in pair] if isinstance(node, yaml.MappingNode) else []):
+            taint(child, depth + 1)
+
+    def find_secrets(node, seen: set, depth: int = 0) -> None:
+        if id(node) in seen or depth > _MAX_YAML_DEPTH:
+            return
+        seen.add(id(node))
+        if isinstance(node, yaml.SequenceNode):
+            for child in node.value:
+                find_secrets(child, seen, depth + 1)
+        elif isinstance(node, yaml.MappingNode):
+            for key_node, value_node in node.value:
+                if isinstance(key_node, yaml.ScalarNode) and _SENSITIVE_ASSIGN.search(f"{key_node.value}:"):
+                    taint(value_node)
+                find_secrets(value_node, seen, depth + 1)
+
+    try:
+        seen_nodes: set = set()
+        for document in documents:
+            find_secrets(document, seen_nodes)
+    except RecursionError:
+        return None
 
     def scalar(node) -> Optional[str]:
         return None if not isinstance(node, yaml.ScalarNode) or _yaml_null(node) else str(node.value).strip()
@@ -996,11 +1027,13 @@ def _yaml_records(text: str, rel: str, kind: str) -> Optional[List[Dict[str, obj
         budget["nodes"] += 1
         if depth > _MAX_YAML_DEPTH or budget["nodes"] > _MAX_YAML_NODES:
             raise ValueError("YAML structure too deep or too large (a recursive alias ends here too)")
+        if id(node) in tainted:
+            return
         if isinstance(node, yaml.SequenceNode):
             for child in node.value:
                 walk(child, category, depth + 1)
             return
-        if not isinstance(node, yaml.MappingNode):
+        if not isinstance(node, yaml.MappingNode) or id(node) in tainted:
             return
         pairs = [(str(key.value).lower(), key, value) for key, value in node.value if isinstance(key, yaml.ScalarNode)]
         if any(name == "example" and (scalar(value) or "").strip("\"'").lower() in {"true", "yes", "y", "1"}

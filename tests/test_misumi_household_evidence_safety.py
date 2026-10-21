@@ -229,3 +229,18 @@ def test_records_under_a_credential_named_container_are_not_indexed(tmp_path):
             _no_canary(adapter.resolution_hits(resolution))
             _no_canary(adapter.evidence_text(resolution))
         _no_canary(adapter.search(query, domain="food", limit=50))
+
+
+@pytest.mark.parametrize("stock", [
+    "secrets: &vault\n  - name: milk\n    quantity: 2 cartons\n    notes: hunter2\nitems: *vault\n",
+    "secrets:\n  - &m\n    name: milk\n    quantity: 2 cartons\n    notes: hunter2\nitems:\n  - *m\n",
+])
+def test_an_alias_into_a_credential_container_is_never_indexed(tmp_path, stock):
+    adapter = _adapter(tmp_path, {"household/food/stock.yaml": stock})
+    assert not adapter.item_index()["records"]
+    for query in ("do we have milk?", "do we have oat milk?"):
+        resolution = adapter.resolve_question(query, "food")
+        if resolution is not None:
+            _no_canary(adapter.resolution_hits(resolution))
+            _no_canary(adapter.evidence_text(resolution))
+        _no_canary(adapter.search(query, domain="food", limit=50))
