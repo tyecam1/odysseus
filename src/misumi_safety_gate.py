@@ -61,7 +61,7 @@ _RUN_STEMS = (
     "overdos", "suicid", "poison", "burn", "scald", "drown", "collaps", "seizure", "stroke", "faint", "hurt", "kill", "die",
     "dead", "pain", "smoke", "shock", "swallow", "knife", "gun", "attack", "abuse", "unresponsive", "heartattack", "cprs",
 )
-# Long, distinctive stems are also looked for in the whole text with every separator removed ("cho king", "am bul ance").
+# Long, distinctive stems are also looked for in the whole text with every separator removed, on token boundaries ("cho king").
 _LONG_STEMS = (
     "ambulance", "unconscious", "overdose", "suicide", "drowning", "bleeding", "choking", "collapsed", "seizure", "poisoning",
     "poisoned", "anaphyl", "heartattack", "strangle", "stabbed", "unresponsive", "notbreathing", "cantbreathe", "999", "911",
@@ -114,10 +114,20 @@ def _spaced_hazard(text: str) -> str | None:
                     if at in bounds and at + len(stem) in bounds:
                         return stem
                     at = variant.find(stem, at + 1)
-    despaced = re.sub(r"[^a-z0-9]", "", text)
-    for stem in _LONG_STEMS:
-        if stem in despaced:
-            return stem
+    tokens = re.findall(r"[a-z0-9]+", text)
+    despaced = "".join(tokens)
+    if not any(stem in despaced for stem in _LONG_STEMS):
+        return None
+    bounds, total = {0}, 0
+    for token in tokens:
+        total += len(token)
+        bounds.add(total)
+    for stem in _LONG_STEMS:  # a stem must begin AND end on token boundaries: "tech ok in g" is not "choking"
+        at = despaced.find(stem)
+        while at != -1:
+            if at in bounds and at + len(stem) in bounds:
+                return stem
+            at = despaced.find(stem, at + 1)
     return None
 
 

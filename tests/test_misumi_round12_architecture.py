@@ -282,3 +282,9 @@ def test_slash_newline_and_mixed_chunk_spacing_do_not_hide_a_hazard(prompt):
                                     "i have a b c d ideas for the kitchen", "it is a no go for us I think"])
 def test_the_chunk_reading_does_not_turn_ordinary_prose_into_a_hazard(prompt):
     assert gate.is_benign_turn(prompt), prompt
+
+
+@pytest.mark.parametrize("prompt", ["Release 2026-09-11 is out", "Host 100.99.90.100 is up", "The repo is one directory",
+                                    "Tech OK in general?", "document.js: Tabbed editor"])
+def test_separator_removal_does_not_synthesise_a_hazard_across_unrelated_words(prompt):
+    assert gate.is_benign_turn(prompt) and not gate.withhold_learned_route(prompt), prompt
