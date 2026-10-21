@@ -178,14 +178,25 @@ def run_instagram_handoff(
 
     started = time.monotonic()
     out = Path(handoff_dir) if handoff_dir is not None else DEFAULT_HANDOFF_DIR
-    counts = {"routed_phd": 0, "routed_misumi": 0, "retained_neutral": 0, "skipped": 0, "failed": 0, "reclassified": 0, "retracted": 0}
+    sem = sem_model = None
+    sem_budget = 0
+    sem_domains: tuple[str, ...] = ()
+    from src import instagram_semantic as _sem
+    if _sem.semantic_enabled():
+        sem_model, why = _sem.runtime()
+        if why:
+            logger.warning("Instagram semantic tier skipped: %s", why)
+        else:
+            sem, sem_budget, sem_domains = _sem, _sem.semantic_batch(), _sem.semantic_domains()
+    counts = {"semantic_reused": 0, "semantic_run": 0, "semantic_failed": 0, "semantic_routed": 0, "routed_phd": 0, "routed_misumi": 0, "retained_neutral": 0, "skipped": 0, "failed": 0, "reclassified": 0, "retracted": 0}
     stamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     handled = 0
     with get_db_session() as db:
         rows = db.query(SourceEvent).filter(SourceEvent.source == SOURCE).order_by(SourceEvent.received_at, SourceEvent.id).all()
         for row in rows:
             record = _handoff_record(row.payload)
-            if record and record.get("content_hash") == row.content_hash and record.get("version") == HANDOFF_VERSION:
+            owes_semantic = sem is not None and record is not None and record.get("domain") == DOMAIN_NEUTRAL and "semantic" not in record
+            if record and record.get("content_hash") == row.content_hash and record.get("version") == HANDOFF_VERSION and not owes_semantic:
                 counts["skipped"] += 1
                 continue
             if handled >= batch:
@@ -198,12 +209,31 @@ def run_instagram_handoff(
                 logger.warning("Instagram handoff could not read a payload (%s)", type(exc).__name__)
                 continue
             verdict = classify_payload(payload)
+            semantic = None
+            if sem is not None and verdict["domain"] == DOMAIN_NEUTRAL and sem_budget > 0:
+                stored = record.get("semantic") if record else None
+                if isinstance(stored, dict) and stored.get("identity") == sem.objective_identity(payload):
+                    semantic = stored                # identical model input and prompt: reuse the answer, no new inference
+                    counts["semantic_reused"] += 1
+                else:
+                    sem_budget -= 1                  # inference only for neutral material that is new or changed, within budget
+                    semantic = sem.classify_semantic(payload, sem_model)
+                if semantic is None:
+                    counts["semantic_failed"] += 1   # nothing is written or retracted on a failed call: retried next run
+                    continue
+                else:
+                    counts["semantic_run"] += 1
+                    wanted = {"M": DOMAIN_MISUMI, "P": DOMAIN_PHD}.get(semantic["label"])
+                    if wanted in sem_domains and semantic["useful"]:
+                        counts["semantic_routed"] += 1
+                        verdict = {"domain": wanted, "confidence": "model", "reasons": ["model:semantic"]}
             domain = verdict["domain"]
             prior = record.get("domain") if record else row.domain     # no record: trust the stored domain, never re-emit or skip a retraction
             row.domain = domain
             row.payload = json.dumps({"handoff": {
                 "version": HANDOFF_VERSION, "content_hash": row.content_hash, "domain": domain,
                 "confidence": verdict["confidence"], "reasons": verdict["reasons"], "classified_at": stamp,
+                **({"semantic": {**semantic, "at": stamp}} if semantic is not None else {}),
             }}, sort_keys=True, separators=(",", ":"))
             if record and prior != domain:
                 counts["reclassified"] += 1

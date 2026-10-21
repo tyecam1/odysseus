@@ -236,3 +236,147 @@ def test_a_routed_row_without_a_handoff_record_neither_duplicates_nor_loses_its_
     result = run_instagram_handoff(out)
     lines = _lines(out / "obsidian-phd.jsonl")
     assert result["retracted"] == 1 and len(lines) == n + 1 and lines[-1]["retracted"] and lines[-1]["permalink"] == drop
+
+
+# ------------------------------------------------------------------ Stage-7 semantic tier (local model, off by default)
+def _semantic(monkeypatch, answers, *, model="local-model", why=None):
+    import src.instagram_semantic as sem
+    calls = []
+    monkeypatch.setattr(sem, "semantic_enabled", lambda: True)
+    monkeypatch.setattr(sem, "runtime", lambda: (None, why) if why else (model, None))
+
+    def fake(payload, name):
+        calls.append(payload.get("caption"))
+        answer = answers(payload) if callable(answers) else answers
+        return None if answer is None else {**answer, "model": name, "prompt": "v2", "identity": sem.objective_identity(payload)}
+
+    monkeypatch.setattr(sem, "classify_semantic", fake)
+    return calls
+
+
+def test_the_semantic_tier_is_off_by_default_and_never_calls_a_model(rows, tmp_path, monkeypatch):
+    import src.instagram_semantic as sem
+    monkeypatch.setattr(sem, "classify_semantic", lambda *a: (_ for _ in ()).throw(AssertionError("model called")))
+    _save("off", "an unremarkable post")
+    assert run_instagram_handoff(tmp_path / "h")["retained_neutral"] == 1
+
+
+def test_a_useful_model_verdict_routes_a_neutral_item_with_provenance_and_is_never_asked_twice(rows, tmp_path, monkeypatch):
+    calls = _semantic(monkeypatch, {"label": "M", "useful": True})
+    permalink = _save("sem1", "an unremarkable post")
+    out = tmp_path / "h"
+    first = run_instagram_handoff(out)
+    assert (first["semantic_run"], first["semantic_routed"], first["routed_misumi"]) == (1, 1, 1) and _domain(permalink) == "misumi"
+    line = _lines(out / "misumi.jsonl")[0]
+    assert line["confidence"] == "model" and line["reasons"] == ["model:semantic"]
+    with get_db_session() as db:
+        record = json.loads(db.query(SourceEvent).filter(SourceEvent.external_id == permalink).one().payload)["handoff"]
+    assert record["semantic"]["model"] == "local-model" and record["semantic"]["label"] == "M" and "caption" not in json.dumps(record)
+    second = run_instagram_handoff(out)
+    assert second["skipped"] >= 1 and second["semantic_run"] == 0 and len(calls) == 1 and len(_lines(out / "misumi.jsonl")) == 1
+
+
+def test_not_useful_phd_and_failed_answers_do_not_route_and_failures_are_retried(rows, tmp_path, monkeypatch):
+    state = {"answer": {"label": "M", "useful": False}}
+    calls = _semantic(monkeypatch, lambda payload: state["answer"])
+    quiet = _save("q", "post one")
+    run_instagram_handoff(tmp_path / "h")
+    assert _domain(quiet) == "neutral" and len(calls) == 1
+    run_instagram_handoff(tmp_path / "h")
+    assert len(calls) == 1                                           # a negative answer is remembered, not re-inferred
+    monkeypatch.setenv("ODYSSEUS_INSTAGRAM_SEMANTIC_DOMAINS", "misumi")
+    state["answer"] = {"label": "P", "useful": True}
+    phd = _save("p", "post two")
+    run_instagram_handoff(tmp_path / "h")
+    assert _domain(phd) == "neutral"                                 # a domain left out of the configured list is never model-routed
+    monkeypatch.delenv("ODYSSEUS_INSTAGRAM_SEMANTIC_DOMAINS")
+    state["answer"] = {"label": "P", "useful": True}
+    phd2 = _save("p2", "post two b")
+    run_instagram_handoff(tmp_path / "h")
+    assert _domain(phd2) == "obsidian-phd" and _domain(phd) == "neutral"   # default domains include PhD ("model" tier); old answers are remembered
+    state["answer"] = None
+    broken = _save("b", "post three")
+    result = run_instagram_handoff(tmp_path / "h")
+    assert result["semantic_failed"] == 1 and _domain(broken) == "neutral"
+    state["answer"] = {"label": "M", "useful": True}
+    assert run_instagram_handoff(tmp_path / "h")["semantic_routed"] == 1 and _domain(broken) == "misumi"
+
+
+def test_deterministic_routes_skip_the_model_and_the_budget_bounds_inference(rows, tmp_path, monkeypatch):
+    monkeypatch.setenv("ODYSSEUS_INSTAGRAM_SEMANTIC_BATCH", "2")
+    calls = _semantic(monkeypatch, {"label": "N", "useful": False})
+    _save("d", "cobot gripper research for assembly line")
+    for i in range(5):
+        _save(f"n{i}", f"plain post {i}")
+    first = run_instagram_handoff(tmp_path / "h")
+    assert first["semantic_run"] == 2 and len(calls) == 2 and "gripper" not in " ".join(c for c in calls if c)
+    for _ in range(3):
+        run_instagram_handoff(tmp_path / "h")
+    assert len(calls) == 5                                           # each neutral item asked exactly once across runs
+
+
+def test_a_refused_runtime_disables_the_tier_for_the_run(rows, tmp_path, monkeypatch):
+    calls = _semantic(monkeypatch, {"label": "M", "useful": True}, why="semantic inference refused: the model endpoint is not local")
+    _save("r", "plain post")
+    assert run_instagram_handoff(tmp_path / "h")["retained_neutral"] == 1 and calls == []
+
+
+def test_semantic_reply_parsing_and_objective_are_safe():
+    import src.instagram_semantic as sem
+    assert sem.parse_reply('{"label": "M", "useful": true}') == {"label": "M", "useful": True}
+    assert sem.parse_reply('noise {"label": "M", "useful": true} tail') is None
+    assert sem.parse_reply('{"label": "X"}') is None and sem.parse_reply("not json") is None and sem.parse_reply(None) is None
+    assert sem.parse_reply('{"label": "N", "useful": "yes"}') == {"label": "N", "useful": False}
+    text = sem.build_objective({"caption": "cafÃ© " + "x" * 5000, "hashtags": "bad", "collections": 3})
+    assert "café" in text and len(text) < 3000 and "Hashtags: (none)" in text
+
+
+def test_the_think_switch_is_emitted_only_when_set():
+    from src.llm_core import _build_ollama_payload
+    msgs = [{"role": "user", "content": "x"}]
+    assert "think" not in _build_ollama_payload("m", msgs, 0.0, 10)
+    assert _build_ollama_payload("m", msgs, 0.0, 10, think=False)["think"] is False
+
+
+def test_parser_takes_only_a_single_clean_verdict_object():
+    import src.instagram_semantic as sem
+    assert sem.parse_reply('<think>{"label":"M","useful":true}</think>{"label":"N","useful":false}') == {"label": "N", "useful": False}
+    assert sem.parse_reply('{"label":"M","useful":true}{"label":"N"}') is None
+    assert sem.parse_reply('{"label":"M","useful":true,"domain":"x"}') is None
+    assert sem.parse_reply('```json\n{"label":"P","useful":true}\n```') == {"label": "P", "useful": True}
+
+
+def test_objective_is_bounded_and_identity_ignores_unrelated_metadata():
+    import src.instagram_semantic as sem
+    huge = {"caption": "x" * 10**5, "hashtags": ["h" * 10**5] * 50, "collections": [{"name": "c" * 10**5}] * 50}
+    assert len(sem.build_objective(huge)) <= sem.MAX_OBJECTIVE
+    a = {"caption": "same", "owner": [1], "marker": "v1"}
+    b = {"caption": "same", "owner": [2], "marker": "v2"}
+    assert sem.objective_identity(a) == sem.objective_identity(b) != sem.objective_identity({"caption": "other"})
+
+
+def test_a_failed_model_call_changes_nothing_and_a_revised_row_with_the_same_input_is_not_asked_again(rows, tmp_path, monkeypatch):
+    state = {"answer": {"label": "M", "useful": True}}
+    calls = _semantic(monkeypatch, lambda payload: state["answer"])
+    permalink = _save("flaky", "an unremarkable post", marker="v1")
+    out = tmp_path / "h"
+    run_instagram_handoff(out)
+    assert _domain(permalink) == "misumi" and len(calls) == 1
+    _save("flaky", "an unremarkable post", marker="v2")              # revised metadata, identical model input
+    result = run_instagram_handoff(out)
+    assert result["semantic_reused"] == 1 and len(calls) == 1 and len(_lines(out / "misumi.jsonl")) == 1
+    _save("flaky", "a changed post now", marker="v3")                # changed input while the model is down
+    state["answer"] = None
+    failed = run_instagram_handoff(out)
+    assert failed["semantic_failed"] == 1 and failed["retracted"] == 0 and _domain(permalink) == "misumi"
+    state["answer"] = {"label": "M", "useful": True}
+    run_instagram_handoff(out)
+    assert len(_lines(out / "misumi.jsonl")) == 1                    # no retraction, no duplicate pointer
+
+
+def test_the_response_cache_key_separates_think_modes_and_leaves_default_keys_unchanged():
+    from src.llm_core import _get_cache_key
+    msgs = [{"role": "user", "content": "x"}]
+    default = _get_cache_key("u", "m", msgs, 0.0, 10)
+    assert default == _get_cache_key("u", "m", msgs, 0.0, 10, None)
+    assert default != _get_cache_key("u", "m", msgs, 0.0, 10, False) != _get_cache_key("u", "m", msgs, 0.0, 10, True)
