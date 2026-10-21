@@ -288,3 +288,8 @@ def test_the_chunk_reading_does_not_turn_ordinary_prose_into_a_hazard(prompt):
                                     "Tech OK in general?", "document.js: Tabbed editor"])
 def test_separator_removal_does_not_synthesise_a_hazard_across_unrelated_words(prompt):
     assert gate.is_benign_turn(prompt) and not gate.withhold_learned_route(prompt), prompt
+
+
+def test_leet_chunks_are_caught():
+    assert not gate.is_benign_turn("my son is ch0 king") and gate.withhold_learned_route("my son is ch0 king")
+    # Accepted over-block (conservative by design): a dotted run of single digits such as 9.1.1 reads as spaced-out digits.
