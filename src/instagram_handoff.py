@@ -188,7 +188,7 @@ def run_instagram_handoff(
             logger.warning("Instagram semantic tier skipped: %s", why)
         else:
             sem, sem_budget, sem_domains = _sem, _sem.semantic_batch(), _sem.semantic_domains()
-    counts = {"semantic_run": 0, "semantic_failed": 0, "semantic_routed": 0, "routed_phd": 0, "routed_misumi": 0, "retained_neutral": 0, "skipped": 0, "failed": 0, "reclassified": 0, "retracted": 0}
+    counts = {"semantic_reused": 0, "semantic_run": 0, "semantic_failed": 0, "semantic_routed": 0, "routed_phd": 0, "routed_misumi": 0, "retained_neutral": 0, "skipped": 0, "failed": 0, "reclassified": 0, "retracted": 0}
     stamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     handled = 0
     with get_db_session() as db:
@@ -211,10 +211,16 @@ def run_instagram_handoff(
             verdict = classify_payload(payload)
             semantic = None
             if sem is not None and verdict["domain"] == DOMAIN_NEUTRAL and sem_budget > 0:
-                sem_budget -= 1                      # inference only for neutral material that is new or changed, within budget
-                semantic = sem.classify_semantic(payload, sem_model)
+                stored = record.get("semantic") if record else None
+                if isinstance(stored, dict) and stored.get("identity") == sem.objective_identity(payload):
+                    semantic = stored                # identical model input and prompt: reuse the answer, no new inference
+                    counts["semantic_reused"] += 1
+                else:
+                    sem_budget -= 1                  # inference only for neutral material that is new or changed, within budget
+                    semantic = sem.classify_semantic(payload, sem_model)
                 if semantic is None:
-                    counts["semantic_failed"] += 1   # no record of an answer: retried on the next run, never guessed
+                    counts["semantic_failed"] += 1   # nothing is written or retracted on a failed call: retried next run
+                    continue
                 else:
                     counts["semantic_run"] += 1
                     wanted = {"M": DOMAIN_MISUMI, "P": DOMAIN_PHD}.get(semantic["label"])

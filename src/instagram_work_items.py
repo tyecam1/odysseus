@@ -40,6 +40,7 @@ DEFAULT_THRESHOLD = 25
 _REASON_VOCAB = frozenset(
     [f"phd:{cue}" for cue in _handoff._PHD_CORE | _handoff._PHD_GENERIC]
     + [f"misumi:{cue}" for cue in _handoff._MISUMI_STRONG | _handoff._MISUMI_WEAK]
++ ["model:semantic"]
 )
 _CONFIDENCES = frozenset({"none", "low", "medium", "high", "model"})   # the outbox is data, never trusted text, in a public digest
 
@@ -94,7 +95,7 @@ def build_digest(
         head = (
             f"---\ntitle: Instagram Saved - {len(rows)} new research leads ({stamp})\nartifact_type: review\nstatus: proposed\n"
             "review_only: true\ncanonical_edits: false\n" f"created: {stamp[:10]}\n"
-            "owner: obsidian-phd\norigin: odysseus instagram_saved_import + instagram_handoff (deterministic, no model)\n"
+            "owner: obsidian-phd\norigin: odysseus instagram_saved_import + instagram_handoff (deterministic rules plus an optional local-model tier marked confidence=model)\n"
             "evidence_ceiling: lead_only_metadata\npromotion: human-gated (nothing here is canonical)\n---\n\n"
             f"# Instagram Saved: {len(rows)} new research-lead candidates (review area only)\n\n"
             "Leads or inspirations, never scholarly sources. Nothing here changes canonical notes.\n\n"

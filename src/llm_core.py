@@ -120,20 +120,23 @@ def _stream_timeout(read_timeout) -> httpx.Timeout:
 
 # Cache for LLM responses
 def _get_cache_key(url: str, model: str, messages: List[Dict], 
-                   temperature: float, max_tokens: int) -> str:
+                   temperature: float, max_tokens: int, think: Optional[bool] = None) -> str:
     """Generate cache key for LLM requests."""
     hashable_messages = []
     for msg in messages:
         sorted_items = tuple(sorted(msg.items()))
         hashable_messages.append(sorted_items)
     
-    content = json.dumps({
+    key = {
         'url': url,
         'model': model, 
         'messages': hashable_messages,
         'temp': temperature,
         'max_tokens': max_tokens
-    }, sort_keys=True)
+    }
+    if think is not None:                 # absent for default calls, so existing cache keys are unchanged
+        key['think'] = think
+    content = json.dumps(key, sort_keys=True)
     return hashlib.sha256(content.encode()).hexdigest()
 
 _response_cache = {}
@@ -1811,7 +1814,7 @@ def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LL
         messages_copy = non_sys
 
     provider = _detect_provider(url)
-    cache_key = _get_cache_key(url, model, messages_copy, temperature, max_tokens)
+    cache_key = _get_cache_key(url, model, messages_copy, temperature, max_tokens, think)
     cached_response = _get_cached_response(cache_key)
     if cached_response:
         logger.debug(f"Returning cached response for key: {cache_key}")

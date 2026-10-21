@@ -8,6 +8,7 @@ Evidence for the prompt and the acceptance decision: docs/instagram-semantic-pil
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -21,6 +22,10 @@ logger = logging.getLogger(__name__)
 ALIAS = "local-classify"
 PROMPT_VERSION = "v2"
 MAX_TEXT = 700
+MAX_TAG = 40
+MAX_NAME = 60
+MAX_ITEMS = 10
+MAX_OBJECTIVE = 4000
 TIMEOUT_S = 60.0
 DEFAULT_BATCH = 400          # at most this many inferences per run; the rest wait for the next scheduled run
 DEFAULT_DOMAINS = ("misumi", "obsidian-phd")  # model-routed items are a flagged low tier ("model"); PhD evidence is thin (5 holdout leads)
@@ -58,25 +63,30 @@ def build_objective(payload: dict[str, Any]) -> str:
     collections = payload.get("collections")
     names = [c.get("name") for c in collections if isinstance(c, dict)] if isinstance(collections, (list, tuple)) else []
     tags = payload.get("hashtags") if isinstance(payload.get("hashtags"), (list, tuple)) else []
-    return (
+    objective = (
         f"{SYSTEM}\n\nPost text: {_repair(payload.get('caption'))[:MAX_TEXT] or '(none)'}\n"
-        f"Hashtags: {' '.join('#' + _repair(t) for t in tags[:10]) or '(none)'}\n"
-        f"User's collection names: {', '.join(_repair(n) for n in names) or '(none)'}"
+        f"Hashtags: {' '.join('#' + _repair(t)[:MAX_TAG] for t in tags[:MAX_ITEMS]) or '(none)'}\n"
+        f"User's collection names: {', '.join(_repair(n)[:MAX_NAME] for n in names[:MAX_ITEMS]) or '(none)'}"
     )
+    return objective[:MAX_OBJECTIVE]
+
+
+def objective_identity(payload: dict[str, Any]) -> str:
+    """Hash of the exact model input plus the prompt version: the same identity never needs a second inference."""
+    return hashlib.sha256(f"{PROMPT_VERSION}\0{build_objective(payload)}".encode("utf-8")).hexdigest()
 
 
 def parse_reply(text: Any) -> Optional[dict[str, Any]]:
-    match = re.search(r"\{[^{}]*\}", str(text or ""), re.S)
-    if not match:
-        return None
+    """The reply must be exactly one JSON object holding only label/useful (a stripped <think> block or code fence aside)."""
+    body = re.sub(r"<think>.*?</think>", "", str(text or ""), flags=re.S).strip()
+    body = re.sub(r"^```(?:json)?\s*|\s*```$", "", body).strip()
     try:
-        value = json.loads(match.group())
+        value = json.loads(body)
     except ValueError:
         return None
-    label = value.get("label") if isinstance(value, dict) else None
-    if label not in ("P", "M", "N", "A"):
+    if not isinstance(value, dict) or not set(value) <= {"label", "useful"} or value.get("label") not in ("P", "M", "N", "A"):
         return None
-    return {"label": label, "useful": value.get("useful") is True}
+    return {"label": value["label"], "useful": value.get("useful") is True}
 
 
 def runtime() -> tuple[Optional[str], Optional[str]]:
@@ -100,7 +110,7 @@ def classify_semantic(payload: Any, model: str) -> Optional[dict[str, Any]]:
 
     result = estate_router.execute_local(model, build_objective(payload), timeout=TIMEOUT_S, max_retries=0, think=False)
     if not result.get("ok"):
-        logger.warning("Instagram semantic call failed: %s", str(result.get("error"))[:160])
+        logger.warning("Instagram semantic call failed (upstream error body withheld)")      # it can echo the prompt, i.e. caption text
         return None
     verdict = parse_reply(result.get("output"))
-    return None if verdict is None else {**verdict, "model": model, "prompt": PROMPT_VERSION}
+    return None if verdict is None else {**verdict, "model": model, "prompt": PROMPT_VERSION, "identity": objective_identity(payload)}

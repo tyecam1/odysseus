@@ -248,7 +248,7 @@ def _semantic(monkeypatch, answers, *, model="local-model", why=None):
     def fake(payload, name):
         calls.append(payload.get("caption"))
         answer = answers(payload) if callable(answers) else answers
-        return None if answer is None else {**answer, "model": name, "prompt": "v2"}
+        return None if answer is None else {**answer, "model": name, "prompt": "v2", "identity": sem.objective_identity(payload)}
 
     monkeypatch.setattr(sem, "classify_semantic", fake)
     return calls
@@ -323,7 +323,8 @@ def test_a_refused_runtime_disables_the_tier_for_the_run(rows, tmp_path, monkeyp
 
 def test_semantic_reply_parsing_and_objective_are_safe():
     import src.instagram_semantic as sem
-    assert sem.parse_reply('noise {"label": "M", "useful": true} tail') == {"label": "M", "useful": True}
+    assert sem.parse_reply('{"label": "M", "useful": true}') == {"label": "M", "useful": True}
+    assert sem.parse_reply('noise {"label": "M", "useful": true} tail') is None
     assert sem.parse_reply('{"label": "X"}') is None and sem.parse_reply("not json") is None and sem.parse_reply(None) is None
     assert sem.parse_reply('{"label": "N", "useful": "yes"}') == {"label": "N", "useful": False}
     text = sem.build_objective({"caption": "cafÃ© " + "x" * 5000, "hashtags": "bad", "collections": 3})
@@ -335,3 +336,47 @@ def test_the_think_switch_is_emitted_only_when_set():
     msgs = [{"role": "user", "content": "x"}]
     assert "think" not in _build_ollama_payload("m", msgs, 0.0, 10)
     assert _build_ollama_payload("m", msgs, 0.0, 10, think=False)["think"] is False
+
+
+def test_parser_takes_only_a_single_clean_verdict_object():
+    import src.instagram_semantic as sem
+    assert sem.parse_reply('<think>{"label":"M","useful":true}</think>{"label":"N","useful":false}') == {"label": "N", "useful": False}
+    assert sem.parse_reply('{"label":"M","useful":true}{"label":"N"}') is None
+    assert sem.parse_reply('{"label":"M","useful":true,"domain":"x"}') is None
+    assert sem.parse_reply('```json\n{"label":"P","useful":true}\n```') == {"label": "P", "useful": True}
+
+
+def test_objective_is_bounded_and_identity_ignores_unrelated_metadata():
+    import src.instagram_semantic as sem
+    huge = {"caption": "x" * 10**5, "hashtags": ["h" * 10**5] * 50, "collections": [{"name": "c" * 10**5}] * 50}
+    assert len(sem.build_objective(huge)) <= sem.MAX_OBJECTIVE
+    a = {"caption": "same", "owner": [1], "marker": "v1"}
+    b = {"caption": "same", "owner": [2], "marker": "v2"}
+    assert sem.objective_identity(a) == sem.objective_identity(b) != sem.objective_identity({"caption": "other"})
+
+
+def test_a_failed_model_call_changes_nothing_and_a_revised_row_with_the_same_input_is_not_asked_again(rows, tmp_path, monkeypatch):
+    state = {"answer": {"label": "M", "useful": True}}
+    calls = _semantic(monkeypatch, lambda payload: state["answer"])
+    permalink = _save("flaky", "an unremarkable post", marker="v1")
+    out = tmp_path / "h"
+    run_instagram_handoff(out)
+    assert _domain(permalink) == "misumi" and len(calls) == 1
+    _save("flaky", "an unremarkable post", marker="v2")              # revised metadata, identical model input
+    result = run_instagram_handoff(out)
+    assert result["semantic_reused"] == 1 and len(calls) == 1 and len(_lines(out / "misumi.jsonl")) == 1
+    _save("flaky", "a changed post now", marker="v3")                # changed input while the model is down
+    state["answer"] = None
+    failed = run_instagram_handoff(out)
+    assert failed["semantic_failed"] == 1 and failed["retracted"] == 0 and _domain(permalink) == "misumi"
+    state["answer"] = {"label": "M", "useful": True}
+    run_instagram_handoff(out)
+    assert len(_lines(out / "misumi.jsonl")) == 1                    # no retraction, no duplicate pointer
+
+
+def test_the_response_cache_key_separates_think_modes_and_leaves_default_keys_unchanged():
+    from src.llm_core import _get_cache_key
+    msgs = [{"role": "user", "content": "x"}]
+    default = _get_cache_key("u", "m", msgs, 0.0, 10)
+    assert default == _get_cache_key("u", "m", msgs, 0.0, 10, None)
+    assert default != _get_cache_key("u", "m", msgs, 0.0, 10, False) != _get_cache_key("u", "m", msgs, 0.0, 10, True)
