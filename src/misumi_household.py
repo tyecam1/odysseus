@@ -196,14 +196,14 @@ _ENTRY_TEXT_LIMIT = 300
 
 
 def _entry_text(lines: List[str], entry: Dict[str, object], entries: List[Dict[str, object]], asked: Iterable[str] = (),
-                matched: Iterable[str] = ()) -> str:
+                matched: Iterable[str] = (), hidden: Iterable[int] = ()) -> str:
     """The recorded facts of one YAML entry as one short string ('name: tomatoes; quantity: "1 carton"; moods: late night, focused').
 
     Nested demonstration entries are left out, a field the question asked about that holds null is reported as 'not recorded', and the
     matched facts are always kept (and listed first) even when the entry is long enough to be shortened.
     """
     asked = set(asked)
-    skip: set = set()
+    skip: set = set(hidden)
     for other in entries:
         if other is not entry and other["example"] and entry["start"] <= other["start"] and other["end"] <= entry["end"]:
             skip.update(range(int(other["start"]), int(other["end"])))
@@ -269,9 +269,70 @@ def _value_part(text: str, structured: bool) -> str:
 
 # a field or assignment that names a credential/identifier is never a household fact: it is dropped from every search snippet,
 # context and quoted line (the item index is allowlisted by field; the lexical fallback is not, so it filters by sensitive name)
+# A sensitive word counts as a whole component of a name (wifi_password, home-pin, "Card number"), never inside another word
+# (shopping is not a pin).
+_SENSITIVE_WORDS = (
+    r"pass(?:word|wd|phrase|code)?|pw|pwd|pin|token|secret|api[_ -]?key|credentials?|iban|sort[_ -]?code|card[_ -]?number|"
+    r"cvv|cvc|otp|psk|account[_ -]?number|ssn|national[_ -]?insurance|private[_ -]?key|passport|dob|dose|dosage|medication|"
+    r"prescription|nhs"
+)
 _SENSITIVE_ASSIGN = re.compile(
-    r"\b(?:pass(?:word|wd|phrase|code)?|pin|token|secret|api[_ -]?key|credential|iban|sort[_ -]?code|card[_ -]?number|"
-    r"account[_ -]?number|ssn|national[_ -]?insurance|private[_ -]?key)\b[\"']?\s*[:=]", re.I)
+    rf"(?<![A-Za-z0-9])(?:[A-Za-z0-9]+[_ -])*(?:{_SENSITIVE_WORDS})(?:[_ -][A-Za-z0-9]+)*[\"']?\s*[:=]", re.I)
+
+# The field-safety gate for files under the privacy allowlist (_INDEXED_PATH). Every lexical hit, snippet, context and quoted
+# line is built only from lines that survive it: a YAML/JSON line is kept when each field it names is in _SAFE_FIELDS (a bare
+# key that only groups entries - "items:" over "- name:" blocks - is transparent), and a line that belongs to an unsafe field
+# (a nested mapping, a list, a block scalar) goes with it. Allowlist, not blocklist: an unknown field is never shown.
+_LINE_KEYS = re.compile(r"(?:^|[{,]\s*|-\s+)[\"']?([\w-]+)[\"']?\s*:(?=\s|$)")
+_BARE_KEY = re.compile(r"^(?:-\s+)?[\"']?[\w-]+[\"']?\s*:\s*$")
+_ENTRY_LINE = re.compile(r"^-\s+[\"']?[\w-]+[\"']?\s*:")
+
+
+def _unsafe_lines(lines: List[str]) -> set:
+    """Indexes of the lines of a YAML/JSON file that hold, or sit under, a field that is not in _SAFE_FIELDS."""
+    unsafe: set = set()
+    stack: List[tuple] = []  # (column, safe) of the keys that enclose the current line
+    for number, raw in enumerate(lines):
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        body = re.sub(r"\s+#.*$", "", stripped).rstrip(",")
+        column = len(raw) - len(raw.lstrip())
+        dash = re.match(r"-\s+", body)
+        key_column = column + (dash.end() if dash else 0)
+        keys = _LINE_KEYS.findall(body)
+        if not keys:
+            while stack and (stack[-1][0] > column if dash else stack[-1][0] >= column):
+                stack.pop()
+            if not all(safe for _, safe in stack):
+                unsafe.add(number)
+            continue
+        while stack and stack[-1][0] >= key_column:
+            stack.pop()
+        listed = all(key.lower().replace("-", "_") in _SAFE_FIELDS for key in keys)
+        grouping = False
+        if not listed and _BARE_KEY.match(body):
+            following = next((lines[i].strip() for i in range(number + 1, len(lines))
+                              if lines[i].strip() and not lines[i].strip().startswith("#")), "")
+            grouping = bool(_ENTRY_LINE.match(following))
+        enclosed = all(safe for _, safe in stack)
+        if not (listed or grouping) or not enclosed:
+            unsafe.add(number)
+        if len(keys) == 1:
+            stack.append((key_column, listed or grouping))
+    return unsafe
+
+
+_MASKED_SUFFIXES = {".yaml", ".yml", ".json"}
+
+
+def _hidden_lines(rel: str, lines: List[str]) -> set:
+    """Lines of a file under the privacy allowlist that may not be shown (see _unsafe_lines); none for other files."""
+    if Path(rel).suffix.lower() in _MASKED_SUFFIXES and _INDEXED_PATH.search(rel):
+        return _unsafe_lines(lines)
+    return set()
+
+
 
 
 def _fact_text(line: str, structured: bool, table_header: bool, allow_sensitive: bool = False) -> str:
@@ -338,6 +399,8 @@ _SAFE_FIELDS = frozenset({
     "count", "unit", "units", "location", "expiry", "best_before", "use_by", "sell_by", "status", "notes", "capabilities",
     "area", "cadence", "brand", "size",
 })
+_SIGNATURE_BYTE_BUDGET = 8 * 1024 * 1024  # content digested per lookup for the cache key; beyond it the stat fields alone decide
+_CANDIDATE_CAP = 50  # candidate records kept on a resolution (the true count is kept beside them)
 _MAX_INDEX_FILE_BYTES = 512 * 1024  # a bigger allowlisted file is not read (reported unreadable)
 _MAX_YAML_ALIASES = 50  # more YAML alias references than this: rejected (alias bombs)
 _MAX_YAML_DEPTH = 24
@@ -345,7 +408,7 @@ _MAX_YAML_NODES = 50000
 _INDEX_TIME_BUDGET = 5.0  # seconds; files not reached in time are reported unreadable
 _UNREADABLE_SHOWN = 10  # unreadable files named in a reply or in the evidence
 _ID_KEYS = ("name", "item", "product", "ingredient")
-_INDEX_CACHE: Dict[str, tuple] = {}  # root -> (((path, mtime_ns, size), ...), index)
+_INDEX_CACHE: Dict[str, tuple] = {}  # root -> (((path, mtime_ns, ctime_ns, size, content digest), ...), index)
 _HIT_CANDIDATES = 5  # candidates named in a not-confirmed reply
 _EVIDENCE_CANDIDATES = 8  # candidate records given to the model
 _ALIAS_KEYS = ("aliases", "alias", "also_known_as", "aka")
@@ -538,9 +601,22 @@ _NON_PHYSICAL = frozenset({
 })
 
 
+# Words that qualify an abstract noun without making it a thing ("any time", "free time", "enough money", "a good idea").
+_ABSTRACT_MODIFIERS = frozenset({
+    "a", "an", "the", "any", "some", "enough", "much", "more", "most", "less", "another", "other", "same", "our", "my", "your",
+    "free", "spare", "good", "bad", "great", "nice", "real", "whole", "extra", "little", "few", "lot", "lots", "big", "long",
+    "short", "quick", "next", "last", "new", "old", "today", "tonight", "tomorrow", "this", "that", "these", "those",
+})
+
+
 def names_non_physical(mention: str) -> bool:
-    """Whether a parsed mention is about something abstract ("time", "money", "plans") rather than a household item."""
-    return any(_singular(token) in _NON_PHYSICAL for token in _phrase_tokens(mention))
+    """Whether a parsed mention is ENTIRELY abstract ("time", "any free time", "money", "plans") rather than a household item.
+
+    Every meaningful word must be an abstract noun: one abstract word inside a physical item ("energy drinks", "room spray",
+    "space heater", "fuel tank cap") does not make the item abstract, so it keeps the stock guard.
+    """
+    tokens = [token for token in _phrase_tokens(mention) if token not in _ABSTRACT_MODIFIERS]
+    return bool(tokens) and all(token in _NON_PHYSICAL or _singular(token) in _NON_PHYSICAL for token in tokens)
 
 
 def stock_item_mention(question: str) -> Optional[Dict[str, object]]:
@@ -990,7 +1066,7 @@ def _resolve(parsed: Dict[str, object], records: List[Dict[str, object]], vocabu
     surface = tuple(_phrase_tokens(mention))
     result: Dict[str, object] = {
         "mention": mention, "key": key, "kind": parsed["kind"], "field": parsed.get("field"),
-        "checked": len(records), "records": [], "candidates": [], "strength": 0,
+        "checked": len(records), "records": [], "candidates": [], "candidates_total": 0, "strength": 0,
     }
     if not records:
         result.update(outcome=UNRESOLVED, reason="no recorded items")
@@ -1013,7 +1089,8 @@ def _resolve(parsed: Dict[str, object], records: List[Dict[str, object]], vocabu
         if strength and not (unparsed and strength < 2):
             scored.append((-strength, position, record))
     scored.sort(key=lambda row: (row[0], row[1]))
-    result["candidates"] = [row[2] for row in scored]
+    result["candidates"] = [row[2] for row in scored[:_CANDIDATE_CAP]]
+    result["candidates_total"] = len(scored)
     result["strength"] = -scored[0][0] if scored else 0
     if unparsed:
         result.update(outcome=UNRESOLVED, reason="the question does not clearly name one item")
@@ -1203,6 +1280,7 @@ class HouseholdReadOnlyAdapter:
                 lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
             except OSError:
                 continue
+            hidden = _hidden_lines(rel, lines)
             path_terms = set(_words(path.stem))
             listing = bool(listed)
             path_bonus = len(path_terms & set(terms))
@@ -1210,6 +1288,8 @@ class HouseholdReadOnlyAdapter:
             entries = _yaml_entries(lines) if structured else []
             table_head = ""
             for number, line in enumerate(lines, 1):
+                if number - 1 in hidden:
+                    continue  # a field outside the safe allowlist is never a hit, a snippet or a context
                 covering = [item for item in entries if item["start"] <= number - 1 < item["end"]]
                 if any(item["example"] for item in covering):
                     continue
@@ -1236,7 +1316,7 @@ class HouseholdReadOnlyAdapter:
                 if label:
                     hit["entry"] = label
                 if covering:
-                    context = _entry_text(lines, covering[0], entries, terms, [text])
+                    context = _entry_text(lines, covering[0], entries, terms, [text], hidden)
                 elif table_head and text.startswith("|"):
                     context = _table_context(table_head, text)
                 else:
@@ -1278,12 +1358,21 @@ class HouseholdReadOnlyAdapter:
         """
         candidates = self._index_candidates()
         signature = []
+        digest_budget = _SIGNATURE_BYTE_BUDGET
         for path in candidates:
             try:
                 stat = path.stat()
             except OSError:
                 continue
-            signature.append((path.relative_to(self.root).as_posix(), stat.st_mtime_ns, stat.st_size))
+            digest = ""
+            if stat.st_size <= min(_MAX_INDEX_FILE_BYTES, digest_budget):
+                try:
+                    digest = hashlib.blake2b(path.read_bytes(), digest_size=16).hexdigest()
+                    digest_budget -= stat.st_size
+                except OSError:
+                    pass
+            # size + mtime alone are not enough: an equal-length edit that restores the mtime must not serve old facts
+            signature.append((path.relative_to(self.root).as_posix(), stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size, digest))
         cache_key = str(self.root)
         cached = _INDEX_CACHE.get(cache_key)
         if cached is not None and cached[0] == tuple(signature):
@@ -1441,7 +1530,8 @@ class HouseholdReadOnlyAdapter:
             return hits
         candidates = resolution["candidates"][:_HIT_CANDIDATES]
         named = ", ".join(f"{_quoted(c['name'], 80)} ({c['path']} line {c['line']})" for c in candidates)
-        extra = len(resolution["candidates"]) - len(candidates)
+        total = int(resolution.get("candidates_total") or len(resolution["candidates"]))
+        extra = total - len(candidates)
         more = f" and {extra} more" if extra > 0 else ""
         reason = (resolution.get("reason") or f"no household record is named exactly {_quoted(mention, 80)}") if mention \
             else "the question does not name one item"
@@ -1455,7 +1545,8 @@ class HouseholdReadOnlyAdapter:
         hits.append({
             "path": lead["path"], "line": lead["line"], "score": 0, "resolution": outcome if outcome != NOT_PRESENT else UNRESOLVED,
             "snippet": text,
-            "candidates": [{"id": c["id"], "name": c["name"], "path": c["path"], "line": c["line"]} for c in resolution["candidates"]],
+            "candidates": [{"id": c["id"], "name": c["name"], "path": c["path"], "line": c["line"]} for c in candidates],
+            "candidates_omitted": max(0, extra),
         })
         return hits
 
@@ -1470,8 +1561,9 @@ class HouseholdReadOnlyAdapter:
         for record in resolution["candidates"][:limit]:
             data = _record_data(record) if record["kind"] != SHOPPING or "text" not in record else f"text: {_quoted(_record_text(record))}"
             lines.append(f"- {record['path']} line {record['line']} ({record['kind']}): {data}")
-        if len(resolution["candidates"]) > limit:
-            lines.append(f"- and {len(resolution['candidates']) - limit} more related records")
+        total = int(resolution.get("candidates_total") or len(resolution["candidates"]))
+        if total > limit:
+            lines.append(f"- and {total - limit} more related records")
         for rel, number, text in resolution.get("unparsed_lines") or []:
             lines.append(f"- {rel} line {number} (file not in a recognised record layout)" + (f": {_quoted(text)}" if text else ""))
         if not resolution["candidates"] and not resolution.get("unparsed_lines"):
@@ -1511,6 +1603,7 @@ class HouseholdReadOnlyAdapter:
             except OSError:
                 continue
             entries = _yaml_entries(lines)
+            hidden = _hidden_lines(rel, lines)
             file_hits = [hit for hit in hits if hit["path"] == rel]
             outer = [e for e in entries if not any(o is not e and o["start"] <= e["start"] and e["end"] <= o["end"] for o in entries)]
             claimed: set = set()
@@ -1523,7 +1616,7 @@ class HouseholdReadOnlyAdapter:
                 best = None
                 matched_lines: List[str] = []
                 for number in span:
-                    if any(o is not entry and o["example"] and o["start"] <= number < o["end"] for o in entries):
+                    if number in hidden or any(o is not entry and o["example"] and o["start"] <= number < o["end"] for o in entries):
                         continue
                     text = _fact_text(lines[number], True, False)
                     if not text:
@@ -1546,7 +1639,7 @@ class HouseholdReadOnlyAdapter:
                 }
                 if entry["label"]:
                     hit["entry"] = entry["label"]
-                context = _entry_text(lines, entry, entries, terms, matched_lines)
+                context = _entry_text(lines, entry, entries, terms, matched_lines, hidden)
                 if context and context != best[2]:
                     hit["context"] = context
                 result.append(hit)
