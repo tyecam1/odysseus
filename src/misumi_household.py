@@ -272,7 +272,7 @@ def _value_part(text: str, structured: bool) -> str:
 # A sensitive word counts as a whole component of a name (wifi_password, home-pin, "Card number"), never inside another word
 # (shopping is not a pin).
 _SENSITIVE_WORDS = (
-    r"pass(?:word|wd|phrase|code)?|pw|pwd|pin|token|secret|api[_ -]?key|credentials?|iban|sort[_ -]?code|card[_ -]?number|"
+    r"pass(?:words?|wd|phrase|code)?|pws?|pwd|pins?|tokens?|secrets?|api[_ -]?keys?|credentials?|iban|sort[_ -]?code|card[_ -]?number|"
     r"cvv|cvc|otp|psk|account[_ -]?number|ssn|national[_ -]?insurance|private[_ -]?key|passport|dob|dose|dosage|medication|"
     r"prescription|nhs"
 )
@@ -289,38 +289,82 @@ _ENTRY_LINE = re.compile(r"^-\s+[\"']?[\w-]+[\"']?\s*:")
 
 
 def _unsafe_lines(lines: List[str]) -> set:
-    """Indexes of the lines of a YAML/JSON file that hold, or sit under, a field that is not in _SAFE_FIELDS."""
-    unsafe: set = set()
-    stack: List[tuple] = []  # (column, safe) of the keys that enclose the current line
-    for number, raw in enumerate(lines):
-        stripped = raw.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        body = re.sub(r"\s+#.*$", "", stripped).rstrip(",")
-        column = len(raw) - len(raw.lstrip())
-        dash = re.match(r"-\s+", body)
-        key_column = column + (dash.end() if dash else 0)
-        keys = _LINE_KEYS.findall(body)
-        if not keys:
-            while stack and (stack[-1][0] > column if dash else stack[-1][0] >= column):
-                stack.pop()
-            if not all(safe for _, safe in stack):
-                unsafe.add(number)
-            continue
-        while stack and stack[-1][0] >= key_column:
-            stack.pop()
-        listed = all(key.lower().replace("-", "_") in _SAFE_FIELDS for key in keys)
-        grouping = False
-        if not listed and _BARE_KEY.match(body):
-            following = next((lines[i].strip() for i in range(number + 1, len(lines))
-                              if lines[i].strip() and not lines[i].strip().startswith("#")), "")
-            grouping = bool(_ENTRY_LINE.match(following))
-        enclosed = all(safe for _, safe in stack)
-        if not (listed or grouping) or not enclosed:
-            unsafe.add(number)
-        if len(keys) == 1:
-            stack.append((key_column, listed or grouping))
-    return unsafe
+    """Indexes of the lines of a YAML/JSON file that hold, or sit under, a field that is not in _SAFE_FIELDS.
+
+    Decided from the PARSED document (yaml.compose gives every node its line span), never from the look of a line: a pair is shown
+    only when its key is on the allowlist; a pair whose key names a credential or identifier hides its whole value (nested
+    mappings, lists, block scalars); a key that is neither safe nor sensitive but holds entries only groups them and the entries
+    are judged field by field; every other scalar is hidden. A file that does not parse, is too large or too deep hides ALL its
+    lines (fail closed).
+    """
+    import yaml
+
+    everything = set(range(len(lines)))
+    text = "\n".join(lines)
+    if len(text.encode("utf-8", errors="replace")) > _MAX_INDEX_FILE_BYTES or "\x00" in text:
+        return everything
+    try:
+        if sum(1 for token in yaml.scan(text) if isinstance(token, yaml.AliasToken)) > _MAX_YAML_ALIASES:
+            return everything
+        documents = list(yaml.compose_all(text))
+    except Exception:  # noqa: BLE001 - unparseable: nothing of it may be shown
+        return everything
+    hidden: set = set()
+    budget = {"nodes": 0}
+
+    def span(*nodes) -> range:
+        first = min(node.start_mark.line for node in nodes)
+        last = first
+        for node in nodes:
+            end = node.end_mark.line
+            # a block node ends where the NEXT token starts: when only whitespace precedes that point, its last line is the one before
+            if end > node.start_mark.line and end < len(lines) and not lines[end][:node.end_mark.column].strip():
+                end -= 1
+            last = max(last, end)
+        return range(first, last + 1)
+
+    def walk(node, depth: int = 0) -> None:
+        budget["nodes"] += 1
+        if depth > _MAX_YAML_DEPTH or budget["nodes"] > _MAX_YAML_NODES:
+            raise ValueError("too deep or too large")
+        if isinstance(node, yaml.MappingNode):
+            for key_node, value_node in node.value:
+                key = str(getattr(key_node, "value", "")).strip().lower().replace("-", "_").replace(" ", "_")
+                if key in _SAFE_FIELDS:
+                    walk_safe(value_node, depth + 1)
+                elif _SENSITIVE_ASSIGN.search(f"{key_node.value}:") or not isinstance(value_node, (yaml.MappingNode, yaml.SequenceNode)):
+                    hidden.update(span(key_node, value_node))  # a credential-like name, or a scalar nobody allowed
+                else:
+                    walk(value_node, depth + 1)  # an unlisted key over entries: a grouping; the entries are judged field by field
+        elif isinstance(node, yaml.SequenceNode):
+            for item in node.value:
+                if isinstance(item, (yaml.MappingNode, yaml.SequenceNode)):
+                    walk(item, depth + 1)
+                else:
+                    hidden.update(span(item))  # a bare scalar in a list nobody allowed
+        elif node is not None:
+            hidden.update(span(node))
+
+    def walk_safe(node, depth: int) -> None:
+        """The value of an allowlisted field: scalars and lists of scalars as they are; a nested mapping is judged field by field."""
+        budget["nodes"] += 1
+        if depth > _MAX_YAML_DEPTH or budget["nodes"] > _MAX_YAML_NODES:
+            raise ValueError("too deep or too large")
+        if isinstance(node, yaml.MappingNode):
+            walk(node, depth)
+        elif isinstance(node, yaml.SequenceNode):
+            for item in node.value:
+                if isinstance(item, yaml.MappingNode):
+                    walk(item, depth + 1)
+                elif isinstance(item, yaml.SequenceNode):
+                    walk_safe(item, depth + 1)
+
+    try:
+        for document in documents:
+            walk(document)
+    except Exception:  # noqa: BLE001
+        return everything
+    return {number for number in hidden if 0 <= number < len(lines)}
 
 
 _MASKED_SUFFIXES = {".yaml", ".yml", ".json"}
@@ -328,8 +372,13 @@ _MASKED_SUFFIXES = {".yaml", ".yml", ".json"}
 
 def _hidden_lines(rel: str, lines: List[str]) -> set:
     """Lines of a file under the privacy allowlist that may not be shown (see _unsafe_lines); none for other files."""
-    if Path(rel).suffix.lower() in _MASKED_SUFFIXES and _INDEXED_PATH.search(rel):
+    suffix = Path(rel).suffix.lower()
+    if not _INDEXED_PATH.search(rel):
+        return set()
+    if suffix in _MASKED_SUFFIXES:
         return _unsafe_lines(lines)
+    if suffix in {".csv", ".tsv"}:
+        return set(range(len(lines)))  # rows have no field names to judge: nothing of them is shown
     return set()
 
 

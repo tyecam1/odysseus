@@ -102,16 +102,16 @@ def test_unsafe_lines_masks_nested_and_flow_style_fields():
     lines = [
         "items:",                      # 0 grouping key (transparent)
         "  - name: milk",              # 1
-        "    secrets:",                # 2 a bare key over entries only groups them: the leaf fields decide
-        "      - name: inner",         # 3 a safe leaf field
-        "      - value: hunter2",      # 4 an unlisted leaf field
+        "    secrets:",                # 2 a credential-like name hides its whole value
+        "      - name: inner",         # 3 (under it)
+        "      - value: hunter2",      # 4 (under it)
         "    notes: |",                # 5 safe block scalar
         "      two cartons",           # 6
         "    token: |",                # 7 unsafe block scalar
         "      hunter2",               # 8
         "  - {name: tea, pin: 1234}",  # 9 flow style naming an unsafe key
     ]
-    assert _unsafe_lines(lines) == {4, 7, 8, 9}
+    assert _unsafe_lines(lines) == {2, 3, 4, 7, 8, 9}
 
 
 def test_files_outside_the_allowlist_keep_only_the_blocklist(tmp_path):
@@ -192,3 +192,27 @@ def test_read_hides_unlisted_fields(tmp_path):
     _no_canary(adapter.read("household/cleaning/rota.yaml"))
     _no_canary(adapter.read("household/food/stock.yaml"))
     assert "descale kettle" in adapter.read("household/cleaning/rota.yaml")["text"]
+
+
+def test_a_credential_container_hides_its_nested_safe_looking_fields(tmp_path):
+    adapter = _adapter(tmp_path, {
+        "household/food/stock.yaml": "items:\n  - name: tea\n    quantity: 1 box\n",
+        "household/food/legacy.yaml": "wifi_password:\n  - notes: milk hunter2\nmilk: 2 cartons\n",
+    })
+    resolution = adapter.resolve_question("do we have milk in stock?", "food")
+    _no_canary(resolution["unparsed_lines"])
+    _no_canary(adapter.evidence_text(resolution))
+    assert any("2 cartons" in text for _, _, text in resolution["unparsed_lines"])
+
+
+@pytest.mark.parametrize("name", ["rota.csv", "rota.tsv"])
+def test_delimited_rows_are_never_shown(tmp_path, name):
+    adapter = _adapter(tmp_path, {"household/cleaning/" + name: "milk,2 cartons,hunter2,50mg\n"})
+    _no_canary(adapter.search("milk cartons", domain="cleaning", limit=50))
+    _no_canary(adapter.read("household/cleaning/" + name))
+
+
+def test_unparseable_or_oversized_yaml_shows_nothing(tmp_path):
+    adapter = _adapter(tmp_path, {"household/cleaning/rota.yaml": "tasks:\n  - name: descale kettle\n    dose: 50mg: [\n"})
+    _no_canary(adapter.search("descale kettle", domain="cleaning", limit=50))
+    _no_canary(adapter.read("household/cleaning/rota.yaml"))
