@@ -49,16 +49,49 @@ def normalise(text: object) -> str:
 
 
 _LEET = str.maketrans({"0": "o", "1": "l", "3": "e", "4": "a", "5": "s", "7": "t", "@": "a", "$": "s"})
-_SPACED_LETTERS = re.compile(r"\b(?:[a-z]\s+){3,}[a-z]\b")
+# Three or more single letters in a row, separated by spaces or punctuation ("g a s", "f.i.t", "c-h-o-k-i-n-g").
+_SPACED_RUN = re.compile(r"(?<![a-z0-9])[a-z0-9](?:[ \t.\-_*]+[a-z0-9]){2,}(?![a-z0-9])")
+# Stems checked inside a spaced-out run (after the letters are joined): a run is already a disguise, so a stem anywhere in it
+# counts ("a g a s" -> "agas", "i a m b l e e d i n g" -> "iambleeding"). Applied ONLY to such runs, never to ordinary text.
+_RUN_STEMS = (
+    "gas", "fire", "fit", "999", "911", "112", "111", "sos", "help", "ambulance", "bleed", "blood", "chok", "breath", "unconscious",
+    "overdos", "suicid", "poison", "burn", "scald", "drown", "collaps", "seizure", "stroke", "faint", "hurt", "kill", "die",
+    "dead", "pain", "smoke", "shock", "swallow", "knife", "gun", "attack", "abuse", "unresponsive", "heartattack", "cprs",
+)
+
+
+def _collapse(match: "re.Match[str]", mode: int) -> str:
+    letters = re.findall(r"[a-z0-9]", match.group())
+    if mode == 1 and len(letters) > 3 and letters[0] in "ai":
+        return f"{letters[0]} {''.join(letters[1:])}"  # keep a leading article/pronoun apart: "a f i t" -> "a fit"
+    return "".join(letters)
+
+
+def _obfuscation_variants(text: str) -> tuple[str, ...]:
+    """Bounded extra readings for common disguises; the ordinary reading is kept by the caller for precision."""
+    text = "".join(ch for ch in text if unicodedata.category(ch) != "Cf")
+    forms = []
+    for mode in (0, 1):
+        form = _SPACED_RUN.sub(lambda match, mode=mode: _collapse(match, mode), text)
+        form = re.sub(r"(?<!\w)[a-z0-9@$]+(?!\w)", lambda match: match.group().translate(_LEET)
+                      if re.search(r"[a-z]", match.group()) else match.group(), form)
+        forms.append(re.sub(r"([a-z])\1{2,}", r"\1\1", form))
+    return tuple(dict.fromkeys(forms))
 
 
 def _obfuscation_variant(text: str) -> str:
-    """A bounded extra reading for common disguises; retain the ordinary reading for precision."""
-    text = "".join(ch for ch in text if unicodedata.category(ch) != "Cf")
-    text = _SPACED_LETTERS.sub(lambda match: re.sub(r"\s+", "", match.group()), text)
-    text = re.sub(r"(?<!\w)[a-z0-9@$]+(?!\w)", lambda match: match.group().translate(_LEET)
-                  if re.search(r"[a-z]", match.group()) else match.group(), text)
-    return re.sub(r"([a-z])\1{2,}", r"\1\1", text)
+    return _obfuscation_variants(text)[0]
+
+
+def _spaced_hazard(text: str) -> str | None:
+    """The hazard stem hidden inside a spaced-out run of letters, if any (see _RUN_STEMS)."""
+    for match in _SPACED_RUN.finditer(text):
+        joined = "".join(re.findall(r"[a-z0-9]", match.group())).translate(_LEET)
+        raw = "".join(re.findall(r"[a-z0-9]", match.group()))
+        for stem in _RUN_STEMS:
+            if stem in joined or stem in raw:
+                return stem
+    return None
 
 
 # Everyday idioms that share words with emergencies; removed before matching (precision).
@@ -229,8 +262,11 @@ def assess(text: object, context: Iterable[object] = ()) -> dict[str, object]:
     if len(raw) > MAX_ASSESS_CHARS:
         return {"benign": False, "reasons": ["too-long-to-assess"]}
     norm = normalise(raw)
-    forms = tuple(dict.fromkeys((_IDIOMS.sub(" ", form) for form in (norm, _obfuscation_variant(norm)))))
+    forms = tuple(dict.fromkeys((_IDIOMS.sub(" ", form) for form in (norm, *_obfuscation_variants(norm)))))
     reasons = [domain for domain, pattern in _COMPILED if any(pattern.search(form) for form in forms)]
+    hidden = _spaced_hazard(norm)
+    if hidden is not None:
+        reasons.append(f"obfuscated:{hidden}")
     if any(_RESERVED.search(form) for form in forms):
         reasons.append("reserved-matter")
     hit = next((hit for form in forms if (hit := _fuzzy_hit(form)) is not None), None)
@@ -302,7 +338,10 @@ def routing_risk(text: object) -> list[str]:
         if len(norm) > MAX_ASSESS_CHARS:
             return ["too-long-to-assess"]
         reasons = []
-        forms = tuple(dict.fromkeys((norm, _obfuscation_variant(norm))))
+        forms = tuple(dict.fromkeys((norm, *_obfuscation_variants(norm))))
+        hidden = _spaced_hazard(norm)
+        if hidden is not None:
+            reasons.append(f"obfuscated:{hidden}")
         hazard = next((match for form in forms if (match := _R_HAZARD_RE.search(form)) is not None), None)
         if hazard:
             reasons.append(f"hazard:{hazard.group(0)}")

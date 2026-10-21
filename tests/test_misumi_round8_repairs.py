@@ -48,7 +48,7 @@ def consults(estate, monkeypatch):
 
     async def fake_consult(prompt, target, backend, model, lead="aoteru", structured=False):
         seen["consulted"].append((target, lead))
-        return "ANGLE: Try a warmer paint colour" if structured else f"OK: {target} notes"  # round 10: structured shape
+        return "practical_steps" if structured else f"OK: {target} notes"  # round 12: ids from the closed vocabulary
 
     async def fake_turn(prompt, persona, **kwargs):
         estate["calls"].append({"prompt": prompt, "style": dict(kwargs.get("style_values") or {})})
@@ -104,7 +104,7 @@ def test_the_lead_model_call_carries_the_advisory_instruction(monkeypatch):
     asyncio.run(misumi_routes._model_turn("Kitchen colour ideas", "aoteru", backend="b", model="m",
                                           contributions=[("jin", "OK: try yellow")], advisory_consult="Jin"))
     system = [m["content"] for m in sent[0] if m["role"] == "system"][-1]
-    assert "You remain responsible for the whole answer: answer fully yourself" in system and "optional advice" in system
+    assert "You remain responsible for the whole answer: answer fully yourself" in system and "chosen from a fixed list" in system
 
 
 def test_a_cue_that_can_never_apply_is_refused_plainly_not_done(estate):
