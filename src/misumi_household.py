@@ -283,7 +283,7 @@ _SENSITIVE_ASSIGN = re.compile(
 # line is built only from lines that survive it: a YAML/JSON line is kept when each field it names is in _SAFE_FIELDS (a bare
 # key that only groups entries - "items:" over "- name:" blocks - is transparent), and a line that belongs to an unsafe field
 # (a nested mapping, a list, a block scalar) goes with it. Allowlist, not blocklist: an unknown field is never shown.
-_LINE_KEYS = re.compile(r"(?:^|[{,]\s*|-\s+)[\"']?([\w-]+)[\"']?\s*:(?=\s|$)")
+_LINE_KEYS = re.compile(r"(?:^|[\[{,]\s*|-\s+)[\"']?([\w-]+)[\"']?\s*:")
 _BARE_KEY = re.compile(r"^(?:-\s+)?[\"']?[\w-]+[\"']?\s*:\s*$")
 _ENTRY_LINE = re.compile(r"^-\s+[\"']?[\w-]+[\"']?\s*:")
 
@@ -836,9 +836,16 @@ def _matching_lines(unparsed: Dict[str, List[str]], key: tuple, limit: int = 5) 
         return []
     found = []
     for rel in sorted(unparsed):
+        hidden = _hidden_lines(rel, unparsed[rel])
         for number, line in enumerate(unparsed[rel], 1):
             text = line.strip()
             if text and head in phrase_key(text):
+                if number - 1 in hidden:
+                    # a field outside the safe allowlist: shown only when the FIELD NAME is the item itself (a name-keyed
+                    # layout, "milk: 2 cartons"), never when the item word merely appears in some other field's value
+                    keys = _LINE_KEYS.findall(text)
+                    if len(keys) != 1 or head not in phrase_key(keys[0]):
+                        continue
                 found.append((rel, number, "" if _SENSITIVE_ASSIGN.search(text) else text[:200]))
                 if len(found) >= limit:
                     return found
@@ -1212,8 +1219,11 @@ class HouseholdReadOnlyAdapter:
         lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
         start = max(1, int(start_line))
         count = max(1, min(int(max_lines), 200))
-        selected = lines[start - 1:start - 1 + count]
         rel = path.relative_to(self.root).as_posix()
+        hidden = _hidden_lines(rel, lines)
+        lines = ["[field not shown]" if number in hidden or _SENSITIVE_ASSIGN.search(line) else line
+                 for number, line in enumerate(lines)]
+        selected = lines[start - 1:start - 1 + count]
         return {
             "path": rel,
             "line_start": start,

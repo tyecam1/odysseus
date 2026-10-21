@@ -164,3 +164,31 @@ def test_thousands_of_related_records_give_a_bounded_response(tmp_path):
     assert len(hits[0]["candidates"]) <= _HIT_CANDIDATES
     assert hits[0]["candidates_omitted"] >= 4000
     assert len(adapter.evidence_text(resolution)) <= 6000
+
+
+# --- review round 2: compact JSON, unparsed layouts and read() go through the same gate -----------------------------------
+
+
+def test_compact_json_fields_outside_the_allowlist_are_hidden(tmp_path):
+    adapter = _adapter(tmp_path, {"household/cleaning/rota.json":
+                                  '[{"name":"descale kettle","area":"kitchen","contact_phone":"07700900123","dose":"50mg"}]'})
+    _no_canary(adapter.search("descale kettle", domain="cleaning", limit=50))
+    assert _unsafe_lines(['[{"name":"x","pin":"1"}]']) == {0}
+
+
+def test_unparsed_layout_lines_never_show_unlisted_fields(tmp_path):
+    adapter = _adapter(tmp_path, {
+        "household/food/stock.yaml": "items:\n  - name: tea\n    quantity: 1 box\n",
+        "household/food/legacy.yaml": "contact_phone: milk 07700900123\nmilk: 2 cartons\nnotes: milk goes off fast\n",
+    })
+    resolution = adapter.resolve_question("do we have milk in stock?", "food")
+    _no_canary(resolution["unparsed_lines"])
+    _no_canary(adapter.evidence_text(resolution))
+    assert any("2 cartons" in text for _, _, text in resolution["unparsed_lines"])  # a name-keyed line is still evidence
+
+
+def test_read_hides_unlisted_fields(tmp_path):
+    adapter = _adapter(tmp_path)
+    _no_canary(adapter.read("household/cleaning/rota.yaml"))
+    _no_canary(adapter.read("household/food/stock.yaml"))
+    assert "descale kettle" in adapter.read("household/cleaning/rota.yaml")["text"]
