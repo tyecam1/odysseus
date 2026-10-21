@@ -314,3 +314,63 @@ def test_unsafe_request_ids_are_refused_and_never_appear_in_a_trace(rid):
     result = controller.handle("pause", request_id=rid, explicit_command=True)
     assert result.status == "refused" and provider.writes() == [] and rid not in json.dumps(result.trace)
     assert controller.handle("devices", request_id=rid).trace["request_id"] == ""
+
+
+def test_a_provider_calling_back_into_the_controller_with_the_same_id_cannot_cause_a_second_write():
+    controller, provider = _ctl()
+    real = provider.pause
+    inner = []
+
+    def reentrant(device_id):
+        inner.append(controller.handle("pause", request_id="same", explicit_command=True))
+        real(device_id)
+
+    provider.pause = reentrant
+    outer = controller.handle("pause", request_id="same", explicit_command=True)
+    assert outer.status == "done" and provider.writes().count("pause") == 1
+    assert inner and inner[0].status == "refused" and "already running" in inner[0].message
+
+
+def test_a_slow_provider_does_not_block_an_unrelated_request_and_a_cross_thread_write_cannot_deadlock():
+    import threading
+    import time
+
+    controller, provider = _ctl()
+    release = threading.Event()
+    real = provider.pause
+
+    def slow(device_id):
+        release.wait(5)
+        real(device_id)
+
+    provider.pause = slow
+    done = {}
+    t1 = threading.Thread(target=lambda: done.setdefault("slow", controller.handle("pause", request_id="slow-1", explicit_command=True)))
+    t1.start()
+    time.sleep(0.1)
+    started = time.monotonic()
+    other = controller.handle("volume", request_id="other-1", explicit_command=True, volume=10)   # unrelated id while the slow call runs
+    assert other.status == "done" and time.monotonic() - started < 1.0
+    # a provider that waits for ANOTHER thread to write through the controller does not deadlock either
+    helper = threading.Thread(target=lambda: done.setdefault("helper", controller.handle("resume", request_id="helper-1", explicit_command=True)))
+    helper.start(); helper.join(2)
+    assert not helper.is_alive() and done["helper"].status in ("done", "done_unconfirmed")
+    release.set(); t1.join(5)
+    assert done["slow"].status in ("done", "done_unconfirmed") and provider.writes().count("pause") == 1
+
+
+def test_a_duplicate_on_another_thread_waits_for_the_first_answer_and_never_writes_twice():
+    import threading
+    import time
+
+    controller, provider = _ctl()
+    release = threading.Event()
+    real = provider.pause
+    provider.pause = lambda device_id: (release.wait(5), real(device_id))
+    results = []
+    first = threading.Thread(target=lambda: results.append(controller.handle("pause", request_id="dup", explicit_command=True)))
+    first.start(); time.sleep(0.1)
+    second = threading.Thread(target=lambda: results.append(controller.handle("pause", request_id="dup", explicit_command=True)))
+    second.start(); time.sleep(0.1)
+    release.set(); first.join(5); second.join(5)
+    assert len(results) == 2 and results[0] is results[1] and provider.writes().count("pause") == 1

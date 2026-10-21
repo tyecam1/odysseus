@@ -126,7 +126,11 @@ class MusicController:
         self.provider = provider
         self.max_volume = max(0, min(100, int(max_volume)))
         self._seen: Dict[str, Tuple[tuple, MusicResult]] = {}
-        self._lock = threading.RLock()  # one write at a time: "at most once per request id" must hold under concurrent callers
+        # at-most-once per request id: a short lock guards only the bookkeeping; the provider call itself runs with NO lock held,
+        # so a slow provider cannot block unrelated requests and a provider calling back into the controller cannot deadlock
+        self._lock = threading.Lock()
+        self._inflight: Dict[str, Tuple[tuple, threading.Event, int]] = {}
+        self._wait_seconds = 15.0
 
     # ------------------------------------------------------------------ entry point
     def handle(self, action: str, *, request_id: str, explicit_command: bool = False, guest: bool = False,
@@ -149,23 +153,45 @@ class MusicController:
             if not rid:
                 return self._result(action, "refused", "A write needs a request id of 1-64 letters, digits or . _ : - so it can never run twice.", "")
             fingerprint = (action, _text(query), _text(kind), _text(device), _text(uri), _volume_key(volume))
+            event = None
             with self._lock:
                 if rid in self._seen:
                     stored_fingerprint, stored = self._seen[rid]
                     if stored_fingerprint != fingerprint:
                         return self._result(action, "refused", "That request id was already used for a different command.", rid)
                     return stored  # a duplicate command: the same answer, no second provider call
-                if len(self._seen) >= _REMEMBERED_REQUESTS:
+                if rid in self._inflight:
+                    running_fingerprint, running_event, owner = self._inflight[rid]
+                    if running_fingerprint != fingerprint:
+                        return self._result(action, "refused", "That request id was already used for a different command.", rid)
+                    if owner == threading.get_ident():  # a provider calling back into the controller with the SAME id
+                        return self._result(action, "refused", "That command is already running.", rid)
+                    event = running_event
+                elif len(self._seen) + len(self._inflight) >= _REMEMBERED_REQUESTS:
                     return self._result(action, "refused", "Too many playback changes this session; start a new session to continue.", rid)
-                try:
-                    result = self._write(action, rid, _text(query), _text(kind) or "track", _text(device), _text(uri), volume)
-                except ProviderError as exc:
-                    result = self._failure(action, exc, rid)
-                except Exception:  # noqa: BLE001 - a provider binding bug is a typed result and is never retried under this id
-                    result = self._failure(action, ProviderError("unexpected"), rid)
-                if result.status in ("done", "done_unconfirmed", "error"):  # anything that may have reached the provider
-                    self._seen[rid] = (fingerprint, result)
-                return result
+                else:
+                    self._inflight[rid] = (fingerprint, threading.Event(), threading.get_ident())
+            if event is not None:  # the same command is running on another thread: wait for ITS answer, never run it twice
+                event.wait(self._wait_seconds)
+                with self._lock:
+                    if rid in self._seen and self._seen[rid][0] == fingerprint:
+                        return self._seen[rid][1]
+                return self._result(action, "refused", "That command is still running; try again shortly.", rid)
+            result = None
+            try:
+                result = self._write(action, rid, _text(query), _text(kind) or "track", _text(device), _text(uri), volume)
+            except ProviderError as exc:
+                result = self._failure(action, exc, rid)
+            except Exception:  # noqa: BLE001 - a provider binding bug is a typed result; the id stays burnt (it may have reached the provider)
+                result = self._failure(action, ProviderError("unexpected"), rid)
+            finally:  # the reservation is ALWAYS released and waiters are woken, even if something worse than an Exception escapes
+                with self._lock:
+                    running = self._inflight.pop(rid, None)
+                    if result is not None and result.status in ("done", "done_unconfirmed", "error"):
+                        self._seen[rid] = (fingerprint, result)
+                if running is not None:
+                    running[1].set()
+            return result
         except ProviderError as exc:
             return self._failure(str(action) if isinstance(action, str) else "", exc, "")
         except Exception:  # noqa: BLE001 - last resort: still a typed result, never an exception
