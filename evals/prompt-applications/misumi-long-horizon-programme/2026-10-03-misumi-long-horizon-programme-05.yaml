@@ -1,0 +1,97 @@
+schema_version: 1
+application_id: 2026-10-03-misumi-long-horizon-programme-05
+prompt_id: misumi-long-horizon-programme
+prompt_version: 3
+repository: tyecam1/odysseus
+# Cross-repository programme: tyecam1/odysseus (dev) and tyecam1/misumi (main).
+branch: dev
+# Clock artefacts: the application spans 2026-10-03 to 2026-10-04 and is still open. The trace is
+# persisted at the 2026-10-04 continuation boundary (a coordinator-substitution and trace-repair
+# point), not at a stop; times are approximate.
+session_started_at: "2026-10-03T09:00:00Z"
+session_ended_at: "2026-10-04T11:20:00Z"
+start_commit: b57d9fa4a8a9662f0dabdb2ea783fb3a3ff0a9e0
+end_commit: edcc73e46f4c39558ff1819fd3e6bdcc84a37954
+outcome_status: partial
+stop_reason: >-
+  Not a stop: this trace is persisted mid-application because the previous hand-back left no -05 trace at all (the
+  recurring trace-not-persisted failure class, second occurrence) and because the coordinator runtime changed. Work done
+  in the application so far: Windows-invalid artefact paths fixed and proven on a real Windows host; Seed Order steering
+  delivered and verified live (24 of 24 through the box proxy, persistence off); the canonical home Misumi clone
+  reconciled under explicit operator authorisation; the reboot-incident defect owned, diagnosed and closed with a
+  machine-start lifecycle (S4U boot tasks, independent guard) live-proven across three reboots and kill/maintenance
+  drills; the truthful RUNTIME OFFLINE interface state delivered; backlog and task dispositions completed on both sides;
+  the Sol household-decisions review acted on (:4600 retired from normal use, memory policy v0.2 proposed with named
+  gaps, :4500 kept); and the kiosk voice dependency :4500 decoupled from interactive logon by re-registering its
+  scheduled task with an S4U principal and a boot trigger (S4U execution proven live; boot trigger proven across two
+  operator-approved reboots; audible kiosk acceptance remains human). Remaining executable frontier: none identified beyond the
+  trace/evidence reconciliation carried by this commit. Remaining gates are human or physical: physical kiosk
+  acceptance, the off-site backup provider/path with the public age recipient and permission to install age, the lab
+  sudo deployment (target re-resolved at presentation time; lab still runs d2fc0bac), ratification of memory policy
+  v0.2, and the console/sign-in decisions recorded in the private Misumi repository. Only after those: final
+  reconciliation, the mandatory Opus synthesis, fresh-context Sol #3, closeout documents, and activation of the
+  persona-growth successor.
+commits:
+  - "odysseus ea45b2680b (PR #78 merged): Windows-safe artefact paths, guard test, plain-clone proof on Windows"
+  - "odysseus 62d4a55ec8 (PR #79 merged): Seed Order raw-note preservation and candidate labelling enforcement"
+  - "odysseus a62728a4d9 (PR #80 merged): persona-development scope transferred to the persona-growth successor"
+  - "odysseus 5c715fc243 (PR #84 merged): machine-start lifecycle, independent guard, governed maintenance flag"
+  - "odysseus 6b4c91e07e (PR #85 merged): S4U principal registered with the plain user name"
+  - "odysseus 4ae3bb272b (PR #86 merged): guard Status JSON cleaned; boot-independence testing documented"
+  - "odysseus edcc73e46f (PR #88 merged): household sign-in detail removed from public docs (privacy scrub)"
+  - "misumi 5ac5c9510b (PR #48 merged): persona scope transfer, full card dispositions, memory-policy wording"
+  - "misumi ab2acb126a (PR #49 merged): Seed Order verified live 24/24; scorer precision fix; seed-core cards closed"
+  - "misumi 38aec17c0e (PR #50 merged): host_auto_pull loud and non-zero on a dirty canonical tree"
+  - "misumi 86e71feed0 (PR #53 merged): start-misumi-agent defers to the supervised Ollama-Misumi task"
+  - "misumi 40c3bc4eca (PR #55 merged): Sol review acted on - policy v0.2, host exposure findings, voice services, backup plan"
+  - "misumi 491b88c233 (PR #56 merged): Sol household-decisions review recorded"
+  - "misumi (PR with this trace): 2026-10-04-tts-login-coupling-resolution.md audit and the -05 continuation trace/evidence reconciliation in odysseus"
+models_routes:
+  - "Sonnet orchestrator (Claude Code, claude-sonnet-5-5 as stated by the session) coordinated the main -05 segment, 2026-10-03 to 2026-10-04 early: all implementation, deployment, acceptance and Sol-review response work recorded above"
+  - "GLM Flash (glm-5.3-flash) coordinates the -05 continuation segment from 2026-10-04 (trace/evidence reconciliation and the :4500 lifecycle repair): a temporary substitution for Sonnet while Claude subscription capacity is exhausted; recorded as the runtime model only - the coordinator role contract is unchanged, no Opus-only gate arose in this segment, and the mandatory Opus final synthesis at closeout is unaffected"
+  - "GLM (stronger implementation/diagnosis lane): not invoked; not needed"
+  - "Opus: not invoked in this application; no architecture decision arose (the ratified Phase 4 ADR and the machine-start design from the live diagnosis did not need one)"
+  - "Sol: household-decisions review 2026-10-04 via codex gpt-6-sol on the lab, read-only (misumi docs/audits/2026-10-04-sol-household-decisions.md); the final fresh-context programme review (#3) is deliberately held by the operator until lab-deployment and physical-kiosk evidence exist"
+  - "Seed Order verification: requests from the interface box to its own loopback /agent proxy (service credential never read, printed, copied or persisted; persist_turn false, retention_mode off, history_mode off on every request); route reported by the runtime: qwen3:8b on home"
+  - "Deterministic shells: lab as user agent over Tailscale SSH inside a leased worktree; home and the interface PC over the home LAN with pinned host keys; GitHub through gh and the Git Data API with no local Odysseus checkout on the laptop"
+verification:
+  - "deterministic: new unit tests for path safety, Seed Order enforcement, host_auto_pull dirtiness, guard behaviour (nine PowerShell behaviour tests with mutants caught) and the truthful offline state; Misumi scripts/validate.py passing; Odysseus CI green on the merged PRs"
+  - "live acceptance (reboot persistence, the reopened acceptance owner): uvicorn kill recovered in 21 s; whole-service kill 169 s; Ollama kill 202 s; maintenance mode held both services stopped for about 7 minutes with 6 suppressed rows and 0 recoveries, then restored both in about 15 s; three real reboots recovered in 109 s, 97 s and 112 s as seen from the interface box; no duplicate instances; the permanent archive (212 events) and retention policy intact; speech queued during an outage was acknowledged 14 s after recovery; the box page showed RUNTIME OFFLINE during the outage"
+  - "live acceptance (:4500 lifecycle, this continuation): with the rollback XML captured first, the re-registered S4U task started the agent after the previous instance was stopped - healthy in about 6 s in a non-interactive session, TTS enabled (kokoro, am_fenrir), a real POST /tts synthesized and returned an audio URL, the task settled Ready with LastTaskResult 0, and the box reached /health with 200 afterwards; two operator-approved reboots then proved the boot trigger (logon trigger won by 3 s with auto sign-in on, boot firing correctly ignored; with the logon trigger temporarily removed the boot-only task started the agent at boot, healthy with TTS, box 200 - full definition restored and verified)"
+  - "honest reporting: the scheduler-log reason lines for the boot-only launch were overwritten by the operational-log wrap during the boot flood, so the boot-trigger proof is by construction (the boot trigger was the only registered trigger) rather than by a logged launch-reason event; audible kiosk acceptance remains physical and human; a live destructive transcript deletion has deliberately never been exercised; the direct dev-loop probe (steering contribution without the deterministic step) was denied by the auto-mode classifier and left unmeasured; the cause of the 2026-10-03 18:00 process deaths is unknown (scheduler log was disabled at the time; it is now enabled); a memory policy v0.2 ratification is recorded as proposed, not ratified"
+  - "access and authority: home canonical-clone reconciliation scoped to the three audited files with rollback copies, under explicit operator authorisation; the game process was closed only on the operator's explicit instruction after a classifier denial was respected; the box bridge privacy pause set by a household member was not cleared and correctly refused a synthetic utterance; no auto-mode denial was retried in another form; no household security-posture detail was written to the public repository"
+failure_tags:
+  - application_trace_not_persisted_before_handback_recurred
+  - reboot_persistence_defect_found_by_household_incident_not_design_review
+  - first_home_cutover_failed_on_userdomain_assumption
+  - first_box_deploy_rolled_back_on_tls_healthcheck_hostname
+  - direct_dev_loop_probe_denied_steering_contribution_left_unmeasured
+rating:
+  scale: 1-5
+  goal_progress: 4
+  correctness_verification: 4
+  authority_scope_discipline: 5
+  routing_resource_efficiency: 3
+  continuity_handoff_quality: 3
+  agent_overall: 3.8
+  operator_overall: null
+  operator_note: null
+prompt_revision_recommended: false
+revision_reason: >-
+  Reinforce v3; no child. The deterministic planner's output for the failure tags is overridden and the override is
+  recorded in the evolution event. The transport-pitfall class did not recur: the reusable helpers (publish_tree.py,
+  the deploy scripts' own safety nets) absorbed it - one TLS-hostname mistake was caught by the deploy script's
+  rollback safety net and fixed on re-run, which is the tooling fix working as designed. The genuinely recurring class
+  is trace discipline: v3 already contains the pre-stop rule to persist the trace and evolution event before a
+  hand-back, and the -05 hand-back still left no trace (second occurrence after -02). That is a lapse in applying an
+  existing rule, not missing prompt content; if it recurs a third time, the fix should move out of prompt text into
+  tooling (for example extending the publish/stop checklist script to fail closed without a trace), as was done for
+  the transport class. The reboot-persistence tag records that the defect was found by a household incident rather
+  than by design review of the logon-triggered lifecycle; the v3 evolution target about inventorying deployed state
+  was applied, and the machine-start redesign is the corrective outcome, so no new prompt text is added.
+evidence:
+  - "automation/review/misumi-long-horizon-programme-evidence.md (application -05 sections and the -05c reconciliation); evals/prompt-evolution/misumi-long-horizon-programme.yaml (-05 application and reinforcement event); config/initialising-prompts.yaml (v3 application_evidence)"
+  - "misumi docs/audits/2026-10-04-sol-household-decisions.md, docs/memory-policy.md v0.2 (proposed with named gaps), docs/audits/2026-10-03-backlog-final-disposition.md, and the 2026-10-04-tts-login-coupling-resolution.md audit"
+  - "household runtime on home runs release 6b4c91e07ef5 under boot/S4U tasks with the independent guard; interface box runs 20261004-005142-b4833a09a21e; :4500 TTS dependency now starts under an S4U boot task (rollback XML on the host at C:\\Users\\User\\tts-login-coupling-20261004\\Misumi-Agent-Stack.before.xml)"
+  - "Open human or physical gates carried forward: physical kiosk acceptance; backup provider/path + public age recipient + permission to install age; lab sudo deployment (re-resolve dev first); ratification of memory policy v0.2; console/sign-in and exposure decisions recorded privately; then Opus synthesis and Sol #3 before closeout and activation of the persona-growth successor"
+  - "Operator ratings: none supplied"

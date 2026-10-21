@@ -1,0 +1,45 @@
+# Conversational ratification live proof (2026-10-06)
+
+Release `331cda1f82` (includes odysseus #105) on a labelled side-by-side `:1420` instance with SCRATCH routing and
+persona-state roots; household stores untouched. Real model, real HTTP. Script: `evals/misumi-persona-state/demo-12-dialogue-ratification.ps1`.
+
+| Part | Claim | Observed |
+| --- | --- | --- |
+| A1-A3 | Feedback is shadow-only until repeated; the offer is appended on the turn that makes the candidate eligible | corrections 1 and 2: `captured` state `shadow-only`; correction 3: candidate `eligible` / `user-ratification`, the reply text ends with the fixed-template question ("By the way, you have steered me this way 3 times: Misato: keep answers brief. Shall I make that permanent? Say yes, no, or later.") and `ratification_offer` is returned |
+| A4 | A bare `yes` ratifies with user-instruction authority, with no model call | `source: ratification-dialogue`, `state: active`; store shows `misato/response_depth=brief auth=user_instruction` |
+| A5 | The ratified style applies | next request: `persona_state.applied` source `revision`, `effective: true` |
+| A6-A7 | `undo that` reverses it | `state: rolled-back`; store empty (candidate `shadow` / `rolled-back`); the next request carries no style |
+| B1-B3 | A routing candidate is offered the same way; `no` is a terminal rejection and changes nothing | offer "send cleaning, rota questions to Jin" on the turn that made it eligible; `no` -> `rejected`; auto route for the same prompt stays `misato` via `routing-contract-v0.1` |
+| C1-C3 | Moving on withdraws the offer; a later `yes` ratifies nothing | an unrelated question was answered normally; the following `yes` got an ordinary model reply (`ratification: null`); the `technical_depth` candidate stayed `eligible` |
+| C4 | An embedded yes ("yes but keep the answers long") is not an answer | ordinary reply; store unchanged |
+
+Observations kept: the household-grounded reply to the routing offer's turn (`source: household-read-only`) also carried the appended
+question, as designed; after `undo that` the confirming reply is attributed to the head persona because no offer was pending.
+
+## Raw output
+
+```
+scratch-up release=331cda1f82
+A1-first-correction {"persona_state":{"applied":[{"dimension":"response_depth","value":"brief","source":"turn_request","matched":"too long"}],"effective":true,"captured":[{"dimension":"response_depth","value":"brief","scope":"misato","evidence_type":"correction","evidence_id":"ps-ev-a1ede2997152","candidate_id":"psc-bde93df8e476","candidate_status":"shadow","state":"shadow-only"}]},"offer":null,"source":"model","persona":"misato","text":"Apologies for the length. Let me know if you need anything specific or have a task in mind.","status":200,"ratification":null}
+A2-second-correction {"persona_state":{"applied":[{"dimension":"response_depth","value":"brief","source":"turn_request","matched":"too long"}],"effective":true,"captured":[{"dimension":"response_depth","value":"brief","scope":"misato","evidence_type":"correction","evidence_id":"ps-ev-ee86efdbc2d8","candidate_id":"psc-bde93df8e476","candidate_status":"shadow","state":"shadow-only"}]},"offer":null,"source":"model","persona":"misato","text":"I\u0027m here to help. Let me know what you need.","status":200,"ratification":null}
+A3-third-correction-offer-appended {"persona_state":{"applied":[{"dimension":"response_depth","value":"brief","source":"turn_request","matched":"too long"}],"effective":true,"captured":[{"dimension":"response_depth","value":"brief","scope":"misato","evidence_type":"correction","evidence_id":"ps-ev-92bfa094ac2c","candidate_id":"psc-bde93df8e476","candidate_status":"eligible","state":"eligible-awaiting-ratification"}]},"offer":{"kind":"persona-state","candidate_id":"psc-bde93df8e476","summary":"Misato: keep answers brief","question":"By the way, you have steered me this way 3 times: Misato: keep answers brief. Shall I make that permanent? Say yes, no, or later.","answers":["yes","no","later"]},"source":"model","persona":"misato","text":"Apologies for the length. Let me know what you need next.\n\nBy the way, you have steered me this way 3 times: Misato: keep answers brief. Shall I make that permanent? Say yes, no, or later.","status":200,"ratification":null}
+A3b-state-before-answer {"routing_candidates":[],"persona_state_active":[],"persona_state_candidates":["misato/response_depth=brief:eligible/user-ratification"],"routing_active":[]}
+A4-yes {"persona_state":null,"offer":null,"source":"ratification-dialogue","persona":"misato","text":"Done: Misato: keep answers brief. Say \u0027undo that\u0027 to reverse it.","status":200,"ratification":{"verdict":"affirm","state":"active","kind":"persona-state","revision_id":"psr-b2e6cf506219","candidate_id":"psc-bde93df8e476"}}
+A4b-state-after-yes {"routing_candidates":[],"persona_state_active":["misato/response_depth=brief auth=user_instruction"],"persona_state_candidates":["misato/response_depth=brief:active/"],"routing_active":[]}
+A5-style-applied {"persona_state":{"applied":[{"dimension":"response_depth","value":"brief","source":"revision","scope":"misato","revision_id":"psr-b2e6cf506219"}],"effective":true,"captured":null},"offer":null,"source":"model","persona":"misato","text":"A rainbow forms when sunlight passes through water droplets in the air, refracting (bending) the light into different colors. The light is then reflected inside the droplet and dispersed into a spectrum of colors, creating the visible arc of a rainbow.","status":200,"ratification":null}
+A6-undo {"persona_state":null,"offer":null,"source":"ratification-dialogue","persona":"aoteru","text":"Undone: that change is rolled back.","status":200,"ratification":{"verdict":"undo","state":"rolled-back","revision_id":"psr-b2e6cf506219"}}
+A6b-state-after-undo {"routing_candidates":[],"persona_state_active":[],"persona_state_candidates":["misato/response_depth=brief:shadow/rolled-back"],"routing_active":[]}
+A7-style-gone {"persona_state":null,"offer":null,"source":"model","persona":"misato","text":"A rainbow forms when sunlight is refracted, or bent, as it enters a raindrop, then reflected inside the raindrop, and finally refracted again as it exits the raindrop. This process separates the sunlight into its component colors, creating the spectrum of colo","status":200,"ratification":null}
+B1-routing-offer-on-the-turn-that-made-it-eligible {"persona_state":null,"offer":{"kind":"routing","candidate_id":"aff-f145f9cb29ee","summary":"send cleaning, rota questions to Jin","question":"By the way, you have steered me this way 3 times: send cleaning, rota questions to Jin. Shall I make that permanent? Say yes, no, or later.","answers":["yes","no","later"]},"source":"household-read-only","persona":"jin","text":"From household/cleaning/rota.md line 1: # Cleaning rota\n\nBy the way, you have steered me this way 3 times: send cleaning, rota questions to Jin. Shall I make that permanent? Say yes, no, or later.","status":200,"ratification":null}
+B2-no {"persona_state":null,"offer":null,"source":"ratification-dialogue","persona":"jin","text":"Understood. I will not make that change.","status":200,"ratification":{"verdict":"decline","state":"rejected","kind":"routing","candidate_id":"aff-f145f9cb29ee"}}
+B2b-state {"routing_candidates":["cleaning+rota-\u003ejin:rejected/"],"persona_state_active":[],"persona_state_candidates":["misato/response_depth=brief:shadow/rolled-back"],"routing_active":[]}
+B3-route-unchanged {"persona":"misato","method":"routing-contract-v0.1"}
+C1-offer-pending {"state":["misato/response_depth=brief:shadow/rolled-back","misato/technical_depth=plain:eligible/user-ratification"]}
+C2-moved-on {"persona_state":null,"offer":null,"source":"model","persona":"misato","text":"A good name for a cat could be \u0027Whiskers\u0027 or \u0027Shadow\u0027.","status":200,"ratification":null}
+C3-late-yes-ratifies-nothing {"persona_state":null,"offer":null,"source":"model","persona":"misato","text":"Understood. How can I assist you?","status":200,"ratification":null}
+C3b-state {"routing_candidates":["cleaning+rota-\u003ejin:rejected/"],"persona_state_active":[],"persona_state_candidates":["misato/response_depth=brief:shadow/rolled-back","misato/technical_depth=plain:eligible/user-ratification"],"routing_active":[]}
+C4-embedded-yes {"persona_state":null,"offer":null,"source":"model","persona":"misato","text":"Understood. I will provide detailed and comprehensive responses while adhering to the structured guidelines and operational protocols established by the Misumi Seed Order. My responses will be thoughtful, thorough, and focused on the operational and procedural","status":200,"ratification":null}
+C4b-state {"routing_candidates":["cleaning+rota-\u003ejin:rejected/"],"persona_state_active":[],"persona_state_candidates":["misato/response_depth=brief:shadow/rolled-back","misato/technical_depth=plain:eligible/user-ratification"],"routing_active":[]}
+scratch-stopped listeners=0
+DONE (household stores untouched)
+```

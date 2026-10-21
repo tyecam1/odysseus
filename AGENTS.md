@@ -30,6 +30,16 @@ otherwise eligible unit.
 contract. Do not duplicate or override it here.
 
 
+## Temporary operating priority: ship the existing backlog (2026-10-17)
+
+**Operator instruction; effective until the accepted backlog is shipped, or the operator explicitly changes this priority.** Shipping takes precedence over optional refinement, optimisation, refactoring, speculative research, workflow redesign, prompt tuning, new feature ideation and new planning artifacts. This changes *work selection*, not safety, authority or acceptance thresholds.
+
+- **Scope and baseline:** apply to Odysseus-owned work in `automation/review/agent-tasks/{ready,inbox,blocked}` and executable workstreams in its canonical programme queues. At the 2026-10-17 baseline (`dev` at `e8ba6a2e08084f857b2739c99d8fa35318cea6b0`) there were 8 `ready`, 15 `inbox`, and 8 `blocked` agent-task cards. Reconcile with live state; some inbox cards may be duplicate, superseded or already delivered. Domain-specific queues remain owned by their domain repositories.
+- **Select work to deliver:** finish already-started and `ready` items that have a viable end-to-end delivery path before starting an unrelated improvement. Triage `inbox` only enough to identify accepted, high-value shippable work, duplicates and genuine dependencies. Choose the next slice by *time to verified delivery*, user value and dependency unblocking, rather than elegance of the architecture. Prefer a small complete vertical result over an extensively polished partial one.
+- **Meaning of shipped:** acceptance conditions satisfied; minimum relevant tests and safety/security checks pass; changes merged and deployed/real-path exercised when the task requires it; queue/programme status and evidence updated. A draft, plan, PR, untested implementation, or a status-only move to `done` is **not shipped**. Do not weaken existing tests, review/ratification conditions, write leases, release controls, research validity or evidence floors to gain throughput.
+- **Blockers and new work:** record an exact external blocker once and immediately advance another eligible item. Keep blocked accepted work in the unfinished backlog. Capture newly proposed nonessential work in `inbox` but defer execution; admit new work ahead of existing items only to fix a safety/correctness failure, fulfil an acceptance gate, or unblock delivery. Do not repeatedly optimise the delivery machinery itself unless measurement shows it blocks shipping.
+- **Progress and exit:** each dispatch/review should identify the concrete item and expected shipping evidence; report counts of shipped, accepted remaining, untriaged, and blocked without gaming classifications. Maintain shipping-first until **all accepted baseline work and essential delivery dependencies** are genuinely shipped or individually closed as duplicate/obsolete/rejected with recorded justification and required authority. An external blocker, a green test suite, or an empty `ready` directory alone does not terminate this policy. Revert to normal refinement priority only after a documented final backlog reconciliation or explicit operator instruction.
+
 ## Global initialising prompt register
 
 Odysseus owns the cross-repository initialising-prompt register:
