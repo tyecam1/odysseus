@@ -77,6 +77,21 @@ def _correction(store: RoutingAdaptationStore, **kw):
     )
 
 
+def _instruct_and_ratify(store: RoutingAdaptationStore, prompt: str, persona: str, session: str = "s"):
+    """A free-text durable instruction followed by its ratification.
+
+    Round 4: the instruction alone is only an offer (``durable_request``; nothing active). These tests exercise what an
+    ACTIVE mapping does, so they ratify it explicitly with the operator act - before round 4 the phrase promoted by itself.
+    """
+    outcome = record_durable_instruction(store, prompt=prompt, named_persona=persona, session_id=session, owner=None)
+    assert outcome["evidence_type"] == "durable_request" and outcome["state"] == "offered"
+    assert store.active_overlays() == [] or store.active_revision_for_cue(outcome["cue"]) is None
+    revision = store.promote(outcome["candidate_id"], authorisation={
+        "type": "operator_ratification", "principal": "test-operator", "via": "unit-test"})
+    outcome.update({"state": "active", "promotion": {"authorised_by": "operator_ratification", "revision_id": revision["revision_id"]}})
+    return outcome
+
+
 # ---------- evidence ----------
 
 def test_evidence_is_immutable_append(tmp_path: Path):
@@ -126,10 +141,7 @@ def test_repeated_corrections_eligible_but_not_promoted(tmp_path: Path):
     for session in ("a", "b", "c"):
         # Simulate the session state respond() would have noted: an auto
         # route to Misato just before the user manually chose Jin.
-        store._last_auto_route[session] = {
-            "prompt": "Check the cleaning rota", "persona": "misato",
-            "reasons": ["cleaning", "rota"], "request_id": f"r-{session}", "at": time.time(),
-        }
+        store.note_auto_route(session, "Check the cleaning rota", "misato", ["cleaning", "rota"], f"r-{session}", persisted=True, owner=None)
         record_manual_choice(
             store, prompt=f"ask Jin about the cleaning rota {session}", chosen_persona="jin",
             session_id=session, owner=None,
@@ -203,10 +215,7 @@ def test_silence_never_promotes_an_eligible_candidate(tmp_path: Path):
     root = tmp_path / "routing-state"
     store = RoutingAdaptationStore(root)
     for session in ("a", "b", "c"):
-        store._last_auto_route[session] = {
-            "prompt": "Check the cleaning rota", "persona": "misato",
-            "reasons": ["cleaning", "rota"], "request_id": f"r-{session}", "at": time.time(),
-        }
+        store.note_auto_route(session, "Check the cleaning rota", "misato", ["cleaning", "rota"], f"r-{session}", persisted=True, owner=None)
         record_manual_choice(
             store, prompt=f"ask Jin about the cleaning rota {session}", chosen_persona="jin",
             session_id=session, owner=None,
@@ -240,13 +249,10 @@ def test_silence_never_promotes_an_eligible_candidate(tmp_path: Path):
 
 def test_explicit_durable_promotes_and_changes_overlay(tmp_path: Path):
     store = _store(tmp_path)
-    outcome = record_durable_instruction(
-        store, prompt="For cleaning rota questions, use Misato from now on.",
-        named_persona="misato", session_id="s1", owner=None,
-    )
-    # "cleaning" cue extracted; candidate eligible; promotion authorised.
+    outcome = _instruct_and_ratify(store, "For cleaning rota questions, use Misato from now on.", "misato", "s1")
+    # "cleaning" cue extracted; candidate offered; promotion only by the ratification act.
     assert outcome["state"] == "active"
-    assert outcome["promotion"]["authorised_by"] == "user_instruction"
+    assert outcome["promotion"]["authorised_by"] == "operator_ratification"
     overlays = store.active_overlays()
     assert len(overlays) == 1 and overlays[0]["cue"] == outcome["cue"]
 
@@ -287,10 +293,7 @@ def test_reserved_matters_cannot_be_captured_by_learned_state(tmp_path: Path):
 def test_state_survives_restart(tmp_path: Path):
     root = tmp_path / "routing-state"
     store = RoutingAdaptationStore(root)
-    outcome = record_durable_instruction(
-        store, prompt="For watering questions use Ginko from now on.",
-        named_persona="ginko", session_id="s", owner=None,
-    )
+    outcome = _instruct_and_ratify(store, "For watering questions use Ginko from now on.", "ginko")
     revision_id = outcome["promotion"]["revision_id"]
     # A new instance = a restarted process reading the same files.
     revived = RoutingAdaptationStore(root)
@@ -305,10 +308,7 @@ def test_state_survives_restart(tmp_path: Path):
 
 def test_shadow_evaluation_buckets_and_spillover(tmp_path: Path):
     store = _store(tmp_path)
-    outcome = record_durable_instruction(
-        store, prompt="For cleaning questions use Misato from now on.",
-        named_persona="misato", session_id="s", owner=None,
-    )
+    outcome = _instruct_and_ratify(store, "For cleaning questions use Misato from now on.", "misato")
     store.rollback_revision(outcome["promotion"]["revision_id"], "demo")
     candidate = store.get_candidate(["cleaning"])
 
@@ -429,18 +429,30 @@ def test_respond_durable_preference_promotes_and_reroutes(tmp_path, monkeypatch)
         },
     ).json()
     note = instruction["routing_adaptation"]
-    assert note["evidence_type"] == "explicit_durable"
-    assert note["state"] == "active"
-    assert note["promotion"]["authorised_by"] == "user_instruction"
+    # Round 4: the phrase is a durable REQUEST, offered in the same reply; the bare "yes" is the authority.
+    assert note["evidence_type"] == "durable_request"
+    assert note["state"] == "offered"
+    assert instruction["ratification_offer"]["candidate_id"] == note["candidate_id"]
+    pending = client.post(
+        "/misumi/respond",
+        json={"prompt": "the cleaning rota needs updating", "persona": "auto", "session_id": "sess-other"},
+    ).json()
+    assert pending["persona"] == "misato"  # not in force before the yes
+    answer = client.post(
+        "/misumi/respond", json={"prompt": "yes", "persona": "auto", "session_id": "sess-3"},
+    ).json()
+    assert answer["ratification"]["state"] == "active" and answer["ratification"]["kind"] == "routing"
+    note["promotion"] = {"revision_id": answer["ratification"]["revision_id"]}
 
     after = client.post(
         "/misumi/respond",
         json={"prompt": "the cleaning rota needs updating", "persona": "auto", "session_id": "sess-3"},
     ).json()
-    assert after["persona"] == "jin"
-    assert after["routing"]["method"] == "routing-contract-v0.2+learned-revision"
-    assert after["routing"]["learned"]["revision_id"] == note["promotion"]["revision_id"]
-    assert after["routing"]["base_selected"] == "misato"
+    # Round 8: a learned route is an advisory consult - Misato stays lead, Jin is consulted.
+    assert after["persona"] == "misato"
+    assert after["routing"]["method"] == "routing-contract-v0.2"
+    assert after["routing"]["learned_consult"]["revision_id"] == note["promotion"]["revision_id"]
+    assert after["routing"]["learned_consult"]["persona"] == "jin" and after["routing"]["learned_consult"]["lead"] == "misato"
 
     # New process, same state root: the learned route survives restart.
     restarted = _client(tmp_path, monkeypatch)
@@ -448,8 +460,8 @@ def test_respond_durable_preference_promotes_and_reroutes(tmp_path, monkeypatch)
         "/misumi/respond",
         json={"prompt": "cleaning roster for next week", "persona": "auto", "session_id": "sess-4"},
     ).json()
-    assert persisted["persona"] == "jin"
-    assert persisted["routing"]["learned"]["revision_id"] == note["promotion"]["revision_id"]
+    assert persisted["persona"] != "jin"
+    assert persisted["routing"]["learned_consult"]["revision_id"] == note["promotion"]["revision_id"]
 
     # Rollback restores base routing; evidence and candidate stay on disk.
     state_root = tmp_path / "routing-state"
@@ -459,7 +471,7 @@ def test_respond_durable_preference_promotes_and_reroutes(tmp_path, monkeypatch)
         "/misumi/respond",
         json={"prompt": "the cleaning rota needs updating", "persona": "auto", "session_id": "sess-3"},
     ).json()
-    assert rolled["persona"] == "misato"
+    assert rolled["persona"] == "misato" and "learned_consult" not in rolled["routing"]
     assert len(store.list_evidence()) >= 1  # history preserved
 
 
@@ -500,10 +512,7 @@ def test_adaptation_kill_switch(tmp_path, monkeypatch):
 def test_operator_ratification_promotes_repetition_eligible_candidate(tmp_path: Path):
     store = _store(tmp_path)
     for session in ("a", "b", "c"):
-        store._last_auto_route[session] = {
-            "prompt": "Check the cleaning rota", "persona": "misato",
-            "reasons": ["cleaning", "rota"], "request_id": f"r-{session}", "at": time.time(),
-        }
+        store.note_auto_route(session, "Check the cleaning rota", "misato", ["cleaning", "rota"], f"r-{session}", persisted=True, owner=None)
         record_manual_choice(
             store, prompt=f"ask Jin about the cleaning rota {session}", chosen_persona="jin",
             session_id=session, owner=None,
@@ -555,10 +564,7 @@ def test_reject_is_terminal_and_preserves_history(tmp_path: Path):
 
 def test_reject_active_candidate_refused(tmp_path: Path):
     store = _store(tmp_path)
-    outcome = record_durable_instruction(
-        store, prompt="For watering questions use Ginko from now on.",
-        named_persona="ginko", session_id="s", owner=None,
-    )
+    outcome = _instruct_and_ratify(store, "For watering questions use Ginko from now on.", "ginko")
     assert outcome["state"] == "active"
     candidate = store.get_candidate(outcome["cue"])
     try:
@@ -591,9 +597,7 @@ def test_routing_api_inspect_promote_rollback(tmp_path, monkeypatch):
     # Drive it to eligible and ratify through the API.
     store = RoutingAdaptationStore(tmp_path / "routing-state")
     for session in ("x", "y", "z"):
-        store._last_auto_route[session] = {
-            "prompt": "Check the cleaning rota", "persona": "misato",
-            "reasons": ["cleaning", "rota"], "request_id": f"r-{session}", "at": time.time()}
+        store.note_auto_route(session, "Check the cleaning rota", "misato", ["cleaning", "rota"], f"r-{session}", persisted=True, owner=None)
         record_manual_choice(store, prompt=f"ask Jin about the cleaning {session}",
                              chosen_persona="jin", session_id=session, owner=None)
     eligible = store.get_candidate(["cleaning", "rota"])
@@ -606,8 +610,8 @@ def test_routing_api_inspect_promote_rollback(tmp_path, monkeypatch):
 
     rerouted = client.post("/misumi/respond", json={
         "prompt": "the cleaning rota needs updating", "persona": "auto", "session_id": "ra-2"}).json()
-    assert rerouted["persona"] == "jin"
-    assert rerouted["routing"]["learned"]["revision_id"] == revision_id
+    assert rerouted["persona"] == "misato" and rerouted["routing"]["learned_consult"]["persona"] == "jin"
+    assert rerouted["routing"]["learned_consult"]["revision_id"] == revision_id
 
     rolled = client.post(
         f"/misumi/routing/revisions/{revision_id}/rollback",
@@ -615,7 +619,7 @@ def test_routing_api_inspect_promote_rollback(tmp_path, monkeypatch):
     assert rolled.status_code == 200
     restored = client.post("/misumi/respond", json={
         "prompt": "the cleaning rota needs updating", "persona": "auto", "session_id": "ra-2"}).json()
-    assert restored["persona"] == "misato"
+    assert restored["persona"] == "misato" and "learned_consult" not in restored["routing"]
 
     rejected = client.post(
         f"/misumi/routing/candidates/{target['candidate_id']}/reject",

@@ -8,7 +8,7 @@ priority: high
 task_type: skill-engineering
 created_by: gpt-5.6-sol
 created_at: 2026-10-01T11:20:00+01:00
-updated_at: 2026-10-01T11:20:00+01:00
+updated_at: 2026-10-19T16:17:00+01:00
 executor: claude_subscription
 execution_mode: implementation
 architecture: single-plus-verifier
@@ -43,6 +43,7 @@ inputs:
   - AGENTS.md
   - docs/aoteru-model-host-routing-contract.md
   - automation/review/agent-tasks/blocked/2026-09-02-claude-chatgpt-project-browser-bridge.agent-task.md
+  - automation/review/agent-tasks/ready/2026-10-19-claude-brave-chatgpt-query-adapter.agent-task.md
   - tyecam1/obsidian-PhD:automation/config/google_scholar_policy.yaml
   - tyecam1/obsidian-PhD:.agents/skills/citation-management/references/google_scholar_search.md
   - tyecam1/obsidian-PhD:.agents/skills/zotero-kb/SKILL.md
@@ -69,6 +70,10 @@ notes: "This task narrows the stale Scholar gateway into high-value finding-targ
 ---
 
 # Claude-in-Chrome Scholar finding retrieval
+
+## Companion browser provider
+
+ChatGPT query support is a separate high-priority ready task at `automation/review/agent-tasks/ready/2026-10-19-claude-brave-chatgpt-query-adapter.agent-task.md`. Implement both using the same Claude-in-Chrome/Brave browser connection and security-health checks. Keep Scholar query quota, search admission and evidence verification distinct from ChatGPT contextual model consultation. Neither provider may be called operational until independently attested.
 
 ## Goal
 
