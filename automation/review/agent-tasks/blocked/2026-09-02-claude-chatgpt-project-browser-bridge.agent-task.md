@@ -74,6 +74,10 @@ supersedes: []
 duplicates: []
 notes: "Use ChatGPT Projects as a bounded historical-context query surface, not as a new source of canonical truth. The repo copy of the skill must be the controlled source; any local Claude deployment should be a reproducible mirror. Never automate login, extract cookies/tokens, bypass CAPTCHA/anti-bot controls, or silently fall back to paid OpenAI API usage."
 ---
+# Historical bridge specification
+
+**Superseded for execution by:** `automation/review/agent-tasks/ready/2026-10-19-claude-brave-chatgpt-query-adapter.agent-task.md` (2026-10-19, high priority, ready). Retain this blocked card as historical scope/provenance only. Do not independently dispatch or build its former transport. The live successor reuses the ready Scholar Labs Claude-in-Chrome/Brave browser path and incorporates current site-terms gates.
+
 # Claude to ChatGPT Project browser bridge
 
 ## Goal
