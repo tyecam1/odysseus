@@ -102,16 +102,16 @@ def test_unsafe_lines_masks_nested_and_flow_style_fields():
     lines = [
         "items:",                      # 0 grouping key (transparent)
         "  - name: milk",              # 1
-        "    secrets:",                # 2 a bare key over entries only groups them: the leaf fields decide
-        "      - name: inner",         # 3 a safe leaf field
-        "      - value: hunter2",      # 4 an unlisted leaf field
+        "    secrets:",                # 2 a credential-like name hides its whole value
+        "      - name: inner",         # 3 (under it)
+        "      - value: hunter2",      # 4 (under it)
         "    notes: |",                # 5 safe block scalar
         "      two cartons",           # 6
         "    token: |",                # 7 unsafe block scalar
         "      hunter2",               # 8
         "  - {name: tea, pin: 1234}",  # 9 flow style naming an unsafe key
     ]
-    assert _unsafe_lines(lines) == {4, 7, 8, 9}
+    assert _unsafe_lines(lines) == {2, 3, 4, 7, 8, 9}
 
 
 def test_files_outside_the_allowlist_keep_only_the_blocklist(tmp_path):
@@ -164,3 +164,68 @@ def test_thousands_of_related_records_give_a_bounded_response(tmp_path):
     assert len(hits[0]["candidates"]) <= _HIT_CANDIDATES
     assert hits[0]["candidates_omitted"] >= 4000
     assert len(adapter.evidence_text(resolution)) <= 6000
+
+
+# --- review round 2: compact JSON, unparsed layouts and read() go through the same gate -----------------------------------
+
+
+def test_compact_json_fields_outside_the_allowlist_are_hidden(tmp_path):
+    adapter = _adapter(tmp_path, {"household/cleaning/rota.json":
+                                  '[{"name":"descale kettle","area":"kitchen","contact_phone":"07700900123","dose":"50mg"}]'})
+    _no_canary(adapter.search("descale kettle", domain="cleaning", limit=50))
+    assert _unsafe_lines(['[{"name":"x","pin":"1"}]']) == {0}
+
+
+def test_unparsed_layout_lines_never_show_unlisted_fields(tmp_path):
+    adapter = _adapter(tmp_path, {
+        "household/food/stock.yaml": "items:\n  - name: tea\n    quantity: 1 box\n",
+        "household/food/legacy.yaml": "contact_phone: milk 07700900123\nmilk: 2 cartons\nnotes: milk goes off fast\n",
+    })
+    resolution = adapter.resolve_question("do we have milk in stock?", "food")
+    _no_canary(resolution["unparsed_lines"])
+    _no_canary(adapter.evidence_text(resolution))
+    assert any("2 cartons" in text for _, _, text in resolution["unparsed_lines"])  # a name-keyed line is still evidence
+
+
+def test_read_hides_unlisted_fields(tmp_path):
+    adapter = _adapter(tmp_path)
+    _no_canary(adapter.read("household/cleaning/rota.yaml"))
+    _no_canary(adapter.read("household/food/stock.yaml"))
+    assert "descale kettle" in adapter.read("household/cleaning/rota.yaml")["text"]
+
+
+def test_a_credential_container_hides_its_nested_safe_looking_fields(tmp_path):
+    adapter = _adapter(tmp_path, {
+        "household/food/stock.yaml": "items:\n  - name: tea\n    quantity: 1 box\n",
+        "household/food/legacy.yaml": "wifi_password:\n  - notes: milk hunter2\nmilk: 2 cartons\n",
+    })
+    resolution = adapter.resolve_question("do we have milk in stock?", "food")
+    _no_canary(resolution["unparsed_lines"])
+    _no_canary(adapter.evidence_text(resolution))
+    assert any("2 cartons" in text for _, _, text in resolution["unparsed_lines"])
+
+
+@pytest.mark.parametrize("name", ["rota.csv", "rota.tsv"])
+def test_delimited_rows_are_never_shown(tmp_path, name):
+    adapter = _adapter(tmp_path, {"household/cleaning/" + name: "milk,2 cartons,hunter2,50mg\n"})
+    _no_canary(adapter.search("milk cartons", domain="cleaning", limit=50))
+    _no_canary(adapter.read("household/cleaning/" + name))
+
+
+def test_unparseable_or_oversized_yaml_shows_nothing(tmp_path):
+    adapter = _adapter(tmp_path, {"household/cleaning/rota.yaml": "tasks:\n  - name: descale kettle\n    dose: 50mg: [\n"})
+    _no_canary(adapter.search("descale kettle", domain="cleaning", limit=50))
+    _no_canary(adapter.read("household/cleaning/rota.yaml"))
+
+
+def test_records_under_a_credential_named_container_are_not_indexed(tmp_path):
+    stock = ("wifi_password:\n  - name: milk\n    quantity: 2 cartons\n    notes: hunter2\n"
+             "items:\n  - name: tea\n    quantity: 1 box\n")
+    adapter = _adapter(tmp_path, {"household/food/stock.yaml": stock})
+    assert {record["name"] for record in adapter.item_index()["records"]} == {"tea"}
+    for query in ("do we have milk?", "how much milk is left?", "do we have oat milk?"):
+        resolution = adapter.resolve_question(query, "food")
+        if resolution is not None:
+            _no_canary(adapter.resolution_hits(resolution))
+            _no_canary(adapter.evidence_text(resolution))
+        _no_canary(adapter.search(query, domain="food", limit=50))
