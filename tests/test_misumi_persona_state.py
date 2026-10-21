@@ -258,7 +258,7 @@ def test_foundation_is_untouched_and_only_fixed_sentences_are_appended(tmp_path)
     composed = compose_system(foundation, values_all)
     assert composed.startswith(foundation)
     appended = composed[len(foundation):]
-    allowed = {ps.STYLE_HEADER} | {f"- {s}" for s in RENDER.values()}
+    allowed = {ps.STYLE_HEADER, ps.STYLE_CARVE_OUT} | {f"- {s}" for s in RENDER.values()}
     assert {line for line in appended.splitlines() if line.strip()} <= allowed
     assert compose_system(foundation, {}) == foundation
     assert compose_system(foundation, dict(DEFAULTS)) == foundation  # all-default is a no-op
@@ -353,9 +353,16 @@ def test_respond_turn_request_shapes_this_turn_only(tmp_path, monkeypatch):
 
 def test_respond_durable_instruction_promotes_persists_and_rolls_back(tmp_path, monkeypatch):
     client, seen = _client(tmp_path, monkeypatch)
-    note = _say(client, "From now on keep answers shorter.")["persona_state"]["captured"][0]
-    assert note["evidence_type"] == "explicit_durable" and note["state"] == "active"
-    assert note["scope"] == "*"
+    # Round 4: the phrase alone is a durable REQUEST - offered, not active - and the user's bare "yes" ratifies it.
+    asked = _say(client, "From now on keep answers shorter.")
+    note = asked["persona_state"]["captured"][0]
+    assert note["evidence_type"] == "durable_request" and note["state"] == "offered"
+    assert note["scope"] == "*" and asked["ratification_offer"]["candidate_id"] == note["candidate_id"]
+    _say(client, "Explain how rainbows form", session="other", persona="jin")
+    assert seen[-1]["style_values"] == {}  # not in force before the yes
+    answer = _say(client, "yes")
+    assert answer["ratification"]["state"] == "active"
+    note["revision_id"] = answer["ratification"]["revision_id"]
     _say(client, "Explain how rainbows form", persona="jin")
     assert seen[-1]["style_values"] == {"response_depth": "brief"}  # household-wide
 
