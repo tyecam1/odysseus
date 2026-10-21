@@ -1596,6 +1596,35 @@ At least 25 cases are machine-readable, each has an unambiguous pass condition, 
 
 ---
 
+## 2026-10-16 user-directed intelligence and demonstration ambition
+
+Source-of-intent and acceptance expansion: `docs/misumi-intelligence-and-demonstration-ambition-2026-10-16.md` (Odysseus; this branch). Domain-owned personality/ambient companion specification: `tyecam1/misumi:docs/core/misumi-persona-and-ambient-companions-2026-10-16.md` (corresponding proposed Misumi PR).
+
+This is a **scope and prioritisation update** to this existing acceptance owner, not a new long-horizon queue, runtime implementation or ratification of any household norm. Reconcile these additional acceptance criteria into the programme's active dependency frontier:
+
+1. Demonstrate whether deterministic v0.2 or a qualified local Jev-like bounded semantic selector yields better reliable persona routing; do not claim Jev or any neural classifier is deployed now. Preserve v0.1 rollback, safe abstention and reserved-matter authority.
+2. Evaluate strong solo, cheap-first, smaller complementary specialist teams and evidence-based whole-workflow allocation on *matched real tasks*. Count actual verified outcome, model/tool/host spend, tokens, latency, specialist contribution, synthesis errors, rework, human corrections and permissions. PR #91 remains the global model-role owner; PR #124's progress scheduling owns which tasks are worth doing next. Do not create a separate router, evaluator or scheduler.
+3. Build a safe, evidence-coupled inspection/demo surface over the existing runtime and test harness, with reproducible scenarios, production/synthetic/replay badges, user-visible routing/team/host/model/resource traces, guest-mode isolation, truthful UI room/presence states and one-touch reset. Use the same execution path, not a fabricated demo backend.
+4. Build bounded opportunities for Misumi to ask residents useful clarifying stock questions through *consented, actually audible* conversations, prioritised by information gain vs intrusion. Keep hardware availability distinct from permission, attention, identity, audibility and retention. Start with synthetic explicit-turn tests; physical always-on/ambient listening requires separate household consent.
+5. Audit and improve active persona character decision pressure using source-grounded, independently evaluated, blind comparisons (PR #36), not catchphrase imitation or unapproved personality promotion. Add Ein and Jiji only as inexpensive presentation-level ambient companions, not routable or tool-using agents.
+6. Prioritise safety/security verification, current PR #122/#123 integration and actual long-horizon continuity first when they are the critical path. These extensions are ongoing product requirements, not a pretext to keep stale unsafe software running.
+
+A completed demo or milestone is not the mission's completion boundary. Continue selecting evidence-justified next capability gaps without arbitrary busywork; preserve existing consent, permissions, audit and human-only ratification gates.
+
+---
+
+## 2026-10-16 additional operator acceptance: FTL-style 2D UI, per-task tool binding and Jin Spotify
+
+Extends, but does **not duplicate**, the 2026-10-16 intelligence/demo scope recorded above.
+
+- **Misumi visual authority:** `tyecam1/misumi:docs/design/ftl-hud-and-jin-music-ambition-2026-10-16.md`. Improve and repair the FTL-inspired 2D spacecraft/HUD/node interface with crisp pixel art, better material/palette cohesion and high-resolution space backgrounds; protect all existing PS2 3D scene art, rigs, geometry and fixed-camera design (add only, do not alter). Evaluate on actual rendering, controls and guests, not CSS inspection alone.
+- **Dynamic persona-role-tool assignment:** separate fixed character persona identity from temporary execution roles and scoped tool/MCP/model/host assignment. Use capability requirements plus measured complementary skills and availability; compare teams of cheap models against strong solo and deterministic baselines under the existing model-role evaluation owner and Six Eyes objective. Personas do not retain provider credentials, broaden permissions or determine their own tool authority.
+- **Spotify:** enable Jin to request `music.*` capabilities through Odysseus's existing governed tools/MCP executor, with user OAuth PKCE and least-privilege Spotify playback scopes, explicit per-user/device control, guest/read-only denial and actual playback audit after connection. No music plays from unsolicited instructions, no authenticated user can be invented. Demonstration mode uses a safe mock.
+- **Local references (updated 2026-10-16):** the earlier ZIP contained a README only. The user has since confirmed four `.ftl` mod packages in `C:\Users\tyeca\OneDrive\Pictures\Misumi\design-references`: `Better Planets and Backgrounds_v1.3.2.ftl`, `better_asteroids.ftl`, `nebula_2x_original_res.ftl`, and `nebula_original_res.ftl`. Inspect hydrated local files, list/test the archives with 7-Zip, extract the actual space images to local staging, leave originals unchanged, and **directly incorporate suitable extracted space imagery into the private local 2D Misumi spacecraft HUD/demo as the operator explicitly requested**. Do not constrain the images to inspiration only or needlessly redraw them. Use local asset packaging/provenance and evaluate performance/offline fallback; separately check rights before public redistribution or embedding third-party image bytes in Git. No relocation necessary; the screenshot does not prove the archives' contents.
+- **Review:** this is user design intent and acceptance expansion, not a shipped feature, new ratified Level 5/6 authority or reason to terminate existing safer work. Reconcile existing duplicate interface, music recognition, PR #91, PR #36 and previous demo work before implementation.
+
+---
+
 ## Operator priority amendment: Instagram Saved (2026-10-17)
 
 **Operator direction:** Instagram Saved acquisition and low-friction knowledge ingestion is now the highest-priority **dependency-ready discretionary background stream**. This is not a new planner, queue or standalone persona programme. The governing execution and acceptance contract is:
