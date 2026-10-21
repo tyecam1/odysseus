@@ -140,8 +140,10 @@ def compare(records: Sequence[Record], plan_a: str, plan_b: str, metric: str = "
     return result
 
 
-def pareto_front(summary: Dict[str, dict], dimensions: Sequence[str]) -> dict:
-    """Plans not dominated on (verified rate up, each chosen resource down). A plan with a safety violation is excluded first.
+def pareto_front(summary: Dict[str, dict], dimensions: Sequence[str], min_tasks: int = MIN_MATCHED_TASKS) -> dict:
+    """Plans not dominated on (verified rate up, each chosen resource down). A plan with a safety violation is excluded first, and so
+    is a plan with fewer than ``min_tasks`` tasks: point estimates from a handful of tasks (or from a different task mix) must not
+    dominate a well-evidenced plan. Use ``compare`` for matched-task evidence between two plans.
 
     ``front`` lists the survivors; ``dominated`` maps each loser to a plan that dominates it; ``excluded`` maps a plan to why it was
     left out (safety violation, or a chosen resource it did not report), so nothing silently disappears.
@@ -151,6 +153,8 @@ def pareto_front(summary: Dict[str, dict], dimensions: Sequence[str]) -> dict:
     for plan, entry in summary.items():
         if entry["safety_violations"]:
             excluded[plan] = f"{entry['safety_violations']} safety-floor violation(s)"
+        elif entry["tasks"] < min_tasks:
+            excluded[plan] = f"only {entry['tasks']} task(s); fewer than the {min_tasks} needed to be placed on the front"
         elif any(unit not in entry["means"] for unit in dimensions):
             excluded[plan] = "did not report every chosen resource"
         else:

@@ -99,21 +99,21 @@ def _plans(**rows):
 
 
 def test_a_dominated_plan_is_named_with_its_dominator_and_the_front_keeps_trade_offs():
-    summary = _plans(solo={"n": 10, "ok": 9, "cost": 4.0, "lat": 30}, cheap={"n": 10, "ok": 6, "cost": 1.0, "lat": 10},
-                     bad={"n": 10, "ok": 5, "cost": 5.0, "lat": 40})
+    summary = _plans(solo={"n": 20, "ok": 18, "cost": 4.0, "lat": 30}, cheap={"n": 20, "ok": 12, "cost": 1.0, "lat": 10},
+                     bad={"n": 20, "ok": 10, "cost": 5.0, "lat": 40})
     front = ep.pareto_front(summary, ("paid_cost", "latency_seconds"))
     assert front["front"] == ["cheap", "solo"] and front["dominated"] == {"bad": "cheap"}  # dominated by both; the first in sorted plan order is named
 
 
 def test_a_plan_with_a_safety_violation_is_excluded_however_cheap():
-    summary = _plans(solo={"n": 10, "ok": 9, "cost": 4.0, "lat": 30}, risky={"n": 10, "ok": 10, "cost": 0.1, "lat": 1, "safe": False})
+    summary = _plans(solo={"n": 20, "ok": 18, "cost": 4.0, "lat": 30}, risky={"n": 20, "ok": 20, "cost": 0.1, "lat": 1, "safe": False})
     front = ep.pareto_front(summary, ("paid_cost",))
     assert front["front"] == ["solo"] and "safety-floor" in front["excluded"]["risky"]
 
 
 def test_a_plan_that_did_not_report_a_chosen_resource_is_excluded_visibly():
     summary = ep.summarise(ep.parse([_row("t1", "a", paid_cost=1.0), _row("t1", "b", tokens=5.0)]))
-    front = ep.pareto_front(summary, ("paid_cost",))
+    front = ep.pareto_front(summary, ("paid_cost",), min_tasks=1)
     assert front["front"] == ["a"] and "did not report" in front["excluded"]["b"]
 
 
@@ -128,3 +128,17 @@ def test_the_module_has_no_way_to_change_routing_or_fetch_data():
     source = inspect.getsource(ep)
     for forbidden in ("requests", "urllib", "socket", "subprocess", "open(", "os.environ", "yaml", "import os"):
         assert forbidden not in source, forbidden
+
+
+def test_a_one_task_plan_cannot_dominate_a_well_evidenced_plan():
+    rows = [_row(f"t{i}", "thorough", verified=(i % 20 != 0), paid_cost=5.0, latency_seconds=30.0) for i in range(100)]
+    rows.append(_row("only-1", "cheap_lucky", verified=True, paid_cost=0.1, latency_seconds=1.0))
+    front = ep.pareto_front(ep.summarise(ep.parse(rows)), ("paid_cost", "latency_seconds"))
+    assert front["front"] == ["thorough"] and front["dominated"] == {}
+    assert "only 1 task" in front["excluded"]["cheap_lucky"]
+
+
+def test_the_evidence_floor_is_adjustable_but_never_below_one_task():
+    summary = ep.summarise(ep.parse([_row("t1", "a", paid_cost=1.0)]))
+    assert ep.pareto_front(summary, ("paid_cost",), min_tasks=1)["front"] == ["a"]
+    assert ep.pareto_front(summary, ("paid_cost",))["front"] == []
