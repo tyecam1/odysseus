@@ -1010,7 +1010,9 @@ def _yaml_records(text: str, rel: str, kind: str) -> Optional[List[Dict[str, obj
                       if name == wanted and scalar(value)), None)
         if ident is None:
             group = next((scalar(value) for name, _, value in pairs if name == "category" and scalar(value)), category)
-            for _, _, value in pairs:
+            for _, key, value in pairs:
+                if _SENSITIVE_ASSIGN.search(f"{key.value}:"):
+                    continue  # nothing under a credential-like name is a record, whatever it contains
                 walk(value, group or "", depth + 1)
             return
         fields: Dict[str, object] = {}

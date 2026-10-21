@@ -216,3 +216,16 @@ def test_unparseable_or_oversized_yaml_shows_nothing(tmp_path):
     adapter = _adapter(tmp_path, {"household/cleaning/rota.yaml": "tasks:\n  - name: descale kettle\n    dose: 50mg: [\n"})
     _no_canary(adapter.search("descale kettle", domain="cleaning", limit=50))
     _no_canary(adapter.read("household/cleaning/rota.yaml"))
+
+
+def test_records_under_a_credential_named_container_are_not_indexed(tmp_path):
+    stock = ("wifi_password:\n  - name: milk\n    quantity: 2 cartons\n    notes: hunter2\n"
+             "items:\n  - name: tea\n    quantity: 1 box\n")
+    adapter = _adapter(tmp_path, {"household/food/stock.yaml": stock})
+    assert {record["name"] for record in adapter.item_index()["records"]} == {"tea"}
+    for query in ("do we have milk?", "how much milk is left?", "do we have oat milk?"):
+        resolution = adapter.resolve_question(query, "food")
+        if resolution is not None:
+            _no_canary(adapter.resolution_hits(resolution))
+            _no_canary(adapter.evidence_text(resolution))
+        _no_canary(adapter.search(query, domain="food", limit=50))
