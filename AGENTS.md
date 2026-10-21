@@ -29,6 +29,14 @@ otherwise eligible unit.
 `docs/aoteru-model-host-routing-contract.md` is the routing and authority
 contract. Do not duplicate or override it here.
 
+**Usage-limit failover:** For a verified Codex quota/usage-limit response, do not
+park otherwise eligible work until reset. Apply the existing routing contract's
+"Codex usage-limit → GLM failover" section: prefer an actually qualified GLM
+implementation/review lane with the same task scope and lease; if unavailable,
+continue independent deterministic/other qualified work and preserve the exact
+review debt. Never treat an unmerged GLM candidate, launcher smoke test,
+alias name, or credential discovery as worker qualification.
+
 
 ## Temporary operating priority: ship the existing backlog (2026-10-17)
 
