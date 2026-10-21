@@ -8,7 +8,7 @@ priority: critical
 task_type: orchestration
 created_by: chatgpt
 created_at: 2026-10-02T19:03:00+01:00
-updated_at: 2026-10-03T14:00:00+01:00
+updated_at: 2026-10-17T16:14:00+01:00
 executor: claude_subscription
 execution_mode: staged-loop
 architecture: single-plus-verifier
@@ -1622,3 +1622,17 @@ Extends, but does **not duplicate**, the 2026-10-16 intelligence/demo scope reco
 - **Spotify:** enable Jin to request `music.*` capabilities through Odysseus's existing governed tools/MCP executor, with user OAuth PKCE and least-privilege Spotify playback scopes, explicit per-user/device control, guest/read-only denial and actual playback audit after connection. No music plays from unsolicited instructions, no authenticated user can be invented. Demonstration mode uses a safe mock.
 - **Local references (updated 2026-10-16):** the earlier ZIP contained a README only. The user has since confirmed four `.ftl` mod packages in `C:\Users\tyeca\OneDrive\Pictures\Misumi\design-references`: `Better Planets and Backgrounds_v1.3.2.ftl`, `better_asteroids.ftl`, `nebula_2x_original_res.ftl`, and `nebula_original_res.ftl`. Inspect hydrated local files, list/test the archives with 7-Zip, extract the actual space images to local staging, leave originals unchanged, and **directly incorporate suitable extracted space imagery into the private local 2D Misumi spacecraft HUD/demo as the operator explicitly requested**. Do not constrain the images to inspiration only or needlessly redraw them. Use local asset packaging/provenance and evaluate performance/offline fallback; separately check rights before public redistribution or embedding third-party image bytes in Git. No relocation necessary; the screenshot does not prove the archives' contents.
 - **Review:** this is user design intent and acceptance expansion, not a shipped feature, new ratified Level 5/6 authority or reason to terminate existing safer work. Reconcile existing duplicate interface, music recognition, PR #91, PR #36 and previous demo work before implementation.
+
+---
+
+## Operator priority amendment: Instagram Saved (2026-10-17)
+
+**Operator direction:** Instagram Saved acquisition and low-friction knowledge ingestion is now the highest-priority **dependency-ready discretionary background stream**. This is not a new planner, queue or standalone persona programme. The governing execution and acceptance contract is:
+
+[Instagram Saved primary ingestion directive](../../../../docs/instagram-saved-primary-ingestion-directive-2026-10-17.md)
+
+Interpret the linked directive as the required sub-programme reading and gate checklist whenever working on Instagram intake, device-triggered events, source events, classification or persona/research ingestion. GLM-Flash coordinates; GLM performs bounded difficult reasoning; Codex independently verifies under live worker qualification, leases and budgets.
+
+The user explicitly requests that agents perform initial source acquisition without routinely asking the user to prepare a first export. Inspect authorised existing exports/hosts/sessions, try compliant official acquisition when eligible, and continue independent work if authentication, device unlock or permissions block acquisition. Do not relax GrapheneOS privacy, platform access rules or canonical PhD research gates to obtain this convenience.
+
+This amendment changes **work ordering**, not the existing persona identity/GUI remit or ownership. It permits independent Instagram stream reconnaissance and bounded implementation before the larger persona-growth programme's activation if existing runtime/lease authority permits; it does not license overlapping mutations with ongoing convergence work. Follow the directive's G0–G6 evidence and anti-drift checkpoints. A merged plan, synthetic fixture or connection detector alone is not successful ingestion.

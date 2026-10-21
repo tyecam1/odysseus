@@ -1,0 +1,53 @@
+"""44 phrasings written AFTER the round-10 code was final, labelled by intent before they were run (see the r9 bank for labels).
+Round-10 decisions: a hedge on the user's OWN request is still their request (offer; it needs only a bare yes); hedges and
+attribution about OTHER people stay data; a signed-off message gets the notice."""
+
+BANK = [
+    # offer
+    ("I think from now on keep answers short", "offer"),
+    ("Probably best if from now on you use bullet points", "offer"),
+    ("Maybe from now on use plain English", "offer"),
+    ("Possibly going forward give more detail", "offer"),
+    ("I guess going forward keep things brief", "offer"),
+    ("Perhaps from now on just answer what I ask", "offer"),
+    ("From now on please answer in proper sentences", "offer"),
+    ("From now on answer in plain prose please", "offer"),
+    ("Going forward could you keep replies brief, thanks", "offer"),
+    ("From now on keep it concise", "offer"),
+    ("In the future, use numbered steps", "offer"),
+    ("From here on in, use bullet points please", "offer"),
+    ("Henceforth be more technical", "offer"),
+    ("From now on suggest next steps please", "offer"),
+    ("Always keep answers short, ta", "offer"),
+    ("Quick one: from now on give more detail", "offer"),
+    # notice
+    ("Could you be briefer from now on?", "notice"),
+    ("Can you use plain English from now on?", "notice"),
+    ("From now on keep answers short lmao", "notice"),
+    ("Going forward use bullet points x\n- Mel", "notice"),
+    ("From now on keep it brief. Cheers, Ali", "notice"),
+    ("Will you give numbered steps from now on?", "notice"),
+    ("haha always use bullet points", "notice"),
+    ("From now on use plain English. Thanks, Priya", "notice"),
+    # none
+    ("My sister reckons you should always use bullet points", "none"),
+    ("Apparently from now on the bins go out on Tuesday", "none"),
+    ("Does Misato always keep answers short?", "none"),
+    ("Why are your answers always so long?", "none"),
+    ("Ask my husband to always lock the shed", "none"),
+    ("Summarise: from now on we meet on Mondays", "none"),
+    ("Here's the message:\nFrom now on keep replies brief", "none"),
+    ("Hello team, going forward keep updates short", "none"),
+    ("Tell my daughter to keep her room tidy from now on", "none"),
+    ("What time is it?", "none"),
+    ("Give me a short answer this time", "none"),
+    ("Use bullet points for this one please", "none"),
+    ("How do I make answers shorter in my essay?", "none"),
+    ("Is it rude to always reply briefly?", "none"),
+    ("Keep it short today, I'm busy", "none"),
+    ("Proofread this: from now on all emails are short", "none"),
+    ("From now on is a nice song", "none"),
+    ("Do people always prefer bullet points?", "none"),
+    ("Remind me to always buy milk", "none"),
+    ("Explain this in plain English", "none"),
+]

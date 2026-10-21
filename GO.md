@@ -4,6 +4,10 @@ Read and execute `@docs/aoteru-long-horizon-autonomous-convergence.agent-task.md
 
 This file overrides any wording elsewhere that suggests a planned multi-session handoff.
 
+## Work selection priority
+
+During the 2026-10-17 shipping-first period, apply the operator's temporary backlog priority in `AGENTS.md` when choosing the next workstream. Complete and verify usable deliverables ahead of discretionary refinements; keep the existing safety, acceptance, authority and continuation gates intact.
+
 ## Execution rule
 
 Do **not** voluntarily stop at a clean checkpoint, green test suite, completed workstream, pushed commit, substantial progress report, human-action batch, or because the programme is large enough to span multiple sessions.
