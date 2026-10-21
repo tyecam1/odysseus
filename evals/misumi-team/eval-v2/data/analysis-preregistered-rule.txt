@@ -1,0 +1,24 @@
+
+### PRIMARY (llama3.1:8b, independent family): 384 judged rows, 0 unusable verdicts excluded
+- solo: detection on CONFLICT prompts 17/96 = 18% (95% CI 11-27%); false alarm on CLEAN prompts 52/96 = 54% (95% CI 44-64%); unfounded-concern on CONFLICT prompts 48/96 = 50% (95% CI 40-60%)
+- team: detection on CONFLICT prompts 42/96 = 44% (95% CI 34-54%); false alarm on CLEAN prompts 79/96 = 82% (95% CI 73-89%); unfounded-concern on CONFLICT prompts 49/96 = 51% (95% CI 41-61%)
+- detection, team minus solo: +26.0 points (95% bootstrap CI +14.6 to +36.5, 96 paired cells)
+- false alarm on clean, team minus solo: +28.1 points (95% bootstrap CI +15.6 to +40.6, 96 paired cells)
+- per task detection team/solo: allergy 9/12 vs 0/12, budget 4/12 vs 1/12, calendar 1/12 vs 0/12, heater 11/12 vs 10/12, payday 7/12 vs 6/12, portions 2/12 vs 0/12, rollout 3/12 vs 0/12, timing 5/12 vs 0/12
+
+### SECONDARY (qwen3:8b, same family as the subject): 384 judged rows, 0 unusable verdicts excluded
+- solo: detection on CONFLICT prompts 85/96 = 89% (95% CI 81-93%); false alarm on CLEAN prompts 0/96 = 0% (95% CI 0-4%); unfounded-concern on CONFLICT prompts 0/96 = 0% (95% CI 0-4%)
+- team: detection on CONFLICT prompts 93/96 = 97% (95% CI 91-99%); false alarm on CLEAN prompts 41/96 = 43% (95% CI 33-53%); unfounded-concern on CONFLICT prompts 0/96 = 0% (95% CI 0-4%)
+- detection, team minus solo: +8.3 points (95% bootstrap CI +1.0 to +16.7, 96 paired cells)
+- false alarm on clean, team minus solo: +42.7 points (95% bootstrap CI +33.3 to +53.1, 96 paired cells)
+- per task detection team/solo: allergy 12/12 vs 12/12, budget 12/12 vs 12/12, calendar 12/12 vs 8/12, heater 12/12 vs 12/12, payday 12/12 vs 12/12, portions 9/12 vs 11/12, rollout 12/12 vs 12/12, timing 12/12 vs 6/12
+
+### Supports' own RISK flag (team condition only)
+- conflict prompts: RISK opened by the support in 44/96 = 46% (95% CI 36-56%) ok consults
+- clean prompts: RISK opened by the support in 0/96 = 0% (95% CI 0-4%) ok consults
+- solo: median latency 3282 ms over 192 replies; teams formed 0; non-model replies 0
+- team: median latency 4316 ms over 192 replies; teams formed 192; non-model replies 0
+
+### Judge agreement: kappa(flags_issue) = 0.34 over 384 rows; kappa(unfounded_concern) = 0.14 over 384 rows
+
+### Pre-registered verdict: SENSITIVITY GAINED AT THE PRICE OF FALSE ALARMS (not a net improvement); judges disagree materially (kappa < 0.6): conclusion capped at INDICATIVE

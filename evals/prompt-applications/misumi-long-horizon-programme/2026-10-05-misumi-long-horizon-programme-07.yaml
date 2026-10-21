@@ -1,0 +1,68 @@
+schema_version: 1
+application_id: 2026-10-05-misumi-long-horizon-programme-07
+prompt_id: misumi-long-horizon-programme
+prompt_version: 4
+repository: tyecam1/odysseus
+# Cross-repository programme: tyecam1/odysseus (dev) and tyecam1/misumi (main).
+# Session began 2026-10-04 late evening UTC; deployment and demonstration completed 2026-10-05.
+branch: dev
+session_started_at: "2026-10-04T23:05:00Z"
+session_ended_at: "2026-10-05T00:35:00Z"
+start_commit: f6b9e4fd6d6ee1e26d88b61c06454ded26253b62
+end_commit: 8f7803acb2648e4381ad9e1c1c6630d9463e02a4
+outcome_status: complete
+stop_reason: >-
+  Stage complete. Misumi's first controlled experience-driven behavioural
+  adaptation loop is delivered and live-proven end-to-end on the deployed
+  runtime: interaction -> routing decision -> user evidence -> candidate
+  affinity -> shadow evaluation -> authorised promotion -> changed future
+  route -> explainable trace -> rollback, with restart persistence proven by a
+  real service restart and history preserved through rollback. The
+  demonstration preference (operator-approved via explicit choice:
+  "Demo cleaning -> Jin, then roll back") was taught, promoted, proven, and
+  rolled back per the approved end state; the baseline is restored and the
+  evidence remains inspectable on the host. Scope discipline held: routing
+  only - no persona prompt, personality, voice or memory changes.
+commits:
+  - "odysseus 8f7803acb2 (PR #94 merged, operator-approved): shadow-mode routing adaptation with governed promotion (src/misumi_routing_adaptation.py, respond wiring, generalisation suite, v4 directive registration), two commits (register-consistency fixes caught by CI)"
+  - "misumi ad4374a001 (PR #60 merged, operator-approved): generalisation/adversarial fixture suite with mechanically computed expectations; routing-contract stale 'remains proposed' line repaired with an explicit ratification note"
+  - "odysseus (PR with this trace): -07 trace, evidence reconciliation, graph application/evolution nodes"
+deployment:
+  - "home Odysseus release cut over a4851dbddd -> 8f7803acb2 by the same staged side-by-side path (stage1 clone+venv+routing smoke, stage2 :1420 on a data copy, stage3 task re-Install + Stop/Start); rollback = re-Install a4851dbddd"
+  - "home canonical misumi clone at 7fe180ca1f at application end; the generalisation fixture commit (ad4374a001) lands via the host auto-pull (docs-only, no runtime effect)"
+  - "adaptation state store at C:\\Users\\User\\AppData\\Local\\Odysseus\\Misumi\\misumi\\routing\\ (evidence.jsonl, candidates.json, revisions.jsonl)"
+verification:
+  - "deterministic: 20 new tests (evidence immutability, correction vs temporary vs durable, contradictions, promotion gates, revision/rollback, restart persistence via a fresh store instance, overlay scoping, shadow evaluation buckets/spillover, respond integration flows, kill switch, incognito non-capture, generalisation pinning incl. learned-overlay class isolation); 230 misumi-related tests green on a lab scratch tree; odysseus CI fully green including tests/test_misumi_prompt_register_consistency.py on the v4 registration"
+  - "live demonstration on the deployed :420 runtime (token from the home user environment, never printed or persisted; one dedicated demo session; persist_turn true - the capture gate requires it, deliberately): (1) before: auto -> misato; (2) manual switch to Jin on the same topic -> evidence type=correction, state shadow-only; (3) immediate re-route -> still misato (shadow cannot change behaviour); (4) explicit durable instruction 'For cleaning questions, from now on use Jin.' -> evidence explicit_durable, candidate eligible, promoted revision rr-5c1e288b9ac0 authorised_by user_instruction; (5) same prompt -> jin via routing-contract-v0.1+learned-revision with base_selected=misato and the revision id in provenance; (6) real service Stop/Start -> the learned route survived the restart; (7) rollback recorded as rr-49e5b3f53ac7 -> the same prompt routes to misato again; (8) history intact after rollback: 2 evidence events, 2 candidates (shadow), 2 revision records"
+  - "regression: the 12 deterministic routing fixtures re-run against the new release: 12/12 PASS"
+  - "honest reporting: the v4 registration initially failed the register-consistency suite in CI (missing prompt-identity line, graph head, guardrails) - fixed in the same PR and treated as the registration checklist now being executable; two implementation defects (candidate lookup by cue key instead of id; shadow-evaluation phantom spillover from an empty-string persona) were caught by the new tests before merge; one deploy-script regeneration mistake (wrong freeze-file name) aborted one stage1 run; the home clone lags one docs-only commit pending its auto-pull; the demo evidence was captured with persist_turn=true so it also persists history rows in the dedicated demo session - recorded deliberately rather than bypassing the capture gate"
+  - "access and authority: both PR merges operator-approved; the demonstration preference and its rollback plan operator-chosen (no synthetic user evidence); paused kiosk box bridge not cleared; no auto-mode denials; no household security-posture detail written to public repos"
+failure_tags:
+  - v4_registration_incomplete_caught_by_register_consistency_ci
+  - promote_lookup_by_cue_key_bug_caught_by_own_tests
+  - shadow_evaluation_phantom_spillover_bug_caught_by_own_tests
+  - deploy_script_freeze_path_regression_aborted_stage1
+  - home_clone_auto_pull_lag_docs_only
+rating:
+  scale: 1-5
+  goal_progress: 5
+  correctness_verification: 4
+  authority_scope_discipline: 5
+  routing_resource_efficiency: 4
+  continuity_handoff_quality: 4
+  agent_overall: 4.4
+  operator_overall: null
+  operator_note: null
+prompt_revision_recommended: false
+revision_reason: >-
+  Reinforce v4 on its first application. The failure classes are all first
+  occurrences with concrete existing guards (register-consistency CI, the new
+  adaptation test suite, the staged deploy scripts); v4's own evolution targets
+  already cover files-over-pipes transport and the implement-vs-adapt split
+  that this application exercised. No new prompt text warranted.
+evidence:
+  - "automation/review/misumi-long-horizon-programme-evidence.md (application -07 sections); evals/prompt-evolution/misumi-long-horizon-programme.yaml (-07 application and evolution nodes)"
+  - "misumi fixtures/persona-routing/generalisation.yaml and fixtures/persona-routing/live-verification.yaml (12/12 PASS re-run on the new release); docs/core/aoteru-routing-contract-v0.1.md (stale line repaired with ratification note); 12-log/26-10/2026-10-04-routing-generalisation-suite.md"
+  - "home runs release 8f7803acb2 (rollback = re-Install a4851dbddd); demonstration scripts on the host: C:\\Users\\User\\demo-07.ps1, C:\\Users\\User\\rollback-07.ps1; adaptation store under the service data dir"
+  - "Open gates carried: physical kiosk acceptance and box-proxy verification (bridge paused by household); memory policy v0.2 ratification (uniformly 'proposed' - no contradictory markers found on re-inspection; learned ROUTING state is routing-process state, gated by the seed order and the routing contract, not by the memory policy); backup inputs; lab sudo deploy (lab still d2fc0bac, target now 8f7803acb2); v3 closeout sequence"
+  - "Operator ratings: none supplied"

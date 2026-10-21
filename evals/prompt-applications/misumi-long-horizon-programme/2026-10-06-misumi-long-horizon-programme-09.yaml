@@ -1,0 +1,58 @@
+schema_version: 1
+application_id: 2026-10-06-misumi-long-horizon-programme-09
+prompt_id: misumi-long-horizon-programme
+prompt_version: 4
+repository: tyecam1/odysseus
+branch: dev
+session_started_at: "2026-10-05T11:30:00Z"
+session_ended_at: "2026-10-06T06:20:00Z"
+start_commit: ffbef0d740329ef01ab2e2089ae734d3e356597a
+end_commit: "b51db41f9ad70687648dca5988cc3c85c87e1550"
+outcome_status: partial
+stop_reason: >-
+  Roadmap resumed after the 2026-10-05 rate-limit interruption (an execution interruption, not a programme failure) and
+  advanced through -08b, -09, -10, -11 and the software parts of -12 plus two B2 resilience drills. Not complete: the
+  routing algorithm change (-09) stops at its authority boundary (B7, needs the user's ratification); -09b and the Sol/GLM
+  reviews are lane-gated; physical kiosk acceptance (B1) and the operator gates B3-B6 are unchanged; -10b and parts of -12
+  remain executable. The whole-roadmap goal is therefore still open.
+commits:
+  - "odysseus #99 restore the full roadmap queue; #100 -09 corpus/evaluator/candidate proposal; #101 -08b live proofs; #102 fix durable-vs-contradiction precedence; #103 -10 persona-state; #104 -11 team formation + whole-word persona names; #105 conversational ratification; #106 -09 evidence corrected to the live manifest + blind held-out v2; #107 RISK-flag calibration; plus this trace/evidence PR"
+  - "misumi #61 voice profiles; #62 expression label; #63 -07 suite re-pinned to the live manifest; #64 tts_status + kiosk voice status"
+deployment:
+  - "home Odysseus release cut over ce8d353a8f -> b51db41f9a by the staged side-by-side path (stage[123]-b51db41f9a.log on the host); rollback = re-Install ce8d353a8f; host agent (:4500) restarted through its launcher so it loads the voice-profile and tts_status code (misumi main 6f0795ad01 lineage); the lab remains d2fc0bac32 (operator sudo gate B5); real-path proof on the deployed :420: 12/12 deterministic fixtures, turn-request style applied with the household persona-state store left at 0/0, a justified team formed"
+verification:
+  - "deterministic: 27 corpus tests, 27 persona-state tests, 13 team tests, 9 dialogue tests, plus the unchanged consultation/routes/routing suites (108 misumi tests on a fresh dev tree at the -12 merge); odysseus CI fully green on every merged PR; misumi has no CI - verify.py 38/38 and the node/python script tests were run on a sparse clone before each merge"
+  - "live (home, scratch :1420 instances of releases 3b1cc57796/d909387fa0/331cda1f82, real qwen3:8b, household stores untouched): -08b silence/contradiction/reject proofs; -10 turn request 27.7 words vs 66-70 baseline, durable style 53-60, restart persistence, rollback, operator ratification with principal, injection captured as style only; -11 benchmark and controls; -12 conversational ratification; B2 TTS failure/recovery and model-loss drills (details in evals/)"
+  - "honest reporting: the first -09 numbers were measured on a DRIFTED persona-intent table and were withdrawn and re-measured (blind held-out v2: baseline 25/44 vs candidate 32/44 strict; three strict regressions recorded); the -11 benchmark showed supports raising RISK in 35/36 consults including 15/16 no-conflict controls, so teams raised false alarms (8/16 vs 0/16 solo) while surfacing more planted conflicts (13/20 vs 9/20) - the support prompt was calibrated afterwards and re-measured; reply-length and keyword-checker proxies are indicative only"
+  - "access and authority: the user approved self-merging programme PRs for this session (AskUserQuestion), used for 11 odysseus and 4 misumi PRs; nothing ratification-gated was merged or activated (the v0.2 routing candidate is not imported by any runtime module and a test enforces it); household stores were never mutated by proof activities; no token value read or persisted"
+failure_tags:
+  - corpus_and_07_suite_used_drifted_persona_intents_first_measurement_withdrawn
+  - named_persona_substring_match_of_one_letter_display_name
+  - durable_instruction_after_conflicting_corrections_unpromotable
+  - stemmer_notes_to_not_collision_caught_by_corpus_test
+  - support_risk_flag_non_discriminating_false_alarms_in_controls
+  - benchmark_first_run_without_no_conflict_controls
+  - live_demo_script_defects_byte_array_unrolling_and_output_capture
+  - sol_glm_lanes_unavailable_verification_debt_carried
+  - background_ci_watcher_killed_under_memory_pressure
+  - production_agent_runs_old_code_until_restarted
+rating:
+  scale: 1-5
+  goal_progress: 4
+  correctness_verification: 4
+  authority_scope_discipline: 5
+  routing_resource_efficiency: 3
+  continuity_handoff_quality: 4
+  agent_overall: 4.0
+  operator_overall: null
+  operator_note: null
+prompt_revision_recommended: false
+revision_reason: >-
+  Reinforce v4. The failures are first occurrences with guards now in place (a guard test that compares the corpus to the
+  live manifest, whole-word name matching, no-conflict controls in every benchmark, truthful lane failures). One practice
+  reinforced by this session: measure against production's own configuration (the live manifest), never a frozen copy.
+evidence:
+  - "automation/review/MISUMI_PROGRAMME.md (-08b..-12 dispositions, B7 and the operator/household/lane gates, D1-D5 attempts); automation/review/misumi-long-horizon-programme-evidence.md (-09 section); evals/prompt-evolution/misumi-long-horizon-programme.yaml (-09 nodes)"
+  - "evals/misumi-routing/ (corpora, evaluator, live scripts), evals/misumi-persona-state/, evals/misumi-team/, evals/misumi-resilience/ (live proofs, raw outputs, scripts)"
+  - "automation/review/misumi-routing-v0.2-amendment-proposal.md (the exact authority-bound actions for B7)"
+  - "Operator ratings: none supplied"
