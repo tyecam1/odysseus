@@ -1,0 +1,32 @@
+
+### data/judged-qwen.jsonl: 768 judged rows
+- detection on CONFLICT prompts (8 tasks x runs per task: [12])
+  team minus solo: +8.3 pts | hierarchical (tasks, then runs) 95% CI -6.2 to +26.0 | flat cells CI +1.0 to +15.6
+  teamfix minus solo: -13.5 pts | hierarchical (tasks, then runs) 95% CI -36.5 to +8.3 | flat cells CI -22.9 to -4.2
+  teamdrop minus solo: +4.2 pts | hierarchical (tasks, then runs) 95% CI -5.2 to +16.7 | flat cells CI -4.2 to +12.5
+  teamdrop minus team: -4.2 pts | hierarchical (tasks, then runs) 95% CI -14.6 to +4.2 | flat cells CI -9.4 to +1.0
+  teamdrop minus teamfix: +17.7 pts | hierarchical (tasks, then runs) 95% CI -3.1 to +42.7 | flat cells CI +7.3 to +28.1
+  teamfix minus team: -21.9 pts | hierarchical (tasks, then runs) 95% CI -49.0 to +0.0 | flat cells CI -31.2 to -12.5
+- false alarm on CLEAN prompts (8 tasks x runs per task: [12])
+  team minus solo: +42.7 pts | hierarchical (tasks, then runs) 95% CI +17.7 to +67.7 | flat cells CI +33.3 to +53.1
+  teamfix minus solo: +0.0 pts | hierarchical (tasks, then runs) 95% CI +0.0 to +0.0 | flat cells CI +0.0 to +0.0
+  teamdrop minus solo: +1.0 pts | hierarchical (tasks, then runs) 95% CI +0.0 to +4.2 | flat cells CI +0.0 to +3.1
+  teamdrop minus team: -41.7 pts | hierarchical (tasks, then runs) 95% CI -67.7 to -16.7 | flat cells CI -52.1 to -32.3
+  teamdrop minus teamfix: +1.0 pts | hierarchical (tasks, then runs) 95% CI +0.0 to +4.2 | flat cells CI +0.0 to +3.1
+  teamfix minus team: -42.7 pts | hierarchical (tasks, then runs) 95% CI -67.7 to -17.7 | flat cells CI -53.1 to -33.3
+
+### data/judged-llama.jsonl: 768 judged rows
+- detection on CONFLICT prompts (8 tasks x runs per task: [12])
+  team minus solo: +26.0 pts | hierarchical (tasks, then runs) 95% CI +9.4 to +43.8 | flat cells CI +15.6 to +37.5
+  teamfix minus solo: +14.6 pts | hierarchical (tasks, then runs) 95% CI -12.5 to +43.8 | flat cells CI +4.2 to +25.0
+  teamdrop minus solo: +13.5 pts | hierarchical (tasks, then runs) 95% CI -5.2 to +37.5 | flat cells CI +4.2 to +22.9
+  teamdrop minus team: -12.5 pts | hierarchical (tasks, then runs) 95% CI -27.1 to +3.1 | flat cells CI -22.9 to -3.1
+  teamdrop minus teamfix: -1.0 pts | hierarchical (tasks, then runs) 95% CI -16.7 to +12.5 | flat cells CI -9.4 to +7.3
+  teamfix minus team: -11.5 pts | hierarchical (tasks, then runs) 95% CI -32.3 to +12.5 | flat cells CI -22.9 to +1.0
+- false alarm on CLEAN prompts (8 tasks x runs per task: [12])
+  team minus solo: +28.1 pts | hierarchical (tasks, then runs) 95% CI +0.0 to +60.4 | flat cells CI +14.6 to +40.6
+  teamfix minus solo: -13.5 pts | hierarchical (tasks, then runs) 95% CI -40.6 to +9.4 | flat cells CI -26.0 to -1.0
+  teamdrop minus solo: -6.2 pts | hierarchical (tasks, then runs) 95% CI -20.8 to +7.3 | flat cells CI -15.6 to +3.1
+  teamdrop minus team: -34.4 pts | hierarchical (tasks, then runs) 95% CI -70.8 to +0.0 | flat cells CI -47.9 to -19.8
+  teamdrop minus teamfix: +7.3 pts | hierarchical (tasks, then runs) 95% CI -20.8 to +38.5 | flat cells CI -5.2 to +20.8
+  teamfix minus team: -41.7 pts | hierarchical (tasks, then runs) 95% CI -66.7 to -16.7 | flat cells CI -53.1 to -29.2
