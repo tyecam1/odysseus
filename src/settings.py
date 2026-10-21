@@ -56,6 +56,7 @@ DEFAULT_SETTINGS = {
     "stt_provider": "disabled",
     "stt_model": "base",
     "stt_language": "",
+    "stt_initial_prompt": "",  # optional vocabulary hint (names, topics) given to Whisper; empty = none
     "search_provider": "searxng",
     # Default fallback chain — when the primary provider fails or
     # rate-limits, we try DuckDuckGo next. Free, no API key required, so
