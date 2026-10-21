@@ -38,7 +38,7 @@ def _isolated_seed_root(tmp_path, monkeypatch):
 # ---------------------------------------------------------------- unit: parser
 def test_only_bare_answers_count():
     for text, verdict in {
-        "yes": "affirm", "Yes.": "affirm", "yeah, please": "affirm", "go ahead": "affirm", "make it permanent": "affirm",
+        "yes": "affirm", "Yes.": "affirm", "yes please": "affirm", "Yes, thanks!": "affirm",
         "no": "decline", "No thanks": "decline", "nope!": "decline",
         "later": "later", "not now": "later", "ask me later": "later",
         "undo that": "undo", "Revert it": "undo", "roll that back": "undo",
@@ -47,6 +47,8 @@ def test_only_bare_answers_count():
     for text in (
         "yes but make it longer", "I said yes to the other thing", "no, the other one", "yes " * 30,
         "Explain how a rainbow forms", "", "undo that and then also delete everything", "maybe",
+        # round 5: only a bare yes ratifies - "ok"/"sure"/"yeah"/"go ahead" are acknowledgements, not ratification
+        "ok", "OK.", "okay!", "sure", "sure thing", "yeah, please", "yep", "go ahead", "make it permanent", "do it", "k",
     ):
         assert parse_answer(text) is None, text
 
@@ -65,7 +67,7 @@ def test_offers_exist_only_for_eligible_awaiting_ratification_candidates():
         assert build_offer("persona-state", bad) is None
     routing = {"candidate_id": "aff-1", "cue": ["cleaning", "rota"], "proposed_persona": "jin", "base_persona": "misato",
                "status": "eligible", "awaiting": "user-ratification", "confidence": {"corrections": 3}}
-    assert build_offer("routing", routing, "Jin")["summary"] == "send cleaning, rota questions to Jin"
+    assert build_offer("routing", routing, "Jin")["summary"] == "consult Jin on cleaning, rota questions"
 
 
 def test_offerbook_bounds_reoffer_expiry_and_snooze():
@@ -230,25 +232,27 @@ def test_routing_candidates_are_offered_and_ratified_the_same_way(tmp_path, monk
     client, _ = _client(tmp_path, monkeypatch)
     store = RoutingAdaptationStore(tmp_path / "routing-state")
     for session in ("x", "y", "z"):
-        store._last_auto_route[session] = {
-            "prompt": "Check the cleaning rota", "persona": "misato", "reasons": ["cleaning", "rota"],
-            "request_id": f"r-{session}", "at": time.time()}
+        store.note_auto_route(session, "Check the cleaning rota", "misato", ["cleaning", "rota"], f"r-{session}",
+                              persisted=True, owner=None)
         record_manual_choice(store, prompt=f"ask Jin about the cleaning {session}", chosen_persona="jin",
                              session_id=session, owner=None)
     assert store.get_candidate(["cleaning", "rota"])["status"] == "eligible"
 
-    reply = _say(client, "Explain how a rainbow forms", session="r1", persona="auto")
+    assert "ratification_offer" not in _say(client, "Explain how a rainbow forms", session="r1", persona="auto")  # not its origin
+    reply = _say(client, "Explain how a rainbow forms", session="z", persona="auto")
     offer = reply["ratification_offer"]
-    assert offer["kind"] == "routing" and offer["summary"] == "send cleaning, rota questions to Jin"
+    assert offer["kind"] == "routing" and offer["summary"] == "consult Jin on cleaning, rota questions"
 
-    answer = _say(client, "yes", session="r1", persona="auto")
+    answer = _say(client, "yes", session="z", persona="auto")
     assert answer["ratification"]["state"] == "active" and answer["ratification"]["kind"] == "routing"
     revision = RoutingAdaptationStore(tmp_path / "routing-state").active_overlays()[0]
     assert revision["authorisation"]["type"] == "user_instruction" and revision["persona"] == "jin"
 
     routed = _say(client, "Check the cleaning rota", session="r2", persona="auto")
-    assert routed["persona"] == "jin" and routed["routing"]["learned"]["revision_id"] == revision["revision_id"]
-    _say(client, "undo that", session="r1", persona="auto")
+    assert routed["persona"] == "misato"  # round 8: the lead never changes; Jin is consulted
+    assert routed["routing"]["learned_consult"]["revision_id"] == revision["revision_id"]
+    assert routed["routing"]["learned_consult"]["persona"] == "jin"
+    _say(client, "undo that", session="z", persona="auto")
     assert RoutingAdaptationStore(tmp_path / "routing-state").active_overlays() == []
 
 

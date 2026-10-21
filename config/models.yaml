@@ -51,6 +51,16 @@ paid_providers:
 default_paid_provider: codex
 
 capabilities:
+  - alias: local-classify
+    binding: qwen3.5:9b
+    qualified_hosts:
+      hz2-workstation: {evidence: docs/instagram-semantic-pilot-evidence-2026-10-20.md}
+    gpu_priority: yield_to_experiment  # shares the RTX 3080; withheld while an experiment reservation is active
+    evidence: docs/instagram-semantic-pilot-evidence-2026-10-20.md
+    note: >-
+      Stage-7 Instagram Saved semantic second opinion (src/instagram_semantic.py). Bound for ONE bounded classification
+      task (triage of saved-post text into PhD lead / personal reference / neither) after a frozen-holdout pilot, not a
+      general-purpose quality claim; qwen3:8b (local-fast) did not meet the same acceptance rule. Single-rater labels.
   - alias: local-fast
     binding: qwen3:8b
     qualified_hosts:

@@ -870,7 +870,7 @@ def _retryable_local_error(exc: Exception) -> bool:
 
 
 def execute_local(concrete_model: str, objective: "str | list[dict]", *, timeout: float = 60.0,
-                   max_retries: int = 1) -> dict:
+                   max_retries: int = 1, think: Optional[bool] = None) -> dict:
     """WHAT actually happens once WHERE+WHAT have been resolved: the one
     provider-neutral bounded execution/result path this lab-first slice
     can run for real right now (no claude/codex binary or paid
@@ -923,7 +923,7 @@ def execute_local(concrete_model: str, objective: "str | list[dict]", *, timeout
     while attempts <= max_retries:
         attempts += 1
         try:
-            output = llm_call(_OLLAMA_BASE, concrete_model, messages, timeout=int(timeout), num_ctx=num_ctx)
+            output = llm_call(_OLLAMA_BASE, concrete_model, messages, timeout=int(timeout), num_ctx=num_ctx, think=think)
         except HTTPException as e:
             # A deterministic upstream rejection (bad request, model not
             # found, etc.) — retrying would not change it.

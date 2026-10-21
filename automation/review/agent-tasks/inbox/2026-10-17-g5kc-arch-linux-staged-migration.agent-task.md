@@ -1,0 +1,235 @@
+---
+artifact_type: agent-task
+task_schema: agent-task/v2
+task_id: 2026-10-17-g5kc-arch-linux-staged-migration
+title: "Gigabyte G5 KC: diagnose spare Mac SSD, procure storage, and migrate laptop to Arch Linux"
+status: inbox
+priority: medium
+task_type: host-migration
+created_by: chatgpt
+created_at: 2026-10-17
+executor: ""
+execution_mode: gated-human-assisted
+architecture: single
+architecture_rationale: "One host migration with explicit physical and destructive gates. Delegate independent read-only SSD research and test verification, not competing installers or a new control plane."
+single_agent_baseline: "A single implementation agent inventories the laptop, produces deterministic manifests and install configuration, pauses for each physical/data-destruction approval, then configures and verifies Arch after human bootstrapping."
+execution_host: laptop
+context_budget: high
+coordination_reason: "An existing Odysseus/Aoteru laptop client and estate routing must remain usable. Migration is host-local; shared execution remains Odysseus-owned. Other machines must not be affected."
+requires_remote_compute: false
+requires_local_model: false
+requires_zotero: false
+requires_mcp: false
+requires_web: true
+verification_route: V2_HUMAN_VERIFIED
+risk_level: high
+approval_required: true
+source_traceability_required: true
+repo: tyecam1/odysseus
+branch: ""
+allowed_paths:
+  - automation/review/agent-tasks/**
+  - docs/**
+  - companion/laptop_client/**
+  - scripts/windows/g5kc-storage-inventory-readonly.ps1
+  - scripts/windows/g5kc-pcie-storage-diagnostics-readonly.ps1
+denied_paths:
+  - "**/.env"
+  - "**/secrets/**"
+  - "**/id_*"
+  - config/estate.yaml
+  - config/models.yaml
+inputs:
+  - docs/aoteru-repository-ownership-trajectory.md
+  - docs/aoteru-laptop-activation-closeout.agent-task.md
+  - docs/aoteru-model-host-routing-contract.md
+  - docs/aoteru-p13-laptop-reentry-evidence.md
+  - scripts/windows/g5kc-storage-inventory-readonly.ps1
+  - scripts/windows/g5kc-pcie-storage-diagnostics-readonly.ps1
+outputs:
+  - read-only hardware and SSD diagnosis with purchase/no-purchase decision
+  - verified external backup and Windows rollback/recovery plan
+  - reviewed Arch install configuration and post-install automation scripts
+  - separately bootable Arch on a verified second drive
+  - application, PhD/robotics and Odysseus-client restore/verification report
+result_path: ""
+review_report_path: ""
+handoff_model: independent-human-gate-review
+operator_decision_path: ""
+supersedes: []
+duplicates: []
+notes: "Do not run a destructive installer overnight unattended. The gifted Mac SSD is already physically installed in the second M.2 slot; it is not free. Start with live Windows read-only software diagnostics. Operator declines shutdown, reboot or physical inspection at this stage. This record is work intake, not installation approval. Do not create a second agent-task runtime. Avoid including laptop personal data, secrets or raw disk serial numbers in this public repository."
+---
+
+# G5 KC Arch Linux migration: staged, reversible work item
+
+## Decision and objective
+
+- **Operator decision:** Arch Linux as the target operating system; KDE Plasma as initial desktop.
+- **Host:** Gigabyte G5 KC; known prior inventory: Intel Core i5-10500H, NVIDIA RTX 3060 Laptop GPU, Windows on an approximately 477 GB disk. Treat these as previously reported, not an up-to-date live attestation.
+- **Storage design:** Preserve Windows and its existing drive intact. The second M.2 slot is reportedly already occupied by the gifted Mac SSD. After read-only diagnosis, either reuse/replace that SSD with a separate NVMe Arch drive, populate the additional 2.5-inch 7mm SATA bay (subject to missing connector/caddy verification), or consider external USB SSD for a non-invasive trial. No in-place conversion of Windows.
+- **Immediate priority:** digitally diagnose the gifted Mac SSD **while installed in the powered-on laptop**. It was reportedly undetectable; failure is **unconfirmed**. The operator explicitly does **not** consent to shutdown, reboot, BIOS entry or opening the laptop during this gate. No purchasing or writing until digital evidence is assessed. No agent can infer physical connector/slot integrity merely from a device absent in OS enumeration.
+- **Purpose:** a stable native Arch workstation for research, coding, ROS 2 container workloads, Obsidian/Zotero, and the existing thin Aoteru/Odysseus client. Do not relocate Odysseus runtime, research authority or shared orchestration onto the laptop.
+- **References:** Gigabyte G5 (RTX 30 Series) official specification lists two M.2 2280 slots, one NVMe PCIe/SATA and one NVMe PCIe, plus a 2.5-inch 7 mm SATA bay and an SD card reader. Gigabyte separately advertises *two* PCIe 3.0 x4 M.2 slots, with comparable NVMe capability: https://www.gigabyte.com/Laptop/G5--RTX-30-Series . Spec: https://www.gigabyte.com/us/Laptop/G5--RTX-30-Series/sp . These are model-family specifications; physical slot occupancy is not yet observed. Some older Apple SSDs have a proprietary connector; never infer failed silicon solely from non-enumeration in a PC.
+
+## Operating and authority contract
+
+1. Inspect the **live** Odysseus `dev` branch, this task, target machine, current repo instructions and eligible worker lanes. Run `aoteru preflight "<bounded operation>" --repo odysseus` or the canonical API equivalent before substantive routed work. If inaccessible, record the reason and continue only authorised read-only planning.
+2. Never create a new scheduler, task queue, router, host identity or agent orchestration stack. Keep domain files in their existing canonical repos/storage. Follow Odysseus estate routing, credential, lease and execution controls.
+3. Progress only through explicit gates. Agents may prepare, inspect, simulate, package, configure, verify and report autonomously *inside the currently approved gate*. They must not infer human consent to erase/repartition devices or relax security from an instruction to work overnight.
+4. The human must physically approve case opening/drive insertion, firmware/boot changes, any action affecting encryption or Secure Boot, and the exact target disk and destructive write immediately before installation. A lost agent connection at reboot is expected and must not be disguised as a completed migration.
+5. Keep detailed private machine inventory, identifiers, personal data, drive serial numbers, key material, recovery codes and absolute personal paths **out of Git**. Commit only sanitised receipts, non-secret manifests and reusable scripts. Preserve any needed sensitive evidence in the operator-approved secure local storage.
+6. Do not touch lab Jetson, CPI devices, Windows home worker, interface PC, or other host deployments. Do not perform an unrequested firmware flash, account migration or security policy change.
+
+## Model delegation policy (must apply at every gate)
+
+- Follow `AGENTS.md` and the live Odysseus preflight/routing contract before delegating substantive work. Route by **currently qualified** capability and evidence, not by a model-name assumption; do not invent GLM availability.
+- Prefer deterministic PowerShell and direct system queries for enumeration, event collection, exact comparisons and validations; **do not spend inference on work that scripts can reliably perform**.
+- Use a GLM model for bounded, read-only log filtering, controller-error grouping, candidate storage-option comparison or independent summary **when the live estate preflight says a GLM lane is available and adequate**. Send only sanitised task-relevant evidence; no raw serials, identifiers, credentials, recovery codes or private file contents.
+- Use Codex as the coordinator/verifier for cross-source diagnosis, uncertain hardware findings, safety/approval decisions and any future reviewed implementation. Do not dispatch Codex purely to supervise deterministic commands when the existing controller can handle them.
+- Delegating interpretation to a remote GLM model does **not** grant it access to the Windows laptop. Enumeration must run on the real laptop via an already-authorised local agent or shell. No remote executor may claim laptop-specific observations without a captured provenance path.
+- Record each substantive delegation's `task | host/route | selected model | result | verifier | reason if retained locally`. If GLM is unavailable, unauthorised, insufficient or more costly overall, record that reason and use the cheapest adequate alternative without stalling the safe diagnosis.
+- Never construct a second queue/router, auto-install an agent, relax Windows administration security, or approve destructive action to make a model route convenient.
+
+## Pre-gate: digital-only diagnosis on the live laptop (do now)
+
+- **Hard stop:** no power-off/reboot, lid/case opening, physical SSD handling, BIOS access, PCIe reset, partition changes, disk initialisation, firmware update, driver installation, storage-controller-mode changes or offline disk operations. Do not ask the operator to do these as prerequisites for this inspection.
+- Use the existing authorised laptop Aoteru/remote execution path *if* it is actually available. A GitHub connector cannot execute commands on the laptop; do not claim that repository access alone establishes local host access. If no laptop shell exists, provide the exact minimal local PowerShell invocation.
+- Run `scripts/windows/g5kc-storage-inventory-readonly.ps1` on the live Windows machine. Inspect output of Win32_DiskDrive, Get-Disk, Get-PhysicalDisk, partitions/GPT type, present vs historical PnP disk devices, storage controllers, BIOS version and recent relevant system event metadata. **No disk serial numbers or PnP instance IDs in public evidence.**
+- Separate: (A) Mac SSD enumerated and Windows cannot mount APFS/possibly FileVault; (B) device enumerated but controller/device error; (C) historical detection only; (D) no digital evidence of enumeration. None of (B)-(D) alone proves a broken drive; a wrong protocol/adapter, seating and physical failure remain indistinguishable without subsequent physical diagnostic intervention.
+- Observe the SATA controller, but do not infer a physically installed 2.5-inch cable/caddy solely because the chipset supports SATA. Even a comprehensive digital inventory cannot prove vacant bay mechanical fit.
+- Compare four choices: replacing Mac SSD with NVMe; adding 2.5-inch SATA SSD; removable SD for **data only**, not preferred boot/system; external USB 3.x SSD for a non-invasive Arch trial. The G5 KC's SD reader is specified but **UEFI boot support from internal SD is unverified**, and speed/endurance are inferior to internal SSDs for frequent package writes and containers.
+- Output a short decision matrix with verified vs unknown items. Stop at `DIGITAL_INSPECTION_DONE` and obtain a separate decision before any hardware procurement or migration.
+
+## Phase 0: establish real machine and disk truth (read-only)
+
+- Record current Windows edition, laptop model/SKU, CPU, GPU, RAM, UEFI mode, Secure Boot state, BitLocker/device-encryption state, partition layout, storage-controller mode (including Intel RST/VMD), disks, volumes and free space, installed device drivers, firmware, Wi-Fi/Bluetooth chipset, monitor setup, connected accessories and battery health.
+- Cross-check Windows `Get-PhysicalDisk`, `Get-Disk` and `Get-Partition` against BIOS/UEFI storage listing. Read-only PowerShell examples:
+  ```powershell
+  Get-CimInstance Win32_ComputerSystem | Select Manufacturer,Model,TotalPhysicalMemory
+  Get-Disk | Select Number,FriendlyName,BusType,Size,PartitionStyle,OperationalStatus
+  Get-PhysicalDisk | Select FriendlyName,MediaType,BusType,HealthStatus,Size
+  Get-Partition | Select DiskNumber,PartitionNumber,DriveLetter,Type,Size
+  Confirm-SecureBootUEFI
+  Get-BitLockerVolume | Select MountPoint,ProtectionStatus,VolumeStatus
+  ```
+- If any command requires elevation or errors, capture the failure without assuming the corresponding hardware/feature is absent.
+- Defer physical-slot and clearance checks to the later authorised installation gate; the second M.2 slot is **occupied by the gifted Mac SSD** and not available without removing it. Independently confirm the two NVMe PCIe 3.0 x4 electrical capabilities from the manufacturer's specification.
+- Snapshot critical user workflows: Obsidian vault Git state and untracked content; Zotero database and attachment storage; ROS 2 distributions/toolchains/containers; Python/Conda/venvs; CUDA/graphics; SSH/Tailscale; audio/music hardware and software; local work, games and licences; university VPN/Microsoft applications; backups. Classify native, containerised, web, Wine/VM, or must-retain-Windows. Identify blockers *before* operating-system selection is treated as irreversible.
+- **Gate 0:** sign off a read-only, sanitised inventory; no changes to disk topology.
+
+## Phase 1: diagnose spare Apple/Mac SSD (read-only by default)
+
+1. **First inspect digital enumeration without shutdown**; only after the user separately approves physical access, obtain a photograph of **both sides** showing connector and printed part/model number, plus length and adapter, or an accurate transcription. Do not publish full serial numbers.
+2. Identify whether the device is a standard M.2 2280 NVMe, M.2 SATA, Apple proprietary blade form, SATA, or some other module. Identify donor Mac generation only from actual label/connector evidence, not an assumption that all Mac SSDs are interchangeable.
+3. If proprietary: select a *verified appropriate* Apple-to-PC adapter/enclosure only if the cost is justified; confirm direction of adapter, physical clearance and electrical protocol. A common PC M.2 slot or USB NVMe enclosure cannot read every Apple SSD unadapted.
+4. If standard and mechanically compatible: test with power off and suitable ESD handling in the confirmed free slot, or with a known-good **protocol-matched** enclosure. Inspect BIOS enumeration and `Get-Disk` / Disk Management (or Linux live `lsblk -o NAME,SIZE,MODEL,TRAN` and `nvme list`) without initialising, formatting or writing to the device.
+5. Distinguish: (a) device enumerates, filesystem merely not mountable in Windows, (b) incompatible connector/protocol/enclosure or adapter, (c) loose/contact/slot fault, (d) actual likely device failure. If enumerating, capture SMART/NVMe health read-only and check capacity. Testing another known-good device/adapter may be necessary to substantiate (d).
+6. If ownership/data rights are unclear, don't attempt decryption or data recovery. Prior report says the content is not needed; still require explicit erase permission before repurposing.
+7. **Gate 1:** one of `REUSE VERIFIED`, `ADAPTER TEST JUSTIFIED`, `BUY REPLACEMENT`, or `INCONCLUSIVE`, with evidence and lowest-cost next action. Never call the Mac SSD broken solely because Windows does not show a drive letter.
+
+## Phase 2: storage procurement only if needed
+
+- **Required:** standard internal M.2 2280 **NVMe PCIe** (PCIe 3.0 or backward-compatible 4.0), a bare drive without a tall/heavy heatsink; genuine vendor, warranty and return rights; sufficient capacity. Reject M.2 SATA-only for the NVMe-only slot, M.2 2230 unadapted, proprietary Apple blade, and 2.5-inch SATA if buying specifically for the free M.2 NVMe slot.
+- **Capacity choice:** 1 TB sufficient for initial Arch + workstation tooling; consider 2 TB if local datasets, media, container images and dual-environment assets materially require it. Don't spend to chase advertised PCIe 4.0/5.0 peak sequential speeds where the laptop is the bottleneck.
+- Compare real current UK retailer listings with **dated** prices, in-stock status, VAT/delivery and return terms, rather than relying on historical snippets. Consider sustained write, thermals, NAND endurance, reliability and value; note model substitutions/revisions.
+- Illustrative candidates to re-price at purchase time: Lexar NM620 1 TB (PCIe 3.0), Kingston NV3 1 TB (budget Gen4), WD Black SN7100 1 TB, Crucial P310 2 TB **without heatsink**. Do not pre-authorise any purchase.
+- **Gate 2:** operator selects budget and exact SSD model, seller, capacity and installed destination slot; record `purchased` only after actual order.
+
+## Phase 3: preservation and rollback
+
+- Create an independent, offline or external backup of every irreplaceable Windows file, including untracked/uncommitted repositories, Zotero `zotero.sqlite` + `storage`, Obsidian attachments/config, local secrets/keys transferred securely, MFA/recovery arrangements, project files and software licences. A Git remote alone is **not** a complete backup.
+- Verify the backup by checksum/sample restore plus a whole critical-directory manifest; do not rely solely on a completed copy command. Record backup location privately, not Git.
+- Save the BitLocker recovery key through an approved **private** channel if Windows encryption is enabled. Record current firmware settings. Prepare and test Windows recovery media and an Arch installer/rescue USB.
+- Identify how to boot *either* drive independently via UEFI firmware boot menu. Prefer independent EFI System Partitions on separate physical drives, with clear identification of destination disk by model/capacity and verified serial prefix only in the private approval screen. Do not place Arch boot files on the Windows ESP without an explicit reason and approval.
+- Prepare an operational rollback: choose Windows boot in UEFI, physically remove/disable Arch drive if necessary, restore firmware settings, and demonstrate Windows starts with files intact.
+- **Gate 3:** verified restore sample, Windows recovery path, spare storage destination and explicit data-loss approval for the **new target drive only**. If any check fails, STOP.
+
+## Phase 4: pre-build Arch configuration (non-destructive preparation)
+
+- Use official current Arch installation guidance and pin a verified installer ISO/signature; propose guided `archinstall` config or equivalent reproducible declarative steps. Install **Arch Linux**, not an Arch derivative.
+- Default desktop: KDE Plasma/Wayland; default network: NetworkManager. Choose one coherent bootloader route for an independent disk (prefer systemd-boot on UEFI after compatibility review). Disk: GPT with independent EFI partition and Linux system; choose filesystem/backup plan consciously, e.g. Btrfs + tested snapshots if this does not add unjustified maintenance, otherwise ext4 with verified backup/restore.
+- Recommend full-disk LUKS2 encryption for personal/research files, but operator must explicitly approve encryption and securely retain recovery credentials. Never generate/store plaintext passphrases in a repository or runtime logs.
+- Review hardware-specific paths: Intel/NVIDIA hybrid graphics, proprietary/open NVIDIA module compatibility with *current* Arch packages, DKMS/kernel matching, Secure Boot policy, display brightness and refresh, Wi-Fi, Bluetooth, webcam, audio, microphone, headphone jack, touchpad, keyboard backlight/fan/thermal controls, power management, external monitors, suspend/resume.
+- Prepare a short verified first-boot install manifest with explicit dependencies and package sources; pin package choices to live Arch documentation, not historical guessed package names. AUR packages are optional, untrusted and separately reviewed. Set sensible update and recovery discipline for a rolling distro (e.g. linux-lts fallback, pacman caches and recovery media).
+- Recreate research environment minimally: Git + SSH agent, Python/uv or venv, Docker/Podman only where warranted, ROS 2 **Jazzy Ubuntu 24.04 container** and **Humble Ubuntu 22.04 container** as needed rather than representing Arch as an officially supported binary target; GPU/USB/udev/RealSense pass-through tests; CUDA/containers only if a real workload needs them. Avoid disturbing Jetson/lab ROS nodes.
+- Plan an independent thin Aoteru/Odysseus client using existing documented laptop-client and Tailscale route, not a local backend duplication. Confirm executable packaging, credentials and host identity implications of the OS change; keep private tokens off Git.
+- **Gate 4:** independent review of generated installation and recovery plan including all destructive commands; obtain operator's exact-device authorisation.
+
+## Phase 5: human-assisted installation, then bounded unattended configuration
+
+1. Operator physically installs the verified SSD, inserts verified Arch boot USB and selects it in UEFI. Any firmware changes are explicitly reviewed.
+2. Boot installer. **Pause immediately before partition/format** and show destination disk model, size and partition paths alongside preserved Windows disk details. A second independent confirmation of the **exact target device** is mandatory.
+3. Installer formats **only the approved new target**. No erase, resize, reformat, `wipefs`, `dd`, `sgdisk --zap-all` or filesystem creation on the Windows disk. No automatic EFI change to Windows.
+4. Finish base Arch installation, boot into the new system and verify Arch and Windows both boot independently.
+5. After Linux networking and private agent credentials are authenticated manually, agent can execute bounded post-install configuration unattended **without sudo-all privileges**. Use privilege separation for package/configuration operations, a transaction log and explicit permit lists for changes. Stop for new escalations.
+6. Observe/reconnect only via existing authorised channel. Do not treat the inevitable reboot disconnect as success or automatically retry the installer.
+7. **Gate 5:** two-OS boot verification and no unintended Windows disk writes.
+
+## Phase 6: verification, restoration, cutover
+
+- Test desktop stability with RTX 3060/hybrid display, battery/AC power, suspend/resume cycles, external display, peripherals, camera, audio, Wi-Fi/Bluetooth, VPN, disk encryption recovery and package update/reboot.
+- Restore personal/research work **from verified backup or authoritative remote** without losing untracked files. Verify Git/Obsidian/Zotero cross-platform sync and correct attachment/database locations; ensure no double-writer Zotero/Obsidian corruption.
+- Run relevant ROS 2 container builds, camera discovery and **bounded** RealSense capture test if hardware present; confirm USB/udev permissions and NVIDIA GPU workloads; record remaining unsupported packages transparently.
+- Reconnect the laptop Aoteru thin client to *existing* Odysseus estate only; test `aoteru status`, routing, bounded read-only ask and session state. Confirm that the OS transition did not inadvertently change authority or deploy a competing backend.
+- Verify research/publication software compatibility, university access, backups, screen locking, package maintenance and rollback access. Record a small list of Windows-only applications and whether Windows remains a necessary fallback.
+- **Acceptance:** Arch boots independently; all critical work recoverable and usable; Windows unchanged and bootable; critical device drivers operational; major workflows tested; backups functional; no secret published; issues tracked with owners; any known unmet criterion explicitly visible. No premature claim of a complete migration.
+
+## Stop conditions and escalation
+
+Stop immediately upon: unknown actual drive identity/slot, ambiguous Mac SSD connector/protocol, unverified backup, uncertain Windows encryption/recovery, installer targeting wrong disk, destructive permission not current, GPU/display instability without recovery path, bootloader changes to Windows ESP, or lost authorisation. Preserve logs privately; produce an exact one-action human handoff and continue only after approval.
+
+Never promise that an unattended overnight installation can safely manage physical storage, UEFI prompts or reboots. Overnight automation starts only **after first successful Linux boot** and is limited to reviewed software setup/tests.
+
+## Immediate next operator evidence
+
+1. Run the pinned read-only Windows storage inventory script using an existing authorised agent/shell on the **running** laptop. No reboot or physical inspection permitted in this stage.
+2. Evaluate whether a second physical disk is enumerated, historical PnP sightings, partition type and storage-controller errors. If not enumerated, report bounded unknowns rather than declaring dead or fixable.
+3. Compare second NVMe-slot replacement, 7mm SATA SSD (after eventual cable check), SD card as noncritical storage and external USB SSD trial. Defer model selection, capacity and physical SSD inspection until the digital findings are reviewed.
+
+## Closure record
+
+Record phase/gate outcome, evidence date, host hardware summary without serial numbers, new drive make/model, exact installer method, source commits, validation commands/results, remaining blockers, rollback proof, and the operator's decisions. Store no sensitive inventory, keys or filesystem user data in this public repo. Change this task's status only when justified by actual gate evidence.
+
+## Gate result: 2026-10-17 read-only laptop inspection
+
+**Reported executor outcome:** `DIGITAL_INSPECTION_DONE / CLASS D / INCONCLUSIVE`. This receipt records the operator-provided Codex report; the underlying laptop-local inventory file was **not independently read** through this GitHub session.
+
+- Actual host reported: GIGABYTE G5 KC, powered-on Windows laptop. Script `scripts/windows/g5kc-storage-inventory-readonly.ps1` was fetched from Odysseus `dev`, inspected and executed at **2026-10-17 16:24 UTC**.
+- Enumerated physical disks: exactly **one**, model `NVMe ESR512GTLCG-EAC-`, nominal 512 GB, online, hosting Windows `C:`.
+- No second physical disk identifiable as the installed gifted Mac SSD. Present and retained PnP lists and checked PnP history/event records contained no identifiable Mac SSD match. This does **not** establish that the drive has never enumerated.
+- Mac SSD SMART/health inaccessible without enumeration. Failure state, protocol/adapter compatibility, seating, slot/controller fault and drive electronics remain unresolved. Windows not understanding APFS alone would not explain absence of physical disk enumeration.
+- 2.5-inch SATA bay is specified by manufacturer, but cable/caddy and actual fit are **unverified**. An enumerated SATA RAID controller does not establish the existence of an installed SATA data cable.
+- The model's internal SD reader is inadequate as a recommended Arch root-system target. An external USB SSD is a reversible evaluation path if desired.
+- **Execution safety:** Report states no reboot, shutdown, physical inspection, driver/firmware change or storage write during the diagnostic gate.
+- **Delegation provenance:** Odysseus preflight attempted; the live route returned `glm` as an unknown alias. No qualified GLM lane was available through that alias, so deterministic PowerShell gathered evidence and Codex retained the cross-source judgement. Do not hardcode a nonexistent GLM alias or claim GLM ran.
+- **Disposition:** Diagnostic gate complete, migration task remains `inbox`. No SSD is approved for purchase, no disk is approved for formatting, and there is **no** approval to power down/open the laptop. Do not repeat the same Windows inventory without new evidence.
+
+**Next operator choice:** either (1) defer physical intervention until an Arch-installation maintenance window, then inspect/replace the gifted SSD in the reportedly occupied second M.2 slot, preferably with a returnable, verified M.2 2280 NVMe replacement; (2) prioritise the 2.5-inch SATA bay only once its cable/caddy are verified; or (3) evaluate Arch on an external USB SSD. Keep Windows unmodified. If reuse of the Mac SSD is valued, identify its model/adapter at the next explicitly approved powered-down inspection before deciding to discard it.
+
+## Recovery-first second diagnostic gate (operator request, 2026-10-17)
+
+**New objective:** Exhaust remaining safe compatibility/controller observations before recommending replacement. The first pass's `CLASS D` verdict means only that no separate physical disk was enumerated in Windows; it is not evidence of irreparable hardware failure. This task is **not** closed.
+
+1. Confirm the donor Mac model/year from the operator or brother if possible, without opening the laptop; recover the SSD's product/model/adapter details from purchase receipts or historical records if accessible. If unknown, label it unknown. Distinguish an original Apple proprietary module, a replacement standard NVMe M.2 SSD, and a standard M.2 **SATA** SSD.
+2. **Important electrical constraint:** Gigabyte lists two M.2 type 2280 positions: one accepts both NVMe PCIe and M.2 SATA; the **other accepts NVMe PCIe only**. The operator reports the gifted Mac SSD is installed in the second position, but the installed module's protocol and mapping to the dual-protocol slot remain unverified. If it is M.2 SATA in the NVMe-only socket, Windows cannot fix that with a filesystem driver. Confirm exact positioning later only when physical inspection is separately approved.
+3. Run `scripts/windows/g5kc-pcie-storage-diagnostics-readonly.ps1` on the **actual powered-on laptop**. Inspect all present PCI functions (including unidentified/problematic controllers), PnP problem codes and Windows storage-driver versions. Correlate this with the prior inventory. Store complete local diagnostics privately; summarise only sanitised findings in this public task.
+4. Review whether Intel RST/RAID controls the NVMe storage path. Controller presence alone does not prove a VMD defect; this G5 KC uses a 10th-gen CPU and Intel's general newer VMD guidance cannot be applied blindly. **No controller-mode changes, driver replacements or resets.**
+5. If a storage controller or endpoint is visible but unhealthy, identify the precise hardware/problem code and a bounded non-destructive remedy requiring separate approval if it would mutate the host. If no endpoint appears, report that software cannot currently communicate with it and stop; do **not** repeat software rescans or attempt brute-force operations.
+6. On a **future operator-approved reboot**, check whether UEFI enumerates the second storage device, and optionally whether a trusted Linux live environment enumerates it. Neither is authorised in the current digital-only gate. On a separately approved powered-down inspection, confirm module model/connector/adapter, which slot it is in, seating, and a known-good cross-test. This is the only path to separate certain physical/electrical causes from hardware failure.
+7. No purchase recommendation becomes final until compatibility and these bounded tests are reconciled, or the operator knowingly elects to replace the drive without further inspection.
+
+**Acceptance:** concise evidence table for `model/protocol/adapter | PCIe endpoint | controller health | Windows block | remaining unknown | least-invasive next test`. Preserve Windows and its original NVMe disk. No unsupported claim that a missing physical disk is recoverable by file-system software, AI inference, or encryption cracking.
+
+## Second read-only diagnostic outcome: 2026-10-17 16:45 UTC
+
+**Reported result:** second diagnostic `COMPLETE / SECOND DEVICE NOT ENUMERATED / CONDITION UNKNOWN`. This is an operator-supplied report from the laptop Codex agent; the laptop-local evidence JSON was not independently inspected via this GitHub session.
+
+- Ran `scripts/windows/g5kc-pcie-storage-diagnostics-readonly.ps1` on the powered-on GIGABYTE G5 KC at 16:45 UTC. **22 PCI functions** present, all reported OK; no identifiable endpoint for a second SSD.
+- Existing 512 GB Windows NVMe remained the sole enumerated physical disk.
+- `Intel Chipset SATA RAID Controller` reports OK with driver `15.44.0.1015`. No present PnP device was flagged with a problem code. This does not imply the Mac SSD is SATA or rule out every controller problem.
+- Frequent **corrected** PCIe root port #15 warnings reported. Its present children were the Realtek card reader and Ethernet controller. No evidence links these warnings to the missing SSD; do not present them as SSD causation.
+- Gifted Mac module model, connector, protocol, adapter and physical slot mapping **remain unknown**. Compatible NVMe endpoint, Apple proprietary blade/adapter, M.2 SATA-in-NVMe-only slot, seating, slot, firmware and drive-electronics failure remain unseparated.
+- The agent reports no shutdown, reboot, case opening, driver/firmware/storage modification. Live Odysseus routing had **no qualified GLM binding**; none dispatched. Deterministic Windows queries supplied the evidence; Codex verified the report.
+- Private local evidence paths, *not to be ingested into public Git unredacted*: `%LOCALAPPDATA%/G5KC-SSD-diagnostics/2026-10-17/pcie-diagnostics.json`, `storage-inventory.json`, `sanitised-correlation.json`. Do not assume the raw files are accessible from the remote compute host or this GitHub session.
+- **Gate disposition:** digital-only diagnosis exhausted without new hardware identity. No supported software remedy identified. No purchase or physical operation approved. Status remains `inbox`, awaiting the **donor Mac model/year or SSD/adapter identity** obtained without opening the laptop, or a separately approved powered-down UEFI/physical inspection and known-good slot test. Avoid redundant Windows rescans or conjectural driver changes.
