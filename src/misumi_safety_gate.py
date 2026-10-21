@@ -50,13 +50,21 @@ def normalise(text: object) -> str:
 
 _LEET = str.maketrans({"0": "o", "1": "l", "3": "e", "4": "a", "5": "s", "7": "t", "@": "a", "$": "s"})
 # Three or more single letters in a row, separated by spaces or punctuation ("g a s", "f.i.t", "c-h-o-k-i-n-g").
-_SPACED_RUN = re.compile(r"(?<![a-z0-9])[a-z0-9](?:[ \t.\-_*]+[a-z0-9]){2,}(?![a-z0-9])")
-# Stems checked inside a spaced-out run (after the letters are joined): a run is already a disguise, so a stem anywhere in it
-# counts ("a g a s" -> "agas", "i a m b l e e d i n g" -> "iambleeding"). Applied ONLY to such runs, never to ordinary text.
+_SEP = r"[^a-z0-9]+"  # ANY run of other characters between two letters ("g+a+s", "g=a=s", "g!a!s", "g/a/s")
+_SPACED_RUN = re.compile(rf"(?<![a-z0-9])[a-z0-9](?:{_SEP}[a-z0-9]){{2,}}(?![a-z0-9])")
+# Short chunks ("fi re", "ga s", "a fi t"): two or more tokens of at most two characters. A stem counts here only when it begins and
+# ends at a token boundary, so "if i re-send" does not read as "fire" but "fi re" does.
+_CHUNK_RUN = re.compile(rf"(?<![a-z0-9])[a-z0-9]{{1,2}}(?:{_SEP}[a-z0-9]{{1,2}})+(?![a-z0-9])")
+# Stems checked inside a spaced-out run (after the letters are joined).
 _RUN_STEMS = (
     "gas", "fire", "fit", "999", "911", "112", "111", "sos", "help", "ambulance", "bleed", "blood", "chok", "breath", "unconscious",
     "overdos", "suicid", "poison", "burn", "scald", "drown", "collaps", "seizure", "stroke", "faint", "hurt", "kill", "die",
     "dead", "pain", "smoke", "shock", "swallow", "knife", "gun", "attack", "abuse", "unresponsive", "heartattack", "cprs",
+)
+# Long, distinctive stems are also looked for in the whole text with every separator removed, on token boundaries ("cho king").
+_LONG_STEMS = (
+    "ambulance", "unconscious", "overdose", "suicide", "drowning", "bleeding", "choking", "collapsed", "seizure", "poisoning",
+    "poisoned", "anaphyl", "heartattack", "strangle", "stabbed", "unresponsive", "notbreathing", "cantbreathe", "999", "911",
 )
 
 
@@ -84,13 +92,42 @@ def _obfuscation_variant(text: str) -> str:
 
 
 def _spaced_hazard(text: str) -> str | None:
-    """The hazard stem hidden inside a spaced-out run of letters, if any (see _RUN_STEMS)."""
+    """The hazard stem hidden by spacing or punctuation, if any: inside a run of single characters (any stem), inside a run of
+    short chunks (a stem on token boundaries), or - for the long distinctive stems - anywhere once all separators are removed."""
     for match in _SPACED_RUN.finditer(text):
-        joined = "".join(re.findall(r"[a-z0-9]", match.group())).translate(_LEET)
         raw = "".join(re.findall(r"[a-z0-9]", match.group()))
-        for stem in _RUN_STEMS:
-            if stem in joined or stem in raw:
+        for variant in (raw, raw.translate(_LEET)):
+            for stem in _RUN_STEMS:
+                if stem in variant:
+                    return stem
+    for match in _CHUNK_RUN.finditer(text):
+        tokens = re.findall(r"[a-z0-9]+", match.group())
+        bounds, total = {0}, 0
+        for token in tokens:
+            total += len(token)
+            bounds.add(total)
+        raw = "".join(tokens)
+        for variant in (raw, raw.translate(_LEET)):
+            for stem in _RUN_STEMS:
+                at = variant.find(stem)
+                while at != -1:
+                    if at in bounds and at + len(stem) in bounds:
+                        return stem
+                    at = variant.find(stem, at + 1)
+    tokens = re.findall(r"[a-z0-9]+", text)
+    despaced = "".join(tokens)
+    if not any(stem in despaced for stem in _LONG_STEMS):
+        return None
+    bounds, total = {0}, 0
+    for token in tokens:
+        total += len(token)
+        bounds.add(total)
+    for stem in _LONG_STEMS:  # a stem must begin AND end on token boundaries: "tech ok in g" is not "choking"
+        at = despaced.find(stem)
+        while at != -1:
+            if at in bounds and at + len(stem) in bounds:
                 return stem
+            at = despaced.find(stem, at + 1)
     return None
 
 

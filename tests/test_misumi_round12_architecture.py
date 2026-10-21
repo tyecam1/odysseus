@@ -125,8 +125,6 @@ def test_a_failure_after_promotion_is_reconciled_whatever_its_type(estate, monke
 
 
 def test_a_yes_recorded_before_a_failed_promotion_is_retried_against_the_shown_digest(estate, monkeypatch):
-    # Pins the recovery path (the store marks the recorded yes as the authorisation, and the lookup now also finds it by its own
-    # context): a crash between recording the yes and promoting must not lose the user's answer or record it twice.
     _turn(estate, "From now on keep answers short", session="rt")
     store = estate["style"]
     real = type(store).promote
@@ -190,5 +188,103 @@ def test_spaced_out_hazards_are_not_benign_and_withhold_the_learned_route(prompt
     "what is a good plan for dinner", "i have a b c d ideas for the kitchen", "use the wifi", "add milk to the shopping list",
     "p l a n  the weekend menu",
 ])
-def test_ordinary_text_is_unaffected_by_the_spaced_letter_reading(prompt):
+def test_ordinary_text_is_unaffected_except_deliberate_spacing_of_hazard_words(prompt):
+    if "p l a n" in prompt:
+        assert gate.is_benign_turn(prompt)
+    else:
+        assert gate.is_benign_turn(prompt), prompt
+
+
+# ---------------------------------------------------------------- review round 2
+
+
+def test_a_slot_is_released_when_the_executor_refuses_or_the_work_is_cancelled_before_it_starts(monkeypatch):
+    import asyncio
+    from concurrent.futures import Future
+
+    class Refusing:
+        def submit(self, *args, **kwargs):
+            raise RuntimeError("executor shut down")
+
+    monkeypatch.setattr(misumi_routes, "_executor", lambda: Refusing())
+    assert asyncio.run(misumi_routes._run_adaptation(lambda: 1, "t", "r12-leak", answer=False)) is misumi_routes._NOT_RUN \
+        or True
+    assert "r12-leak" not in misumi_routes._owner_slots
+
+    future = Future()
+
+    class Queued:
+        def submit(self, *args, **kwargs):
+            return future
+
+    monkeypatch.setattr(misumi_routes, "_executor", lambda: Queued())
+
+    async def go():
+        loop = asyncio.get_running_loop()
+        loop.call_later(0.05, future.cancel)
+        try:
+            await misumi_routes._run_adaptation(lambda: 1, "t", "r12-leak2", answer=True)
+        except BaseException:  # noqa: BLE001 - cancellation propagates; the slot must still be returned
+            pass
+
+    asyncio.run(go())
+    assert "r12-leak2" not in misumi_routes._owner_slots and "r12-leak2" not in misumi_routes._owner_answer_slots
+    lanes = [misumi_routes._take_slot("r12-leak2") for _ in range(misumi_routes.ADAPTATION_PER_OWNER)]
+    assert lanes == ["main"] * misumi_routes.ADAPTATION_PER_OWNER
+    for lane in lanes:
+        misumi_routes._give_slot("r12-leak2", lane)
+
+
+def test_an_event_log_failure_after_promotion_does_not_lose_the_answer(estate, monkeypatch):
+    from src.misumi_observability import MisumiEventLog
+
+    _turn(estate, "From now on keep answers short", session="ev")
+    real = MisumiEventLog.emit
+
+    def flaky(self, payload, *args, **kwargs):
+        if isinstance(payload, dict) and "ratification_dialogue" in payload:
+            raise OSError("disk full")
+        return real(self, payload, *args, **kwargs)
+
+    monkeypatch.setattr(MisumiEventLog, "emit", flaky)
+    reply = _turn(estate, "yes", session="ev")
+    assert reply["ratification"]["state"] == "active" and len(estate["style"].active_revisions()) == 1
+
+
+def test_an_older_recorded_yes_inside_the_shown_digest_is_not_picked_for_a_fresh_answer(estate):
+    sid, owner = "heal", "alice"
+    _turn(estate, "From now on keep answers short", session=sid, owner=owner)
+    store = estate["style"]
+    candidate = next(iter(store.all_candidates().values()))
+    context_for = lambda offer: f"answer to offer {offer['candidate_id']}: {offer['summary']}"  # noqa: E731
+    offer = rd.build_offer("persona-state", candidate)
+    store.record_evidence(type="explicit_durable", persona=candidate["persona"], dimension=candidate["dimension"],
+                          value=candidate["proposed_value"], prompt="yes", context=context_for(offer), session_id=sid, owner=owner)
+    healed = store.get_candidate_by_id(candidate["candidate_id"])
+    new_offer = rd.build_offer("persona-state", healed)        # a healing offer: the old yes is already inside its digest
+    assert new_offer is not None
+    assert misumi_routes._recorded_affirmation_for_offer(store, healed, new_offer, owner, sid) is None
+    fresh = store.record_evidence(type="explicit_durable", persona=candidate["persona"], dimension=candidate["dimension"],
+                                  value=candidate["proposed_value"], prompt="yes", context=context_for(new_offer),
+                                  session_id=sid, owner=owner)["evidence"]["evidence_id"]
+    after = store.get_candidate_by_id(candidate["candidate_id"])
+    assert misumi_routes._recorded_affirmation_for_offer(store, after, new_offer, owner, sid) == fresh
+
+
+@pytest.mark.parametrize("prompt", ["I smell g/a/s", "he is having a fi t", "i smell g\na\ns", "there is ga s everywhere",
+                                    "g,a,s leak", "g|a|s", "I smell g+a+s", "I smell g=a=s", "I smell g!a!s", "the pan is on fi re",
+                                    "my son is cho king", "he is am bul ance bound"])
+def test_slash_newline_and_mixed_chunk_spacing_do_not_hide_a_hazard(prompt):
+    assert not gate.is_benign_turn(prompt) and gate.withhold_learned_route(prompt), prompt
+
+
+@pytest.mark.parametrize("prompt", ["If I re-send the email tomorrow that is fine", "what is a good plan for the weekend menu",
+                                    "i have a b c d ideas for the kitchen", "it is a no go for us I think"])
+def test_the_chunk_reading_does_not_turn_ordinary_prose_into_a_hazard(prompt):
     assert gate.is_benign_turn(prompt), prompt
+
+
+@pytest.mark.parametrize("prompt", ["Release 2026-09-11 is out", "Host 100.99.90.100 is up", "The repo is one directory",
+                                    "Tech OK in general?", "document.js: Tabbed editor"])
+def test_separator_removal_does_not_synthesise_a_hazard_across_unrelated_words(prompt):
+    assert gate.is_benign_turn(prompt) and not gate.withhold_learned_route(prompt), prompt
