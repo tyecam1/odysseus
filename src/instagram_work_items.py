@@ -41,7 +41,7 @@ _REASON_VOCAB = frozenset(
     [f"phd:{cue}" for cue in _handoff._PHD_CORE | _handoff._PHD_GENERIC]
     + [f"misumi:{cue}" for cue in _handoff._MISUMI_STRONG | _handoff._MISUMI_WEAK]
 )
-_CONFIDENCES = frozenset({"none", "low", "medium", "high"})   # the outbox is data, never trusted text, in a public digest
+_CONFIDENCES = frozenset({"none", "low", "medium", "high", "model"})   # the outbox is data, never trusted text, in a public digest
 
 # domain -> (owner repo, base branch, review path template, outbox file)
 OWNERS: dict[str, dict[str, str]] = {

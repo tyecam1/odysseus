@@ -617,8 +617,11 @@ def _build_ollama_payload(
     stream: bool = False,
     tools: Optional[List[Dict]] = None,
     num_ctx: Optional[int] = None,
+    think: Optional[bool] = None,
 ) -> Dict:
     """Build the JSON payload for Ollama's /api/chat endpoint.
+
+    ``think`` is emitted only when explicitly set (False turns reasoning off for bounded classification calls).
 
     ``num_ctx`` sets the input context window. Ollama defaults to 2048
     when the option is omitted, so a model with a larger advertised
@@ -645,6 +648,8 @@ def _build_ollama_payload(
         payload["options"] = options
     if tools:
         payload["tools"] = tools
+    if think is not None:
+        payload["think"] = think
     return payload
 
 
@@ -1762,8 +1767,10 @@ def normalize_model_id(
 def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LLMConfig.DEFAULT_TEMPERATURE,
              max_tokens: int = LLMConfig.DEFAULT_MAX_TOKENS, headers: Optional[Dict] = None,
              timeout: int = LLMConfig.DEFAULT_TIMEOUT, prompt_type: Optional[str] = None,
-             num_ctx: Optional[int] = None) -> str:
+             num_ctx: Optional[int] = None, think: Optional[bool] = None) -> str:
     """Synchronous LLM call with optional prompt type enhancement.
+
+    ``think`` (Ollama only): explicit reasoning switch; omitted keeps the model default.
 
     ``num_ctx`` (Ollama only): explicit context-window override. When
     omitted, behaviour is unchanged — the Ollama branch discovers and
@@ -1818,7 +1825,7 @@ def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LL
         target_url = _normalize_ollama_url(url)
         payload = _build_ollama_payload(
             model, messages_copy, temperature, max_tokens,
-            stream=False, num_ctx=(num_ctx if num_ctx is not None else get_context_length(url, model)),
+            stream=False, num_ctx=(num_ctx if num_ctx is not None else get_context_length(url, model)), think=think,
         )
     else:
         target_url = _normalize_openai_chat_url(url)
