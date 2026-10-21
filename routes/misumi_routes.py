@@ -829,15 +829,16 @@ def _recorded_affirmation_for_offer(store: Any, candidate: Dict[str, Any], offer
     BETWEEN recording the yes and promoting leaves the evidence on the candidate with no mark, and the retry must be validated
     against the digest the user was shown (that evidence ignored), not discarded because the candidate has since changed."""
     context = f"answer to offer {offer['candidate_id']}: {offer['summary']}"
-    marked = candidate.get("promotion_authorised_by")
-    found = None
-    for item in store.list_evidence():
-        if item.get("type") == "explicit_durable" and item.get("owner") == owner and item.get("session_id") == sid and \
-                item.get("context") == context and parse_answer(str(item.get("prompt_excerpt") or "")) == "affirm":
-            found = str(item.get("evidence_id"))
-            if marked and found == str(marked):
-                break  # the recorded authorisation wins over any other matching row
-    return found
+    rows = [item for item in store.list_evidence()
+            if item.get("type") == "explicit_durable" and item.get("owner") == owner and item.get("session_id") == sid
+            and item.get("context") == context and parse_answer(str(item.get("prompt_excerpt") or "")) == "affirm"]
+    for item in reversed(rows):  # newest first
+        evidence_id = str(item.get("evidence_id"))
+        # only a yes that was recorded AFTER the offer was shown qualifies: ignoring it must give back the shown digest. An older
+        # yes already inside that digest (a healing or same-summary re-offer) is not this answer; the fresh yes is recorded instead.
+        if candidate_digest(candidate, offer.get("kind", ""), ignore_evidence=(evidence_id,)) == offer.get("digest"):
+            return evidence_id
+    return None
 
 
 def _recent_revision_by(owner: Optional[str], sid: Optional[str], stores: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -1139,15 +1140,23 @@ async def _run_adaptation(work, label: str, owner: Optional[str] = None, answer:
     import contextvars
 
     context = contextvars.copy_context()
+    released = threading.Lock()
 
-    def guarded():
-        try:
-            return context.run(work)
-        finally:
+    def release(_future=None):
+        if released.acquire(blocking=False):  # exactly once, whichever path gets here first
             _give_slot(owner, lane)
 
     try:
-        return await asyncio.get_running_loop().run_in_executor(_executor(), guarded)
+        future = _executor().submit(context.run, work)
+        future.add_done_callback(release)  # runs on completion AND when cancelled while still queued
+    except BaseException as exc:
+        release()
+        if isinstance(exc, Exception):
+            logger.exception("Misumi %s work could not be submitted; learned behaviour withheld: %s", label, exc)
+            return _NOT_RUN
+        raise
+    try:
+        return await asyncio.wrap_future(future)
     except Exception as exc:  # noqa: BLE001 - adaptation state must never fail a turn
         logger.exception("Misumi %s work failed; learned behaviour withheld: %s", label, exc)
         return _NOT_RUN
@@ -1159,10 +1168,13 @@ def _dialogue_reply(body, request_id: str, pending, outcome: Dict[str, Any], tex
     if not text:
         return None
     persona = normalize_persona((pending or {}).get("persona") or "aoteru")
-    events.emit({
-        "request_id": request_id, "persona": persona, "persona_source": "requested",
-        "ratification_dialogue": outcome, "outcome": "ratification-dialogue", "approval_mode": "user-in-dialogue",
-    })
+    try:
+        events.emit({
+            "request_id": request_id, "persona": persona, "persona_source": "requested",
+            "ratification_dialogue": outcome, "outcome": "ratification-dialogue", "approval_mode": "user-in-dialogue",
+        })
+    except Exception as exc:  # noqa: BLE001 - an event-log failure must never turn an applied answer into "not processed"
+        logger.warning("Misumi dialogue event could not be written: %s", exc)
     return {
         "text": text, "state": "speaking", "mood": body.mood or "focused",
         "source": "ratification-dialogue" if record else "dialogue-notice",

@@ -50,7 +50,10 @@ def normalise(text: object) -> str:
 
 _LEET = str.maketrans({"0": "o", "1": "l", "3": "e", "4": "a", "5": "s", "7": "t", "@": "a", "$": "s"})
 # Three or more single letters in a row, separated by spaces or punctuation ("g a s", "f.i.t", "c-h-o-k-i-n-g").
-_SPACED_RUN = re.compile(r"(?<![a-z0-9])[a-z0-9](?:[ \t.\-_*]+[a-z0-9]){2,}(?![a-z0-9])")
+_SEP = r"[\s.\-_*/\\|,;:]+"
+_SPACED_RUN = re.compile(rf"(?<![a-z0-9])[a-z0-9](?:{_SEP}[a-z0-9]){{2,}}(?![a-z0-9])")
+# Mixed short chunks ("a fi t", "ga s"): two or more tokens of at most two characters, at least one a single character.
+_CHUNK_RUN = re.compile(rf"(?<![a-z0-9])[a-z0-9]{{1,2}}(?:{_SEP}[a-z0-9]{{1,2}})+(?![a-z0-9])")
 # Stems checked inside a spaced-out run (after the letters are joined): a run is already a disguise, so a stem anywhere in it
 # counts ("a g a s" -> "agas", "i a m b l e e d i n g" -> "iambleeding"). Applied ONLY to such runs, never to ordinary text.
 _RUN_STEMS = (
@@ -85,9 +88,12 @@ def _obfuscation_variant(text: str) -> str:
 
 def _spaced_hazard(text: str) -> str | None:
     """The hazard stem hidden inside a spaced-out run of letters, if any (see _RUN_STEMS)."""
-    for match in _SPACED_RUN.finditer(text):
-        joined = "".join(re.findall(r"[a-z0-9]", match.group())).translate(_LEET)
-        raw = "".join(re.findall(r"[a-z0-9]", match.group()))
+    for match in (*_SPACED_RUN.finditer(text), *_CHUNK_RUN.finditer(text)):
+        tokens = re.findall(r"[a-z0-9]+", match.group())
+        if match.re is _CHUNK_RUN and not any(len(token) == 1 for token in tokens):
+            continue
+        raw = "".join(tokens)
+        joined = raw.translate(_LEET)
         for stem in _RUN_STEMS:
             if stem in joined or stem in raw:
                 return stem
