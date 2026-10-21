@@ -436,3 +436,16 @@ def test_never_accepts_domain_routing_and_has_no_domain_helper():
 
     assert "domain" not in inspect.signature(import_instagram_saved_export).parameters
     assert not hasattr(module, "_apply_domain")
+
+
+def test_a_second_different_caption_on_one_item_is_preserved_not_discarded(tmp_path):
+    posts = _fixture(POSTS_FIXTURE)
+    values = posts[0]["label_values"]
+    first = next(v["value"] for v in values if v.get("label") == "Caption")
+    values += [{"label": "Caption", "value": "an edited second caption"}, {"label": "Caption", "value": first}]
+    paths = _write_exports(tmp_path, posts, _fixture(COLLECTIONS_FIXTURE))
+    result = import_instagram_saved_export(*paths)
+    payload = read_source_event_payload(result["imported"][0]["payload_ref"])
+    assert payload["caption"] == first and payload["caption_variants"] == ["an edited second caption"]
+    other = read_source_event_payload(result["imported"][1]["payload_ref"])
+    assert "caption_variants" not in other                       # untouched items keep their payload (and hash)

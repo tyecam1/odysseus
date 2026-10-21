@@ -84,6 +84,17 @@ def _direct_label(
     return None, None
 
 
+def _caption_variants(values: list[Any], first: Any) -> list[str]:
+    """Further, different Caption values on the same item (Meta emits an edited second pair on some saves)."""
+    variants: list[str] = []
+    for value in values:
+        if isinstance(value, dict) and value.get("label") == "Caption":
+            text = value.get("value")
+            if isinstance(text, str) and text != first and text not in variants:
+                variants.append(text)
+    return variants
+
+
 def _group(values: list[Any], title: str) -> tuple[Optional[dict[str, Any]], Optional[int]]:
     for index, value in enumerate(values):
         if isinstance(value, dict) and value.get("title") == title:
@@ -198,6 +209,7 @@ def _parse_saved_posts(
             "timestamp": timestamp,
             "fbid": entry.get("fbid") if isinstance(entry.get("fbid"), str) else None,
             "caption": caption,
+            "caption_variants": _caption_variants(values, caption),
             "title": title,
             "hashtags": hashtags,
             "owner": owner,
@@ -347,7 +359,9 @@ def _private_payload(
         }
         for record in collection_records
     ]
+    extra = {"caption_variants": post["caption_variants"]} if post["caption_variants"] else {}
     return {
+        **extra,
         "kind": "instagram_saved_post",
         "permalink": permalink,
         "saved_at": post["timestamp"],
@@ -386,6 +400,7 @@ def import_instagram_saved_export(
     saved_posts = _load_list(saved_posts_path, "saved-posts")
     saved_collections = _load_list(saved_collections_path, "saved-collections")
     posts_file = os.path.basename(saved_posts_path)
+    snapshot = os.path.basename(os.path.dirname(os.path.abspath(saved_posts_path)))[:64]
     collections_file = os.path.basename(saved_collections_path)
 
     posts, post_failures = _parse_saved_posts(
@@ -419,6 +434,7 @@ def import_instagram_saved_export(
             existed_before = existing is not None
             prior_hash = existing.content_hash if existing is not None else None
             prior_timestamp = None
+            prior_snapshot = None
             if enforce_freshness and existing is not None:
                 try:
                     prior_metadata = json.loads(existing.payload_ref or "")
@@ -427,10 +443,17 @@ def import_instagram_saved_export(
                 candidate = prior_metadata.get("saved_at")
                 if _is_int(candidate):
                     prior_timestamp = candidate
+                if isinstance(prior_metadata.get("snapshot"), str):
+                    prior_snapshot = prior_metadata["snapshot"]
         finally:
             db.close()
 
-        if prior_timestamp is not None and post["timestamp"] <= prior_timestamp:
+        # An equal saved time is not stale (edits and collection changes keep it) unless an OLDER snapshot is only
+        # resurfacing because the newer one is unreadable or gone: that must not regress the stored revision.
+        if prior_timestamp is not None and (
+            post["timestamp"] < prior_timestamp
+            or (post["timestamp"] == prior_timestamp and prior_snapshot is not None and snapshot < prior_snapshot)
+        ):
             counts["superseded"] += 1
             continue
 
@@ -456,6 +479,7 @@ def import_instagram_saved_export(
         metadata = {
             **payload_pointer,
             "source_kind": "instagram_saved_post",
+            "snapshot": snapshot,
             "saved_at": post["timestamp"],
             "item_count": len(post["item_indices"]),
             "collection_count": len(private_payload["collections"]),
