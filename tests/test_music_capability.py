@@ -149,7 +149,7 @@ def test_a_direct_uri_plays_and_a_malformed_one_is_refused():
 # --- volume is bounded -------------------------------------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("value", [-1, 101, 81, 3.5, "loud", None, True])
+@pytest.mark.parametrize("value", [-1, 101, 81, 3.5, "loud", None, True, float("nan"), float("inf"), float("-inf")])
 def test_unsafe_or_malformed_volume_is_refused_not_clamped(value):
     controller, provider = _ctl()
     assert _do(controller, "volume", "v", volume=value).status == "refused" and provider.writes() == []
@@ -197,3 +197,57 @@ def test_every_simulated_result_says_so():
     for result in (controller.handle("devices", request_id="a"), _do(controller, "play", "b", query="Kind of Blue"),
                    _do(controller, "pause", "c", device="nowhere")):
         assert result.simulated and result.message.startswith("[simulation]")
+
+
+def test_a_provider_that_raises_anything_gives_a_typed_result_and_is_not_retried():
+    controller, provider = _ctl()
+    provider.pause = lambda device_id: (_ for _ in ()).throw(RuntimeError("binding bug"))
+    first = _do(controller, "pause", "boom")
+    assert first.status == "error" and first.trace["error"] == "unexpected"
+    provider.pause = lambda device_id: provider.calls.append(("pause", (device_id,)))
+    assert _do(controller, "pause", "boom") is first and provider.writes() == []
+    provider.devices = lambda: (_ for _ in ()).throw(KeyError("shape changed"))
+    assert controller.handle("devices", request_id="r").status == "error"
+
+
+def test_an_old_request_id_is_never_forgotten_so_it_can_never_write_twice():
+    controller, provider = _ctl()
+    _do(controller, "play", "first", query="Kind of Blue")
+    for number in range(600):
+        _do(controller, "pause", f"fill-{number}")
+    _do(controller, "play", "first", query="Kind of Blue")
+    assert provider.writes().count("play") == 1
+
+
+def test_the_remembered_set_fails_closed_when_full(monkeypatch):
+    import src.music_capability as module
+
+    monkeypatch.setattr(module, "_REMEMBERED_REQUESTS", 3)
+    controller, provider = _ctl()
+    for number in range(3):
+        assert _do(controller, "pause", f"a{number}").status == "done"
+    refused = _do(controller, "pause", "overflow")
+    assert refused.status == "refused" and provider.writes() == ["pause"] * 3
+
+
+def test_a_guest_replaying_the_owners_request_id_learns_nothing():
+    controller, provider = _ctl()
+    _do(controller, "play", "owner-1", query="Kind of Blue")
+    replay = controller.handle("play", request_id="owner-1", explicit_command=True, guest=True, query="Kind of Blue")
+    assert replay.status == "refused" and not replay.data and provider.writes() == ["play"]
+    assert controller.handle("play", request_id="owner-1", explicit_command=False, query="Kind of Blue").status == "refused"
+
+
+def test_reusing_a_request_id_for_a_different_command_is_refused():
+    controller, provider = _ctl()
+    _do(controller, "play", "id", query="Kind of Blue")
+    assert _do(controller, "play", "id", query="Pastel Blues").status == "refused"
+    assert _do(controller, "volume", "id", volume=10).status == "refused" and provider.writes() == ["play"]
+
+
+@pytest.mark.parametrize("request_id", [None, 5, ["x"], {}])
+def test_odd_request_ids_and_inputs_never_raise(request_id):
+    controller, provider = _ctl()
+    assert controller.handle("pause", request_id=request_id, explicit_command=True).status == "refused"
+    assert controller.handle(None, request_id="x").status == "refused"
+    assert controller.handle("search", request_id="s", query=None).status == "refused"
