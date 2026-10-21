@@ -149,7 +149,7 @@ def test_a_direct_uri_plays_and_a_malformed_one_is_refused():
 # --- volume is bounded -------------------------------------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("value", [-1, 101, 81, 3.5, "loud", None, True, float("nan"), float("inf"), float("-inf")])
+@pytest.mark.parametrize("value", [-1, 101, 81, 3.5, 3.0, 35.0, "loud", None, True, float("nan"), float("inf"), float("-inf")])
 def test_unsafe_or_malformed_volume_is_refused_not_clamped(value):
     controller, provider = _ctl()
     assert _do(controller, "volume", "v", volume=value).status == "refused" and provider.writes() == []
@@ -251,3 +251,66 @@ def test_odd_request_ids_and_inputs_never_raise(request_id):
     assert controller.handle("pause", request_id=request_id, explicit_command=True).status == "refused"
     assert controller.handle(None, request_id="x").status == "refused"
     assert controller.handle("search", request_id="s", query=None).status == "refused"
+
+
+def test_concurrent_calls_with_one_request_id_reach_the_provider_exactly_once():
+    import threading
+
+    controller, provider = _ctl()
+    barrier = threading.Barrier(8)
+    real = provider.pause
+
+    def slow_pause(device_id):
+        import time
+        time.sleep(0.05)
+        real(device_id)
+
+    provider.pause = slow_pause
+    results = []
+
+    def go():
+        barrier.wait()
+        results.append(controller.handle("pause", request_id="race", explicit_command=True))
+
+    threads = [threading.Thread(target=go) for _ in range(8)]
+    [t.start() for t in threads]
+    [t.join() for t in threads]
+    assert provider.writes().count("pause") == 1 and len(results) == 8 and all(r is results[0] for r in results)
+
+
+@pytest.mark.parametrize("explicit,guest", [("yes", False), (1, False), ([], False), (True, None), (True, 0), (True, "no"), (True, "")])
+def test_authority_needs_exact_booleans(explicit, guest):
+    controller, provider = _ctl()
+    result = controller.handle("pause", request_id="x", explicit_command=explicit, guest=guest)
+    assert result.status == "refused" and provider.writes() == []
+
+
+def test_unprintable_inputs_never_raise():
+    class Bad:
+        def __str__(self):
+            raise RuntimeError("no")
+
+        def __repr__(self):
+            raise RuntimeError("no")
+
+    controller, provider = _ctl()
+    for kwargs in ({"query": Bad()}, {"device": Bad()}, {"uri": Bad()}, {"volume": Bad()}, {"kind": Bad()}):
+        assert controller.handle("play", request_id="b" + str(len(provider.calls)), explicit_command=True, **kwargs).status in (
+            "refused", "not_found", "clarify", "error", "done", "done_unconfirmed")
+    assert controller.handle("volume", request_id="bv", explicit_command=True, volume=Bad()).status == "refused"
+    assert controller.handle("search", request_id="s", query=Bad()).status in ("refused", "not_found", "done")
+
+
+@pytest.mark.parametrize("uri", ["spotify:track:abc\n", "javascript:alert:x", "spotify:track:abc def", "spotify:evil:abc123",
+                                 "http:track:abc", " spotify:track:abc", "spotify:track:" + "a" * 65])
+def test_only_exact_well_formed_uris_reach_the_provider(uri):
+    controller, provider = _ctl()
+    assert _do(controller, "play", "u", uri=uri).status == "refused" and provider.writes() == []
+
+
+@pytest.mark.parametrize("rid", ["Bearer token-secret", "a b", "x" * 65, "i\nd", "tok=abc", "é"])
+def test_unsafe_request_ids_are_refused_and_never_appear_in_a_trace(rid):
+    controller, provider = _ctl()
+    result = controller.handle("pause", request_id=rid, explicit_command=True)
+    assert result.status == "refused" and provider.writes() == [] and rid not in json.dumps(result.trace)
+    assert controller.handle("devices", request_id=rid).trace["request_id"] == ""

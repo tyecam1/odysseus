@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import re
 import math
+import threading
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Protocol, Tuple
 
@@ -29,7 +30,8 @@ DEFAULT_MAX_VOLUME = 80  # percent; a higher request is refused, never clamped s
 MAX_OPTIONS = 3  # choices offered when asking the user to disambiguate
 MAX_DEVICES_LISTED = 5
 _REMEMBERED_REQUESTS = 4096  # write request ids remembered per controller; when full, new writes are refused, never evicted
-_URI = re.compile(r"^[a-z]+:[a-z]+:[A-Za-z0-9]{1,64}$")
+_URI = re.compile(r"spotify:(?:track|album|playlist|artist|episode|show):[A-Za-z0-9]{1,64}")
+_REQUEST_ID = re.compile(r"[A-Za-z0-9._:-]{1,64}")  # ids are opaque and short; anything else is refused, so traces can never carry free text
 
 
 class ProviderError(Exception):
@@ -100,50 +102,74 @@ def _say(provider: MusicProvider, text: str) -> str:
     return f"[simulation] {text}" if getattr(provider, "simulated", False) else text
 
 
+def _text(value: Any) -> str:
+    """A caller-supplied value as text; an object whose __str__ raises is empty text, never an exception."""
+    if isinstance(value, str):
+        return value
+    if value is None:
+        return ""
+    try:
+        return str(value)
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _volume_key(value: Any) -> str:
+    try:
+        return f"{type(value).__name__}:{value!r}"[:80]
+    except Exception:  # noqa: BLE001
+        return type(value).__name__
+
+
 class MusicController:
     def __init__(self, provider: MusicProvider, *, max_volume: int = DEFAULT_MAX_VOLUME):
         self.provider = provider
         self.max_volume = max(0, min(100, int(max_volume)))
         self._seen: Dict[str, Tuple[tuple, MusicResult]] = {}
+        self._lock = threading.RLock()  # one write at a time: "at most once per request id" must hold under concurrent callers
 
     # ------------------------------------------------------------------ entry point
     def handle(self, action: str, *, request_id: str, explicit_command: bool = False, guest: bool = False,
                query: str = "", kind: str = "track", device: str = "", uri: str = "", volume: Any = None) -> MusicResult:
-        """Run one ``music.<action>`` request. Never raises: every failure is a typed result."""
-        action = action.strip().lower() if isinstance(action, str) else ""
-        request_id = request_id.strip() if isinstance(request_id, str) else ""
-        fingerprint = (action, str(query), str(kind), str(device), str(uri), repr(volume))
+        """Run one ``music.<action>`` request. Never raises: every failure, including unprintable inputs, is a typed result."""
         try:
+            action = action.strip().lower() if isinstance(action, str) else ""
+            rid = request_id.strip() if isinstance(request_id, str) else ""
+            rid = rid if _REQUEST_ID.fullmatch(rid) else ""
             if action not in ALL_ACTIONS:
-                return self._result(action, "refused", "That is not a music action I support.", request_id)
+                return self._result(action, "refused", "That is not a music action I support.", rid)
             if action in READ_ACTIONS:
-                return self._read(action, request_id, str(query or ""), str(kind or "track"))
-            # permission is decided BEFORE any remembered answer is returned: a guest replaying the owner's id learns nothing
-            if guest:
-                return self._result(action, "refused", "Guests cannot control the owner's music account.", request_id)
-            if not explicit_command:
-                return self._result(action, "refused", "Playback changes need an explicit command from the owner.", request_id)
-            if not request_id:
-                return self._result(action, "refused", "A write needs a request id so it can never run twice.", request_id)
-            if request_id in self._seen:
-                stored_fingerprint, stored = self._seen[request_id]
-                if stored_fingerprint != fingerprint:
-                    return self._result(action, "refused", "That request id was already used for a different command.", request_id)
-                return stored  # a duplicate command: the same answer, no second provider call
-            if len(self._seen) >= _REMEMBERED_REQUESTS:
-                return self._result(action, "refused", "Too many playback changes this session; start a new session to continue.",
-                                    request_id)
-            result = self._write(action, request_id, str(query or ""), str(kind or "track"), str(device or ""), str(uri or ""), volume)
-            if result.status in ("done", "done_unconfirmed", "error"):  # anything that may have reached the provider
-                self._seen[request_id] = (fingerprint, result)
-            return result
+                return self._read(action, rid, _text(query), _text(kind) or "track")
+            # permission is decided BEFORE any remembered answer is returned: a guest replaying the owner's id learns nothing.
+            # Exact booleans only: a truthy "yes" or a missing guest flag (None) is not authority.
+            if guest is not False:
+                return self._result(action, "refused", "Guests cannot control the owner's music account.", rid)
+            if explicit_command is not True:
+                return self._result(action, "refused", "Playback changes need an explicit command from the owner.", rid)
+            if not rid:
+                return self._result(action, "refused", "A write needs a request id of 1-64 letters, digits or . _ : - so it can never run twice.", "")
+            fingerprint = (action, _text(query), _text(kind), _text(device), _text(uri), _volume_key(volume))
+            with self._lock:
+                if rid in self._seen:
+                    stored_fingerprint, stored = self._seen[rid]
+                    if stored_fingerprint != fingerprint:
+                        return self._result(action, "refused", "That request id was already used for a different command.", rid)
+                    return stored  # a duplicate command: the same answer, no second provider call
+                if len(self._seen) >= _REMEMBERED_REQUESTS:
+                    return self._result(action, "refused", "Too many playback changes this session; start a new session to continue.", rid)
+                try:
+                    result = self._write(action, rid, _text(query), _text(kind) or "track", _text(device), _text(uri), volume)
+                except ProviderError as exc:
+                    result = self._failure(action, exc, rid)
+                except Exception:  # noqa: BLE001 - a provider binding bug is a typed result and is never retried under this id
+                    result = self._failure(action, ProviderError("unexpected"), rid)
+                if result.status in ("done", "done_unconfirmed", "error"):  # anything that may have reached the provider
+                    self._seen[rid] = (fingerprint, result)
+                return result
         except ProviderError as exc:
-            return self._failure(action, exc, request_id)
-        except Exception:  # noqa: BLE001 - a provider binding bug must still be a typed result, and never a retried write
-            result = self._failure(action, ProviderError("unexpected"), request_id)
-            if action in WRITE_ACTIONS and request_id and len(self._seen) < _REMEMBERED_REQUESTS:
-                self._seen[request_id] = (fingerprint, result)
-            return result
+            return self._failure(str(action) if isinstance(action, str) else "", exc, "")
+        except Exception:  # noqa: BLE001 - last resort: still a typed result, never an exception
+            return self._failure(action if isinstance(action, str) else "", ProviderError("unexpected"), "")
 
     # ------------------------------------------------------------------ reads (never touch a write method)
     def _read(self, action: str, request_id: str, query: str, kind: str) -> MusicResult:
@@ -175,10 +201,9 @@ class MusicController:
     def _write(self, action: str, request_id: str, query: str, kind: str, device: str, uri: str, volume: Any) -> MusicResult:
         volume_value: Optional[int] = None
         if action == "volume":
-            if isinstance(volume, bool) or not isinstance(volume, (int, float)) or not math.isfinite(volume) \
-                    or int(volume) != volume or not 0 <= int(volume) <= 100:
+            if isinstance(volume, bool) or not isinstance(volume, int) or not 0 <= volume <= 100:
                 return self._result(action, "refused", "Volume must be a whole number from 0 to 100.", request_id)
-            volume_value = int(volume)
+            volume_value = volume
             if volume_value > self.max_volume:
                 return self._result(action, "refused", f"That is above the safe limit of {self.max_volume}%.", request_id)
         try:
@@ -254,7 +279,7 @@ class MusicController:
 
     def _resolve_item(self, action: str, query: str, kind: str, uri: str, request_id: str):
         if uri:
-            if not _URI.match(str(uri)):
+            if not _URI.fullmatch(str(uri)):
                 return self._result(action, "refused", "That is not a valid music link.", request_id)
             return Item(uri=str(uri), title=str(uri))
         text = str(query or "").strip()
