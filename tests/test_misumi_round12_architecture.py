@@ -272,6 +272,13 @@ def test_an_older_recorded_yes_inside_the_shown_digest_is_not_picked_for_a_fresh
 
 
 @pytest.mark.parametrize("prompt", ["I smell g/a/s", "he is having a fi t", "i smell g\na\ns", "there is ga s everywhere",
-                                    "g,a,s leak", "g|a|s"])
+                                    "g,a,s leak", "g|a|s", "I smell g+a+s", "I smell g=a=s", "I smell g!a!s", "the pan is on fi re",
+                                    "my son is cho king", "he is am bul ance bound"])
 def test_slash_newline_and_mixed_chunk_spacing_do_not_hide_a_hazard(prompt):
     assert not gate.is_benign_turn(prompt) and gate.withhold_learned_route(prompt), prompt
+
+
+@pytest.mark.parametrize("prompt", ["If I re-send the email tomorrow that is fine", "what is a good plan for the weekend menu",
+                                    "i have a b c d ideas for the kitchen", "it is a no go for us I think"])
+def test_the_chunk_reading_does_not_turn_ordinary_prose_into_a_hazard(prompt):
+    assert gate.is_benign_turn(prompt), prompt

@@ -50,16 +50,21 @@ def normalise(text: object) -> str:
 
 _LEET = str.maketrans({"0": "o", "1": "l", "3": "e", "4": "a", "5": "s", "7": "t", "@": "a", "$": "s"})
 # Three or more single letters in a row, separated by spaces or punctuation ("g a s", "f.i.t", "c-h-o-k-i-n-g").
-_SEP = r"[\s.\-_*/\\|,;:]+"
+_SEP = r"[^a-z0-9]+"  # ANY run of other characters between two letters ("g+a+s", "g=a=s", "g!a!s", "g/a/s")
 _SPACED_RUN = re.compile(rf"(?<![a-z0-9])[a-z0-9](?:{_SEP}[a-z0-9]){{2,}}(?![a-z0-9])")
-# Mixed short chunks ("a fi t", "ga s"): two or more tokens of at most two characters, at least one a single character.
+# Short chunks ("fi re", "ga s", "a fi t"): two or more tokens of at most two characters. A stem counts here only when it begins and
+# ends at a token boundary, so "if i re-send" does not read as "fire" but "fi re" does.
 _CHUNK_RUN = re.compile(rf"(?<![a-z0-9])[a-z0-9]{{1,2}}(?:{_SEP}[a-z0-9]{{1,2}})+(?![a-z0-9])")
-# Stems checked inside a spaced-out run (after the letters are joined): a run is already a disguise, so a stem anywhere in it
-# counts ("a g a s" -> "agas", "i a m b l e e d i n g" -> "iambleeding"). Applied ONLY to such runs, never to ordinary text.
+# Stems checked inside a spaced-out run (after the letters are joined).
 _RUN_STEMS = (
     "gas", "fire", "fit", "999", "911", "112", "111", "sos", "help", "ambulance", "bleed", "blood", "chok", "breath", "unconscious",
     "overdos", "suicid", "poison", "burn", "scald", "drown", "collaps", "seizure", "stroke", "faint", "hurt", "kill", "die",
     "dead", "pain", "smoke", "shock", "swallow", "knife", "gun", "attack", "abuse", "unresponsive", "heartattack", "cprs",
+)
+# Long, distinctive stems are also looked for in the whole text with every separator removed ("cho king", "am bul ance").
+_LONG_STEMS = (
+    "ambulance", "unconscious", "overdose", "suicide", "drowning", "bleeding", "choking", "collapsed", "seizure", "poisoning",
+    "poisoned", "anaphyl", "heartattack", "strangle", "stabbed", "unresponsive", "notbreathing", "cantbreathe", "999", "911",
 )
 
 
@@ -87,16 +92,32 @@ def _obfuscation_variant(text: str) -> str:
 
 
 def _spaced_hazard(text: str) -> str | None:
-    """The hazard stem hidden inside a spaced-out run of letters, if any (see _RUN_STEMS)."""
-    for match in (*_SPACED_RUN.finditer(text), *_CHUNK_RUN.finditer(text)):
+    """The hazard stem hidden by spacing or punctuation, if any: inside a run of single characters (any stem), inside a run of
+    short chunks (a stem on token boundaries), or - for the long distinctive stems - anywhere once all separators are removed."""
+    for match in _SPACED_RUN.finditer(text):
+        raw = "".join(re.findall(r"[a-z0-9]", match.group()))
+        for variant in (raw, raw.translate(_LEET)):
+            for stem in _RUN_STEMS:
+                if stem in variant:
+                    return stem
+    for match in _CHUNK_RUN.finditer(text):
         tokens = re.findall(r"[a-z0-9]+", match.group())
-        if match.re is _CHUNK_RUN and not any(len(token) == 1 for token in tokens):
-            continue
+        bounds, total = {0}, 0
+        for token in tokens:
+            total += len(token)
+            bounds.add(total)
         raw = "".join(tokens)
-        joined = raw.translate(_LEET)
-        for stem in _RUN_STEMS:
-            if stem in joined or stem in raw:
-                return stem
+        for variant in (raw, raw.translate(_LEET)):
+            for stem in _RUN_STEMS:
+                at = variant.find(stem)
+                while at != -1:
+                    if at in bounds and at + len(stem) in bounds:
+                        return stem
+                    at = variant.find(stem, at + 1)
+    despaced = re.sub(r"[^a-z0-9]", "", text)
+    for stem in _LONG_STEMS:
+        if stem in despaced:
+            return stem
     return None
 
 
