@@ -49,6 +49,17 @@ def purge_stale_temp_audio(max_age_s: float = STT_TMP_MAX_AGE_S, now: Optional[f
     return removed
 
 
+STT_PROMPT_MAX_CHARS = 600
+
+
+def clean_stt_prompt(value) -> str:
+    """The configured vocabulary hint as safe, bounded text: control characters removed, whitespace collapsed, at most 600 chars."""
+    if not isinstance(value, str):
+        return ""
+    text = "".join(ch if ch >= " " and ch != "\x7f" else " " for ch in value)
+    return " ".join(text.split())[:STT_PROMPT_MAX_CHARS]
+
+
 class STTService:
     """Multi-provider STT service.
 
@@ -77,6 +88,7 @@ class STTService:
             "stt_provider": saved.get("stt_provider", "disabled"),
             "stt_model": saved.get("stt_model", "base"),
             "stt_language": saved.get("stt_language", ""),
+            "stt_initial_prompt": saved.get("stt_initial_prompt", ""),
         }
 
     @property
@@ -129,7 +141,7 @@ class STTService:
                 return None
         return self._whisper_model
 
-    def _transcribe_local(self, audio_bytes: bytes, language: str = "") -> Optional[str]:
+    def _transcribe_local(self, audio_bytes: bytes, language: str = "", initial_prompt: str = "") -> Optional[str]:
         model = self._get_whisper()
         if not model:
             return None
@@ -145,6 +157,12 @@ class STTService:
             kwargs = {}
             if language:
                 kwargs["language"] = language
+            hint = clean_stt_prompt(initial_prompt)
+            if hint:
+                # A vocabulary hint (household names, topics) makes Whisper spell them right ("Aoteru", not "Otero").
+                # condition_on_previous_text=False stops the hint from leaking into short, clipped segments.
+                kwargs["initial_prompt"] = hint
+                kwargs["condition_on_previous_text"] = False
 
             segments, info = model.transcribe(tmp_path, **kwargs)
             text = " ".join(seg.text.strip() for seg in segments)
@@ -160,7 +178,8 @@ class STTService:
 
     # ── API endpoint ──
 
-    def _transcribe_api(self, audio_bytes: bytes, endpoint_id: str, model: str, language: str = "") -> Optional[str]:
+    def _transcribe_api(self, audio_bytes: bytes, endpoint_id: str, model: str, language: str = "",
+                        initial_prompt: str = "") -> Optional[str]:
         from src.database import SessionLocal, ModelEndpoint
 
         db = SessionLocal()
@@ -183,6 +202,9 @@ class STTService:
         data = {"model": model or "whisper-1"}
         if language:
             data["language"] = language
+        hint = clean_stt_prompt(initial_prompt)
+        if hint:
+            data["prompt"] = hint  # the OpenAI-compatible name for the same vocabulary hint
 
         try:
             r = httpx.post(url, headers=headers, files=files, data=data, timeout=60)
@@ -204,15 +226,16 @@ class STTService:
         provider = settings["stt_provider"]
         model = settings["stt_model"]
         language = settings.get("stt_language", "")
+        initial_prompt = settings.get("stt_initial_prompt", "")
 
         if provider in ("disabled", "browser"):
             return None
 
         if provider == "local":
-            return self._transcribe_local(audio_bytes, language)
+            return self._transcribe_local(audio_bytes, language, initial_prompt)
         elif provider.startswith("endpoint:"):
             endpoint_id = provider.split(":", 1)[1]
-            return self._transcribe_api(audio_bytes, endpoint_id, model, language)
+            return self._transcribe_api(audio_bytes, endpoint_id, model, language, initial_prompt)
         else:
             logger.error(f"Unknown STT provider: {provider}")
             return None
