@@ -51,10 +51,13 @@ def parse(rows: Iterable[dict]) -> List[Record]:
     seen: set = set()
     for index, row in enumerate(rows):
         try:
-            task_id, plan = str(row["task_id"]).strip(), str(row["plan"]).strip()
+            raw_task, raw_plan = row["task_id"], row["plan"]
             verified, safety_ok, costs = row["verified"], row["safety_ok"], row["costs"]
         except (KeyError, TypeError) as exc:
             raise RecordError(f"row {index}: missing {exc}") from exc
+        if not isinstance(raw_task, str) or not isinstance(raw_plan, str):
+            raise RecordError(f"row {index}: task_id and plan must be strings")
+        task_id, plan = raw_task.strip(), raw_plan.strip()
         if not task_id or not plan:
             raise RecordError(f"row {index}: empty task_id or plan")
         if not isinstance(verified, bool) or not isinstance(safety_ok, bool):
@@ -80,7 +83,8 @@ def parse(rows: Iterable[dict]) -> List[Record]:
 def _floor(requested: int) -> int:
     """The evidence floor in force: whatever the caller asks for, but never below the module's own."""
     try:
-        return max(MIN_MATCHED_TASKS, int(requested))
+        value = float(requested)
+        return max(MIN_MATCHED_TASKS, math.ceil(value)) if math.isfinite(value) else MIN_MATCHED_TASKS
     except (TypeError, ValueError, OverflowError):
         return MIN_MATCHED_TASKS
 
@@ -173,6 +177,8 @@ def pareto_front(records: Sequence[Record], dimensions: Sequence[str], min_tasks
     if those are fewer than the floor the result is ``insufficient`` with an empty front (a plan never wins by running easier or
     fewer tasks). ``dominated`` maps a loser to the first dominating plan in sorted order.
     """
+    if not dimensions or any(not isinstance(unit, str) or not unit for unit in dimensions) or len(set(dimensions)) != len(dimensions):
+        raise ValueError("choose at least one distinct, named resource dimension: an efficiency comparison without a resource is not one")
     floor = _floor(min_tasks)
     by_plan: Dict[str, List[Record]] = {}
     for record in records:
@@ -199,11 +205,11 @@ def pareto_front(records: Sequence[Record], dimensions: Sequence[str], min_tasks
     stats = {}
     for plan, rows in candidates.items():
         stats[plan] = {"rate": _mean([1.0 if rows[t].verified else 0.0 for t in common]),
-                       **{u: _mean([rows[t].costs[u] for t in common]) for u in dimensions}}
+                       "costs": {u: _mean([rows[t].costs[u] for t in common]) for u in dimensions}}
 
     def dominates(x: dict, y: dict) -> bool:
-        no_worse = x["rate"] >= y["rate"] and all(x[u] <= y[u] for u in dimensions)
-        better = x["rate"] > y["rate"] or any(x[u] < y[u] for u in dimensions)
+        no_worse = x["rate"] >= y["rate"] and all(x["costs"][u] <= y["costs"][u] for u in dimensions)
+        better = x["rate"] > y["rate"] or any(x["costs"][u] < y["costs"][u] for u in dimensions)
         return no_worse and better
 
     for plan in sorted(stats):

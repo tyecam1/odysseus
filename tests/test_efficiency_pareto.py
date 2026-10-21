@@ -35,6 +35,10 @@ def _matched(n, a_cost, b_cost, a_ok=lambda i: True, b_ok=lambda i: True, a_safe
     {"task_id": "t", "plan": "p", "verified": True, "safety_ok": True, "costs": {"x": 10 ** 400}},
     {"task_id": "t", "plan": "p", "verified": True, "safety_ok": True, "costs": {"x": "5"}},
     {"task_id": "", "plan": "p", "verified": True, "safety_ok": True, "costs": {"x": 1}},
+    {"task_id": float("nan"), "plan": "p", "verified": True, "safety_ok": True, "costs": {"x": 1}},
+    {"task_id": 7, "plan": "p", "verified": True, "safety_ok": True, "costs": {"x": 1}},
+    {"task_id": None, "plan": "p", "verified": True, "safety_ok": True, "costs": {"x": 1}},
+    {"task_id": "t", "plan": float("nan"), "verified": True, "safety_ok": True, "costs": {"x": 1}},
 ])
 def test_untrustworthy_records_are_rejected_not_crashed(bad):
     with pytest.raises(ep.RecordError):
@@ -202,3 +206,39 @@ def test_the_module_has_no_way_to_change_routing_or_fetch_data():
     source = inspect.getsource(ep)
     for forbidden in ("requests", "urllib", "socket", "subprocess", "open(", "os.environ", "yaml", "import os"):
         assert forbidden not in source, forbidden
+
+
+def test_nan_or_missing_task_ids_cannot_manufacture_matched_evidence():
+    rows = [_row(f"t{i}", "a") for i in range(19)] + [_row(f"t{i}", "b") for i in range(19)]
+    rows += [dict(_row("x", "a"), task_id=float("nan")), dict(_row("x", "b"), task_id=float("nan"))]
+    with pytest.raises(ep.RecordError):
+        ep.parse(rows)
+
+
+def test_a_resource_named_rate_cannot_overwrite_quality_in_the_front():
+    rows = []
+    for i in range(20):
+        rows.append(_row(f"t{i}", "better", verified=True, rate=1.0))
+        rows.append(_row(f"t{i}", "worse", verified=(i < 10), rate=2.0))
+    front = ep.pareto_front(ep.parse(rows), ("rate",))
+    assert front["front"] == ["better"] and front["dominated"] == {"worse": "better"}
+
+
+@pytest.mark.parametrize("floor", [20.5, 20.0001, 21.0, 25])
+def test_a_fractional_floor_is_rounded_up_never_truncated(floor):
+    records = _matched(20, a_cost=1.0, b_cost=5.0, b_ok=lambda i: False)
+    assert ep.compare(records, "strong_solo", "team", min_matched=floor)["verdict"] == "insufficient"
+    front = ep.pareto_front(records, ("paid_cost",), min_tasks=floor)
+    assert front["front"] == [] and all("only 20 task" in reason for reason in front["excluded"].values())
+
+
+@pytest.mark.parametrize("floor", [float("nan"), float("inf"), float("-inf")])
+def test_a_non_finite_floor_falls_back_to_the_module_floor(floor):
+    records = _matched(5, a_cost=1.0, b_cost=5.0, b_ok=lambda i: False)
+    assert ep.compare(records, "strong_solo", "team", min_matched=floor)["verdict"] == "insufficient"
+
+
+@pytest.mark.parametrize("dims", [(), [], ("paid_cost", "paid_cost"), ("",), (None,)])
+def test_the_front_fails_closed_without_a_real_resource_dimension(dims):
+    with pytest.raises(ValueError):
+        ep.pareto_front(_front_records(a={"n": 20, "ok": 18, "cost": 1.0, "lat": 1}), dims)
