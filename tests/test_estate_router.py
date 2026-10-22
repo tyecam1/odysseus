@@ -1858,3 +1858,17 @@ def test_codex_lanes_preserve_distinct_sandbox_authority(
     args = captured["args"]
     assert args[args.index("--model") + 1] == "gpt-6.1-sol"
     assert args[args.index("-c") + 1] == "model_reasoning_effort=high"
+
+
+def test_codex_executor_fails_before_launch_if_current_model_is_unverifiable(monkeypatch):
+    import subprocess
+    from src.subscription_model_policy import SubscriptionModelError
+    monkeypatch.setattr(estate_router, "_codex_available", lambda: (True, "/usr/bin/codex"))
+    def unavailable(_binary):
+        raise SubscriptionModelError("known newer subscription version is missing")
+    monkeypatch.setattr(estate_router, "resolve_latest_codex_model", unavailable)
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: pytest.fail("must not execute an old model"))
+    result = estate_router.execute_codex("do not downgrade")
+    assert result["ok"] is False
+    assert result["model_policy"] == "fail_closed"
+    assert "newer" in result["error"]
