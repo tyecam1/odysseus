@@ -56,9 +56,23 @@ _STOP_TERMS = frozenset({
     "to", "today", "tomorrow", "tonight", "us", "very", "was", "we", "were", "what", "when", "where", "which", "who",
     "whose", "will", "with", "words", "would", "yesterday", "yet", "you", "your", "need", "needs", "needed",
     "an", "as", "at", "be", "by", "if", "up", "just", "also", "go",
+    "plainly", "honestly", "briefly", "simply",
 })
 # Words that may accompany a request to show a whole list or table ("what is on the cleaning rota this week").
-_LISTING_FILLER = frozenset({"week", "next", "current"})
+_LISTING_FILLER = frozenset({"week", "next", "current", "household", "right"})
+# A spoken question begins (or ends) with the persona it is addressed to: "Aoteru, what is on the shopping list today?". The name is
+# an address, never evidence, so it must not stay behind as a leftover term that the file-listing rule demands from the file name.
+_ADDRESSEE_NAMES = ("aoteru", "misumi", "kurisu", "lelouch", "ichigo", "ginko", "sanji", "jin", "misato", "giorno", "erwin", "kino")
+_ADDRESSEE_ALT = "|".join(_ADDRESSEE_NAMES)
+_ADDRESSEE_LEAD = re.compile(r"^\s*(?:(?:hey|hi|hello|ok|okay|yo|oi)\b[\s,]*)?(?:%s)\b[\s,:;.!-]*" % _ADDRESSEE_ALT, re.IGNORECASE)
+_ADDRESSEE_TAIL = re.compile(r"[\s,;:-]+(?:%s)\W*$" % _ADDRESSEE_ALT, re.IGNORECASE)
+
+
+def strip_addressee(text: str) -> str:
+    """Drop a leading ("Hey Aoteru,") or trailing (", Aoteru?") persona address; a name inside the sentence is content and stays."""
+    out = _ADDRESSEE_LEAD.sub("", text or "", count=1)
+    out = _ADDRESSEE_TAIL.sub("", out, count=1) if out.strip() else out
+    return out
 # Domain indicator words that are also what a question asks about ("what tasks are blocked?"): they stay evidence terms.
 _STATUS_WORDS = frozenset({"blocked", "backlog", "urgent", "open-loop", "open-loops", "broken", "repair", "repairs", "maintenance"})
 _TERM = re.compile(r"[A-Za-z0-9_]{2,}")
@@ -1330,6 +1344,7 @@ class HouseholdReadOnlyAdapter:
         record by record instead) and needs EVERY content word on a line - so it can never answer "olive oil" with "sesame oil"
         or attribute a record. An unconfirmed item question returns nothing here; the route hands its candidates to the model.
         """
+        query = strip_addressee(query)
         item_domain = domain in ("food", "shopping")
         if item_domain:
             resolution = self.resolve_question(query, domain, bare=True)
