@@ -1016,6 +1016,17 @@ def _execute_codex_with_sandbox(objective: str, *, sandbox: str, provider: str,
     if not available:
         return {"ok": False, "error": f"codex unavailable: {detail}", "provider": provider}
     codex_binary = detail  # _codex_available() returns the resolved binary path on success
+    # Resolve afresh from the authenticated Codex subscription catalogue.
+    # Omitting --model inherits potentially stale host configuration.
+    from src.subscription_model_policy import (
+        SubscriptionModelError, resolve_latest_codex_model, subscription_effort,
+    )
+    try:
+        subscription_model = resolve_latest_codex_model(codex_binary)
+        reasoning_effort = subscription_effort()
+    except SubscriptionModelError as exc:
+        return {"ok": False, "provider": provider, "model_policy": "fail_closed",
+                "error": str(exc)}
 
     started = time.monotonic()
     with tempfile.TemporaryDirectory(prefix="p12-codex-") as scratch:
@@ -1024,6 +1035,8 @@ def _execute_codex_with_sandbox(objective: str, *, sandbox: str, provider: str,
             proc = subprocess.Popen(
                 [
                     codex_binary, "exec",
+                    "--model", subscription_model,
+                    "-c", f"model_reasoning_effort={reasoning_effort}",
                     "--sandbox", sandbox,
                     "--ephemeral",
                     "--skip-git-repo-check",
@@ -1058,7 +1071,9 @@ def _execute_codex_with_sandbox(objective: str, *, sandbox: str, provider: str,
                 }
             output = Path(out_path).read_text().strip() if Path(out_path).exists() else ""
             return {"ok": True, "provider": provider, "output": output, "latency_ms": latency_ms,
-                    "codex_binary": codex_binary}
+                    "codex_binary": codex_binary, "concrete_model": subscription_model,
+                    "reasoning_effort": reasoning_effort,
+                    "model_catalogue": "authenticated-codex-debug-models"}
         except subprocess.TimeoutExpired:
             # Tree-aware cleanup: killpg alone is insufficient when a
             # descendant (observed live: the MCP server codex spawns)
