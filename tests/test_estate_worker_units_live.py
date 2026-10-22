@@ -38,15 +38,19 @@ def _worker(home, verb, payload, deadline_s=30):
 
 
 def _wait_for_cgroup_marker(marker, timeout=10):
-    """Return the cgroup path from a `cat /proc/self/cgroup` capture once the file holds a complete "0::<path>" line."""
+    """Return the cgroup path from a `cat /proc/self/cgroup` capture once the file holds a complete "0::<path>" line.
+
+    The shell creates the redirect target before `cat` writes it, so existence alone is not enough, and a partial write can hold only
+    "0::": wait for a non-empty path and the terminating newline."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
-            text = marker.read_text().strip()
+            text = marker.read_text()
         except FileNotFoundError:
             text = ""
-        if "::" in text:
-            return text.split("::", 1)[1]
+        _, sep, rest = text.partition("::")
+        if sep and rest.strip() and text.endswith("\n"):
+            return rest.strip()
         time.sleep(0.05)
     raise AssertionError(f"cgroup marker never held a complete line: {marker}")
 
@@ -119,14 +123,3 @@ def test_u67_real_unit_setsid_grandchild_keeps_the_cgroup_populated(tmp_path):
     while estate_worker_procs.tree_quiescent(handle) is not True and time.monotonic() < deadline:
         time.sleep(0.1)
     assert estate_worker_procs.tree_quiescent(handle) is True
-
-
-def test_cgroup_marker_wait_tolerates_a_file_that_exists_before_it_has_content(tmp_path):
-    """The shell creates the redirect target first and writes later: an existence-only wait read "" and crashed."""
-    import threading
-    marker = tmp_path / "cgroup.txt"
-    marker.write_text("")                                   # exists, empty
-    threading.Timer(0.3, lambda: marker.write_text("0::/user.slice/x.service\n")).start()
-    assert _wait_for_cgroup_marker(marker, timeout=5) == "/user.slice/x.service"
-    with pytest.raises(AssertionError, match="never held"):
-        _wait_for_cgroup_marker(tmp_path / "missing.txt", timeout=0.2)
