@@ -125,6 +125,11 @@ class MisumiRespondRequest(BaseModel):
     history_mode: Optional[Literal["auto", "off"]] = None
 
 
+class MisumiRouteExplainRequest(BaseModel):
+    prompt: str = Field(default="", max_length=4000)
+    persona: str = "auto"   # "auto" (the ratified deterministic lead route) or a persona id the caller selected
+
+
 class MisumiTaskRequest(BaseModel):
     prompt: str
     persona: str = "aoteru"
@@ -1408,6 +1413,42 @@ def setup_misumi_routes(
             "approval_mode": "operator",
         })
         return {"rolled_back": True, "rollback": rollback}
+
+    @router.post("/route-explain")
+    def route_explain(request: Request, body: MisumiRouteExplainRequest):
+        """Developer inspection: how a request WOULD be routed, from the same deterministic code /respond uses.
+
+        Never calls a model, reads no household data, writes no state and consults no learned overlay (so it cannot depend on or
+        change adaptation state). It answers "why solo, team or deterministic?" for a prompt without answering the prompt.
+        """
+        _require_api_scope(request, "misumi:read")
+        prompt = (body.prompt or "").strip()
+        if not prompt:
+            raise HTTPException(422, "prompt is required")
+        auto = str(body.persona or "auto").strip().lower() == "auto"
+        if auto:
+            lead, routing = resolve_auto_lead(prompt, prior_lead=None)
+            routing = routing or {}
+        else:
+            lead = normalize_persona(body.persona)
+            routing = {"method": "caller-selected", "reasons": ["the persona was chosen by the caller"]}
+        team = _team_plan(prompt, lead)
+        return {
+            "executes_model": False,
+            "writes_state": False,
+            "lead": {
+                "persona": lead,
+                "source": "auto" if auto else "caller",
+                "method": str(routing.get("method") or ""),
+                "reasons": [str(item) for item in (routing.get("reasons") or [])],
+            },
+            "team": {key: team.get(key) for key in ("decision", "supports", "excluded", "reasons")},
+            "household_domain": infer_household_domain(prompt),
+            "safety": {
+                "reserved_turn": bool(is_reserved_turn(prompt)),
+                "learned_routing_withheld": bool(withhold_learned_route(prompt)),
+            },
+        }
 
     @router.get("/persona-state")
     def persona_state_inspect(request: Request):

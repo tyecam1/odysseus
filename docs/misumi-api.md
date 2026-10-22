@@ -54,6 +54,22 @@ For successful Aoteru model replies, bounded consultation may append labelled co
 
 Consultations are synchronous within the initiating `/respond` request. They do not start background work or persona swarms. Set `MISUMI_CONSULT=false` to disable consultation; the default is enabled. When disabled, `/respond` follows the legacy path and omits the three additive fields.
 
+## Route inspection (developer)
+
+```http
+POST /misumi/route-explain
+Authorization: Bearer ody_...
+Content-Type: application/json
+
+{"prompt": "Aoteru, help me plan a dinner party: menu, tidy-up schedule and music.", "persona": "auto"}
+```
+
+Explains how a request would be routed, from the same deterministic code `/misumi/respond` uses: the lead persona with its method and
+reasons, the solo/team decision with supports, excluded personas and reasons, the household domain the question maps to, and whether the
+shared safety gate marks the turn reserved or withholds learned routing. It needs `misumi:read`, never calls a model, reads no household
+data, writes no state and does not consult learned routing overlays. `executes_model` and `writes_state` are always `false`.
+`persona` is `auto` (default) or a persona id the caller selected.
+
 ## Task planning
 
 ```http
