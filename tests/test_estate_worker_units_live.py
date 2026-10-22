@@ -37,6 +37,20 @@ def _worker(home, verb, payload, deadline_s=30):
     return response["result"]
 
 
+def _wait_for_cgroup_marker(marker, timeout=10):
+    """Return the cgroup path from a `cat /proc/self/cgroup` capture once the file holds a complete "0::<path>" line."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            text = marker.read_text().strip()
+        except FileNotFoundError:
+            text = ""
+        if "::" in text:
+            return text.split("::", 1)[1]
+        time.sleep(0.05)
+    raise AssertionError(f"cgroup marker never held a complete line: {marker}")
+
+
 def _wait(home, execution_id, predicate, timeout=30):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -90,10 +104,9 @@ def test_u67_real_unit_setsid_grandchild_keeps_the_cgroup_populated(tmp_path):
     script.write_text(f"#!/bin/sh\ncat /proc/self/cgroup > {marker}\nsetsid sleep 30 </dev/null >/dev/null 2>&1 &\nsleep 3\n")
     script.chmod(0o755)
     estate_worker_procs.spawn_runner_unit([str(script)], str(tmp_path), str(tmp_path / "log"), unit)
-    deadline = time.monotonic() + 10
-    while not marker.exists() and time.monotonic() < deadline:
-        time.sleep(0.1)
-    cgroup = marker.read_text().strip().split("::", 1)[1]
+    # The shell creates the redirect target BEFORE `cat` writes to it, so waiting for existence alone can read an empty file
+    # (IndexError on the "::" split, seen on the lab under load). Wait for the content.
+    cgroup = _wait_for_cgroup_marker(marker)
     handle = {"cgroup": cgroup, "unit": f"{unit}.service"}
     assert estate_worker_procs.cgroup_is_dedicated(cgroup, f"{unit}.service")
     time.sleep(0.5)
@@ -106,3 +119,14 @@ def test_u67_real_unit_setsid_grandchild_keeps_the_cgroup_populated(tmp_path):
     while estate_worker_procs.tree_quiescent(handle) is not True and time.monotonic() < deadline:
         time.sleep(0.1)
     assert estate_worker_procs.tree_quiescent(handle) is True
+
+
+def test_cgroup_marker_wait_tolerates_a_file_that_exists_before_it_has_content(tmp_path):
+    """The shell creates the redirect target first and writes later: an existence-only wait read "" and crashed."""
+    import threading
+    marker = tmp_path / "cgroup.txt"
+    marker.write_text("")                                   # exists, empty
+    threading.Timer(0.3, lambda: marker.write_text("0::/user.slice/x.service\n")).start()
+    assert _wait_for_cgroup_marker(marker, timeout=5) == "/user.slice/x.service"
+    with pytest.raises(AssertionError, match="never held"):
+        _wait_for_cgroup_marker(tmp_path / "missing.txt", timeout=0.2)
