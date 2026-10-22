@@ -17,6 +17,13 @@ import src.estate_router as estate_router
 _CODEX_PROCESS_GROUP_FIXTURE = Path(__file__).parent / "fixtures" / "codex_process_group_probe.sh"
 
 
+@pytest.fixture(autouse=True)
+def _mock_latest_model_for_existing_executor_tests(monkeypatch):
+    # Existing sandbox/process-group tests exercise CLI mechanics, not the
+    # authenticated catalogue. Catalogue selection has independent tests.
+    monkeypatch.setattr(estate_router, "resolve_latest_codex_model", lambda _: "gpt-6.1-sol", raising=False)
+
+
 @pytest.fixture
 def fixture_config(tmp_path, monkeypatch):
     config_dir = tmp_path / "config"
@@ -1848,3 +1855,6 @@ def test_codex_lanes_preserve_distinct_sandbox_authority(
     assert result["ok"] is True
     sandbox_index = captured["args"].index("--sandbox")
     assert captured["args"][sandbox_index + 1] == expected_sandbox
+    args = captured["args"]
+    assert args[args.index("--model") + 1] == "gpt-6.1-sol"
+    assert args[args.index("-c") + 1] == "model_reasoning_effort=high"
