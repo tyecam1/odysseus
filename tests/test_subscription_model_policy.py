@@ -33,6 +33,13 @@ def test_future_version_is_selected_without_policy_change(monkeypatch):
     assert policy.resolve_latest_codex_model("/usr/bin/codex") == "gpt-7-astra"
 
 
+def test_future_generic_flagship_is_selected(monkeypatch):
+    mock_catalogue(monkeypatch, [
+        {"slug": "gpt-6.1-sol"}, {"slug": "gpt-7"},
+    ])
+    assert policy.resolve_latest_codex_model("/usr/bin/codex") == "gpt-7"
+
+
 def test_same_version_prefers_flagship(monkeypatch):
     mock_catalogue(monkeypatch, [
         {"slug": "gpt-6.1-sol"}, {"slug": "gpt-6.1-astra"},
