@@ -821,7 +821,8 @@ def _update_decision_outcome(decision_id: str, *, status: str, deterministic_gat
                              executor: Optional[str] = None, escalated: Optional[bool] = None,
                              actual_route: Optional[str] = None,
                              verification_outcome: Optional[str] = None,
-                             executed_host_id: Optional[str] = None) -> None:
+                             executed_host_id: Optional[str] = None,
+                             concrete_model: Optional[str] = None) -> None:
     """Execution happens after `resolve_route()` already wrote its
     decision row — update that same row with the real outcome rather than
     writing a second telemetry row for one routed task (`RoutingDecision`
@@ -852,6 +853,8 @@ def _update_decision_outcome(decision_id: str, *, status: str, deterministic_gat
                     row.verification_outcome = verification_outcome
                 if executed_host_id is not None:
                     row.executed_host_id = executed_host_id
+                if concrete_model is not None:
+                    row.concrete_model = concrete_model
     except Exception:
         import logging
         logging.getLogger(__name__).exception("routing_decisions outcome update failed; execution result is unaffected")
@@ -1657,6 +1660,7 @@ def run_task(task: dict) -> dict:
                     actual_route=executor_name,
                     verification_outcome=gate,
                     executed_host_id=(result.get("placement") or {}).get("executed_host"),
+                    concrete_model=result.get("concrete_model"),
                 )
             # implementation_mode, terminal within execute_codex_write_durable's
             # wait_timeout: the decision outcome was already recorded by
@@ -1670,7 +1674,7 @@ def run_task(task: dict) -> dict:
                 **route, "ok": gate == "pass", "reason": reason,
                 "route": {
                     **route["route"], "executor": executor_name,
-                    "concrete_model": provider_choice["concrete_model_label"],
+                    "concrete_model": result.get("concrete_model") or provider_choice["concrete_model_label"],
                     "reason": reason,
                 },
             }
