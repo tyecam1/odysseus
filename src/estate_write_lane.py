@@ -160,6 +160,7 @@ def _record_outcome(row, state: str, host_id: str, result: Optional[dict] = None
         escalation_reason="insufficient_capability" if gate == "pass" else "worker_failed",
         executor="codex-write", escalated=True, actual_route="codex-write",
         verification_outcome=gate, executed_host_id=host_id,
+        concrete_model=(result or {}).get("concrete_model"),
     )
 
 
