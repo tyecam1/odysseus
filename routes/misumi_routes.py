@@ -417,10 +417,70 @@ def _fallback_retention(prompt: str, answer: str) -> Dict[str, Optional[Dict[str
     return {"memory": memory_plan, "artifact": None}
 
 
+_ANSWER_START = re.compile(r'"answer"\s*:\s*"')
+_JSON_ESCAPES = {'"': '"', "\\": "\\", "/": "/", "b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t"}
+
+
+def _salvage_answer(raw: Optional[str]) -> Optional[str]:
+    """Recover the "answer" string from a JSON-shaped reply that did not parse (typically cut off at the output limit).
+
+    The interface shows (and speaks) the answer, so a reply like `{ "answer": "Menu: ... or The` must never reach the user as raw JSON.
+    Returns the decoded answer, ended at the last complete sentence when the reply was cut off, or None when the text is not an
+    answer-bearing JSON object. Other keys (memory, artifact) are never returned.
+    """
+    text = (raw or "").strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[1] if "\n" in text else ""
+    text = text.strip()
+    if not text.startswith("{"):
+        return None
+    start = _ANSWER_START.search(text)
+    if not start:
+        return None
+    out: List[str] = []
+    closed = False
+    i = start.end()
+    while i < len(text):
+        ch = text[i]
+        if ch == '"':
+            closed = True
+            break
+        if ch == "\\":
+            if i + 1 >= len(text):
+                break
+            nxt = text[i + 1]
+            if nxt == "u":
+                digits = text[i + 2:i + 6]
+                if len(digits) < 4 or any(c not in "0123456789abcdefABCDEF" for c in digits):
+                    break
+                code = int(digits, 16)
+                if 0xD800 <= code <= 0xDFFF:   # half of a surrogate pair: stop rather than emit an unencodable character
+                    break
+                out.append(chr(code))
+                i += 6
+                continue
+            out.append(_JSON_ESCAPES.get(nxt, nxt))
+            i += 2
+            continue
+        out.append(ch)
+        i += 1
+    answer = "".join(out).strip()
+    if not answer:
+        return None
+    if not closed:
+        cut = max(answer.rfind(mark) for mark in (". ", ".\n", "! ", "!\n", "? ", "?\n"))
+        if cut >= len(answer) * 0.5:
+            answer = answer[:cut + 1]
+        elif answer[-1] not in ".!?":
+            answer = answer.rstrip(" ,;:-") + "..."
+    return answer
+
+
 def _parse_model_turn(raw: str, prompt: str) -> Dict[str, Any]:
     parsed = _json_object(raw)
     if not parsed or not isinstance(parsed.get("answer"), str):
-        answer = _short_text(raw, 4000)
+        salvaged = _salvage_answer(raw)
+        answer = _short_text(salvaged if salvaged is not None else raw, 4000)
         return {"answer": answer, **_fallback_retention(prompt, answer), "retention_decided": True}
     answer = _short_text(parsed.get("answer"), 4000)
     memory_plan = parsed.get("memory") if isinstance(parsed.get("memory"), dict) else None
