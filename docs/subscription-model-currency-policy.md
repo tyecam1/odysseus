@@ -22,7 +22,7 @@ relax PhD research authority.
 - `src/subscription_model_policy.py` calls `codex debug models` on the chosen
   worker, using that CLI's authenticated, account-specific model catalogue.
 - It selects the greatest numeric model version among visible premium
-  `gpt-N[.M]-sol` / `gpt-N[.M]-astra` models. Same-version Astra wins.
+  `gpt-N[.M]`, `gpt-N[.M]-sol` or `gpt-N[.M]-astra` models. Same-version Astra wins.
   This is model *currency*, not route-cost optimization. Older Luna/Terra
   models and historical Codex models are not eligible subscription execution
   fallbacks.
