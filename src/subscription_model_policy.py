@@ -19,7 +19,7 @@ class SubscriptionModelError(RuntimeError):
 # from silently selecting Sol 5.6 or 6.0 after 6.1 has been established.
 # Newer eligible versions are always selected automatically.
 _CODEX_MINIMUM_VERSION = (6, 1)
-_CODEX_PREMIUM = re.compile(r"^gpt-(\d+)(?:\.(\d+))?-(sol|astra)$")
+_CODEX_PREMIUM = re.compile(r"^gpt-(\d+)(?:\.(\d+))?(?:-(sol|astra))?$")
 _ALLOWED_EFFORTS = frozenset({"low", "medium", "high", "xhigh", "max"})
 
 def subscription_effort() -> str:
@@ -74,7 +74,7 @@ def resolve_latest_codex_model(codex_binary: str, *, timeout: float = 30.0) -> s
         if not match or item.get("visibility", "list") != "list":
             continue
         major, minor = int(match.group(1)), int(match.group(2) or 0)
-        # Same-version Astra wins over Sol. No economical/older tier is eligible.
+        # Same-version Astra wins over Sol and generic GPT. No old economical tier.
         candidates.append(((major, minor, int(match.group(3) == "astra")), slug))
     if not candidates:
         raise SubscriptionModelError("no current premium Codex subscription model in authenticated catalogue")
