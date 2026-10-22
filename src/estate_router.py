@@ -36,6 +36,9 @@ from typing import Callable, Optional
 
 import yaml
 
+from src.subscription_model_policy import (
+    SubscriptionModelError, resolve_latest_codex_model, subscription_effort,
+)
 from src.runtime_paths import get_app_root
 from src.park_lease_ops import active_lease_for_repo
 from src import worktree_ops
@@ -1018,9 +1021,6 @@ def _execute_codex_with_sandbox(objective: str, *, sandbox: str, provider: str,
     codex_binary = detail  # _codex_available() returns the resolved binary path on success
     # Resolve afresh from the authenticated Codex subscription catalogue.
     # Omitting --model inherits potentially stale host configuration.
-    from src.subscription_model_policy import (
-        SubscriptionModelError, resolve_latest_codex_model, subscription_effort,
-    )
     try:
         subscription_model = resolve_latest_codex_model(codex_binary)
         reasoning_effort = subscription_effort()
