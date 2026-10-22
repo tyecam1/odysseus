@@ -42,6 +42,7 @@ The conversational model owns intent and communication. Odysseus owns routing. W
 13. Escalation is evidence-triggered, not based on vague difficulty judgments.
 14. No swarm by default. One worker owns each task unit; parallelism is justified only by independent evidence gathering or deliberately independent verification.
 15. Routing telemetry may improve future choices but cannot silently weaken permissions, domain gates, quality floors or verification requirements.
+16. Subscription model versions are not economic routing knobs; when a subscription lane is chosen, resolve the newest eligible premium model at dispatch and allow only reasoning effort to vary. Fail closed on missing freshness/eligibility evidence. See `docs/subscription-model-currency-policy.md`.
 
 ## Human-facing default
 
