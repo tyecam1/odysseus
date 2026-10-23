@@ -115,6 +115,38 @@ def test_a_caller_selected_persona_is_honoured_and_labelled(client):
     assert body["lead"]["method"] == "caller-selected" and body["lead"]["reasons"]
 
 
+def test_explicit_auto_preserves_the_base_route_with_supported_normalization(client):
+    prompt = "What is on the shopping list?"
+    body = explain(client, prompt, persona=" AUTO ")
+    lead, routing = resolve_auto_lead(prompt, prior_lead=None)
+    assert body["lead"] == {
+        "persona": lead,
+        "source": "auto",
+        "method": str((routing or {}).get("method") or ""),
+        "reasons": [str(item) for item in ((routing or {}).get("reasons") or [])],
+    }
+
+
+@pytest.mark.parametrize(("persona", "expected"), [(" SanJi ", "sanji"), ("L", "l"), ("AOTERU", "aoteru")])
+def test_supported_persona_forms_use_the_normalized_caller_selection(client, persona, expected):
+    body = explain(client, "What is on the shopping list?", persona=persona)
+    assert body["lead"] == {
+        "persona": expected,
+        "source": "caller",
+        "method": "caller-selected",
+        "reasons": ["the persona was chosen by the caller"],
+    }
+
+
+def test_an_unknown_persona_is_rejected_instead_of_being_labelled_caller_selected(client):
+    response = client.post(
+        "/misumi/route-explain",
+        json={"prompt": "What is on the shopping list?", "persona": "not-a-persona"},
+    )
+    assert response.status_code == 422
+    assert response.json()["detail"] == "persona must be 'auto' or a supported persona id"
+
+
 def _tree_snapshot(root: Path):
     if not root.exists():
         return {}

@@ -1596,6 +1596,9 @@ def setup_misumi_routes(
             routing = routing or {}
         else:
             lead = normalize_persona(body.persona)
+            requested_persona = str(body.persona or "").strip().lower()
+            if requested_persona != lead:
+                raise HTTPException(422, "persona must be 'auto' or a supported persona id")
             routing = {"method": "caller-selected", "reasons": ["the persona was chosen by the caller"]}
         team = _team_plan(prompt, lead)
         return {

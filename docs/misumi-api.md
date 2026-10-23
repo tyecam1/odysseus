@@ -93,6 +93,8 @@ showcase nor a final routing trace.
 The endpoint needs `misumi:read`, never calls a model, writes no state, and does not read household records. `executes_model: false` and
 `writes_state: false` describe this inspection request only; they do not predict whether a later `/misumi/respond` call will execute a
 model, tool, consultation, household read, or state update. `persona` is `auto` (default) or a persona id the caller selected.
+Persona ids are the ids supported by the current persona policy; matching ignores surrounding whitespace and case. An unknown id returns
+422 rather than silently falling back to Aoteru.
 
 ## Task planning
 
