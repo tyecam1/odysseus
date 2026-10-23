@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 from core.middleware import require_admin
 from src.constants import DATA_DIR
 from src.misumi_household import (
+    strip_addressee,
     INVENTORY_INTENT, HouseholdReadOnlyAdapter, infer_household_domain, item_question, names_non_physical,
 )
 from src.misumi_memory import MisumiMemory
@@ -1827,41 +1828,43 @@ def setup_misumi_routes(
             not_saved = {"example": "", "message": (
                 f"I can't keep that as a lasting routing preference: questions about {cue} are treated as possibly urgent, so "
                 "the main assistant always keeps them.")}
-        domain = infer_household_domain(prompt)
+        # Strip only the bounded address forms; preserve names used as household content and the original prompt for other paths.
+        hh_prompt = strip_addressee(prompt)
+        domain = infer_household_domain(hh_prompt)
         # A question about one item is resolved against the allowlisted household record index. The household answers on its
         # own ONLY for an exact record; any other item question goes to the model (with the candidate records as quoted data
         # when there are any), and is never answered "no" without it.
         item_evidence: Optional[Dict[str, Any]] = None
         item_pending = False  # an item question the household cannot answer exactly: the model answers it
         item_unconfirmed = False  # an explicitly scoped item question answered "not confirmed" because no model replied
-        shaped = item_question(prompt)
+        shaped = item_question(hh_prompt)
         resolution = None
         household_failed = False
         names_item = False
         try:
-            names_item = adapter.reachable and adapter.mentions_recorded_item(prompt)
+            names_item = adapter.reachable and adapter.mentions_recorded_item(hh_prompt)
         except Exception as exc:
             logger.warning("Misumi household index unavailable: %s", exc, exc_info=True)
             household_failed = True
         # "do we have time", "are we low on money": abstract, unless the text also names a recorded item ("still in date")
         non_physical = bool(shaped and names_non_physical(str(shaped["mention"])) and not names_item)
-        inventory_intent = (shaped is not None or bool(INVENTORY_INTENT.search(prompt))) and not non_physical
+        inventory_intent = (shaped is not None or bool(INVENTORY_INTENT.search(hh_prompt))) and not non_physical
         try:
-            resolution = adapter.resolve_question(prompt, domain) if adapter.reachable and not non_physical else None
+            resolution = adapter.resolve_question(hh_prompt, domain) if adapter.reachable and not non_physical else None
             if resolution is not None and resolution["deterministic"]:
                 domain = str(resolution["domain"])
                 found = adapter.resolution_hits(resolution)
             elif resolution is not None:
                 # an item question with no exact record, in ANY domain: a recorded line that says it is still quoted for the
                 # other household domains (records, cleaning ...); otherwise the model answers, never a flat "no matching"
-                found = adapter.search(prompt, domain=domain, limit=30) if domain not in (None, "food", "shopping") else []
+                found = adapter.search(hh_prompt, domain=domain, limit=30) if domain not in (None, "food", "shopping") else []
                 # a lexical relation never establishes an item's identity or state: without an exact record the model
                 # answers under the stock guard, and any lexical hits reach it only as untrusted context
                 item_pending = True
                 if resolution["evidence"] and not found:
                     item_evidence = resolution
             else:
-                found = adapter.search(prompt, domain=domain, limit=30) if adapter.reachable else []
+                found = adapter.search(hh_prompt, domain=domain, limit=30) if adapter.reachable else []
                 if not found and domain is not None and adapter.reachable and not non_physical and (
                         shaped is not None or names_item or inventory_intent):
                     item_pending = True
