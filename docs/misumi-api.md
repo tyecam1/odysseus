@@ -64,11 +64,35 @@ Content-Type: application/json
 {"prompt": "Aoteru, help me plan a dinner party: menu, tidy-up schedule and music.", "persona": "auto"}
 ```
 
-Explains how a request would be routed, from the same deterministic code `/misumi/respond` uses: the lead persona with its method and
-reasons, the solo/team decision with supports, excluded personas and reasons, the household domain the question maps to, and whether the
-shared safety gate marks the turn reserved or withholds learned routing. It needs `misumi:read`, never calls a model, reads no household
-data, writes no state and does not consult learned routing overlays. `executes_model` and `writes_state` are always `false`.
-`persona` is `auto` (default) or a persona id the caller selected.
+Returns a stateless preview of the base persona route and pre-reply team plan. It uses the same base routing and team-policy code as
+`/misumi/respond`, and may read their persona policy configuration, but it is not a preview of the final `/respond` result. In particular,
+it does not carry a persisted lead, apply learned routing, resolve household records, dispatch a tool, or run post-reply consultation.
+Those boundaries are machine-readable:
+
+```json
+{
+  "preview": {
+    "scope": "base-persona-and-team",
+    "omits": [
+      "persisted_lead",
+      "learned_routing",
+      "household_resolution",
+      "tool_dispatch",
+      "post_reply_consultation"
+    ]
+  }
+}
+```
+
+The response also reports the base lead and its reasons, the team-policy decision with supports/exclusions/reasons, a lexical
+`household_domain` label, and the shared safety-gate labels. `household_domain` does not mean `/respond` will return a
+`household-read-only` result: this endpoint does not query household records or claim deterministic household execution. Its team plan is
+formed without a primary reply, so `/respond` may make a different post-reply consultation decision. It is neither a broad persona
+showcase nor a final routing trace.
+
+The endpoint needs `misumi:read`, never calls a model, writes no state, and does not read household records. `executes_model: false` and
+`writes_state: false` describe this inspection request only; they do not predict whether a later `/misumi/respond` call will execute a
+model, tool, consultation, household read, or state update. `persona` is `auto` (default) or a persona id the caller selected.
 
 ## Task planning
 

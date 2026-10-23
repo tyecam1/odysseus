@@ -128,7 +128,7 @@ class MisumiRespondRequest(BaseModel):
 
 class MisumiRouteExplainRequest(BaseModel):
     prompt: str = Field(default="", max_length=4000)
-    persona: str = "auto"   # "auto" (the ratified deterministic lead route) or a persona id the caller selected
+    persona: str = "auto"   # "auto" (the stateless base lead route) or a persona id the caller selected
 
 
 class MisumiTaskRequest(BaseModel):
@@ -1579,10 +1579,12 @@ def setup_misumi_routes(
 
     @router.post("/route-explain")
     def route_explain(request: Request, body: MisumiRouteExplainRequest):
-        """Developer inspection: how a request WOULD be routed, from the same deterministic code /respond uses.
+        """Inspect the stateless base-persona and pre-reply team plan.
 
-        Never calls a model, reads no household data, writes no state and consults no learned overlay (so it cannot depend on or
-        change adaptation state). It answers "why solo, team or deterministic?" for a prompt without answering the prompt.
+        This reads persona routing/policy configuration but passes no persisted lead or learned routing to the base route, passes
+        no primary reply to team planning, and does not perform /respond's household resolution, tool dispatch or post-reply
+        consultation. The household domain is only a lexical label. This request calls no model, reads no household records and
+        writes no state; those no-effect fields do not predict what a later /respond request will execute.
         """
         _require_api_scope(request, "misumi:read")
         prompt = (body.prompt or "").strip()
@@ -1599,6 +1601,16 @@ def setup_misumi_routes(
         return {
             "executes_model": False,
             "writes_state": False,
+            "preview": {
+                "scope": "base-persona-and-team",
+                "omits": [
+                    "persisted_lead",
+                    "learned_routing",
+                    "household_resolution",
+                    "tool_dispatch",
+                    "post_reply_consultation",
+                ],
+            },
             "lead": {
                 "persona": lead,
                 "source": "auto" if auto else "caller",
