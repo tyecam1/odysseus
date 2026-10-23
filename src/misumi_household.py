@@ -56,9 +56,43 @@ _STOP_TERMS = frozenset({
     "to", "today", "tomorrow", "tonight", "us", "very", "was", "we", "were", "what", "when", "where", "which", "who",
     "whose", "will", "with", "words", "would", "yesterday", "yet", "you", "your", "need", "needs", "needed",
     "an", "as", "at", "be", "by", "if", "up", "just", "also", "go",
+    "plainly", "honestly", "briefly", "simply",
 })
 # Words that may accompany a request to show a whole list or table ("what is on the cleaning rota this week").
-_LISTING_FILLER = frozenset({"week", "next", "current"})
+_LISTING_FILLER = frozenset({"week", "next", "current", "household", "right"})
+# Explicit addresses such as "Aoteru, what is on the shopping list today?" are query framing rather than household evidence.
+# Keep ambiguous bare names as content; remove only the bounded greeting/punctuation forms defined below.
+_ADDRESSEE_NAMES = ("aoteru", "misumi", "kurisu", "lelouch", "ichigo", "ginko", "sanji", "jin", "misato", "giorno", "erwin", "kino")
+_ADDRESSEE_ALT = "|".join(_ADDRESSEE_NAMES)
+_ADDRESSEE_GREETING_LEAD = re.compile(
+    r"^\s*(?:hey|hi|hello|ok|okay|yo|oi)\b[\s,]*(?:%s)(?![\w'’])[\s,:;.!?-]*" % _ADDRESSEE_ALT,
+    re.IGNORECASE,
+)
+_ADDRESSEE_PUNCTUATED_LEAD = re.compile(
+    r"^\s*(?:%s)(?![\w'’])\s*[,;:!.-]\s*" % _ADDRESSEE_ALT,
+    re.IGNORECASE,
+)
+_ADDRESSEE_ONLY = re.compile(r"^\s*(?:%s)(?![\w'’])[\s.!?]*$" % _ADDRESSEE_ALT, re.IGNORECASE)
+_ADDRESSEE_TAIL = re.compile(r"\s*[,;:-]\s*(?:%s)[\s.!?]*$" % _ADDRESSEE_ALT, re.IGNORECASE)  # requires an explicit separator
+
+
+def strip_addressee(text: str) -> str:
+    """Drop only deterministic persona addresses, leaving ambiguous bare names as content.
+
+    A leading name is an address only after a greeting, before explicit punctuation, or when it is the whole utterance. A trailing
+    name is an address only after vocative punctuation. Thus unpunctuated subjects ("Jin bought the list"), leading possessives and
+    unpunctuated trailing names stay intact. Punctuation is the deliberate remaining ambiguity: ``Jin: records`` is treated as an
+    address even if its author intended a label.
+    """
+    out = text or ""
+    if _ADDRESSEE_GREETING_LEAD.match(out):
+        out = _ADDRESSEE_GREETING_LEAD.sub("", out, count=1)
+    elif _ADDRESSEE_PUNCTUATED_LEAD.match(out):
+        out = _ADDRESSEE_PUNCTUATED_LEAD.sub("", out, count=1)
+    elif _ADDRESSEE_ONLY.match(out):
+        out = ""
+    out = _ADDRESSEE_TAIL.sub("", out, count=1) if out.strip() else out
+    return out
 # Domain indicator words that are also what a question asks about ("what tasks are blocked?"): they stay evidence terms.
 _STATUS_WORDS = frozenset({"blocked", "backlog", "urgent", "open-loop", "open-loops", "broken", "repair", "repairs", "maintenance"})
 _TERM = re.compile(r"[A-Za-z0-9_]{2,}")
@@ -1330,6 +1364,7 @@ class HouseholdReadOnlyAdapter:
         record by record instead) and needs EVERY content word on a line - so it can never answer "olive oil" with "sesame oil"
         or attribute a record. An unconfirmed item question returns nothing here; the route hands its candidates to the model.
         """
+        query = strip_addressee(query)
         item_domain = domain in ("food", "shopping")
         if item_domain:
             resolution = self.resolve_question(query, domain, bare=True)
