@@ -55,6 +55,68 @@ def test_other_keys_before_the_answer_never_leak():
     assert answer.startswith("Sure.")
 
 
+@pytest.mark.parametrize(
+    ("raw", "private_text"),
+    [
+        ('{"memory":{"answer":"PRIVATE MEMORY"},"answer":"Visible reply', "PRIVATE MEMORY"),
+        ('{"artifact":{"answer":"PRIVATE ARTIFACT"},"answer":"Visible reply', "PRIVATE ARTIFACT"),
+        ('{"items":[{"answer":"PRIVATE ARRAY"}],"answer":"Visible reply', "PRIVATE ARRAY"),
+    ],
+)
+def test_only_a_root_answer_is_recovered_after_nested_values(raw, private_text):
+    answer = turn(raw)["answer"]
+    assert answer == "Visible reply..."
+    assert private_text not in answer
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        r'{"memory":{"\u0061nswer":"PRIVATE ESCAPED"},"answer":"Visible reply',
+        '{"memory":"literal \\"answer\\": \\"PRIVATE ESCAPED\\"", "answer":"Visible reply',
+    ],
+)
+def test_escaped_key_like_text_inside_another_value_is_not_an_answer(raw):
+    answer = turn(raw)["answer"]
+    assert answer == "Visible reply..."
+    assert "PRIVATE ESCAPED" not in answer
+
+
+def test_no_root_answer_is_distinct_from_a_recognised_empty_root_answer():
+    assert _salvage_answer('{"memory":{"answer":"nested only"}}') is None
+    assert _salvage_answer('{"answer":"') == ""
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        '{"answer":',
+        '{"answer":"',
+        '{"answer":"", "memory":{"text":"structured metadata',
+    ],
+)
+def test_a_recognised_empty_or_truncated_root_answer_never_falls_back_to_raw_metadata(raw):
+    assert _salvage_answer(raw) == ""
+    assert turn(raw)["answer"] == ""
+
+
+def test_a_complete_surrogate_pair_is_recovered_as_one_unicode_character():
+    raw = '{"answer":"Smile \\ud83d\\ude00 tonight and then'
+    assert turn(raw)["answer"] == "Smile 😀 tonight and then..."
+
+
+def test_a_complete_valid_reply_preserves_a_surrogate_pair():
+    raw = '{"answer":"Smile \\ud83d\\ude00","memory":null,"artifact":null}'
+    assert turn(raw)["answer"] == "Smile 😀"
+
+
+@pytest.mark.parametrize("tail", [r"\ud83d", r"\ud83d\u", r"\ud83d\ude"])
+def test_an_incomplete_surrogate_pair_stops_cleanly(tail):
+    answer = turn('{"answer":"Smile safely. More ' + tail)["answer"]
+    assert answer == "Smile safely."
+    assert "\\" not in answer
+
+
 def test_plain_text_and_non_answer_json_keep_the_old_behaviour():
     assert turn("Just a plain reply.")["answer"] == "Just a plain reply."
     assert _salvage_answer("Just a plain reply.") is None
