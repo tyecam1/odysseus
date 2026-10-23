@@ -1828,7 +1828,7 @@ def setup_misumi_routes(
             not_saved = {"example": "", "message": (
                 f"I can't keep that as a lasting routing preference: questions about {cue} are treated as possibly urgent, so "
                 "the main assistant always keeps them.")}
-        # a spoken question starts with the persona it is addressed to; the name is an address, never household evidence
+        # Strip only the bounded address forms; preserve names used as household content and the original prompt for other paths.
         hh_prompt = strip_addressee(prompt)
         domain = infer_household_domain(hh_prompt)
         # A question about one item is resolved against the allowlisted household record index. The household answers on its
