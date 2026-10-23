@@ -418,10 +418,172 @@ def _fallback_retention(prompt: str, answer: str) -> Dict[str, Optional[Dict[str
     return {"memory": memory_plan, "artifact": None}
 
 
+_JSON_ESCAPES = {'"': '"', "\\": "\\", "/": "/", "b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t"}
+
+
+def _json_string_end(text: str, start: int) -> Tuple[int, bool]:
+    """Return the end of one JSON string without interpreting embedded text."""
+    i = start + 1
+    while i < len(text):
+        if text[i] == '"':
+            return i + 1, True
+        if text[i] == "\\":
+            if i + 1 >= len(text):
+                return len(text), False
+            if text[i + 1] == "u":
+                digits = text[i + 2:i + 6]
+                if len(digits) < 4 or any(ch not in "0123456789abcdefABCDEF" for ch in digits):
+                    return len(text), False
+                i += 6
+                continue
+            i += 2
+            continue
+        i += 1
+    return len(text), False
+
+
+def _skip_json_value(text: str, start: int) -> Tuple[int, bool]:
+    """Skip one complete root-member value, including nested containers."""
+    i = start
+    if text[i] == '"':
+        return _json_string_end(text, i)
+    if text[i] in "[{":
+        stack = ["]" if text[i] == "[" else "}"]
+        i += 1
+        while i < len(text):
+            if text[i] == '"':
+                i, closed = _json_string_end(text, i)
+                if not closed:
+                    return i, False
+                continue
+            if text[i] in "[{":
+                stack.append("]" if text[i] == "[" else "}")
+            elif text[i] in "]}":
+                if text[i] != stack[-1]:
+                    return i, False
+                stack.pop()
+                if not stack:
+                    return i + 1, True
+            i += 1
+        return i, False
+    while i < len(text) and text[i] not in ",}":
+        i += 1
+    return i, bool(text[start:i].strip())
+
+
+def _decode_json_string_prefix(text: str, start: int) -> Tuple[str, bool]:
+    """Decode a complete or truncated JSON string, stopping before a partial escape."""
+    out: List[str] = []
+    i = start + 1
+    while i < len(text):
+        ch = text[i]
+        if ch == '"':
+            return "".join(out), True
+        if ch != "\\":
+            out.append(ch)
+            i += 1
+            continue
+        if i + 1 >= len(text):
+            break
+        nxt = text[i + 1]
+        if nxt != "u":
+            out.append(_JSON_ESCAPES.get(nxt, nxt))
+            i += 2
+            continue
+        digits = text[i + 2:i + 6]
+        if len(digits) < 4 or any(c not in "0123456789abcdefABCDEF" for c in digits):
+            break
+        code = int(digits, 16)
+        if 0xD800 <= code <= 0xDBFF:
+            low_digits = text[i + 8:i + 12] if text[i + 6:i + 8] == "\\u" else ""
+            if len(low_digits) < 4 or any(c not in "0123456789abcdefABCDEF" for c in low_digits):
+                break
+            low = int(low_digits, 16)
+            if not 0xDC00 <= low <= 0xDFFF:
+                break
+            out.append(chr(0x10000 + ((code - 0xD800) << 10) + low - 0xDC00))
+            i += 12
+            continue
+        if 0xDC00 <= code <= 0xDFFF:
+            break
+        out.append(chr(code))
+        i += 6
+    return "".join(out), False
+
+
+def _finish_salvaged_answer(answer: str, closed: bool) -> str:
+    answer = answer.strip()
+    if not answer or closed:
+        return answer
+    cut = max(answer.rfind(mark) for mark in (". ", ".\n", "! ", "!\n", "? ", "?\n"))
+    if cut >= len(answer) * 0.5:
+        return answer[:cut + 1]
+    if answer[-1] not in ".!?":
+        return answer.rstrip(" ,;:-") + "..."
+    return answer
+
+
+def _salvage_answer(raw: Optional[str]) -> Optional[str]:
+    """Recover the "answer" string from a JSON-shaped reply that did not parse (typically cut off at the output limit).
+
+    The interface shows (and speaks) the answer, so a reply like `{ "answer": "Menu: ... or The` must never reach the user as raw JSON.
+    Returns the decoded answer, ended at the last complete sentence when the reply was cut off, or None when the text is not an
+    answer-bearing JSON object. Other keys (memory, artifact) are never returned.
+    """
+    text = (raw or "").strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[1] if "\n" in text else ""
+    text = text.strip()
+    if not text.startswith("{"):
+        return None
+    i = 1
+    while i < len(text):
+        while i < len(text) and text[i].isspace():
+            i += 1
+        if i >= len(text) or text[i] == "}":
+            return None
+        if text[i] != '"':
+            return None
+        key_start = i
+        i, key_closed = _json_string_end(text, i)
+        if not key_closed:
+            return None
+        try:
+            key = json.loads(text[key_start:i])
+        except (json.JSONDecodeError, TypeError):
+            return None
+        while i < len(text) and text[i].isspace():
+            i += 1
+        if i >= len(text) or text[i] != ":":
+            return None
+        i += 1
+        while i < len(text) and text[i].isspace():
+            i += 1
+        if key == "answer":
+            if i >= len(text) or text[i] != '"':
+                return ""
+            answer, closed = _decode_json_string_prefix(text, i)
+            return _finish_salvaged_answer(answer, closed)
+        if i >= len(text):
+            return None
+        i, value_complete = _skip_json_value(text, i)
+        if not value_complete:
+            return None
+        while i < len(text) and text[i].isspace():
+            i += 1
+        if i >= len(text) or text[i] == "}":
+            return None
+        if text[i] != ",":
+            return None
+        i += 1
+    return None
+
+
 def _parse_model_turn(raw: str, prompt: str) -> Dict[str, Any]:
     parsed = _json_object(raw)
     if not parsed or not isinstance(parsed.get("answer"), str):
-        answer = _short_text(raw, 4000)
+        salvaged = _salvage_answer(raw)
+        answer = _short_text(salvaged if salvaged is not None else raw, 4000)
         return {"answer": answer, **_fallback_retention(prompt, answer), "retention_decided": True}
     answer = _short_text(parsed.get("answer"), 4000)
     memory_plan = parsed.get("memory") if isinstance(parsed.get("memory"), dict) else None
