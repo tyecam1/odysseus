@@ -14,6 +14,7 @@ import pytest
 from src import estate_worker_procs
 from src.estate_router import current_host_id
 from src.estate_worker_protocol import build_request
+from tests.helpers.cgroup_marker import _wait_for_cgroup_marker
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -35,24 +36,6 @@ def _worker(home, verb, payload, deadline_s=30):
     response = json.loads(completed.stdout)
     assert response["ok"] is True, response
     return response["result"]
-
-
-def _wait_for_cgroup_marker(marker, timeout=10):
-    """Return the cgroup path from a `cat /proc/self/cgroup` capture once the file holds a complete "0::<path>" line.
-
-    The shell creates the redirect target before `cat` writes it, so existence alone is not enough, and a partial write can hold only
-    "0::": wait for a non-empty path and the terminating newline."""
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        try:
-            text = marker.read_text()
-        except FileNotFoundError:
-            text = ""
-        _, sep, rest = text.partition("::")
-        if sep and rest.strip() and text.endswith("\n"):
-            return rest.strip()
-        time.sleep(0.05)
-    raise AssertionError(f"cgroup marker never held a complete line: {marker}")
 
 
 def _wait(home, execution_id, predicate, timeout=30):
