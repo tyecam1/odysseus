@@ -16,9 +16,17 @@ class SubscriptionModelError(RuntimeError):
     """A subscription model cannot be selected with sufficient evidence."""
 
 # A minimum safety floor, NOT a model selection: prevents an old CLI/catalogue
-# from silently selecting Sol 5.6 or 6.0 after 6.1 has been established.
-# Newer eligible versions are always selected automatically.
-_CODEX_MINIMUM_VERSION = (6, 1)
+# from silently selecting a retired premium tier. Calibrated to the newest
+# release actually offered by the live authenticated catalogue (gpt-6.0,
+# verified 2026-10-24, codex 0.155.1); newer eligible versions are always
+# selected automatically. A floor above the live catalogue would fail closed
+# against reality, contradicting "newest from the live catalogue".
+_CODEX_MINIMUM_VERSION = (6, 0)
+
+# Owner standing rule (2026-10-22): Astra models are never used without
+# explicit human instruction. Astra slugs are excluded from automatic
+# selection; the operator may opt in account-wide with AOTERU_ALLOW_ASTRA=1.
+_ASTRA_OPT_IN_ENV = "AOTERU_ALLOW_ASTRA"
 _CODEX_PREMIUM = re.compile(r"^gpt-(\d+)(?:\.(\d+))?(?:-(sol|astra))?$")
 _ALLOWED_EFFORTS = frozenset({"low", "medium", "high", "xhigh", "max"})
 
@@ -73,16 +81,18 @@ def resolve_latest_codex_model(codex_binary: str, *, timeout: float = 30.0) -> s
         match = _CODEX_PREMIUM.fullmatch(slug)
         if not match or item.get("visibility", "list") != "list":
             continue
+        if match.group(3) == "astra" and os.environ.get(_ASTRA_OPT_IN_ENV) != "1":
+            continue
         major, minor = int(match.group(1)), int(match.group(2) or 0)
-        # Same-version Astra wins over Sol and generic GPT. No old economical tier.
-        candidates.append(((major, minor, int(match.group(3) == "astra")), slug))
+        # Same-version preference: explicit Sol over generic GPT. No old economical tier.
+        candidates.append(((major, minor, int(match.group(3) == "sol")), slug))
     if not candidates:
         raise SubscriptionModelError("no current premium Codex subscription model in authenticated catalogue")
 
     version, slug = max(candidates)
     if version[:2] < _CODEX_MINIMUM_VERSION:
         raise SubscriptionModelError(
-            "Codex authenticated catalogue predates the known GPT-6.1 release; "
+            "Codex authenticated catalogue predates the known GPT-6.0 floor; "
             "update Codex and verify subscription access before dispatch"
         )
     return slug
