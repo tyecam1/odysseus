@@ -309,6 +309,12 @@ def test_codex_process_group_is_killed_on_timeout(monkeypatch, tmp_path):
     fake_popen = _fake_popen_factory(hold_event)
     monkeypatch.setattr(subprocess, "Popen", fake_popen)
     monkeypatch.setattr(estate_router, "_codex_available", lambda: (True, "/fake/codex"))
+    # The subscription policy resolves the model via `codex debug models`
+    # (a subprocess.run call, which itself uses Popen as a context manager).
+    # This test targets timeout kill behaviour, so patch the policy seam.
+    monkeypatch.setattr(estate_router, "resolve_latest_codex_model",
+                        lambda binary: "gpt-6.1-sol")
+    monkeypatch.setattr(estate_router, "subscription_effort", lambda: "high")
     kill_calls = []
 
     def _fake_killpg(pgid, sig):
