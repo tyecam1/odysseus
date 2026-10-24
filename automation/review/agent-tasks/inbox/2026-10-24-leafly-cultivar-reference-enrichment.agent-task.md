@@ -3,12 +3,12 @@ artifact_type: agent-task
 task_schema: agent-task/v2
 task_id: 2026-10-24-leafly-cultivar-reference-enrichment
 title: "Source-grounded Leafly cultivar enrichment for a 76-name research inventory"
-status: inbox
+status: done
 priority: medium
 task_type: implementation
 created_by: operator-request-via-chatgpt
 created_at: 2026-10-24T16:53:00+01:00
-updated_at: 2026-10-24T16:53:00+01:00
+updated_at: 2026-10-24T21:30:00+01:00
 executor: ""
 execution_mode: review-first
 architecture: single
@@ -150,5 +150,20 @@ All **49 other product names** must remain `no_reliable_match_established` until
 - Observe Odysseus `AGENTS.md` shipping-first backlog priority, mandatory preflight and write lease, controlled PR/merge/deploy, and independent verifier. A task card or test-only result is not deployment evidence.
 
 ## Sequencing and status
+
+## Sequencing and status
+
+**Shipped 2026-10-24** (PR #159, squash e3135ebf4dbc; deployed to the lab checkout and live service restarted 21:12:43 BST).
+
+Evidence:
+- Implementation: `src/leafly_research.py`, `routes/leafly_research_routes.py`, `tests/test_leafly_research.py` (13 tests, green in CI and on the lab).
+- Independent review: Sol/Codex read-only lane; findings (URL-host restriction, full-row revision hashing, research-route auth gate, SpreadsheetML element order, XML control characters, broken price-regex test) all repaired in commit 8f6148c.
+- Live lab evidence: `GET /api/research/leafly76` -> 76 rows with classifications and leafly.com sources (401 anonymous, 200 authenticated); `GET /api/research/leafly76/export` -> valid 13,637-byte colour-coded XLSX.
+- Provenance: 76 `leafly_cultivar_research` SourceEvent rows in the production database; second ingest idempotent (still 76); rows survive a service restart.
+- Persistence: service `enabled`, restarted twice via the granted sudo route; data retained.
+
+Recorded deviation: the acceptance line "27 source-reference rows; 49 unmatched" describes the earlier seed table. The operator's final CSV carries per-row descriptions, classifications and leafly.com references for all 76 rows (evidence-labelled, analogues never promoted to exact matches), which supersedes those counts.
+
+Remaining: the optional scheduled re-check of the 27 curated Leafly URLs (requirement 3, "if actually worthwhile") was not implemented — the dataset is static operator research; a scheduler cadence would add fetch load without proven demand. Also not implemented: a graphical in-app matrix for this dataset (read-only API + XLSX export are the delivery affordances; any UI belongs to a future, separately-governed change).
 
 This is a new **inbox** task, not implemented or deployed by its creation. The already-created user-facing XLSX is a local conversation artifact and should not be represented as committed to lab or GitHub. Keep separate from the Glasgow gig source's runtime and domain acceptance.
