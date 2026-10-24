@@ -76,14 +76,18 @@ def _row_refs(row):
 
 
 def _header_fill_map(workbook_bytes):
-    """Map header-cell value -> fill style index from styles.xml."""
+    """Map header-cell value -> resolved fill rgb via cellXfs fillId."""
     with zipfile.ZipFile(BytesIO(workbook_bytes)) as archive:
         styles = ElementTree.fromstring(archive.read("xl/styles.xml"))
         sheet = ElementTree.fromstring(archive.read("xl/worksheets/sheet1.xml"))
     fills = styles.find(f"{_NS}fills").findall(f"{_NS}fill")
-    def fill_rgb(index):
-        rgb = fills[index].find(f"{_NS}patternFill/{_NS}fgColor")
+    xfs = styles.find(f"{_NS}cellXfs").findall(f"{_NS}xf")
+
+    def fill_rgb(style_index):
+        fill_id = int(xfs[style_index].attrib["fillId"])
+        rgb = fills[fill_id].find(f"{_NS}patternFill/{_NS}fgColor")
         return rgb.attrib.get("rgb") if rgb is not None else None
+
     header = sheet.find(f"{_NS}sheetData").findall(f"{_NS}row")[0]
     mapping = {}
     for cell in header.findall(f"{_NS}c"):
