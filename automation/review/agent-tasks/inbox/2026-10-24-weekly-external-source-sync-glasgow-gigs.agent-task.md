@@ -95,3 +95,9 @@ Iterate lowercase weekday slug: `monday`, `tuesday`, `wednesday`, `thursday`, `f
 - Align with `AGENTS.md` temporary shipping-first backlog priority. The new user-requested capability is recorded in `inbox`; it is **not implemented, scheduled or deployed** by creating this card.
 - Run Aoteru preflight and acquire the required write lease before production implementation. Use a qualified code lane and independent verification. Do not merge untested changes.
 - Close this Odysseus task only on backend delivery evidence, and keep the existing Misumi owner task open until user-facing matrix and recommendation functionality is proven.
+
+## Linked research enrichment request (2026-10-24)
+
+Operator subsequently requested non-transactional Leafly cultivar descriptions for a separate 76-name investigation workbook. Canonical independent work item: `automation/review/agent-tasks/inbox/2026-10-24-leafly-cultivar-reference-enrichment.agent-task.md`.
+
+This companion source may reuse the same Odysseus scheduler, source-event provenance and retrieval infrastructure but **must not be folded into Glasgow gig parsing, event filtering, gig task acceptance or Misumi's music UI**. No retailer credential storage, product-availability tracking, quantity-price tiers or ordering integration is authorised. The original Glasgow gig acceptance criteria and shipping-first priority remain unchanged.
