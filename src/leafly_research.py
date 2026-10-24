@@ -23,6 +23,7 @@ import csv
 import hashlib
 import io
 import zipfile
+from urllib.parse import urlparse
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -110,22 +111,40 @@ def _validate(rows: List[Dict[str, str]], *, source: str) -> None:
             )
         for key in ("primary_leafly_source", "additional_leafly_source"):
             url = row.get(key, "")
-            if url and not url.startswith(("http://", "https://")):
+            if not url:
+                continue
+            parsed = urlparse(url)
+            if parsed.scheme not in ("http", "https") or not parsed.hostname:
                 raise LeaflyResearchValidationError(
                     f"{source}:{index}: {name!r} {key} is not an http(s) URL"
+                )
+            if parsed.username or parsed.password or "@" in (parsed.netloc or ""):
+                raise LeaflyResearchValidationError(
+                    f"{source}:{index}: {name!r} {key} embeds credentials"
+                )
+            if parsed.hostname not in ("leafly.com", "www.leafly.com"):
+                raise LeaflyResearchValidationError(
+                    f"{source}:{index}: {name!r} {key} is not a leafly.com URL"
                 )
 
 
 def revision_hash(row: Dict[str, str]) -> str:
     """Stable content hash for one inventory row (card field ``revision_hash``)."""
-    material = "\n".join(
-        row.get(key, "") for key in (
-            "category", "product_name", "leafly_description",
-            "closest_leafly_reference", "evidence_classification",
-            "primary_leafly_source", "additional_leafly_source",
-        )
-    )
-    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+_REVISION_KEYS = (
+    "category", "product_name", "leafly_description",
+    "closest_leafly_reference", "evidence_classification",
+    "primary_leafly_source", "additional_leafly_source",
+)
+
+
+def revision_material(row: Dict[str, str]) -> str:
+    """Full row content hashed for identity; ANY field change is a revision."""
+    return "\n".join(row.get(key, "") for key in _REVISION_KEYS)
+
+
+def revision_hash(row: Dict[str, str]) -> str:
+    """Stable content hash for one inventory row (card field ``revision_hash``)."""
+    return hashlib.sha256(revision_material(row).encode("utf-8")).hexdigest()
 
 
 def ingest_provenance(rows: List[Dict[str, str]]) -> Dict[str, int]:
@@ -148,7 +167,7 @@ def ingest_provenance(rows: List[Dict[str, str]]) -> Dict[str, int]:
         record_source_event(
             SOURCE_NAME,
             row["product_name"],
-            f"{row['product_name']}\n{row['leafly_description']}",
+            revision_material(row),
             metadata={
                 "category": row.get("category", "unknown"),
                 "closest_leafly_reference": row.get("closest_leafly_reference", ""),
@@ -194,9 +213,15 @@ def retrieval_records(rows: List[Dict[str, str]]) -> List[Dict[str, Any]]:
 # Minimal stdlib XLSX writer (inline strings + flat header fills only)
 # ---------------------------------------------------------------------------
 
+_ILLEGAL_XML_CHARS = dict.fromkeys(
+    list(range(0x00, 0x09)) + [0x0B, 0x0C] + list(range(0x0E, 0x20))
+)
+
+
 def _xml_escape(text: str) -> str:
+    cleaned = text.translate(_ILLEGAL_XML_CHARS)
     return (
-        text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        cleaned.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
         .replace('"', "&quot;")
     )
 
@@ -309,9 +334,9 @@ def build_workbook(rows: List[Dict[str, str]]) -> bytes:
     sheet_xml = (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
         '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+f'<dimension ref="A1:{last_col}{last_row}"/>'
         '<sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" '
         'activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>'
-        f'<dimension ref="A1:{last_col}{last_row}"/>'
         f'<sheetData>{"".join(row_xml)}</sheetData>'
         f'<autoFilter ref="A1:{last_col}{last_row}"/>'
         "</worksheet>"

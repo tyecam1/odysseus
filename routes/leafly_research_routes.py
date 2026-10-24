@@ -8,12 +8,15 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import Response
+
+from src.auth_helpers import _auth_disabled, get_current_user
 
 from src.constants import DATA_DIR
 from src.leafly_research import (
     DEFAULT_CSV_PATH,
+    ingest_provenance,
     EXPECTED_ROW_COUNT,
     SOURCE_NAME,
     SCAFFOLD_NOTE,
@@ -33,9 +36,25 @@ _XLSX_MEDIA_TYPE = (
 def setup_leafly_research_routes() -> APIRouter:
     router = APIRouter()
 
+    def _require_user(request: Request) -> str:
+        """Same gate as the other research endpoints: research data requires
+        an authenticated user; anonymous access only when auth is disabled."""
+        user = get_current_user(request)
+        if not user:
+            if _auth_disabled():
+                return ""
+            raise HTTPException(401, "Not authenticated")
+        return user
+
+
     @router.get("/api/research/leafly76")
-    async def get_leafly76() -> dict:
+    async def get_leafly76(request: Request) -> dict:
         """The 76 inventory rows with their Leafly descriptions and provenance."""
+        _require_user(request)
+        try:
+            ingest_provenance(load_inventory())
+        except Exception:  # provenance is best-effort; lookup must stay read-only-safe
+            logger.exception("Leafly provenance ingest failed")
         try:
             rows = load_inventory()
         except (OSError, LeaflyResearchValidationError) as exc:
@@ -56,7 +75,7 @@ def setup_leafly_research_routes() -> APIRouter:
         }
 
     @router.get("/api/research/leafly76/export")
-    async def export_leafly76() -> Response:
+    async def export_leafly76(request: Request) -> Response:
         """Colour-coded XLSX workbook (product name beside description).
 
         Advertised-option and price-comparison columns are blank scaffolding

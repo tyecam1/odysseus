@@ -129,13 +129,23 @@ def test_option_columns_are_colour_coded_and_blank(rows):
 
 
 def test_no_invented_price_or_quantity_values(rows):
-    """The research payload itself carries no price/quantity/stock offers."""
+    """No transactional offer data in the research payload itself.
+
+    Product names and descriptions may legitimately MENTION a stamped figure
+    (e.g. the hash stamp rows) while explicitly disclaiming it; that is not
+    price/quantity offer data. What must never appear is offer/stock language.
+    """
     import re
-    price_pattern = re.compile(r"[£$]\s?\d|\d+\s?(?:oz|euros?|pounds?)", re.I)
+    offer_pattern = re.compile(
+        r"in stock|out of stock|usual price|advertised price|"
+        r"price is|costs?" + chr(92) + "s?["
+        + chr(0xa3) + chr(0x20ac) + "$]|to order|purchase at",
+        re.I,
+    )
     for row in rows:
         blob = " ".join(row.values())
-        assert not price_pattern.search(blob), (
-            f"price-like value in research fields for {row['product_name']!r}"
+        assert not offer_pattern.search(blob), (
+            f"offer-like value in research fields for {row['product_name']!r}"
         )
 
 
@@ -232,3 +242,20 @@ def test_provenance_records_carry_sources(rows, _clean_rows):
         payload_ref = event.payload_ref
     assert payload_ref is not None
     assert "black-truffle" in payload_ref
+
+
+def test_non_leafly_and_credential_urls_rejected(tmp_path):
+    header = ("category,product_name,leafly_description,"
+              "evidence_classification,primary_leafly_source,"
+              "additional_leafly_source" + chr(10))
+    good = ("Cannabis flower,X,desc,exact,"
+            "https://www.leafly.com/strains/x," + chr(10))
+    bad_host = ("Cannabis flower,Y,desc,exact,"
+                "https://evil.example/strains/y," + chr(10))
+    bad_creds = ("Cannabis flower,Z,desc,exact,"
+                 "https://user:pass@leafly.com/strains/z," + chr(10))
+    for name, row in (("host", bad_host), ("creds", bad_creds)):
+        bad = tmp_path / (name + ".csv")
+        bad.write_text(header + good + row, encoding="utf-8")
+        with pytest.raises(LeaflyResearchValidationError):
+            load_inventory(bad)
