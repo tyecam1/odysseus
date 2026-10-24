@@ -696,7 +696,9 @@ app.include_router(setup_history_routes(session_manager, upload_handler=upload_h
 
 # Search
 from routes.search_routes import setup_search_routes
+from routes.leafly_research_routes import setup_leafly_research_routes
 app.include_router(setup_search_routes(config))
+app.include_router(setup_leafly_research_routes())
 
 # Presets
 from routes.preset_routes import setup_preset_routes
