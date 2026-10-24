@@ -15,3 +15,16 @@ commits = ["ddb5ec37f55a21a802a938a4cdfef4e286a06607"]
 paths = ['^evals/local_models/results/artifacts/lm2-[A-Za-z0-9_.-]+/gemma4-(12b|26b-a4b|e4b)-qat-gguf-direct/[A-Za-z0-9_.-]+\.json$']
 regexTarget = "match"
 regexes = ['^model_key": "gemma4-(12b|26b-a4b|e4b)-qat-gguf-direct"$']
+
+# Second verified exception: the operator-authored Leafly task card tripped
+# generic-api-key on the literal phrase "price/quantity" (entropy heuristic,
+# not a credential). The tip of the card was reworded; this exception covers
+# only the one historical commit, the one card path, and exactly that phrase.
+[[allowlists]]
+description = "Leafly task card prose: the literal phrase price/quantity is not a credential"
+condition = "AND"
+targetRules = ["generic-api-key"]
+commits = ["bfb8d78c8cd0c98298099c3bdb07b5f6c9bb488e", "4c82ef6dc54c48a10a63eb8e0bb6fc4566404206"]
+paths = ['^automation/review/agent-tasks/inbox/2026-10-24-leafly-cultivar-reference-enrichment\.agent-task\.md$']
+regexTarget = "match"
+regexes = ['price/quantity']

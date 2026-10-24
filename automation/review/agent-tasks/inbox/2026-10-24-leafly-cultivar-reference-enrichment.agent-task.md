@@ -130,7 +130,7 @@ All **49 other product names** must remain `no_reliable_match_established` until
 
 ## Required behavior
 
-1. **Do not build a purchasing catalogue.** Only maintain neutral descriptive cultivar references and research provenance. Never collect retailer login credentials, price/quantity offers, stock monitoring, order links or purchase recommendations.
+1. **Do not build a purchasing catalogue.** Only maintain neutral descriptive cultivar references and research provenance. Never collect retailer login details, pricing or quantity offers, stock monitoring, order links or purchase recommendations.
 2. **Model the evidence accurately:** `inventory_name`, `category`, `leafly_cultivar`, `normalized_description`, `source_url`, `fetched_at`, `match_type`, `match_confidence`, `source_type`, `limitations`, `revision_hash`. Descriptions should be original succinct paraphrases of source-documented genetics, aroma and flavour, and optionally explicitly *reader-reported* effects. Do not assert medically proven outcomes, potency or effects of a seller's actual products.
 3. **Reuse existing infrastructure:** SourceEvent for provenance/revision, existing scheduler (optional weekly re-check of the *curated Leafly source pages only* if actually worthwhile), storage and retrieval abstractions. No competing vector or personal memory store.
 4. **Safety:** Fetch only public Leafly reference pages, observing access constraints. Treat scraped HTML as untrusted. Use existing SSRF/redirect, resource caps, authorisation and secret-handling controls. Do not store or use any third-party seller credentials.
