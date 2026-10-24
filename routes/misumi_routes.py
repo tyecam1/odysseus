@@ -126,6 +126,11 @@ class MisumiRespondRequest(BaseModel):
     history_mode: Optional[Literal["auto", "off"]] = None
 
 
+class MisumiRouteExplainRequest(BaseModel):
+    prompt: str = Field(default="", max_length=4000)
+    persona: str = "auto"   # "auto" (the stateless base lead route) or a persona id the caller selected
+
+
 class MisumiTaskRequest(BaseModel):
     prompt: str
     persona: str = "aoteru"
@@ -1571,6 +1576,57 @@ def setup_misumi_routes(
             "approval_mode": "operator",
         })
         return {"rolled_back": True, "rollback": rollback}
+
+    @router.post("/route-explain")
+    def route_explain(request: Request, body: MisumiRouteExplainRequest):
+        """Inspect the stateless base-persona and pre-reply team plan.
+
+        This reads persona routing/policy configuration but passes no persisted lead or learned routing to the base route, passes
+        no primary reply to team planning, and does not perform /respond's household resolution, tool dispatch or post-reply
+        consultation. The household domain is only a lexical label. This request calls no model, reads no household records and
+        writes no state; those no-effect fields do not predict what a later /respond request will execute.
+        """
+        _require_api_scope(request, "misumi:read")
+        prompt = (body.prompt or "").strip()
+        if not prompt:
+            raise HTTPException(422, "prompt is required")
+        auto = str(body.persona or "auto").strip().lower() == "auto"
+        if auto:
+            lead, routing = resolve_auto_lead(prompt, prior_lead=None)
+            routing = routing or {}
+        else:
+            lead = normalize_persona(body.persona)
+            requested_persona = str(body.persona or "").strip().lower()
+            if requested_persona != lead:
+                raise HTTPException(422, "persona must be 'auto' or a supported persona id")
+            routing = {"method": "caller-selected", "reasons": ["the persona was chosen by the caller"]}
+        team = _team_plan(prompt, lead)
+        return {
+            "executes_model": False,
+            "writes_state": False,
+            "preview": {
+                "scope": "base-persona-and-team",
+                "omits": [
+                    "persisted_lead",
+                    "learned_routing",
+                    "household_resolution",
+                    "tool_dispatch",
+                    "post_reply_consultation",
+                ],
+            },
+            "lead": {
+                "persona": lead,
+                "source": "auto" if auto else "caller",
+                "method": str(routing.get("method") or ""),
+                "reasons": [str(item) for item in (routing.get("reasons") or [])],
+            },
+            "team": {key: team.get(key) for key in ("decision", "supports", "excluded", "reasons")},
+            "household_domain": infer_household_domain(prompt),
+            "safety": {
+                "reserved_turn": bool(is_reserved_turn(prompt)),
+                "learned_routing_withheld": bool(withhold_learned_route(prompt)),
+            },
+        }
 
     @router.get("/persona-state")
     def persona_state_inspect(request: Request):
