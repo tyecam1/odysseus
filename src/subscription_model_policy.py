@@ -79,8 +79,18 @@ def resolve_latest_codex_model(codex_binary: str, *, timeout: float = 30.0) -> s
         if not isinstance(slug, str):
             continue
         match = _CODEX_PREMIUM.fullmatch(slug)
-        if not match or item.get("visibility", "list") != "list":
+        if not match:
             continue
+        # An unrecognised visibility value means eligibility cannot be
+        # verified; skipping it could silently select an older model.
+        visibility = item.get("visibility", "list")
+        if visibility == "hide":
+            continue
+        if visibility != "list":
+            raise SubscriptionModelError(
+                f"unrecognised visibility {visibility!r} for catalogue entry {slug!r}; "
+                "update Codex and verify the catalogue before dispatch"
+            )
         if match.group(3) == "astra" and os.environ.get(_ASTRA_OPT_IN_ENV) != "1":
             continue
         major, minor = int(match.group(1)), int(match.group(2) or 0)
