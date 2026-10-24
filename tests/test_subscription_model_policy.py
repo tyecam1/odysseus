@@ -107,3 +107,16 @@ def test_invalid_effort_fails_closed(monkeypatch):
     monkeypatch.setenv("AOTERU_SUBSCRIPTION_REASONING_EFFORT", "none")
     with pytest.raises(policy.SubscriptionModelError):
         policy.subscription_effort()
+
+
+def test_unknown_visibility_fails_closed(monkeypatch):
+    mock_catalogue(monkeypatch, [
+        {"slug": "gpt-7-sol", "visibility": None}, {"slug": "gpt-6-sol"},
+    ])
+    with pytest.raises(policy.SubscriptionModelError, match="visibility"):
+        policy.resolve_latest_codex_model("/usr/bin/codex")
+
+
+def test_missing_visibility_defaults_to_list(monkeypatch):
+    mock_catalogue(monkeypatch, [{"slug": "gpt-7-sol"}, {"slug": "gpt-6-sol"}])
+    assert policy.resolve_latest_codex_model("/usr/bin/codex") == "gpt-7-sol"
