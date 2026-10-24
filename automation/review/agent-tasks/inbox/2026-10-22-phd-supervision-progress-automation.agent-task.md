@@ -29,7 +29,6 @@ source_traceability_required: true
 repo: tyecam1/obsidian-PhD
 branch: agent/phd-supervision-progress-20261022
 allowed_paths:
-  - Scripts/automation/**
   - automation/review/supervisor-office-pack/**
   - Scripts/automation/tests/**
 denied_paths:
@@ -57,7 +56,7 @@ outputs:
   - tests on representative new, revised, agenda-only and no-change notes
 result_path: automation/review/supervisor-office-pack/erfu-pivotal-register-contract.md
 review_report_path: automation/review/supervisor-office-pack/supervision-progress-updater-verification.md
-handoff_model: resolved-at-dispatch-per-odysseus-subscription-currency-policy
+handoff_model: resolved-at-dispatch
 operator_decision_path: ""
 supersedes: []
 duplicates: []
