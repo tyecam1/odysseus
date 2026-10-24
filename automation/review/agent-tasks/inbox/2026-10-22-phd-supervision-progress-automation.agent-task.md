@@ -53,7 +53,7 @@ outputs:
   - exact three-sheet approved baseline preservation
   - evidence and supervisor-attribution checks
   - staged release and approved OneDrive publication procedure
-  - tests on representative new, revised, agenda-only and no-change notes
+  - Scripts/automation/tests/** tests covering representative new, revised, agenda-only and no-change notes
 result_path: automation/review/supervisor-office-pack/erfu-pivotal-register-contract.md
 review_report_path: automation/review/supervisor-office-pack/supervision-progress-updater-verification.md
 handoff_model: resolved-at-dispatch
