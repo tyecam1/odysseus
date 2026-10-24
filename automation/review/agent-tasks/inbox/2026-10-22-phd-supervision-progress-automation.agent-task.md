@@ -10,11 +10,11 @@ created_by: chatgpt
 created_at: 2026-10-22T12:00:00+01:00
 updated_at: 2026-10-22T12:00:00+01:00
 executor: claude_subscription
-execution_mode: review-first
+execution_mode: implementation
 architecture: single-plus-verifier
 architecture_rationale: "One agent integrates the approved workbook and existing PhD staging workflow. A separate verifier checks evidence fidelity, workbook preservation and external sharing safety."
 single_agent_baseline: "One implementation agent plus focused independent review."
-execution_host: primary
+execution_host: laptop
 context_budget: medium
 coordination_reason: "Crosses PhD evidence extraction, workbook update, automation scheduling and university OneDrive publishing."
 requires_remote_compute: false
@@ -27,14 +27,21 @@ risk_level: medium
 approval_required: true
 source_traceability_required: true
 repo: tyecam1/obsidian-PhD
-branch: ""
+branch: agent/phd-supervision-progress-20261022
 allowed_paths:
   - Scripts/automation/**
   - automation/review/supervisor-office-pack/**
-  - tests/**
+  - Scripts/automation/tests/**
 denied_paths:
   - "**/.env"
   - "**/secrets/**"
+  - 00-dashboards/**
+  - 01-research-plan/**
+  - 02-library/00-papers/**
+  - 02-library/01-annotations/**
+  - 02-library/02-evidence/**
+  - 03-concept/**
+  - 07-standards/**
 inputs:
   - automation/review/supervisor-office-pack/erfu-pivotal-register-contract.md
   - automation/review/supervisor-office-pack/2026-10-22-supervision-record-approval.md
@@ -50,7 +57,7 @@ outputs:
   - tests on representative new, revised, agenda-only and no-change notes
 result_path: automation/review/supervisor-office-pack/erfu-pivotal-register-contract.md
 review_report_path: automation/review/supervisor-office-pack/supervision-progress-updater-verification.md
-handoff_model: gpt-6
+handoff_model: resolved-at-dispatch-per-odysseus-subscription-currency-policy
 operator_decision_path: ""
 supersedes: []
 duplicates: []
