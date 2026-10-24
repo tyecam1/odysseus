@@ -48,13 +48,15 @@ making the artifact not look like a credential (for example a different field na
 
 The operator-authored task card
 `automation/review/agent-tasks/inbox/2026-10-24-leafly-cultivar-reference-enrichment.agent-task.md`
-tripped `generic-api-key` on the literal prose phrase `price/quantity` (a
+tripped `generic-api-key` on the literal slash-joined pricing/quantity noun phrase (a
 two-word English noun phrase in a prohibition sentence — entropy heuristic,
 not a credential). Verified by running the pinned gitleaks 8.30.1 locally and
-reading the unredacted finding: Secret = `price/quantity`, no key/value
+reading the unredacted finding: the flagged Secret was that same pricing
+phrase, and no key/value
 assignment anywhere near it.
 
 Handling followed the doc's own rule (reword over allowlist): the card's tip
 was reworded to "pricing or quantity offers", and the exception covers only
-the historical commit `bfb8d78c`, only that card path, and only the exact
-phrase `price/quantity`. Re-verify with the same local pinned-binary scan.
+the historical commit `bfb8d78c`, only that card path, and only the exact slash-joined pricing/quantity phrase (the allowlist entry
+records it; do not copy the phrase into docs or prose — quoting it here is what
+the rule flags). Re-verify with the same local pinned-binary scan.
