@@ -28,9 +28,31 @@ def test_newest_premium_version_is_selected(monkeypatch):
 
 def test_future_version_is_selected_without_policy_change(monkeypatch):
     mock_catalogue(monkeypatch, [
+        {"slug": "gpt-6.1-sol"}, {"slug": "gpt-7"},
+    ])
+    assert policy.resolve_latest_codex_model("/usr/bin/codex") == "gpt-7"
+
+
+def test_astra_never_selected_without_explicit_opt_in(monkeypatch):
+    mock_catalogue(monkeypatch, [
+        {"slug": "gpt-5.6-sol"}, {"slug": "gpt-6-sol"}, {"slug": "gpt-6-astra"},
+    ])
+    monkeypatch.delenv("AOTERU_ALLOW_ASTRA", raising=False)
+    assert policy.resolve_latest_codex_model("/usr/bin/codex") == "gpt-6-sol"
+
+
+def test_astra_newer_still_skipped(monkeypatch):
+    mock_catalogue(monkeypatch, [
         {"slug": "gpt-6.1-sol"}, {"slug": "gpt-7-astra"},
     ])
-    assert policy.resolve_latest_codex_model("/usr/bin/codex") == "gpt-7-astra"
+    monkeypatch.delenv("AOTERU_ALLOW_ASTRA", raising=False)
+    assert policy.resolve_latest_codex_model("/usr/bin/codex") == "gpt-6.1-sol"
+
+
+def test_astra_opt_in_selects_astra(monkeypatch):
+    mock_catalogue(monkeypatch, [{"slug": "gpt-6-astra"}])
+    monkeypatch.setenv("AOTERU_ALLOW_ASTRA", "1")
+    assert policy.resolve_latest_codex_model("/usr/bin/codex") == "gpt-6-astra"
 
 
 def test_future_generic_flagship_is_selected(monkeypatch):
@@ -40,15 +62,20 @@ def test_future_generic_flagship_is_selected(monkeypatch):
     assert policy.resolve_latest_codex_model("/usr/bin/codex") == "gpt-7"
 
 
-def test_same_version_prefers_flagship(monkeypatch):
+def test_same_version_prefers_sol(monkeypatch):
     mock_catalogue(monkeypatch, [
         {"slug": "gpt-6.1-sol"}, {"slug": "gpt-6.1-astra"},
     ])
-    assert policy.resolve_latest_codex_model("/usr/bin/codex") == "gpt-6.1-astra"
+    assert policy.resolve_latest_codex_model("/usr/bin/codex") == "gpt-6.1-sol"
+
+
+def test_live_floor_catalogue_selects_newest(monkeypatch):
+    mock_catalogue(monkeypatch, [{"slug": "gpt-5.6-sol"}, {"slug": "gpt-6-sol"}])
+    assert policy.resolve_latest_codex_model("/usr/bin/codex") == "gpt-6-sol"
 
 
 def test_old_catalogue_never_falls_back(monkeypatch):
-    mock_catalogue(monkeypatch, [{"slug": "gpt-5.6-sol"}, {"slug": "gpt-6-sol"}])
+    mock_catalogue(monkeypatch, [{"slug": "gpt-5.6-sol"}, {"slug": "gpt-6-luna"}])
     with pytest.raises(policy.SubscriptionModelError, match="predates"):
         policy.resolve_latest_codex_model("/usr/bin/codex")
 
