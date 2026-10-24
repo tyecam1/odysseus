@@ -1,6 +1,6 @@
 # Secret-scan allowlist (gitleaks)
 
-`.gitleaks.toml` keeps the **default gitleaks ruleset fully on** (`useDefault = true`) and adds exactly one exception.
+`.gitleaks.toml` keeps the **default gitleaks ruleset fully on** (`useDefault = true`) and adds narrow, verified exceptions only.
 
 ## What it allows, and why
 
@@ -43,3 +43,20 @@ Note: `--config /dev/null` is **not** a way to see the findings; an empty config
 
 Do not widen it to a rule-wide or path-wide ignore. If a new benchmark artifact legitimately trips the rule, prefer
 making the artifact not look like a credential (for example a different field name) over adding an allowlist entry.
+
+## Second exception: Leafly task-card prose (2026-10-24)
+
+The operator-authored task card
+`automation/review/agent-tasks/inbox/2026-10-24-leafly-cultivar-reference-enrichment.agent-task.md`
+tripped `generic-api-key` on the literal slash-joined pricing/quantity noun phrase (a
+two-word English noun phrase in a prohibition sentence — entropy heuristic,
+not a credential). Verified by running the pinned gitleaks 8.30.1 locally and
+reading the unredacted finding: the flagged Secret was that same pricing
+phrase, and no key/value
+assignment anywhere near it.
+
+Handling followed the doc's own rule (reword over allowlist): the card's tip
+was reworded to "pricing or quantity offers", and the exception covers only
+the historical commit `bfb8d78c`, only that card path, and only the exact slash-joined pricing/quantity phrase (the allowlist entry
+records it; do not copy the phrase into docs or prose — quoting it here is what
+the rule flags). Re-verify with the same local pinned-binary scan.
