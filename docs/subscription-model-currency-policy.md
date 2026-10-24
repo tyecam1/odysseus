@@ -22,13 +22,20 @@ relax PhD research authority.
 - `src/subscription_model_policy.py` calls `codex debug models` on the chosen
   worker, using that CLI's authenticated, account-specific model catalogue.
 - It selects the greatest numeric model version among visible premium
-  `gpt-N[.M]`, `gpt-N[.M]-sol` or `gpt-N[.M]-astra` models. Same-version Astra wins.
-  This is model *currency*, not route-cost optimization. Older Luna/Terra
-  models and historical Codex models are not eligible subscription execution
-  fallbacks.
-- A **minimum version floor** of GPT 6.1 prevents an out-of-date catalogue
-  from silently selecting Sol 5.6 or 6.0. This is a safety condition, not an
-  operator model knob. Later eligible versions are auto-selected.
+  `gpt-N[.M]` and `gpt-N[.M]-sol` models; at the same version an explicit
+  Sol slug is preferred over generic GPT. This is model *currency*, not
+  route-cost optimization. Older Luna/Terra models and historical Codex
+  models are not eligible subscription execution fallbacks.
+- **Astra exclusion (owner standing rule, 2026-10-22):** `gpt-N[.M]-astra`
+  slugs are never selected automatically; Astra requires explicit human
+  instruction and, at runtime, the operator-set `AOTERU_ALLOW_ASTRA=1`
+  opt-in. Without it, Astra entries are invisible to the selector.
+- A **minimum version floor**, currently GPT 6.0 (the newest release the
+  live authenticated catalogue actually offers as of 2026-10-24), prevents
+  an out-of-date catalogue from silently selecting a retired premium tier.
+  This is a safety condition, not an operator model knob. Later eligible
+  versions are auto-selected. The floor must never be pinned above what the
+  live catalogue offers; doing so fails dispatch closed against reality.
 - On dispatch the code passes `--model <resolved>` explicitly on BOTH
   read-only and workspace-write runs. The only configurable inference dial
   is `AOTERU_SUBSCRIPTION_REASONING_EFFORT` (low, medium, high, xhigh, max;
