@@ -142,3 +142,8 @@ Labels used in this section: `consent-bound` = needs the household's consent bef
 New findings from this arc: (1) transcript export silently stopped at 200 rows (#119), and still stops silently at 1000; (2) STT not running (above); (3) a household-read-only answer for a records question returned an irrelevant line, and the first repair then answered "no match" to real stock questions (#122); (4) `odysseus-backup-task.ps1 -Action Install` used `$env:USERDOMAIN` (#121); (5) home OneDrive dormant; (6) the -11 evaluation's intervals did not follow its pre-registered resampling, and the verdict was quoted from the wrong judge (it still holds under the registered primary slot, llama3.1:8b, and not under qwen3:8b); (7) -10/-12 hygiene and binding defects (#123); (8) an unsupported production length claim, withdrawn.
 
 Terminal state: NOT terminal. The executable remainder is `awaiting-user-action` (merges, home deployment, host hardening, lab worktree removal), plus the carried Sol findings and the Sol re-review. Everything else is operator-, household-, physical-, nature-, credential- or model-lane-gated, or an explicit verification debt.
+
+
+## Delivery update, 24 October 2026
+
+PR #153 base-routing preview is merged and deployed at `79ca6aafc8`; scope, authentication, persona validation and household regressions passed on the live home path. See the PR #153 delivered entry in [[misumi-long-horizon-programme-evidence]]. This completes that inspection increment, not the broader showcase. PR #148 remains unfinished; J2 #624 retains its research gates.
