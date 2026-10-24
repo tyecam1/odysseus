@@ -29,6 +29,11 @@ otherwise eligible unit.
 `docs/aoteru-model-host-routing-contract.md` is the routing and authority
 contract. Do not duplicate or override it here.
 
+Subscription model version/tier is never a task-controlled variable. Apply
+`docs/subscription-model-currency-policy.md`: only effort is selected, use
+the newest authenticated model and fail closed rather than fall back. Local
+models retain their separate qualification policy.
+
 **Usage-limit failover:** For a verified Codex quota/usage-limit response, do not
 park otherwise eligible work until reset. Apply the existing routing contract's
 "Codex usage-limit → GLM failover" section: prefer an actually qualified GLM
