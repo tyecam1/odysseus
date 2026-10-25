@@ -75,8 +75,7 @@ jobs:
           # under pipefail that failed this gate on every manifest-changing
           # PR (exit 141) -- the exact PRs this workflow exists to review.
           sbom_response="$(gh api -i "repos/${REPO}/dependency-graph/sbom" 2>/dev/null || true)"
-          status="$(printf '%s
-' "${sbom_response}" | sed -n '1p' | awk '{print $2}')"
+          status="$(printf '%s\n' "${sbom_response}" | sed -n '1p' | awk '{print $2}')"
           status="${status:-none}"
           echo "dependency-graph API status: ${status:-none}"
           if [ "${status}" = "404" ]; then
