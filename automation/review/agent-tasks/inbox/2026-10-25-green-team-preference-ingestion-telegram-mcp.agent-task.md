@@ -48,6 +48,11 @@ outputs:
   - security and acceptance verification with exact blocked prerequisites
   - docs and operator handoff
 ---
+post_merge_status: misumi-pr-88-merged; canon resolves at tyecam1/misumi@main (blob 3ac07e494e5575d8a61c730956f04627169533a3, main head 075b1547f668); restated parameters in this exemplar are non-authoritative summaries
+
+
+> **Canon precedence (2026-10-25, post-merge).** Misumi PR #88 is MERGED: the canonical document now resolves at `tyecam1/misumi@main:docs/preferences/green-team-leafly-product-comparison-v1.md` (content blob `3ac07e494e5575d8a61c730956f04627169533a3`, main head `075b1547f668`). Numeric parameters, weights, schema and ordering restated anywhere in this card or the exemplar are **non-authoritative summaries**; on any discrepancy resolve to the Misumi document at a pinned commit. Nothing here satisfies 'done' while implementation, tests or external evidence are outstanding.
+
 
 # Green Team/Leafly preference ingestion + Telegram MCP integration
 
