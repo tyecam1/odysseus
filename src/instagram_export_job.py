@@ -158,6 +158,14 @@ def _private_dir(path: Path) -> None:
         pass
 
 
+def _fchmod_owner_only(fd: int) -> None:
+    """Harden an already-open fd to owner-only where the platform supports it."""
+    if hasattr(os, "fchmod"):
+        os.fchmod(fd, stat.S_IRUSR | stat.S_IWUSR)
+    # Windows has no os.fchmod; the fd is created with a restrictive mode
+    # argument and the data directory's ownership ACLs already limit access
+    # to the service user, so there is nothing further to tighten here.
+
 def _fsync_dir(path: Path) -> None:
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
     try:
@@ -180,7 +188,7 @@ def _acquisition_lock(state_path: Path):
     flags |= getattr(os, "O_NOFOLLOW", 0)
     fd = os.open(lock_path, flags, stat.S_IRUSR | stat.S_IWUSR)
     try:
-        os.fchmod(fd, stat.S_IRUSR | stat.S_IWUSR)
+        _fchmod_owner_only(fd)
         try:
             import fcntl
         except ImportError as exc:  # pragma: no cover - acquisition runs on the POSIX lab host
@@ -239,7 +247,7 @@ def _append_operator_gate(
     flags |= getattr(os, "O_NOFOLLOW", 0)
     fd = os.open(path, flags, stat.S_IRUSR | stat.S_IWUSR)
     try:
-        os.fchmod(fd, stat.S_IRUSR | stat.S_IWUSR)
+        _fchmod_owner_only(fd)
         with os.fdopen(fd, "a", encoding="utf-8", closefd=False) as handle:
             handle.write(json.dumps(dict(gate), sort_keys=True, separators=(",", ":")) + "\n")
             handle.flush()

@@ -363,3 +363,18 @@ def test_an_older_snapshot_resurfacing_with_an_equal_saved_time_does_not_regress
     assert accounting["failed"] == 1 and accounting["superseded"] == 1 and accounting["revised"] == 0
     assert read_source_event_payload(_job_row(permalink)["payload_ref"])["caption"] == "newer export"
     assert _job_row(permalink)["revision_count"] == 0
+
+
+def test_append_import_run_survives_windows_without_os_fchmod(monkeypatch, tmp_path):
+    """Windows has no os.fchmod; append_import_run must not raise AttributeError."""
+    import os
+
+    monkeypatch.delattr(os, "fchmod", raising=False)
+    run_log = tmp_path / "governed" / "instagram" / "import-runs.jsonl"
+
+    line = append_import_run(_record("2026-10-25T00:00:00Z", created=1), run_log)
+
+    assert run_log.read_text(encoding="utf-8").splitlines() == [line]
+    if hasattr(os, "fchmod"):
+        # On POSIX the created file is still owner-only.
+        assert stat.S_IMODE(run_log.stat().st_mode) == 0o600

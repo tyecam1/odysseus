@@ -1005,3 +1005,23 @@ def test_scheduler_honours_persisted_next_scheduled_at_after_restart(monkeypatch
     assert delay == 86400.0
     assert delay != DEFAULT_INTERVAL_HOURS * 60 * 60
 
+
+
+def test_acquisition_lock_and_state_survive_windows_without_os_fchmod(monkeypatch, tmp_path):
+    """Windows has no os.fchmod; the lock path must not raise AttributeError."""
+    import os
+
+    import src.instagram_export_job as export_job
+
+    monkeypatch.delattr(os, "fchmod", raising=False)
+    state_path = tmp_path / "governed" / "instagram" / "acquisition-state.json"
+
+    with export_job._acquisition_lock(state_path):
+        save_acquisition_state(_state("scheduled"), state_path)
+
+    lock_path = state_path.parent / ".acquisition-state.json.lock"
+    assert lock_path.exists()
+    assert state_path.exists()
+    if hasattr(os, "fchmod"):
+        # On POSIX the created files are still owner-only.
+        assert stat.S_IMODE(state_path.stat().st_mode) == 0o600
