@@ -1017,7 +1017,7 @@ def test_acquisition_lock_and_state_survive_windows_without_os_fchmod(monkeypatc
     state_path = tmp_path / "governed" / "instagram" / "acquisition-state.json"
 
     with export_job._acquisition_lock(state_path):
-        save_acquisition_state(_state("idle"), state_path)
+        save_acquisition_state(_state("scheduled"), state_path)
 
     lock_path = state_path.parent / ".acquisition-state.json.lock"
     assert lock_path.exists()
