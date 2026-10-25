@@ -328,6 +328,15 @@ def apply_rarity_grade(records: List[Dict[str, Any]],
                                      "basis": est.get("basis", "injected rarity estimate")}
 
 
+def _effective_grade(rec: Dict[str, Any]) -> Tuple[Optional[float], float]:
+    """Prefer reported grades while retaining any inference as raw audit data."""
+    reported = seller_grade_numeric(rec.get("seller_tier"))
+    if reported is not None:
+        return reported, 1.0
+    inferred = rec.get("inferred_grade") or {}
+    return inferred.get("numeric"), inferred.get("confidence", 1.0)
+
+
 def build_factors(records: List[Dict[str, Any]], *,
                   rarity_policy: Optional[Mapping[str, Dict[str, Any]]] = None
                   ) -> List[Tuple[Dict[str, Any], Factors, Dict[str, Any]]]:
@@ -341,10 +350,8 @@ def build_factors(records: List[Dict[str, Any]], *,
     out = []
     for cat, recs in by_cat.items():
         # category observation vectors
-        grades = [(rec, (rec.get("inferred_grade") or {}).get("numeric")
-                    if rec.get("inferred_grade") else seller_grade_numeric(rec.get("seller_tier")))
-                  for rec in recs]
-        gvals = [(rec, g) for rec, g in grades if g is not None]
+        grades = [_effective_grade(rec) for rec in recs]
+        gvals = [g for g, _ in grades if g is not None]
         ratings = [(rec, rec.get("combined_rating")) for rec in recs]
         rvals = [(rec, v) for rec, v in ratings if v is not None]
         prices_by_basis: Dict[str, List[float]] = {}
@@ -358,17 +365,10 @@ def build_factors(records: List[Dict[str, Any]], *,
         thc_peers = [thc for thc, _ in reference_values if thc is not None]
         orientation_peers = [si for _, si in reference_values if si is not None]
 
-        for rec in recs:
+        for rec, (my_g, conf) in zip(recs, grades):
             f = Factors()
-            conf = (rec.get("inferred_grade") or {}).get("confidence", 1.0) \
-                if rec.get("inferred_grade") else 1.0
-            if gvals:
-                my_g = (rec.get("inferred_grade") or {}).get("numeric") \
-                    if rec.get("inferred_grade") else seller_grade_numeric(rec.get("seller_tier"))
-                if my_g is not None:
-                    idx = [g for _, g in gvals].index(my_g)
-                    f.grade = (_midrank_factor([g for _, g in gvals], idx, conf),
-                               conf)
+            if my_g is not None:
+                f.grade = (_midrank_factor(gvals, gvals.index(my_g), conf), conf)
             if rvals and rec.get("combined_rating") is not None:
                 idx = [v for _, v in rvals].index(rec["combined_rating"])
                 f.rating = _midrank_factor([v for _, v in rvals], idx, 0.8)

@@ -222,6 +222,65 @@ def test_rarity_grade_only_for_ungraded_flower():
     assert "inferred_grade" not in recs[2]  # not a flower
 
 
+def test_reported_grade_overrides_stale_inference_on_repeated_build():
+    shared = dict(combined_rating=4.0, unit_price=10.0, unit_basis="per g",
+                  leafly_thc=25, sativa_pct=75, leafly_rating_count=10,
+                  seller_popularity_rank=1)
+    record = rec("Synthetic updated", **shared)
+    peer = rec("Synthetic peer", seller_tier="AA", **shared)
+    unrelated = [rec("Synthetic vape", "Vapes", combined_rating=4.5),
+                 rec("Synthetic vape peer", "Vapes", combined_rating=3.5)]
+    records = [record, peer, *unrelated]
+    fresh_records = copy.deepcopy(records)
+    fresh_records[0]["seller_tier"] = "AAA"
+    policy = {record["product_name"]: {
+        "tier": "A", "confidence": 0.8, "basis": "synthetic rarity estimate",
+        "provenance": {"source": "synthetic-policy", "revision": "test-v1"},
+    }}
+
+    first = build_factors(records, rarity_policy=policy)
+    audit = copy.deepcopy(record["inferred_grade"])
+    assert audit == {**policy[record["product_name"]], "numeric": 1.0}
+    assert first[0][1].grade == pytest.approx((1 - 0.8 * 0.5 / 7, 0.8))
+    assert first[0][2]["score"] < first[1][2]["score"]
+
+    record["seller_tier"] = "AAA"
+    rebuilt = build_factors(records, rarity_policy=policy)
+    fresh = build_factors(fresh_records, rarity_policy=policy)
+    assert rebuilt[0][0] is record
+    assert record["inferred_grade"] == audit  # audit survives seller precedence
+    assert record["seller_tier"] == "AAA"
+    assert "inferred_grade" not in fresh_records[0]
+    assert rebuilt[0][1].grade == pytest.approx((1 + 0.5 / 7, 1.0))
+    assert rebuilt[1][1].grade == pytest.approx((1 - 0.5 / 7, 1.0))
+    assert rebuilt[0][2]["score"] > rebuilt[1][2]["score"]
+    assert [(f, score) for _, f, score in rebuilt] == [(f, score) for _, f, score in fresh]
+    assert [r["product_name"] for r, _, _ in sort_records(rebuilt)] == [
+        r["product_name"] for r, _, _ in sort_records(fresh)]
+    for (_, before, _), (_, after, _) in zip(first, rebuilt):
+        assert (before.rating, before.price, before.thc, before.si,
+                before.popularity, before.detail) == (
+                    after.rating, after.price, after.thc, after.si,
+                    after.popularity, after.detail)
+    assert rebuilt[2:] == first[2:]  # other-category scores are unchanged
+
+
+@pytest.mark.parametrize("seller_tier", [None, "", "unknown"])
+def test_inferred_grade_fallback_survives_repeated_build_without_valid_seller_grade(seller_tier):
+    record = rec("Synthetic inferred", seller_tier=seller_tier)
+    peer = rec("Synthetic peer", seller_tier="AA")
+    policy = {record["product_name"]: {
+        "tier": "A", "confidence": 0.8, "provenance": "synthetic-policy",
+    }}
+    first = build_factors([record, peer], rarity_policy=policy)
+    before = copy.deepcopy(record)
+    rebuilt = build_factors([record, peer])
+    assert record == before
+    assert rebuilt == first
+    assert rebuilt[0][1].grade == pytest.approx((1 - 0.8 * 0.5 / 7, 0.8))
+    assert rebuilt[0][2]["score"] < rebuilt[1][2]["score"]
+
+
 @pytest.mark.parametrize("entry", [
     {"tier": "AA", "confidence": 0.5},
     {"tier": "unknown", "confidence": 0.5, "provenance": "synthetic"},
