@@ -42,6 +42,10 @@ bcrypt
 mcp>=1.29.0,<2.0.0  # mcp 2.0.0 removed the low-level Server.list_tools() decorator API used by mcp_servers/*_server.py; pin until those are migrated
 pyotp
 qrcode[pil]
+# Transitive via qrcode[pil]; pip-audit flags a large CVE batch on 12.3.0,
+# all fixed in 13.0.0. Only consumer is upload_handler.py dimension probing
+# (Image.open/exif_transpose/width/height, exception-guarded).
+pillow>=13.0.0
 croniter
 pytest
 pytest-asyncio
