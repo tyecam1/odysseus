@@ -1,10 +1,10 @@
 """Deterministic Green Team x Leafly product-comparison scoring engine.
 
-Implements the canonical operator contract:
+Scoring implementation referring to the private preference contract:
 `tyecam1/misumi:docs/preferences/green-team-leafly-product-comparison-v1.md`
 (canonical blob 3ac07e494e5575d8a61c730956f04627169533a3, version 1).
 
-Order of operations is exactly the canon's:
+Order of operations:
 grade estimation -> category factors -> source blending -> weighted GM ->
 evidence shrink -> spread -> missing penalty -> availability-first sort.
 
@@ -16,7 +16,13 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
+
+CANON_REF = {
+    "repository": "tyecam1/misumi",
+    "path": "docs/preferences/green-team-leafly-product-comparison-v1.md",
+    "revision": "3ac07e494e5575d8a61c730956f04627169533a3",
+}
 
 # --- canon constants (mirrored for validation only; Misumi doc is canon) ----
 W_GRADE = 1.0
@@ -31,19 +37,6 @@ FACTOR_BAND = (0.5, 1.5)
 
 GRADE_NUMERIC = {"A": 1.0, "AA": 2.0, "AA+": 2.5, "AAA": 3.0}
 
-# Rarity-based estimates for otherwise-ungraded flower (canon section 4).
-RARITY_GRADES = {
-    "Stardawg": ("A", 1.0, 0.90),
-    "Amnesia Haze": ("A", 1.0, 0.90),
-    "Sundae Driver": ("AA", 2.0, 0.70),
-    "Cookie Dawg": ("AA", 2.0, 0.75),
-    "Mango Mirage": ("AA", 2.0, 0.30),
-    "Gelato X Ice Cream Cake": ("AA+", 2.5, 0.45),
-    "Vitamin Z": ("AA+", 2.5, 0.70),
-    "Dante's Inferno": ("AA+", 2.5, 0.70),
-    "Purple Octane": ("AA+", 2.5, 0.65),
-}
-
 # Metrics applicable per category; anything else is inapplicable (never a
 # missing-data penalty). THC/Sativa-Indica apply to cannabis flower only in
 # this model, because the sources only publish those there.
@@ -57,6 +50,31 @@ APPLICABLE = {
     "Mixed/miscellaneous": {"rating", "price", "popularity"},
 }
 
+SCORING_METHODOLOGY = {
+    "weights": {"grade": W_GRADE, "rating": W_RATING, "price": W_PRICE,
+                "thc": W_THC, "si": W_SI, "popularity": W_POPULARITY},
+    "applicable": {category: sorted(metrics) for category, metrics in APPLICABLE.items()},
+    "normalization": "1 + confidence*(worse_count + 0.5*equal_count - 0.5*N)/(N+5); equal_count includes self",
+    "factor_band": FACTOR_BAND,
+    "singletons_and_equal_peers": "neutral multiplier 1",
+    "price_peers": "same category and explicit unit basis; lower is preferred",
+    "flower_reference_factors": {
+        "thc": "higher supplied Leafly cultivar-reference THC percentage; never a batch measurement",
+        "si": "higher stated sativa share; if only indica is supplied, compare 100-indica without filling missing source fields",
+        "validation": "finite numeric percentage points [0,100]; paired orientation percentages must sum to 100",
+        "normalization_strength": "1; a ranking parameter, not a claim of source certainty",
+        "peers": "available valid flower reference values only; absent values are never estimated",
+    },
+    "grade_policy": "optional private caller injection; no personal product table bundled",
+    "GM": "exp(sum(weight*log(factor))/sum(weight)) over present applicable factors",
+    "B": "clip(0.5+(GM-1)*sum(weight)/(sum(weight)+2),0,1)",
+    "C": "B^gamma/(B^gamma+(1-B)^gamma)",
+    "gamma": GAMMA,
+    "score": "clip(C*0.8^max(0,missing_applicable_count-1),0,1)",
+    "missing": "unavailable applicable metrics count as missing; inapplicable metrics do not",
+    "sort": "purchasable first; then category, score descending, unit price ascending",
+}
+
 _SIZE_GRAMS = [
     (re.compile(r"(\d+(?:\.\d+)?)\s*kg\b", re.I), 1000.0),
     (re.compile(r"(\d+(?:\.\d+)?)\s*mg\b", re.I), 0.001),
@@ -66,11 +84,16 @@ _SIZE_GRAMS = [
 
 def parse_quantity_grams(size_text: str) -> Optional[float]:
     """Grams implied by a size label, or None (packs/unknown are not grams)."""
-    low = (size_text or "").lower().replace(",", ".")
+    if not isinstance(size_text, str):
+        return None
+    low = size_text.lower().replace(",", ".")
     for rx, mult in _SIZE_GRAMS:
         m = rx.search(low)
         if m:
-            return float(m.group(1)) * mult
+            if m.start() and low[m.start() - 1] in "-+.0123456789":
+                return None
+            grams = float(m.group(1)) * mult
+            return grams if math.isfinite(grams) and grams > 0 else None
     return None
 
 
@@ -106,10 +129,10 @@ def _midrank_factor(values: List[float], index: int, confidence: float,
     v = values[index]
     if smaller_is_better:
         better = sum(1 for x in values if x > v)
-        equal = sum(1 for x in values if x == v) - 1
+        equal = sum(1 for x in values if x == v)
     else:
         better = sum(1 for x in values if x < v)
-        equal = sum(1 for x in values if x == v) - 1
+        equal = sum(1 for x in values if x == v)
     f = 1.0 + confidence * (better + 0.5 * equal - 0.5 * n) / (n + SHRINK_PRIOR)
     return max(FACTOR_BAND[0], min(FACTOR_BAND[1], f))
 
@@ -155,20 +178,58 @@ def unit_price(options: List[Dict[str, Any]]) -> Tuple[Optional[float], Optional
     best: Optional[float] = None
     basis: Optional[str] = None
     excluded: List[str] = []
-    for o in options or []:
+    valid = []
+    for index, o in enumerate(options or []):
+        if not isinstance(o, dict):
+            excluded.append(f"option {index}: malformed option")
+            continue
         price = o.get("price")
         size = o.get("size") or ""
-        if not price or price <= 0:
-            excluded.append(f"{size}: zero/placeholder price")
+        if not _finite_number(price) or price <= 0:
+            excluded.append(f"{size}: invalid, nonfinite or zero/placeholder price")
             continue
         grams = parse_quantity_grams(size)
         if grams:
             eff = price / grams
+            if not math.isfinite(eff):
+                excluded.append(f"{size}: nonfinite unit price")
+                continue
+            valid.append({"source_option_index": index, "quantity_grams": grams,
+                          "unit_price": eff, "unit_basis": "per g"})
             if best is None or eff < best:
                 best, basis = eff, "per g"
         else:
             excluded.append(f"{size}: no parseable quantity")
-    return best, basis, {"excluded_options": excluded}
+    return best, basis, {"excluded_options": excluded,
+                         "source_options": options, "valid_options": valid}
+
+
+def _finite_number(value: Any) -> bool:
+    return (isinstance(value, (int, float)) and not isinstance(value, bool)
+            and math.isfinite(value))
+
+
+def _flower_reference_values(record: Dict[str, Any]) -> Tuple[Optional[float], Optional[float]]:
+    """Validate supplied reference percentages, without modifying source fields.
+
+    Orientation is compared on the sativa axis. The complement of a supplied
+    indica percentage is a comparison coordinate, never a new source datum.
+    """
+    def percentage(value):
+        return value if _finite_number(value) and 0 <= value <= 100 else None
+
+    thc = percentage(record.get("leafly_thc"))
+    sativa = percentage(record.get("sativa_pct"))
+    indica = percentage(record.get("indica_pct"))
+    if sativa is not None and indica is not None:
+        orientation = sativa if math.isclose(sativa + indica, 100, abs_tol=1e-6) else None
+    elif sativa is not None:
+        orientation = sativa
+    elif indica is not None:
+        orientation = 100 - indica
+    else:
+        orientation = None
+    return thc, orientation
 
 
 def combined_popularity(leafly_count: Optional[int],
@@ -187,7 +248,7 @@ def combined_popularity(leafly_count: Optional[int],
     if leafly_count and lc:
         lf = _midrank_factor([float(x) for x in lc], [float(x) for x in lc].index(float(leafly_count)), 0.7)
     rc = [r for r in (cat_seller_ranks or []) if r is not None]
-    if seller_rank is not None and rc and len(rc) > 1:
+    if seller_rank is not None and rc:
         sf = _midrank_factor([float(x) for x in rc], [float(x) for x in rc].index(float(seller_rank)),
                              0.9, smaller_is_better=True)
     detail["leafly_factor"] = lf
@@ -243,27 +304,36 @@ def composite_score(factors: Factors, category: str,
     }
 
 
-def apply_rarity_grade(records: List[Dict[str, Any]]) -> None:
-    """Canon section 4: rarity-based estimate for ungraded flower, in place.
-    Sets record['inferred_grade'] = {tier, numeric, confidence}; never touches
-    a seller-reported grade."""
+def apply_rarity_grade(records: List[Dict[str, Any]],
+                       rarity_policy: Optional[Mapping[str, Dict[str, Any]]] = None) -> None:
+    """Apply an explicitly injected policy to ungraded flower only.
+
+    No personal lookup is bundled. Entries contain tier, confidence and
+    provenance; the caller owns loading the private policy. Seller grades take
+    precedence. Inferred values retain their source and estimation basis.
+    """
     for rec in records:
         if rec.get("category") != "Cannabis flower":
             continue
         if seller_grade_numeric(rec.get("seller_tier")) is not None:
             continue
-        est = RARITY_GRADES.get(rec.get("product_name") or "")
-        if est:
-            tier, numeric, confidence = est
-            rec["inferred_grade"] = {"tier": tier, "numeric": numeric,
-                                     "confidence": confidence,
-                                     "basis": "rarity/market-saturation estimate (canon section 4)"}
+        est = (rarity_policy or {}).get(rec.get("product_name") or "")
+        if est is not None:
+            numeric = seller_grade_numeric(est.get("tier"))
+            confidence = est.get("confidence")
+            if (numeric is None or not _finite_number(confidence)
+                    or not 0 <= confidence <= 1 or not est.get("provenance")):
+                raise ValueError("injected grade policy requires tier, confidence [0,1] and provenance")
+            rec["inferred_grade"] = {**est, "numeric": numeric,
+                                     "basis": est.get("basis", "injected rarity estimate")}
 
 
-def build_factors(records: List[Dict[str, Any]]) -> List[Tuple[Dict[str, Any], Factors, Dict[str, Any]]]:
+def build_factors(records: List[Dict[str, Any]], *,
+                  rarity_policy: Optional[Mapping[str, Dict[str, Any]]] = None
+                  ) -> List[Tuple[Dict[str, Any], Factors, Dict[str, Any]]]:
     """Category-relative factors for every record. Deterministic; ties handled
     with midranks; single-peer categories neutral."""
-    apply_rarity_grade(records)
+    apply_rarity_grade(records, rarity_policy)
     by_cat: Dict[str, List[Dict[str, Any]]] = {}
     for rec in records:
         by_cat.setdefault(rec["category"], []).append(rec)
@@ -277,10 +347,16 @@ def build_factors(records: List[Dict[str, Any]]) -> List[Tuple[Dict[str, Any], F
         gvals = [(rec, g) for rec, g in grades if g is not None]
         ratings = [(rec, rec.get("combined_rating")) for rec in recs]
         rvals = [(rec, v) for rec, v in ratings if v is not None]
-        prices = [(rec, rec.get("unit_price")) for rec in recs]
-        pvals = [(rec, v) for rec, v in prices if v is not None]
+        prices_by_basis: Dict[str, List[float]] = {}
+        for rec in recs:
+            price, basis = rec.get("unit_price"), rec.get("unit_basis")
+            if _finite_number(price) and price > 0 and isinstance(basis, str) and basis.strip():
+                prices_by_basis.setdefault(basis, []).append(price)
         leaf_counts = [rec.get("leafly_rating_count") for rec in recs]
         seller_ranks = [rec.get("seller_popularity_rank") for rec in recs]
+        reference_values = [_flower_reference_values(rec) for rec in recs] if cat == "Cannabis flower" else []
+        thc_peers = [thc for thc, _ in reference_values if thc is not None]
+        orientation_peers = [si for _, si in reference_values if si is not None]
 
         for rec in recs:
             f = Factors()
@@ -296,16 +372,38 @@ def build_factors(records: List[Dict[str, Any]]) -> List[Tuple[Dict[str, Any], F
             if rvals and rec.get("combined_rating") is not None:
                 idx = [v for _, v in rvals].index(rec["combined_rating"])
                 f.rating = _midrank_factor([v for _, v in rvals], idx, 0.8)
-            if pvals and rec.get("unit_price") is not None:
-                idx = [v for _, v in pvals].index(rec["unit_price"])
-                f.price = (_midrank_factor([v for _, v in pvals], idx, 0.9,
-                                           smaller_is_better=True),
-                           rec.get("unit_basis") or "per g")
+            price, basis = rec.get("unit_price"), rec.get("unit_basis")
+            pvals = prices_by_basis.get(basis, []) if isinstance(basis, str) else []
+            if pvals and _finite_number(price) and price > 0:
+                f.price = (_midrank_factor(pvals, pvals.index(price), 0.9,
+                                           smaller_is_better=True), basis)
             pop, pdet = combined_popularity(
                 rec.get("leafly_rating_count"), rec.get("seller_popularity_rank"),
                 len(seller_ranks), cat, leaf_counts, seller_ranks)
             f.popularity = pop
-            f.detail = {"popularity": pdet}
+            f.detail = {"popularity": pdet,
+                        "price": {"raw_value": price, "unit_basis": basis,
+                                  "peer_values": pvals, "confidence": 0.9,
+                                  "excluded_reason": None if f.price else
+                                  "missing/invalid positive price or explicit unit basis"}}
+            if cat == "Cannabis flower":
+                thc, orientation = _flower_reference_values(rec)
+                for name, value, peers, raw in (
+                    ("thc", thc, thc_peers, {"leafly_thc": rec.get("leafly_thc")}),
+                    ("si", orientation, orientation_peers,
+                     {"sativa_pct": rec.get("sativa_pct"), "indica_pct": rec.get("indica_pct")}),
+                ):
+                    if value is not None:
+                        setattr(f, name, _midrank_factor(peers, peers.index(value), 1.0))
+                    f.detail[name] = {
+                        "raw_values": raw, "comparison_value": value, "peer_values": peers,
+                        "normalization_strength": 1.0,
+                        "evidence_class": "cultivar_reference" if name == "thc" else "source_orientation",
+                        "source": rec.get("primary_leafly_source"),
+                        "basis": SCORING_METHODOLOGY["flower_reference_factors"][name],
+                        "excluded_reason": None if value is not None else
+                        "missing/invalid reference percentage or inconsistent orientation pair",
+                    }
             score = composite_score(f, cat)
             out.append((rec, f, score))
     return out
