@@ -441,7 +441,9 @@ def test_workbook_valid_argb_formats_widths_and_score_only_gradient():
                 assert 0 <= float(_cell_value(cell)) <= 1
             elif fill is not None:
                 assert fill.attrib["rgb"] in {"FFFFFFFF", "FFF2F2F2"}
-            if cell.attrib["r"].startswith(("G", "L")):
+            if cell.attrib["r"].startswith("G"):
+                assert custom_formats[int(style.attrib["numFmtId"])] == '"£"0.00\\ \\p\\e\\r\\ \\g'
+            if cell.attrib["r"].startswith("L"):
                 assert style.attrib["numFmtId"] == "164"
             if cell.attrib["r"].startswith(("H", "I", "J")):
                 assert style.attrib["numFmtId"] == "165"
@@ -457,6 +459,58 @@ def test_workbook_valid_argb_formats_widths_and_score_only_gradient():
         assert workbook["Overview"]["G2"].value == 5
         assert workbook["Overview"]["D12"].value == 1
         assert workbook["Overview"]["D12"].number_format == "0.00%"
+
+
+def test_workbook_unit_price_basis_is_visible_literal_and_totals_stay_currency():
+    bases = ["per g", "per item", "per g", None, "", "unknown",
+             'per "item";[Red]0\\<&>\t\n\r', 'per \x00;[Red]0']
+    records = [rec(f"Synthetic {i}", unit_price=5 + i / 10, unit_basis=basis,
+                   overview_options=[{"size": f"Option {k}", "price": 10 + k} for k in range(6)])
+               for i, basis in enumerate(bases)]
+    records.append(rec("No supplied basis", unit_price=8,
+                       overview_options=[{"size": "1g", "price": 8}]))
+    before = copy.deepcopy(records)
+    blob = build_workbook(build_factors(records), "2026-10-25")
+    xml = _workbook_xml(blob)  # Parse every XML/style/relationship part.
+    styles = xml["xl/styles.xml"]
+    formats = styles.find(XML_NS + "numFmts")
+    custom_formats = {int(node.attrib["numFmtId"]): node.attrib["formatCode"] for node in formats}
+    assert int(formats.attrib["count"]) == len(formats) == len(custom_formats)
+    assert custom_formats[164] == '"£"0.00'
+    xfs = styles.find(XML_NS + "cellXfs")
+    assert int(xfs.attrib["count"]) == len(xfs)
+    overview = xml["xl/worksheets/sheet1.xml"]
+    assert overview.find(XML_NS + "dimension").attrib["ref"] == f"A1:W{len(records) + 1}"
+    rows = overview.find(XML_NS + "sheetData")
+    assert [_cell_value(cell) for cell in rows[0]] == OVERVIEW_COLUMNS
+    details = xml["xl/worksheets/sheet2.xml"].find(XML_NS + "sheetData")
+    for row, detail_row, record in zip(rows[1:], details[1:], records):
+        assert len(row) == 23
+        price_cell = row[6]
+        assert price_cell.get("t", "n") == "n"
+        assert float(_cell_value(price_cell)) == record["unit_price"]
+        style = xfs[int(price_cell.attrib["s"])]
+        assert style.attrib["fillId"] == "0"
+        code = custom_formats[int(style.attrib["numFmtId"])]
+        assert code.startswith('"£"0.00')
+        suffix = code[len('"£"0.00'):]
+        # Interpret Excel's literal escapes: no basis character may act as
+        # a number placeholder, section separator, colour or other directive.
+        assert re.fullmatch(r"(?:\\[\s\S])*", suffix)
+        visible_basis = "".join(re.findall(r"\\([\s\S])", suffix))
+        basis = record.get("unit_basis")
+        assert visible_basis == (" " + basis.replace("\x00", "") if basis else "")
+        for index, cell in enumerate(row[11:22:2]):
+            assert cell.get("t", "n") == "n"
+            if index < len(record["overview_options"]):
+                assert float(_cell_value(cell)) == record["overview_options"][index]["price"]
+                assert xfs[int(cell.attrib["s"])].attrib["numFmtId"] == "164"
+            else:
+                assert _cell_value(cell) == ""
+                assert xfs[int(cell.attrib["s"])].attrib["numFmtId"] == "0"
+        assert xfs[int(detail_row[16].attrib["s"])].attrib["numFmtId"] == "164"
+    assert rows[1][6].attrib["s"] == rows[3][6].attrib["s"]  # Reuse identical basis styles.
+    assert records == before
 
 
 def test_workbook_raw_record_round_trip_arbitrary_fields_variants_and_dictionary():

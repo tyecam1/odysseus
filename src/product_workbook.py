@@ -111,10 +111,22 @@ def build_workbook(scored_sorted, snapshot_date: str) -> bytes:
     S_MONEY = xf(numfmt=164)
     S_PERCENT = xf(numfmt=10)  # numeric fraction, shown as 0.00%
     S_SOURCE_PERCENT = xf(numfmt=165)  # source percentage points (e.g. 25)
-    numfmts_xml = ('<numFmts count="2">'
-                   '<numFmt numFmtId="164" formatCode="&quot;&#163;&quot;0.00"/>'
-                   '<numFmt numFmtId="165" formatCode="0.0&quot;%&quot;"/>'
-                   '</numFmts>')
+    numfmts = {164: '"£"0.00', 165: '0.0"%"'}
+    unit_money_styles = {}
+
+    def unit_money_style(basis):
+        if basis is None or basis == "":
+            return S_MONEY
+        # Strip XML-invalid characters before escaping Excel literals, so a
+        # removed control character cannot leave a dangling backslash.
+        basis = "".join(ch for ch in str(basis) if _esc(ch))
+        if basis not in unit_money_styles:
+            numfmt = 164 + len(numfmts)
+            # Excel's backslash quotes the next character literally, including
+            # quotes, backslashes and format operators such as ; and [Red].
+            numfmts[numfmt] = numfmts[164] + "".join("\\" + ch for ch in " " + basis)
+            unit_money_styles[basis] = xf(numfmt=numfmt)
+        return unit_money_styles[basis]
 
     # green gradient per score decile (light -> deep green), score column only
     GRAD = []
@@ -146,7 +158,7 @@ def build_workbook(scored_sorted, snapshot_date: str) -> bytes:
             rec.get("unit_price"), rec.get("leafly_thc"), rec.get("sativa_pct"), rec.get("indica_pct"),
         ]
         styles = [S_BAND[rec["category"]], S_BAND[rec["category"]], S_BAND[rec["category"]],
-                  score_style(score["score"]), S_TEXT, S_TEXT, S_MONEY,
+                  score_style(score["score"]), S_TEXT, S_TEXT, unit_money_style(rec.get("unit_basis")),
                   S_SOURCE_PERCENT, S_SOURCE_PERCENT, S_SOURCE_PERCENT]
         for k in range(6):
             if k < len(opts):
@@ -252,7 +264,11 @@ def build_workbook(scored_sorted, snapshot_date: str) -> bytes:
         z.writestr("xl/styles.xml",
                    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
                    '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
-                   + numfmts_xml +
+                   + f'<numFmts count="{len(numfmts)}">'
+                   + "".join(f'<numFmt numFmtId="{numfmt}" formatCode="'
+                             + _esc(code).replace("\t", "&#9;").replace("\n", "&#10;").replace("\r", "&#13;")
+                             + '"/>' for numfmt, code in numfmts.items())
+                   + '</numFmts>' +
                    '<fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts>'
                    f'<fills count="{len(fills)}">'
                    + "".join(
