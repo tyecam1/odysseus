@@ -94,3 +94,12 @@ Odysseus owns execution, MCP integration, tool routing, explicit external-send a
 ## Minimal operator kickoff to ingest the contract
 
 > Use `tyecam1/misumi@main:docs/preferences/green-team-leafly-product-comparison-v1.md` as the authority, and this task card as the bounded execution checklist. Confirm the live repository state before implementation, route through Aoteru preflight/lease, preserve Misumi domain authority and Odysseus execution ownership, validate workbook formulas and output, and gate Telegram MCP outbound messages on explicit operator approval. Do not claim capability without end-to-end evidence.
+
+## Implementation progress (2026-10-25, feat/green-team-research)
+
+- `src/product_research.py`: deterministic canon scoring (midrank category factors, single-peer neutral, combined rating with unrated!=0, verified `orderby=popularity` ordinal popularity, weights 5x1 + 0.25 popularity, GM -> B -> gamma-6 spread -> 0.8^max(0,m-1) penalty, rarity-grade table).
+- `src/product_workbook.py`: exact two-sheet Overview(23 col A:W)/Details writer, category banding + green gradient on score only.
+- `src/merchant_contact.py`: transport-agnostic governed merchant-contact adapter (draft/approve/send/read; exact-content approval, verified-recipient gate, duplicate-send block, merchant_claim inbound classification). Draft-only: no Telegram MCP transport is configured (operator blocker).
+- Tests: tests/test_product_research.py + tests/test_merchant_contact.py (27 passed).
+- Store popularity: verified orderby=popularity works; full 69-product ordinal captured 2026-10-25 (operator snapshot file).
+- Canon ingested as SourceEvent `misumi_preference_canon` (misumi@main 075b1547, blob 3ac07e49, validation all-pass).
