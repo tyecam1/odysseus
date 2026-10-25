@@ -36,6 +36,9 @@ from typing import Callable, Optional
 
 import yaml
 
+from src.subscription_model_policy import (
+    SubscriptionModelError, resolve_latest_codex_model, subscription_effort,
+)
 from src.runtime_paths import get_app_root
 from src.park_lease_ops import active_lease_for_repo
 from src import worktree_ops
@@ -818,7 +821,8 @@ def _update_decision_outcome(decision_id: str, *, status: str, deterministic_gat
                              executor: Optional[str] = None, escalated: Optional[bool] = None,
                              actual_route: Optional[str] = None,
                              verification_outcome: Optional[str] = None,
-                             executed_host_id: Optional[str] = None) -> None:
+                             executed_host_id: Optional[str] = None,
+                             concrete_model: Optional[str] = None) -> None:
     """Execution happens after `resolve_route()` already wrote its
     decision row — update that same row with the real outcome rather than
     writing a second telemetry row for one routed task (`RoutingDecision`
@@ -849,6 +853,8 @@ def _update_decision_outcome(decision_id: str, *, status: str, deterministic_gat
                     row.verification_outcome = verification_outcome
                 if executed_host_id is not None:
                     row.executed_host_id = executed_host_id
+                if concrete_model is not None:
+                    row.concrete_model = concrete_model
     except Exception:
         import logging
         logging.getLogger(__name__).exception("routing_decisions outcome update failed; execution result is unaffected")
@@ -1016,6 +1022,14 @@ def _execute_codex_with_sandbox(objective: str, *, sandbox: str, provider: str,
     if not available:
         return {"ok": False, "error": f"codex unavailable: {detail}", "provider": provider}
     codex_binary = detail  # _codex_available() returns the resolved binary path on success
+    # Resolve afresh from the authenticated Codex subscription catalogue.
+    # Omitting --model inherits potentially stale host configuration.
+    try:
+        subscription_model = resolve_latest_codex_model(codex_binary)
+        reasoning_effort = subscription_effort()
+    except SubscriptionModelError as exc:
+        return {"ok": False, "provider": provider, "model_policy": "fail_closed",
+                "error": str(exc)}
 
     started = time.monotonic()
     with tempfile.TemporaryDirectory(prefix="p12-codex-") as scratch:
@@ -1024,6 +1038,8 @@ def _execute_codex_with_sandbox(objective: str, *, sandbox: str, provider: str,
             proc = subprocess.Popen(
                 [
                     codex_binary, "exec",
+                    "--model", subscription_model,
+                    "-c", f"model_reasoning_effort={reasoning_effort}",
                     "--sandbox", sandbox,
                     "--ephemeral",
                     "--skip-git-repo-check",
@@ -1058,7 +1074,9 @@ def _execute_codex_with_sandbox(objective: str, *, sandbox: str, provider: str,
                 }
             output = Path(out_path).read_text().strip() if Path(out_path).exists() else ""
             return {"ok": True, "provider": provider, "output": output, "latency_ms": latency_ms,
-                    "codex_binary": codex_binary}
+                    "codex_binary": codex_binary, "concrete_model": subscription_model,
+                    "reasoning_effort": reasoning_effort,
+                    "model_catalogue": "authenticated-codex-debug-models"}
         except subprocess.TimeoutExpired:
             # Tree-aware cleanup: killpg alone is insufficient when a
             # descendant (observed live: the MCP server codex spawns)
@@ -1642,6 +1660,7 @@ def run_task(task: dict) -> dict:
                     actual_route=executor_name,
                     verification_outcome=gate,
                     executed_host_id=(result.get("placement") or {}).get("executed_host"),
+                    concrete_model=result.get("concrete_model"),
                 )
             # implementation_mode, terminal within execute_codex_write_durable's
             # wait_timeout: the decision outcome was already recorded by
@@ -1655,7 +1674,7 @@ def run_task(task: dict) -> dict:
                 **route, "ok": gate == "pass", "reason": reason,
                 "route": {
                     **route["route"], "executor": executor_name,
-                    "concrete_model": provider_choice["concrete_model_label"],
+                    "concrete_model": result.get("concrete_model") or provider_choice["concrete_model_label"],
                     "reason": reason,
                 },
             }

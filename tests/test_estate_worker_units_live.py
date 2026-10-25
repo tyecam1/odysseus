@@ -14,6 +14,7 @@ import pytest
 from src import estate_worker_procs
 from src.estate_router import current_host_id
 from src.estate_worker_protocol import build_request
+from tests.helpers.cgroup_marker import _wait_for_cgroup_marker
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -90,10 +91,9 @@ def test_u67_real_unit_setsid_grandchild_keeps_the_cgroup_populated(tmp_path):
     script.write_text(f"#!/bin/sh\ncat /proc/self/cgroup > {marker}\nsetsid sleep 30 </dev/null >/dev/null 2>&1 &\nsleep 3\n")
     script.chmod(0o755)
     estate_worker_procs.spawn_runner_unit([str(script)], str(tmp_path), str(tmp_path / "log"), unit)
-    deadline = time.monotonic() + 10
-    while not marker.exists() and time.monotonic() < deadline:
-        time.sleep(0.1)
-    cgroup = marker.read_text().strip().split("::", 1)[1]
+    # The shell creates the redirect target BEFORE `cat` writes to it, so waiting for existence alone can read an empty file
+    # (IndexError on the "::" split, seen on the lab under load). Wait for the content.
+    cgroup = _wait_for_cgroup_marker(marker)
     handle = {"cgroup": cgroup, "unit": f"{unit}.service"}
     assert estate_worker_procs.cgroup_is_dedicated(cgroup, f"{unit}.service")
     time.sleep(0.5)

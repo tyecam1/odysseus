@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 from core.middleware import require_admin
 from src.constants import DATA_DIR
 from src.misumi_household import (
+    strip_addressee,
     INVENTORY_INTENT, HouseholdReadOnlyAdapter, infer_household_domain, item_question, names_non_physical,
 )
 from src.misumi_memory import MisumiMemory
@@ -123,6 +124,11 @@ class MisumiRespondRequest(BaseModel):
     retention_mode: Literal["auto", "off"] = "auto"
     persist_turn: bool = True
     history_mode: Optional[Literal["auto", "off"]] = None
+
+
+class MisumiRouteExplainRequest(BaseModel):
+    prompt: str = Field(default="", max_length=4000)
+    persona: str = "auto"   # "auto" (the stateless base lead route) or a persona id the caller selected
 
 
 class MisumiTaskRequest(BaseModel):
@@ -417,10 +423,172 @@ def _fallback_retention(prompt: str, answer: str) -> Dict[str, Optional[Dict[str
     return {"memory": memory_plan, "artifact": None}
 
 
+_JSON_ESCAPES = {'"': '"', "\\": "\\", "/": "/", "b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t"}
+
+
+def _json_string_end(text: str, start: int) -> Tuple[int, bool]:
+    """Return the end of one JSON string without interpreting embedded text."""
+    i = start + 1
+    while i < len(text):
+        if text[i] == '"':
+            return i + 1, True
+        if text[i] == "\\":
+            if i + 1 >= len(text):
+                return len(text), False
+            if text[i + 1] == "u":
+                digits = text[i + 2:i + 6]
+                if len(digits) < 4 or any(ch not in "0123456789abcdefABCDEF" for ch in digits):
+                    return len(text), False
+                i += 6
+                continue
+            i += 2
+            continue
+        i += 1
+    return len(text), False
+
+
+def _skip_json_value(text: str, start: int) -> Tuple[int, bool]:
+    """Skip one complete root-member value, including nested containers."""
+    i = start
+    if text[i] == '"':
+        return _json_string_end(text, i)
+    if text[i] in "[{":
+        stack = ["]" if text[i] == "[" else "}"]
+        i += 1
+        while i < len(text):
+            if text[i] == '"':
+                i, closed = _json_string_end(text, i)
+                if not closed:
+                    return i, False
+                continue
+            if text[i] in "[{":
+                stack.append("]" if text[i] == "[" else "}")
+            elif text[i] in "]}":
+                if text[i] != stack[-1]:
+                    return i, False
+                stack.pop()
+                if not stack:
+                    return i + 1, True
+            i += 1
+        return i, False
+    while i < len(text) and text[i] not in ",}":
+        i += 1
+    return i, bool(text[start:i].strip())
+
+
+def _decode_json_string_prefix(text: str, start: int) -> Tuple[str, bool]:
+    """Decode a complete or truncated JSON string, stopping before a partial escape."""
+    out: List[str] = []
+    i = start + 1
+    while i < len(text):
+        ch = text[i]
+        if ch == '"':
+            return "".join(out), True
+        if ch != "\\":
+            out.append(ch)
+            i += 1
+            continue
+        if i + 1 >= len(text):
+            break
+        nxt = text[i + 1]
+        if nxt != "u":
+            out.append(_JSON_ESCAPES.get(nxt, nxt))
+            i += 2
+            continue
+        digits = text[i + 2:i + 6]
+        if len(digits) < 4 or any(c not in "0123456789abcdefABCDEF" for c in digits):
+            break
+        code = int(digits, 16)
+        if 0xD800 <= code <= 0xDBFF:
+            low_digits = text[i + 8:i + 12] if text[i + 6:i + 8] == "\\u" else ""
+            if len(low_digits) < 4 or any(c not in "0123456789abcdefABCDEF" for c in low_digits):
+                break
+            low = int(low_digits, 16)
+            if not 0xDC00 <= low <= 0xDFFF:
+                break
+            out.append(chr(0x10000 + ((code - 0xD800) << 10) + low - 0xDC00))
+            i += 12
+            continue
+        if 0xDC00 <= code <= 0xDFFF:
+            break
+        out.append(chr(code))
+        i += 6
+    return "".join(out), False
+
+
+def _finish_salvaged_answer(answer: str, closed: bool) -> str:
+    answer = answer.strip()
+    if not answer or closed:
+        return answer
+    cut = max(answer.rfind(mark) for mark in (". ", ".\n", "! ", "!\n", "? ", "?\n"))
+    if cut >= len(answer) * 0.5:
+        return answer[:cut + 1]
+    if answer[-1] not in ".!?":
+        return answer.rstrip(" ,;:-") + "..."
+    return answer
+
+
+def _salvage_answer(raw: Optional[str]) -> Optional[str]:
+    """Recover the "answer" string from a JSON-shaped reply that did not parse (typically cut off at the output limit).
+
+    The interface shows (and speaks) the answer, so a reply like `{ "answer": "Menu: ... or The` must never reach the user as raw JSON.
+    Returns the decoded answer, ended at the last complete sentence when the reply was cut off, or None when the text is not an
+    answer-bearing JSON object. Other keys (memory, artifact) are never returned.
+    """
+    text = (raw or "").strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[1] if "\n" in text else ""
+    text = text.strip()
+    if not text.startswith("{"):
+        return None
+    i = 1
+    while i < len(text):
+        while i < len(text) and text[i].isspace():
+            i += 1
+        if i >= len(text) or text[i] == "}":
+            return None
+        if text[i] != '"':
+            return None
+        key_start = i
+        i, key_closed = _json_string_end(text, i)
+        if not key_closed:
+            return None
+        try:
+            key = json.loads(text[key_start:i])
+        except (json.JSONDecodeError, TypeError):
+            return None
+        while i < len(text) and text[i].isspace():
+            i += 1
+        if i >= len(text) or text[i] != ":":
+            return None
+        i += 1
+        while i < len(text) and text[i].isspace():
+            i += 1
+        if key == "answer":
+            if i >= len(text) or text[i] != '"':
+                return ""
+            answer, closed = _decode_json_string_prefix(text, i)
+            return _finish_salvaged_answer(answer, closed)
+        if i >= len(text):
+            return None
+        i, value_complete = _skip_json_value(text, i)
+        if not value_complete:
+            return None
+        while i < len(text) and text[i].isspace():
+            i += 1
+        if i >= len(text) or text[i] == "}":
+            return None
+        if text[i] != ",":
+            return None
+        i += 1
+    return None
+
+
 def _parse_model_turn(raw: str, prompt: str) -> Dict[str, Any]:
     parsed = _json_object(raw)
     if not parsed or not isinstance(parsed.get("answer"), str):
-        answer = _short_text(raw, 4000)
+        salvaged = _salvage_answer(raw)
+        answer = _short_text(salvaged if salvaged is not None else raw, 4000)
         return {"answer": answer, **_fallback_retention(prompt, answer), "retention_decided": True}
     answer = _short_text(parsed.get("answer"), 4000)
     memory_plan = parsed.get("memory") if isinstance(parsed.get("memory"), dict) else None
@@ -1409,6 +1577,57 @@ def setup_misumi_routes(
         })
         return {"rolled_back": True, "rollback": rollback}
 
+    @router.post("/route-explain")
+    def route_explain(request: Request, body: MisumiRouteExplainRequest):
+        """Inspect the stateless base-persona and pre-reply team plan.
+
+        This reads persona routing/policy configuration but passes no persisted lead or learned routing to the base route, passes
+        no primary reply to team planning, and does not perform /respond's household resolution, tool dispatch or post-reply
+        consultation. The household domain is only a lexical label. This request calls no model, reads no household records and
+        writes no state; those no-effect fields do not predict what a later /respond request will execute.
+        """
+        _require_api_scope(request, "misumi:read")
+        prompt = (body.prompt or "").strip()
+        if not prompt:
+            raise HTTPException(422, "prompt is required")
+        auto = str(body.persona or "auto").strip().lower() == "auto"
+        if auto:
+            lead, routing = resolve_auto_lead(prompt, prior_lead=None)
+            routing = routing or {}
+        else:
+            lead = normalize_persona(body.persona)
+            requested_persona = str(body.persona or "").strip().lower()
+            if requested_persona != lead:
+                raise HTTPException(422, "persona must be 'auto' or a supported persona id")
+            routing = {"method": "caller-selected", "reasons": ["the persona was chosen by the caller"]}
+        team = _team_plan(prompt, lead)
+        return {
+            "executes_model": False,
+            "writes_state": False,
+            "preview": {
+                "scope": "base-persona-and-team",
+                "omits": [
+                    "persisted_lead",
+                    "learned_routing",
+                    "household_resolution",
+                    "tool_dispatch",
+                    "post_reply_consultation",
+                ],
+            },
+            "lead": {
+                "persona": lead,
+                "source": "auto" if auto else "caller",
+                "method": str(routing.get("method") or ""),
+                "reasons": [str(item) for item in (routing.get("reasons") or [])],
+            },
+            "team": {key: team.get(key) for key in ("decision", "supports", "excluded", "reasons")},
+            "household_domain": infer_household_domain(prompt),
+            "safety": {
+                "reserved_turn": bool(is_reserved_turn(prompt)),
+                "learned_routing_withheld": bool(withhold_learned_route(prompt)),
+            },
+        }
+
     @router.get("/persona-state")
     def persona_state_inspect(request: Request):
         """Inspect persona-state candidates and effective revisions (read-only)."""
@@ -1665,41 +1884,43 @@ def setup_misumi_routes(
             not_saved = {"example": "", "message": (
                 f"I can't keep that as a lasting routing preference: questions about {cue} are treated as possibly urgent, so "
                 "the main assistant always keeps them.")}
-        domain = infer_household_domain(prompt)
+        # Strip only the bounded address forms; preserve names used as household content and the original prompt for other paths.
+        hh_prompt = strip_addressee(prompt)
+        domain = infer_household_domain(hh_prompt)
         # A question about one item is resolved against the allowlisted household record index. The household answers on its
         # own ONLY for an exact record; any other item question goes to the model (with the candidate records as quoted data
         # when there are any), and is never answered "no" without it.
         item_evidence: Optional[Dict[str, Any]] = None
         item_pending = False  # an item question the household cannot answer exactly: the model answers it
         item_unconfirmed = False  # an explicitly scoped item question answered "not confirmed" because no model replied
-        shaped = item_question(prompt)
+        shaped = item_question(hh_prompt)
         resolution = None
         household_failed = False
         names_item = False
         try:
-            names_item = adapter.reachable and adapter.mentions_recorded_item(prompt)
+            names_item = adapter.reachable and adapter.mentions_recorded_item(hh_prompt)
         except Exception as exc:
             logger.warning("Misumi household index unavailable: %s", exc, exc_info=True)
             household_failed = True
         # "do we have time", "are we low on money": abstract, unless the text also names a recorded item ("still in date")
         non_physical = bool(shaped and names_non_physical(str(shaped["mention"])) and not names_item)
-        inventory_intent = (shaped is not None or bool(INVENTORY_INTENT.search(prompt))) and not non_physical
+        inventory_intent = (shaped is not None or bool(INVENTORY_INTENT.search(hh_prompt))) and not non_physical
         try:
-            resolution = adapter.resolve_question(prompt, domain) if adapter.reachable and not non_physical else None
+            resolution = adapter.resolve_question(hh_prompt, domain) if adapter.reachable and not non_physical else None
             if resolution is not None and resolution["deterministic"]:
                 domain = str(resolution["domain"])
                 found = adapter.resolution_hits(resolution)
             elif resolution is not None:
                 # an item question with no exact record, in ANY domain: a recorded line that says it is still quoted for the
                 # other household domains (records, cleaning ...); otherwise the model answers, never a flat "no matching"
-                found = adapter.search(prompt, domain=domain, limit=30) if domain not in (None, "food", "shopping") else []
+                found = adapter.search(hh_prompt, domain=domain, limit=30) if domain not in (None, "food", "shopping") else []
                 # a lexical relation never establishes an item's identity or state: without an exact record the model
                 # answers under the stock guard, and any lexical hits reach it only as untrusted context
                 item_pending = True
                 if resolution["evidence"] and not found:
                     item_evidence = resolution
             else:
-                found = adapter.search(prompt, domain=domain, limit=30) if adapter.reachable else []
+                found = adapter.search(hh_prompt, domain=domain, limit=30) if adapter.reachable else []
                 if not found and domain is not None and adapter.reachable and not non_physical and (
                         shaped is not None or names_item or inventory_intent):
                     item_pending = True
