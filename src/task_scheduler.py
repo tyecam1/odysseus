@@ -699,6 +699,19 @@ class TaskScheduler:
                 except (TypeError, ValueError):
                     delay = registration.get("pending_poll_interval_seconds", 15 * 60)
                 self._instagram_export_next_monotonic = time.monotonic() + delay
+            elif state_name == "complete":
+                # Honour the persisted weekly deadline across restarts: a
+                # completed cycle must re-arm at its recorded
+                # next_scheduled_at, not a fresh full interval from now.
+                try:
+                    due = datetime.fromisoformat(
+                        str(state.get("next_scheduled_at")).replace("Z", "+00:00")
+                    )
+                    self._instagram_export_next_monotonic = time.monotonic() + max(
+                        0.0, (due - datetime.now(timezone.utc)).total_seconds()
+                    )
+                except (TypeError, ValueError):
+                    pass
             elif state_name in {
                 "awaiting_email", "downloading", "validating", "needs_operator_auth"
             }:
