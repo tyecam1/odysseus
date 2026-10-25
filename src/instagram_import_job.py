@@ -67,6 +67,14 @@ def _private_parent(path: Path) -> None:
         pass
 
 
+def _fchmod_owner_only(fd: int) -> None:
+    """Harden an already-open fd to owner-only where the platform supports it."""
+    if hasattr(os, "fchmod"):
+        os.fchmod(fd, stat.S_IRUSR | stat.S_IWUSR)
+    # Windows has no os.fchmod; the fd is created with a restrictive mode
+    # argument and the data directory's ownership ACLs already limit access
+    # to the service user, so there is nothing further to tighten here.
+
 def append_import_run(
     accounting: dict[str, Any], run_log_path: str | os.PathLike[str] = DEFAULT_RUN_LOG
 ) -> str:
@@ -79,7 +87,7 @@ def append_import_run(
     flags |= getattr(os, "O_NOFOLLOW", 0)
     fd = os.open(path, flags, stat.S_IRUSR | stat.S_IWUSR)
     try:
-        os.fchmod(fd, stat.S_IRUSR | stat.S_IWUSR)
+        _fchmod_owner_only(fd)
         with os.fdopen(fd, "a", encoding="utf-8", closefd=False) as handle:
             handle.write(line + "\n")
             handle.flush()
