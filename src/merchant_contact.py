@@ -1,11 +1,10 @@
-"""Governed merchant-contact drafting/approval over a Telegram MCP transport.
+"""Merchant enquiry drafts and inspection of untrusted inbound messages.
 
-Domain-neutral adapter per the Odysseus task card: draft -> review ->
-EXPLICIT per-recipient/per-content approval -> send -> read replies.
-Non-transactional customer-service/product-information use only. Draft-only
-when no transport is configured; never sends without a matching approval
-record (exact recipient + exact content hash). No credentials live here: the
-transport is injected and resolves secrets from the operator's environment.
+Outbound capability is DISABLED for every transport. This module has no
+integration with the existing governed approval/tool boundary, and caller
+strings (including a ``verified:`` prefix) establish no authority or chat
+identity. It must not mint approvals or attempt delivery. A future integration
+must use the existing authority, not add an approval registry here.
 """
 
 from __future__ import annotations
@@ -31,25 +30,8 @@ class TransportNotConfigured(RuntimeError):
     """No Telegram transport is connected. Draft-only mode."""
 
 
-class ApprovalRequired(RuntimeError):
-    """Send attempted without an exact matching operator approval."""
-
-
-class DuplicateSend(RuntimeError):
-    """The exact approved message was already sent (idempotency guard)."""
-
-
-class UnverifiedDestination(RuntimeError):
-    """Recipient has not been established as a verified merchant chat."""
-
-
-@dataclass
-class Approval:
-    approval_id: str
-    recipient: str
-    content_sha256: str
-    created_at: str
-    used: bool = False
+class OutboundDisabled(RuntimeError):
+    """No governed outbound integration exists; no transport may send."""
 
 
 @dataclass
@@ -74,16 +56,16 @@ def sanitise_untrusted_inbound(raw: str) -> str:
 
 
 class MerchantContactService:
-    """Transport-agnostic service. `transport` must expose
-    send_message(recipient, content) -> message_id and
-    read_replies(recipient, since_message_id) -> list[dict];
-    raise TransportNotConfigured when unconnected."""
+    """Drafts need no transport. An optional injected inbound adapter exposes
+    read_replies(recipient, since_message_id) -> list[dict]. No connection is
+    established here and its outbound methods are never called."""
+
+    outbound_enabled = False
+    outbound_blocker = "DISABLED: existing governed approval/tool integration is absent"
 
     def __init__(self, transport=None, audit_path: Optional[Path] = None):
         self.transport = transport
         self.audit_path = Path(audit_path) if audit_path else None
-        self.approvals: Dict[str, Approval] = {}
-        self.sent_keys: set = set()
         self.drafts: Dict[str, Draft] = {}
         self._seq = 0
 
@@ -102,10 +84,6 @@ class MerchantContactService:
 
     # -- draft ------------------------------------------------------------
     def prepare_draft(self, recipient: str, content: str) -> Draft:
-        if self.transport is None:
-            raise TransportNotConfigured(
-                "no Telegram transport connected: draft-only mode requires "
-                "an operator-configured transport with an established chat")
         content = content.strip()
         if not content:
             raise ValueError("empty draft")
@@ -125,52 +103,18 @@ class MerchantContactService:
                      "recipient": recipient, "content_sha256": draft.content_sha256})
         return draft
 
-    # -- approve ----------------------------------------------------------
-    def approve(self, draft_id: str, approver: str) -> Approval:
-        d = self.drafts.get(draft_id)
-        if d is None:
-            raise KeyError(draft_id)
-        self._seq += 1
-        approval = Approval(approval_id=f"appr-{self._seq}",
-                            recipient=d.recipient,
-                            content_sha256=d.content_sha256,
-                            created_at=datetime.now(timezone.utc).isoformat())
-        self.approvals[approval.approval_id] = approval
-        self._audit({"event": "approved", "approval_id": approval.approval_id,
-                     "draft_id": draft_id, "recipient": d.recipient,
-                     "content_sha256": d.content_sha256, "approver": approver})
-        return approval
+    def review(self, draft_id: str) -> Draft:
+        """Inspect a prepared draft, without granting send authority."""
+        return self.drafts[draft_id]
+
+    def approve(self, draft_id: str, approver: str) -> None:
+        """Compatibility entry point: standalone callers cannot mint authority."""
+        raise OutboundDisabled(self.outbound_blocker)
 
     # -- send -------------------------------------------------------------
     def send_approved(self, approval_id: str, recipient: str, content: str) -> Dict[str, Any]:
-        if self.transport is None:
-            raise TransportNotConfigured("no transport connected; cannot send")
-        approval = self.approvals.get(approval_id)
-        if approval is None:
-            raise ApprovalRequired(
-                "send requires an operator approval matching the exact "
-                "recipient and exact content")
-        key = (recipient, approval.content_sha256)
-        if key in self.sent_keys or (approval.used and key in self.sent_keys):
-            raise DuplicateSend("this exact approved message was already sent")
-        if approval.used:
-            raise ApprovalRequired("approval already used")
-        if approval.recipient != recipient or approval.content_sha256 != content_hash(content):
-            raise ApprovalRequired(
-                "approval does not match this recipient/content: edit content "
-                "or recipient and re-approve")
-        if not recipient.startswith("verified:"):
-            raise UnverifiedDestination(
-                "recipient is not a verified established merchant chat "
-                "(bot API cannot initiate arbitrary DMs)")
-        message_id = self.transport.send_message(recipient, content)
-        approval.used = True
-        self.sent_keys.add(key)
-        self._audit({"event": "sent", "approval_id": approval_id,
-                     "recipient": recipient, "content_sha256": approval.content_sha256,
-                     "message_id": message_id})
-        return {"message_id": message_id, "recipient": recipient,
-                "content_sha256": approval.content_sha256}
+        """Fail closed regardless of transport, caller strings, retry or restart."""
+        raise OutboundDisabled(self.outbound_blocker)
 
     # -- read -------------------------------------------------------------
     def read_replies(self, recipient: str, since_message_id: Optional[str] = None

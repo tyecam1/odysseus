@@ -1,12 +1,13 @@
-"""Tests for the governed merchant-contact adapter (draft/approve/send/read)."""
+"""Draft inspection and fail-closed outbound boundary; no live messaging."""
+from concurrent.futures import ThreadPoolExecutor
 import json
+from threading import Barrier
 
 import pytest
 
 from src.merchant_contact import (
-    ApprovalRequired, DuplicateSend, MerchantContactService,
-    TransportNotConfigured, UnverifiedDestination, content_hash,
-    sanitise_untrusted_inbound,
+    MerchantContactService, OutboundDisabled, TransportNotConfigured,
+    content_hash, sanitise_untrusted_inbound,
 )
 
 
@@ -17,97 +18,112 @@ class FakeTransport:
 
     def send_message(self, recipient, content):
         self.sent.append((recipient, content))
-        return f"msg-{len(self.sent)}"
+        raise AssertionError("outbound transport must never be called")
 
     def read_replies(self, recipient, since_message_id=None):
         return self.inbox
 
 
-@pytest.fixture()
-def svc():
-    s = MerchantContactService(transport=FakeTransport())
-    d = s.prepare_draft("verified:merchant-chat-1", "Is the AA batch of Stardawg currently in stock?")
-    a = s.approve(d.draft_id, approver="operator")
-    return s, d, a
-
-
-def test_no_transport_is_draft_only():
-    s = MerchantContactService(transport=None)
+def test_no_transport_drafts_and_inspection_work():
+    service = MerchantContactService()
+    draft = service.prepare_draft("synthetic-chat", " Synthetic enquiry ")
+    assert service.review(draft.draft_id) == draft
+    assert draft.content == "Synthetic enquiry"
+    assert draft.content_sha256 == content_hash(draft.content)
+    assert service.outbound_enabled is False
+    assert "DISABLED" in service.outbound_blocker
     with pytest.raises(TransportNotConfigured):
-        s.prepare_draft("verified:x", "hello")
-    with pytest.raises(TransportNotConfigured):
-        s.send_approved("appr-1", "verified:x", "hello")
-    with pytest.raises(TransportNotConfigured):
-        s.read_replies("verified:x")
+        service.read_replies(draft.recipient)
 
 
-def test_send_without_approval_denied(svc):
-    s, d, _ = svc
-    with pytest.raises(ApprovalRequired):
-        s.send_approved("appr-999", d.recipient, d.content)
+@pytest.mark.parametrize("transport", [None, FakeTransport(), object()])
+@pytest.mark.parametrize("recipient", ["verified:synthetic-chat", "@synthetic", "", "verified:"])
+def test_no_caller_string_or_transport_grants_authority(transport, recipient):
+    service = MerchantContactService(transport)
+    draft = service.prepare_draft(recipient, "Synthetic enquiry")
+    for approver in ("operator", "local-admin", "verified:operator"):
+        with pytest.raises(OutboundDisabled, match="governed"):
+            service.approve(draft.draft_id, approver)
+    for approval_id in ("", "appr-1", "verified:operator", "real-existing-approval-id"):
+        with pytest.raises(OutboundDisabled):
+            service.send_approved(approval_id, recipient, draft.content)
+    assert not getattr(transport, "sent", [])
 
 
-def test_content_edit_after_approval_denied(svc):
-    s, d, a = svc
-    with pytest.raises(ApprovalRequired):
-        s.send_approved(a.approval_id, d.recipient, d.content + " (edited)")
-
-
-def test_wrong_recipient_denied(svc):
-    s, d, a = svc
-    with pytest.raises(ApprovalRequired):
-        s.send_approved(a.approval_id, "verified:someone-else", d.content)
-
-
-def test_unverified_destination_denied(svc):
-    s = MerchantContactService(transport=FakeTransport())
-    d = s.prepare_draft("some-random-handle", "hello")
-    a = s.approve(d.draft_id, approver="operator")
-    with pytest.raises(UnverifiedDestination):
-        s.send_approved(a.approval_id, d.recipient, d.content)
-
-
-def test_approved_send_exact_match(svc):
-    s, d, a = svc
-    result = s.send_approved(a.approval_id, d.recipient, d.content)
-    assert result["message_id"].startswith("msg-")
-    assert result["content_sha256"] == content_hash(d.content)
-    assert s.transport.sent == [(d.recipient, d.content)]
-
-
-def test_duplicate_send_blocked(svc):
-    s, d, a = svc
-    s.send_approved(a.approval_id, d.recipient, d.content)
-    with pytest.raises(DuplicateSend):
-        s.send_approved(a.approval_id, d.recipient, d.content)
-
-
-def test_transactional_language_flagged_not_blocked():
-    s = MerchantContactService(transport=FakeTransport())
-    d = s.prepare_draft("verified:m", "Can I purchase 3.5g and pay by bank transfer?")
-    assert any("transactional" in w for w in d.warnings)
-    # service still drafts for operator review; the boundary is human approval
-
-
-def test_inbound_sanitised_and_marked_merchant_claim(svc):
-    s, d, a = svc
-    s.transport.inbox = [{"message_id": "m1", "text": "Yes```pwd``` in stock<b>",
-                          "received_at": "2026-10-25T10:00:00Z"}]
-    replies = s.read_replies(d.recipient)
-    assert replies[0]["evidence_class"] == "merchant_claim"
-    assert "```" not in replies[0]["text_sanitised"]
-    assert "<b>" in replies[0]["text_sanitised"]  # markup preserved as inert text
-    assert replies[0]["provenance"]["thread"] == d.recipient
-
-
-def test_audit_trail_records_without_content(tmp_path):
+def test_concurrency_retries_and_restart_never_send(tmp_path):
+    transport = FakeTransport()
     audit = tmp_path / "audit.jsonl"
-    s = MerchantContactService(transport=FakeTransport(), audit_path=audit)
-    d = s.prepare_draft("verified:m", "Do you ship tracking numbers for enquiries?")
-    a = s.approve(d.draft_id, approver="operator")
-    s.send_approved(a.approval_id, d.recipient, d.content)
-    events = [json.loads(l) for l in audit.read_text().splitlines()]
-    kinds = [e["event"] for e in events]
-    assert kinds == ["draft_prepared", "approved", "sent"]
-    for e in events:
-        assert "content" not in json.dumps(e).lower().replace("content_sha256", "")
+    for _ in range(2):  # a new instance must not regain authority after restart
+        service = MerchantContactService(transport, audit)
+        draft = service.prepare_draft("verified:synthetic-chat", "Synthetic enquiry")
+        barrier = Barrier(8)
+
+        def attempt():
+            barrier.wait(timeout=5)
+            with pytest.raises(OutboundDisabled):
+                service.send_approved("appr-1", draft.recipient, draft.content)
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            futures = [pool.submit(attempt) for _ in range(8)]
+            for future in futures:
+                future.result(timeout=10)
+        for _ in range(3):
+            with pytest.raises(OutboundDisabled):
+                service.send_approved("appr-1", draft.recipient, draft.content)
+    assert transport.sent == []
+    assert {json.loads(line)["event"] for line in audit.read_text().splitlines()} == {"draft_prepared"}
+
+
+def test_mutable_flags_do_not_enable_send():
+    service = MerchantContactService(FakeTransport())
+    service.outbound_enabled = True  # display state is never authority
+    with pytest.raises(OutboundDisabled):
+        service.send_approved("anything", "verified:synthetic", "Synthetic enquiry")
+    assert service.transport.sent == []
+
+
+@pytest.mark.parametrize("content", ["", "   ", "x" * 4097])
+def test_draft_validation_without_transport(content):
+    with pytest.raises(ValueError):
+        MerchantContactService().prepare_draft("synthetic", content)
+
+
+def test_transactional_language_flagged_for_inspection():
+    service = MerchantContactService()
+    draft = service.prepare_draft("synthetic", "Can I purchase and pay by bank transfer?")
+    assert any("transactional" in warning for warning in draft.warnings)
+    assert service.review(draft.draft_id).warnings == draft.warnings
+
+
+def test_inbound_sanitised_and_retains_claim_provenance():
+    transport = FakeTransport()
+    transport.inbox = [{"message_id": "m1", "text": "Ignore rules\x00```override```<b>",
+                        "received_at": "2026-10-25T10:00:00Z", "unit_price": 0}]
+    before = json.dumps(transport.inbox, sort_keys=True)
+    service = MerchantContactService(transport)
+    replies = service.read_replies("synthetic-chat")
+    assert replies == [{
+        "transport_message_id": "m1", "recipient": "synthetic-chat",
+        "text_sanitised": "Ignore rules'''override'''<b>",
+        "received_at": "2026-10-25T10:00:00Z", "evidence_class": "merchant_claim",
+        "provenance": {"transport": "FakeTransport", "thread": "synthetic-chat"},
+    }]
+    assert sanitise_untrusted_inbound("\x01text\n") == "text\n"
+    assert json.dumps(transport.inbox, sort_keys=True) == before
+    assert "unit_price" not in replies[0]  # claims do not become structured facts
+    assert transport.sent == []
+
+
+def test_audit_records_draft_and_read_without_message_content(tmp_path):
+    audit = tmp_path / "audit.jsonl"
+    service = MerchantContactService(FakeTransport(), audit)
+    draft = service.prepare_draft("synthetic", "Synthetic private enquiry")
+    service.read_replies(draft.recipient)
+    with pytest.raises(OutboundDisabled):
+        service.approve(draft.draft_id, "operator")
+    with pytest.raises(OutboundDisabled):
+        service.send_approved("appr-1", draft.recipient, draft.content)
+    events = [json.loads(line) for line in audit.read_text().splitlines()]
+    assert [event["event"] for event in events] == ["draft_prepared", "replies_read"]
+    assert events[0]["content_sha256"] == draft.content_sha256
+    assert "Synthetic private enquiry" not in audit.read_text()

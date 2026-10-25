@@ -5,10 +5,12 @@ green gradient on the composite-score column only)."""
 from __future__ import annotations
 
 import io
+import json
+import math
 import zipfile
 from typing import Any, Dict, List
 
-from src.product_research import sort_records
+from src.product_research import CANON_REF, SCORING_METHODOLOGY
 
 OVERVIEW_COLUMNS = [
     "Category", "Title", "Green Team description", "Composite score (%)",
@@ -28,13 +30,34 @@ DETAIL_COLUMNS = [
     "Composite score (%)", "Normalized factors", "Factor weights used",
     "Missing applicable metrics", "Missing penalty", "Gamma", "GM", "B", "C",
     "Excluded price options", "Match classification", "Primary Leafly source",
+    "Factor evidence and peer groups (JSON)", "Scoring methodology (JSON)",
+    "Field dictionary (JSON)", "Raw record JSON part 1",
 ]
 
-GBP = "£"
+FIELD_DICTIONARY = {
+    "Composite score (%)": "Relative comparison, not quality certainty; stored on a 0..1 scale",
+    "Leafly THC (%)": "Cultivar reference THC, not a batch measurement; source percentage points",
+    "Sativa (%) / Indica (%)": "Stated source orientation in percentage points, not measured effects",
+    "Unit price": "Minimum defensible price per stated unit; compare category AND unit basis only",
+    "Inferred grade": "Injected estimate with confidence/provenance, distinct from seller-reported tier",
+    "Normalized factors": "Category-relative multipliers; 1 is neutral; absent is not zero",
+    "Factor evidence and peer groups (JSON)": "Raw factor inputs, confidence, peer vectors and source pointers",
+    "Raw record JSON parts": "Concatenate numbered parts in this row, then decode JSON for ALL input fields, variants and source metadata",
+    "Text exceeding a cell limit": "Display preview is labelled; full value retained in raw record JSON parts",
+}
+
+JSON_CHUNK_SIZE = 30000  # below Excel's 32767-character cell text limit
+
+
+def _json(value: Any) -> str:
+    # ASCII escapes also preserve control characters that XML cannot represent.
+    return json.dumps(value, ensure_ascii=True, sort_keys=True)
 
 
 def _esc(text: Any) -> str:
-    t = "".join(ch for ch in str(text) if ch >= " " or ch in "\t\n")
+    t = "".join(ch for ch in str(text)
+                if ch in "\t\n\r" or " " <= ch <= "\ud7ff" or "\ue000" <= ch <= "\ufffd"
+                or "\U00010000" <= ch <= "\U0010ffff")
     return (t.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
              .replace('"', "&quot;"))
 
@@ -49,7 +72,17 @@ def _col(i: int) -> str:
 
 
 def build_workbook(scored_sorted, snapshot_date: str) -> bytes:
-    """scored_sorted: output of product_research.sort_records."""
+    """Return XLSX bytes; never opens or overwrites a user's workbook.
+
+    scored_sorted is the output of product_research.sort_records. All records
+    must be JSON-serializable; unsupported values fail explicitly.
+    """
+    scored_sorted = list(scored_sorted)
+    raw_records = [_json(rec) for rec, _, _ in scored_sorted]
+    raw_parts = [[raw[i:i + JSON_CHUNK_SIZE] for i in range(0, len(raw), JSON_CHUNK_SIZE)]
+                 for raw in raw_records]
+    part_count = max((len(parts) for parts in raw_parts), default=1)
+    detail_columns = DETAIL_COLUMNS + [f"Raw record JSON part {i}" for i in range(2, part_count + 1)]
     categories = []
     for rec, _f, _s in scored_sorted:
         if rec["category"] not in categories:
@@ -58,39 +91,41 @@ def build_workbook(scored_sorted, snapshot_date: str) -> bytes:
 
     fills = [("none", "00000000"), ("gray125", "00FF0000")]
     def add_fill(rgb):
-        fills.append(("solid", "00" + rgb))
+        fills.append(("solid", "FF" + rgb))
         return len(fills) - 1
     F_HDR = add_fill("DCE6F1")
     F_BAND = {c: add_fill(band[c]) for c, v in band.items()}
-    F_LOW = add_fill("E8F5E9")   # gradient low end (green, light)
-    F_HIGH = add_fill("2E7D32")  # gradient high end (green, deep)
 
     XFS = ['<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyAlignment="1">'
            '<alignment wrapText="1" vertical="top"/></xf>']
-    def xf(fill_id=None, numfmt=None):
+    def xf(fill_id=None, numfmt=0):
         a = ' applyNumberFormat="1"' if numfmt else ""
         fl = ' applyFill="1"' if fill_id is not None else ""
-        XFS.append(f'<xf numFmtId="{164 if numfmt else 0}" fontId="0" '
+        XFS.append(f'<xf numFmtId="{numfmt}" fontId="0" '
                    f'fillId="{fill_id if fill_id is not None else 0}" borderId="0" xfId="0"{fl}{a} '
                    'applyAlignment="1"><alignment wrapText="1" vertical="top"/></xf>')
         return len(XFS) - 1
     S_TEXT = 0
     S_HDR = xf(F_HDR)
     S_BAND = {c: xf(fid) for c, fid in F_BAND.items()}
-    S_MONEY = xf(numfmt=True)
-    numfmts_xml = ('<numFmts count="1">'
+    S_MONEY = xf(numfmt=164)
+    S_PERCENT = xf(numfmt=10)  # numeric fraction, shown as 0.00%
+    S_SOURCE_PERCENT = xf(numfmt=165)  # source percentage points (e.g. 25)
+    numfmts_xml = ('<numFmts count="2">'
                    '<numFmt numFmtId="164" formatCode="&quot;&#163;&quot;0.00"/>'
+                   '<numFmt numFmtId="165" formatCode="0.0&quot;%&quot;"/>'
                    '</numFmts>')
 
     # green gradient per score decile (light -> deep green), score column only
     GRAD = []
     for level in range(10):
-        rgb = ("_E8" if False else
-               "%02X%02X%02X" % (0xE8 - level * 0x11, 0xF5 - level * 0x08, 0xE9 - level * 0x70))
-        GRAD.append(xf(add_fill(rgb)))
+        # Interpolate bounded RGB channels between two green endpoints.
+        rgb = "".join(f"{round(low + (high - low) * level / 9):02X}"
+                      for low, high in zip((232, 245, 233), (117, 187, 121)))
+        GRAD.append(xf(add_fill(rgb), numfmt=10))
 
     def score_style(score: float) -> int:
-        return GRAD[min(9, int(score * 10))]
+        return GRAD[max(0, min(9, int(score * 10)))]
 
     main = []
     details = []
@@ -100,19 +135,19 @@ def build_workbook(scored_sorted, snapshot_date: str) -> bytes:
 
     # header rows
     main.append([(h, S_HDR) for h in OVERVIEW_COLUMNS])
-    details.append([(h, S_HDR) for h in DETAIL_COLUMNS])
+    details.append([(h, S_HDR) for h in detail_columns])
 
-    for rec, factors, score in scored_sorted:
+    for record_index, (rec, factors, score) in enumerate(scored_sorted):
         opts = rec.get("overview_options") or []
         status = f"{rec.get('buying_status', 'unknown')} (snapshot {snapshot_date})"
         vals = [
             rec["category"], rec["product_name"], rec.get("store_description") or rec.get("product_name", ""),
-            score["percent"], rec.get("combined_rating"), rec.get("combined_popularity_index"),
+            score["score"], rec.get("combined_rating"), rec.get("combined_popularity_index"),
             rec.get("unit_price"), rec.get("leafly_thc"), rec.get("sativa_pct"), rec.get("indica_pct"),
         ]
         styles = [S_BAND[rec["category"]], S_BAND[rec["category"]], S_BAND[rec["category"]],
                   score_style(score["score"]), S_TEXT, S_TEXT, S_MONEY,
-                  S_TEXT, S_TEXT, S_TEXT]
+                  S_SOURCE_PERCENT, S_SOURCE_PERCENT, S_SOURCE_PERCENT]
         for k in range(6):
             if k < len(opts):
                 vals += [opts[k].get("size"), opts[k].get("price")]
@@ -134,18 +169,23 @@ def build_workbook(scored_sorted, snapshot_date: str) -> bytes:
             rec.get("seller_rating"), rec.get("seller_review_count"),
             rec.get("seller_popularity_rank"),
             rec.get("unit_price"), rec.get("unit_basis"),
-            rec.get("raw_options"), score["percent"],
-            str({k: v for k, v in dict(grade=factors.grade, rating=factors.rating,
+            _json(rec.get("raw_options")), score["score"],
+            _json({k: v for k, v in dict(grade=factors.grade, rating=factors.rating,
                  price=factors.price, thc=factors.thc, si=factors.si,
                  popularity=factors.popularity).items() if v is not None}),
             score["weights_used"], "; ".join(score["missing_applicable"]),
             score["missing_penalty"], score["gamma"], score["gm"], score["b"], score["c"],
-            str((factors.detail or {}).get("popularity", {})),
+            _json(rec.get("price_detail", {}).get("excluded_options", [])),
             rec.get("match_classification") or "", rec.get("primary_leafly_source") or "",
+            _json(factors.detail), _json({"canon_ref": CANON_REF, **SCORING_METHODOLOGY}),
+            _json(FIELD_DICTIONARY),
         ]
-        details.append([(v, S_TEXT) for v in dvals])
+        dvals.extend(raw_parts[record_index] + [None] * (part_count - len(raw_parts[record_index])))
+        dstyles = [S_TEXT] * len(dvals)
+        dstyles[16], dstyles[19] = S_MONEY, S_PERCENT
+        details.append(row_of(dvals, dstyles))
 
-    def sheet_xml(rows, freeze=True):
+    def sheet_xml(rows, widths, freeze=True):
         rxs = []
         for rno, cells in enumerate(rows, start=1):
             cs = []
@@ -153,9 +193,15 @@ def build_workbook(scored_sorted, snapshot_date: str) -> bytes:
                 ref = f"{_col(ci)}{rno}"
                 if val is None or val == "":
                     cs.append(f'<c r="{ref}" s="{style}"/>')
-                elif isinstance(val, (int, float)) and not isinstance(val, bool):
+                elif (isinstance(val, (int, float)) and not isinstance(val, bool)
+                      and math.isfinite(val)):
                     cs.append(f'<c r="{ref}" s="{style}"><v>{val}</v></c>')
                 else:
+                    if isinstance(val, (dict, list, tuple)):
+                        val = _json(val)
+                    val = str(val)
+                    if len(val) > JSON_CHUNK_SIZE:
+                        val = val[:JSON_CHUNK_SIZE] + " [preview; full value in Details raw record JSON]"
                     cs.append(f'<c r="{ref}" s="{style}" t="inlineStr"><is>'
                               f'<t xml:space="preserve">{_esc(val)}</t></is></c>')
             rxs.append(f'<row r="{rno}">{"".join(cs)}</row>')
@@ -166,9 +212,13 @@ def build_workbook(scored_sorted, snapshot_date: str) -> bytes:
                 '<sheetViews><sheetView workbookViewId="0">'
                 + (f'<pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/>' if freeze else '')
                 + '</sheetView></sheetViews>'
+                + '<cols>' + ''.join(f'<col min="{i}" max="{i}" width="{w}" customWidth="1"/>'
+                                     for i, w in enumerate(widths, start=1)) + '</cols>'
                 f'<sheetData>{"".join(rxs)}</sheetData></worksheet>')
 
-    s1, s2 = sheet_xml(main), sheet_xml(details)
+    overview_widths = [24, 30, 60, 20, 20, 24, 24, 18, 16, 16] + [14, 14] * 6 + [42]
+    detail_widths = [24, 24, 30, 20, 40, 24, 60, 60] + [28] * (len(detail_columns) - 8)
+    s1, s2 = sheet_xml(main, overview_widths), sheet_xml(details, detail_widths)
     wb = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
           '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
           'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
