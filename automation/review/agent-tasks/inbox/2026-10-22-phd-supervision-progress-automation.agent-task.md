@@ -3,12 +3,12 @@ artifact_type: agent-task
 task_schema: agent-task/v2
 task_id: 2026-10-22-phd-supervision-progress-automation
 title: "Automate approved PhD supervision progress register after each meeting"
-status: inbox
+status: open
 priority: high
 task_type: implementation
 created_by: chatgpt
 created_at: 2026-10-22T12:00:00+01:00
-updated_at: 2026-10-22T12:00:00+01:00
+updated_at: 2026-10-25T10:30:00+01:00
 executor: claude_subscription
 execution_mode: implementation
 architecture: single-plus-verifier
@@ -60,7 +60,7 @@ handoff_model: resolved-at-dispatch
 operator_decision_path: ""
 supersedes: []
 duplicates: []
-notes: "Do not reinstate legacy exporter, create another backend queue, or claim a live scheduled trigger or successful OneDrive sharing without deployment tests."
+notes: "Do not reinstate legacy exporter, create another backend queue, or claim a live scheduled trigger or successful OneDrive sharing without deployment tests. Reconciled 2026-10-25: implementation delivered via obsidian-PhD#625 (merged 2026-10-24 15:52 BST, commit 8bcb32e0); publication and verified supervisor access remain open. See the reconciliation section below."
 ---
 
 # Implement the approved PhD supervision record update workflow
@@ -69,7 +69,7 @@ notes: "Do not reinstate legacy exporter, create another backend queue, or claim
 
 On 22 October 2026, Tye approved the exact Excel workbook `Tye Cameron-Robson - Supervision Progress Record.xlsx`, SHA-256 `7d79dfbe15d0c115eaf19cf443b03f1d50c02a8686a6f501f03e84f10c1062e6`. The file is privately available to the operator and is **not yet verified to be in OneDrive**.
 
-The workbook's only sheets are `Research overview`, `Supervision history` and `Next priorities`. Do not replace it with the deprecated multi-sheet register or one-page Word export. The new contract is in PhD PR #620, which must be reconciled with live main before execution: https://github.com/tyecam1/obsidian-PhD/pull/620
+The workbook's only sheets are `Research overview`, `Supervision history` and `Next priorities`. Do not replace it with the deprecated multi-sheet register or one-page Word export. The new contract is in PhD PR #620, which must be reconciled with live main before execution: https://github.com/tyecam1/obsidian-PhD/pull/620 (RECONCILED: #620 merged 2026-10-24 15:15 BST.)
 
 ## Goal
 
@@ -100,3 +100,17 @@ Following a completed, source-backed supervision meeting note, agents update the
 ## Current constraints
 
 SharePoint/OneDrive write access is not connected to ChatGPT in the session where the workbook was approved. GitHub changes cannot install a Windows task or confirm folder permissions. Do not close this item until the local integration and supervisor access are demonstrated.
+
+## Reconciliation 2026-10-25 (post-implementation status)
+
+**Implementation — delivered, outside this record's allowed_paths.** PhD PR #625 implemented the updater and merged on 2026-10-24 (commit `8bcb32e0`): `Scripts/automation/supervision_record_updater.py`, `erfu_supervision_review_check.ps1`, `install_erfu_supervision_review_task.ps1`, `Scripts/tests/test_supervision_record_updater.py`, and capability-manifest docs. These paths are NOT within this record's `allowed_paths` (`automation/review/supervisor-office-pack/**`, `Scripts/automation/tests/**`). This is recorded as an approval-path finding, not a retroactive permission change: the work was executed and merged in the PhD repository under that repository's own governance — the 22 October operator approval record, the `erfu-pivotal-register-contract.md` contract (#620), and an independent read-only gpt-6-sol review (six findings, all addressed, recorded in the #625 description). `allowed_paths` here are NOT widened after the fact. This record is not duplicated by #625's implementation; it remains the governing acceptance record.
+
+**Baseline workbook bytes — re-supplied and hash-verified 2026-10-25.** A copy of `Tye Cameron-Robson - Supervision Progress Record.xlsx` exists at `C:\Users\tyeca\Downloads\` with SHA-256 exactly matching the approved `7d79dfbe15d0c115eaf19cf443b03f1d50c02a8686a6f501f03e84f10c1062e6`. The earlier estate-wide missing-bytes blocker is closed at the source side.
+
+**Installation — live-proven 2026-10-25.** Scheduled task `ObsidianPhD-SupervisionRecordDetect` is Ready (daily 07:15 trigger; last run 2026-10-25 07:15, result 0) running the #625 `detect` subcommand against `C:\Users\tyeca\Documents\PhD\notes`. The legacy tasks `ObsidianPhD-ErfuSupervisionOfficePackExport` and `ObsidianPhD-ErfuSupervisionReviewCheck` are Disabled, matching the "do not reinstate the legacy exporter" note.
+
+**Still open (in order):**
+1. Durable review evidence: the declared `review_report_path` (`automation/review/supervisor-office-pack/supervision-progress-updater-verification.md`) does not exist on PhD `main` — the #625 review evidence currently lives only in the PR description. Publish the verification record.
+2. OneDrive placement: the approved workbook has NOT been placed at the target path `C:\Users\tyeca\OneDrive - University of Strathclyde\Erfu Yang's files - Tye Cameron-Robson\` (verified absent 2026-10-25).
+3. Publication: not performed; remains behind the operator approval token gate by contract. Correct that it is not done.
+4. Verified supervisor access: Erfu's and Richard's least-privilege access to the shared folder is unverified; treat as blocked, not success.
