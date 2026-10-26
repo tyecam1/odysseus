@@ -56,7 +56,11 @@ def parse_music_command(text: str) -> Optional[MusicCommand]:
         if match and match.start() > 0:
             hint = re.sub(r"\s+please$", "", match.group("d").strip(), flags=re.I)
             stripped = command.query[:match.start()].strip()
-            if not hint or re.fullmatch(r"(?:something|anything|whatever|some music|music)", stripped, re.I):
+            if not hint:
+                return None
+            if command.action == "play" and re.fullmatch(r"(?:it|that|this|the music)", stripped, re.I):
+                return MusicCommand("resume", device_hint=hint)    # "play it on the laptop" is a resume, never a search for a title called "It"
+            if re.fullmatch(r"(?:something|anything|whatever|some music|music|it|that|this|the music)", stripped, re.I):
                 return None                                        # "play something on the tv" names no music
             fallback = command.fallback_query
             fb_match = _ON_DEVICE.search(fallback) if fallback else None

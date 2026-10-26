@@ -763,3 +763,10 @@ def test_title_like_play_phrases_are_not_taken_as_a_bodyless_resume():
     assert parse_music_command("play music on the radio") is None
     assert parse_music_command("resume on the laptop") == MusicCommand("resume", device_hint="laptop")
     assert parse_music_command("play on the laptop") == MusicCommand("resume", device_hint="laptop")
+
+
+def test_a_pronoun_with_a_device_is_a_resume_never_a_title_search():
+    assert parse_music_command("play it on the laptop") == MusicCommand("resume", device_hint="laptop")
+    assert parse_music_command("play the music on the laptop") == MusicCommand("resume", device_hint="laptop")
+    assert parse_music_command("queue it on the laptop") is None
+    assert parse_music_command("play something on the tv") is None
