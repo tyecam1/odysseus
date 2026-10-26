@@ -12,11 +12,13 @@ resolution, idempotency, bounded volume, truthful results) and ``spotify_binding
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
 import re
 import threading
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
@@ -64,6 +66,8 @@ class MusicRuntime:
         self._lock = threading.Lock()
         self._controller: Optional[MusicController] = None
         self._provider: Optional[SpotifyProvider] = None
+        self._built_for: Optional[str] = None                          # the client id the cached controller was built with
+        self._results: "OrderedDict[str, tuple]" = OrderedDict()       # completed writes by request id, so a retry returns the first answer
 
     # ------------------------------------------------------------------ state
     def configured(self) -> bool:
@@ -74,11 +78,15 @@ class MusicRuntime:
 
     def _build(self) -> Optional[MusicController]:
         with self._lock:
-            if self._controller is not None:
-                return self._controller
             client = _client_id(self.directory)
+            if self._controller is not None and client == self._built_for:
+                return self._controller
+            # a new credential pair was installed (a different client id): the cached controller would submit the new refresh token with the old client
+            self._controller = self._provider = None
+            self._results.clear()
             if client is None or not (self.directory / "token.bin").is_file():
                 return None
+            self._built_for = client
             protect, unprotect = self._protection or _default_protection()
             http = self._http or urllib_http
             store = FileTokenStore(str(self.directory / "token.bin"), protect, unprotect)
@@ -121,10 +129,34 @@ class MusicRuntime:
         return active[0] if active else (devices[0] if len(devices) == 1 else None)
 
     def _run(self, controller: MusicController, command: MusicCommand, request_id: str) -> Dict[str, Any]:
-        rid = "music-" + re.sub(r"[^A-Za-z0-9._:-]", "", request_id)[:48]
+        key = request_id if re.fullmatch(r"[A-Za-z0-9._:-]{1,56}", request_id or "") else hashlib.sha256((request_id or "").encode("utf-8")).hexdigest()[:56]
+        rid = "music-" + key                                         # never truncated: two distinct keys can never share a controller id
+        is_write = command.action not in _READS
+        fingerprint = (command.action, command.query, command.kind, command.volume, command.volume_delta)
+        if is_write:
+            with self._lock:
+                seen = self._results.get(rid)
+            if seen is not None and seen[0] == fingerprint:           # a retry: answer from the first run BEFORE resolving anything relative
+                return seen[1]
+        result = self._execute(controller, command, rid)
+        if is_write and result["status"] not in ("error", "not_connected"):
+            with self._lock:
+                self._results[rid] = (fingerprint, result)
+                while len(self._results) > 256:
+                    self._results.popitem(last=False)
+        return result
+
+    def _execute(self, controller: MusicController, command: MusicCommand, rid: str) -> Dict[str, Any]:
         action, kwargs = command.action, {}
         if action in ("play", "queue"):
-            kwargs = {"query": command.query, "kind": command.kind}
+            query = command.query
+            if command.fallback_query and self._provider is not None:       # "play Blue please": the literal wins if it exists, else drop the "please"
+                try:
+                    if not self._provider.search(query, command.kind):
+                        query = command.fallback_query
+                except Exception:  # noqa: BLE001 - the controller will report the real failure on its own search
+                    pass
+            kwargs = {"query": query, "kind": command.kind}
         elif action == "volume":
             volume = command.volume
             if volume is None:                             # relative: act on the device we can actually read the level of

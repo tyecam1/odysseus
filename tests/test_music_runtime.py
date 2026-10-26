@@ -446,3 +446,82 @@ def test_a_device_with_no_readable_level_is_never_guessed_at(tmp_path):
     http.push(200, {"devices": [{"id": "d1", "name": "Hall", "is_active": True}]})
     out = music_reply(runtime, "turn the music down", "jin", "rg1", allow_writes=True)
     assert out["status"] == "clarify" and "Say a number" in out["text"] and {c[0] for c in http.calls} == {"GET"}
+
+
+# ---------------------------------------------------------------------------------------------------------------------- Sol second pass on #179
+@pytest.mark.parametrize("text", ["add the album to my wishlist", "add milk to the shopping list", "start the music lesson", "start the dishwasher"])
+def test_adding_or_starting_things_that_are_not_music_is_left_alone(text):
+    assert parse_music_command(text) is None
+
+
+def test_only_the_queue_forms_queue():
+    assert parse_music_command("add Blue in Green to the queue") == MusicCommand("queue", query="Blue in Green")
+    assert parse_music_command("add Blue in Green to up next") == MusicCommand("queue", query="Blue in Green")
+    assert parse_music_command("queue up Blue").action == "queue"
+
+
+def test_a_title_made_of_politeness_words_is_kept_and_a_trailing_please_is_a_fallback_only():
+    assert parse_music_command("play Please Please Please on Spotify").query == "Please Please Please"
+    cmd = parse_music_command("play Blue please")
+    assert cmd.query == "Blue please" and cmd.fallback_query == "Blue"
+    assert parse_music_command("could you play Blue please") == MusicCommand("play", query="Blue")
+
+
+def test_the_trailing_please_fallback_is_used_only_when_the_literal_finds_nothing(tmp_path):
+    http = FakeHttp()
+    runtime = make_runtime(tmp_path, http)
+    http.push(200, {"tracks": {"items": []}})                       # "Blue please" matches nothing
+    http.push(200, DEVICE)
+    http.push(200, {"tracks": {"items": [{"uri": "spotify:track:aaa111", "name": "Blue", "artists": [{"name": "Joni Mitchell"}]}]}})
+    http.push(204)
+    http.push(200, dict(PLAYING, item=dict(PLAYING["item"], uri="spotify:track:aaa111")))
+    out = music_reply(runtime, "play Blue please on Spotify", "jin", "rf1", allow_writes=True)
+    assert out["status"] == "done"
+    searches = [urllib.parse.parse_qs(urllib.parse.urlsplit(c[1]).query).get("q") for c in http.calls if "/search" in c[1]]
+    assert searches == [["Blue please"], ["Blue"]]
+    http2 = FakeHttp()
+    runtime2 = make_runtime(tmp_path / "b", http2)
+    http2.push(200, {"tracks": {"items": [{"uri": "spotify:track:p1", "name": "Please Please Please", "artists": [{"name": "Sabrina Carpenter"}]}]}})
+    http2.push(200, DEVICE)
+    http2.push(200, {"tracks": {"items": [{"uri": "spotify:track:p1", "name": "Please Please Please", "artists": [{"name": "Sabrina Carpenter"}]}]}})
+    http2.push(204)
+    http2.push(200, dict(PLAYING, item=dict(PLAYING["item"], uri="spotify:track:p1")))
+    music_reply(runtime2, "play Please Please Please on Spotify", "jin", "rf2", allow_writes=True)
+    assert [urllib.parse.parse_qs(urllib.parse.urlsplit(c[1]).query).get("q") for c in http2.calls if "/search" in c[1]] == [["Please Please Please"]] * 2
+
+
+def test_long_distinct_request_keys_never_collide(tmp_path):
+    http = FakeHttp()
+    runtime = make_runtime(tmp_path, http)
+    for _ in range(2):
+        http.push(200, DEVICE)
+        http.push(204)
+        http.push(200, PLAYING)
+    first = music_reply(runtime, "skip this song", "jin", "a" * 48 + "-first", allow_writes=True)
+    second = music_reply(runtime, "skip this song", "jin", "a" * 48 + "-second", allow_writes=True)
+    assert first["status"].startswith("done") and second["status"].startswith("done")
+    assert len([c for c in http.calls if c[0] == "POST" and "/next" in c[1]]) == 2                 # both really skipped
+
+
+def test_a_retried_relative_volume_returns_the_first_answer_without_recomputing(tmp_path):
+    http = FakeHttp()
+    runtime = make_runtime(tmp_path, http)
+    http.push(200, DEVICE)                                          # level 40 -> 25
+    http.push(200, DEVICE)
+    http.push(204)
+    http.push(200, PLAYING)
+    first = music_reply(runtime, "turn the music down", "jin", "vol-key", allow_writes=True)
+    calls = len(http.calls)
+    retry = music_reply(runtime, "turn the music down", "jin", "vol-key", allow_writes=True)
+    assert retry == first and len(http.calls) == calls                # no device read, no write, no "different command" refusal
+
+
+def test_installing_a_different_client_rebuilds_the_controller_so_the_old_client_is_never_paired_with_the_new_token(tmp_path):
+    http = FakeHttp()
+    runtime = make_runtime(tmp_path, http)
+    first = runtime._build()
+    assert first is not None and runtime._built_for == "synthetic0client0id"
+    (runtime.directory / "client.json").write_text(json.dumps({"client_id": "anotherclientid0001"}))
+    second = runtime._build()
+    assert second is not first and runtime._built_for == "anotherclientid0001"
+    assert runtime._build() is second                                # stable until the credentials change again
