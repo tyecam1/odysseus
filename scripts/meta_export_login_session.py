@@ -154,13 +154,56 @@ def _verify_profile_permissions(profile_dir: Path) -> list[str]:
     return violations
 
 
+def _pid_alive(pid: int) -> bool:
+    """Liveness probe that works on POSIX and Windows.
+
+    `os.kill(pid, 0)` is POSIX-only: on Windows it raises for any signal
+    other than SIGTERM/CTRL events, so query the process handle instead.
+    """
+    if os.name == "nt":
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32
+        kernel32.OpenProcess.argtypes = [ctypes.c_uint, ctypes.c_int, ctypes.c_uint]
+        kernel32.OpenProcess.restype = ctypes.c_void_p
+        kernel32.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+        kernel32.WaitForSingleObject.restype = ctypes.c_uint
+        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+        kernel32.CloseHandle.restype = ctypes.c_int
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        SYNCHRONIZE = 0x00100000
+        WAIT_OBJECT_0 = 0
+        ERROR_INVALID_PARAMETER = 87
+        # SYNCHRONIZE is required for WaitForSingleObject on the handle.
+        handle = kernel32.OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, False, pid
+        )
+        if not handle:
+            # Only "no such process" may be read as dead. Anything else
+            # (access denied, unknown) fails safe to "alive": the cost is a
+            # stale-pid "already running" message, not a second session.
+            return kernel32.GetLastError() != ERROR_INVALID_PARAMETER
+        try:
+            # WAIT_OBJECT_0 means the process is signalled, i.e. terminated;
+            # this avoids the STILL_ACTIVE exit-code ambiguity entirely.
+            return kernel32.WaitForSingleObject(handle, 0) != WAIT_OBJECT_0
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+
+
 def cmd_start(args: argparse.Namespace) -> int:
     if PID_FILE.exists():
         try:
             existing_pid = int(PID_FILE.read_text().strip())
-            os.kill(existing_pid, 0)
-            print(f"a login session is already running (pid {existing_pid}) - run `stop` first")
-            return 1
+            if _pid_alive(existing_pid):
+                print(f"a login session is already running (pid {existing_pid}) - run `stop` first")
+                return 1
+            PID_FILE.unlink(missing_ok=True)
         except (ValueError, ProcessLookupError, PermissionError):
             PID_FILE.unlink(missing_ok=True)
 
@@ -275,14 +318,12 @@ def cmd_status(args: argparse.Namespace) -> int:
         print("no login session is currently running")
         return 0
     pid = int(PID_FILE.read_text().strip())
-    try:
-        os.kill(pid, 0)
+    if _pid_alive(pid):
         print(f"login session running (pid {pid})")
         return 0
-    except ProcessLookupError:
-        print("stale pid file found (process no longer exists) - cleaning up")
-        PID_FILE.unlink(missing_ok=True)
-        return 0
+    print("stale pid file found (process no longer exists) - cleaning up")
+    PID_FILE.unlink(missing_ok=True)
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
