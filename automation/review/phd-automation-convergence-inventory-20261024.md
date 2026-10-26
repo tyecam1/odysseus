@@ -49,8 +49,8 @@ six candidates (`agent_run_evaluator.py`, `engine_objective_validator.py`,
 `sleep_consolidation.py`) currently meets the placement conditions. No
 demonstrated backend replacement exists (`src/routing_evaluator.py` remains
 routing-only; `src/misumi_observability.py` is domain-specific, not a general
-layer); every candidate still has live PhD callers; PhD-side development is
-actively extending these modules (#629 added `supervision_update_extractor.py`);
+layer); every candidate still has live PhD callers; PhD-side automation development remains
+active in the same package family (#629 extended the supervision updater and added `supervision_update_extractor.py`, though none of the six named modules was touched), so the practical coupling surface is not shrinking;
 and cross-repo owner approvals for a semantics-preserving migration are not in
 place. Migration today would be inventory-statistic-driven. Re-assess only when
 a backend replacement has passed the PhD consumers' own tests and both
