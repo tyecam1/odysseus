@@ -7,6 +7,7 @@ an existing root/parent's ACL. An unsupported ACL fails closed. POSIX keeps
 
 from __future__ import annotations
 
+import errno
 import os
 import stat
 from contextlib import contextmanager
@@ -155,19 +156,46 @@ def private_file(path: Path, flags: int) -> Iterator[int]:
         os.close(fd)
 
 
+class PrivateStorageRefused(PermissionError):
+    """A privacy/link refusal (symlink, reparse point, wrong owner or permissions, broad ACL). It is NOT corruption: callers must not "recover" it."""
+
+
 def read_private_bytes(path: Path) -> bytes:
     """Read a private state file, validating the object actually opened (not a pathname that could be swapped after a check).
 
-    Raises FileNotFoundError when absent. POSIX opens with O_NOFOLLOW; on Windows the opened handle's owner and DACL are checked."""
+    Raises FileNotFoundError when absent and PrivateStorageRefused for any privacy or link problem. The final component is refused if it is a
+    symlink or reparse point (O_NOFOLLOW on POSIX, an lstat check on Windows) and the opened object must be the very object that was checked.
+    POSIX also requires the opened file to be owned by this user, and Windows validates the handle's owner and DACL,
+    so a file substituted by another principal through a renamed ancestor is refused rather than consumed."""
     path = Path(path)
-    if not (path.exists() or path.is_symlink()):
-        raise FileNotFoundError(str(path))
-    check_private_path(path.parent)
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
-    fd = os.open(path, flags)
     try:
+        before = os.lstat(path)
+    except FileNotFoundError:
+        raise
+    if stat.S_ISLNK(before.st_mode) or getattr(before, "st_file_attributes", 0) & 0x400:
+        raise PrivateStorageRefused(f"private storage refuses a symlink/reparse state file: {path}")
+    try:
+        check_private_path(path.parent)
+    except PermissionError as exc:
+        raise PrivateStorageRefused(str(exc)) from exc
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError as exc:
+        if getattr(exc, "errno", None) == errno.ELOOP:
+            raise PrivateStorageRefused(f"private storage refuses a symlink state file: {path}") from exc
+        raise
+    try:
+        opened = os.fstat(fd)
+        if not os.path.samestat(before, opened):
+            raise PrivateStorageRefused(f"private state file changed between check and open: {path}")
         if os.name == "nt":
-            _windows_private(path, fd)
+            try:
+                _windows_private(path, fd)
+            except PermissionError as exc:
+                raise PrivateStorageRefused(str(exc)) from exc
+        elif opened.st_uid != os.geteuid():
+            raise PrivateStorageRefused(f"private state file must be owned by this user: {path}")
         with os.fdopen(fd, "rb", closefd=False) as handle:
             return handle.read()
     finally:

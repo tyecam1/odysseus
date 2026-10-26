@@ -318,3 +318,36 @@ def test_windows_accepts_directories_python_creates_and_still_refuses_broader_gr
     subprocess.run(["icacls", str(shared), "/grant", "Everyone:(R)"], check=True, capture_output=True)
     with pytest.raises(PermissionError):
         check_private_path(shared)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="O_NOFOLLOW symlink behaviour is POSIX")
+def test_a_symlinked_state_file_is_refused_not_recovered_as_corruption(tmp_path):
+    """Sol: the corruption recovery renames and chmods the path, which for a link acts on its target."""
+    from src.instagram_export_job import load_acquisition_state
+    from src.private_state_io import PrivateStorageRefused, private_dir
+
+    root = tmp_path / "state"
+    private_dir(root)
+    target_dir = tmp_path / "runtime-owned"
+    target_dir.mkdir(mode=0o755)
+    (root / "acquisition-state.json").symlink_to(target_dir)
+    with pytest.raises(PrivateStorageRefused):
+        load_acquisition_state(root / "acquisition-state.json")
+    assert (root / "acquisition-state.json").is_symlink()                    # not renamed
+    assert (target_dir.stat().st_mode & 0o777) == 0o755                      # not chmod-ed through the link
+    assert not [p for p in root.iterdir() if ".corrupt-" in p.name]
+
+
+def test_read_private_bytes_refuses_a_file_that_changes_identity_between_check_and_open(tmp_path, monkeypatch):
+    from src import private_state_io as psio
+
+    root = tmp_path / "state"
+    psio.private_dir(root)
+    path = root / "state.json"
+    path.write_text('{"state": "scheduled"}')
+    real_stat = os.fstat
+    other = tmp_path / "other"
+    other.write_text("x")
+    monkeypatch.setattr(psio.os, "fstat", lambda fd: real_stat(os.open(other, os.O_RDONLY)))
+    with pytest.raises(psio.PrivateStorageRefused):
+        psio.read_private_bytes(path)

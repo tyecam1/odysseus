@@ -289,13 +289,17 @@ def load_acquisition_state(
     current = now or _utcnow()
     target = Path(path)
     try:
-        state = json.loads(read_private_bytes(target).decode("utf-8"))
+        raw = read_private_bytes(target)
+    except FileNotFoundError:
+        return _new_state(current)
+    # A PrivateStorageRefused (symlink, reparse point, wrong owner, broad ACL) propagates on purpose: it is a privacy refusal, not corruption, and the
+    # corruption recovery below renames and chmods the path, which for a link would act on its target.
+    try:
+        state = json.loads(raw.decode("utf-8"))
         if not isinstance(state, dict) or state.get("state") not in STATES:
             raise ValueError("invalid state document")
         return state
-    except FileNotFoundError:
-        return _new_state(current)
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
+    except (ValueError, json.JSONDecodeError) as exc:
         _private_dir(target.parent)
         preserved = target.with_name(
             f"{target.name}.corrupt-{current.strftime('%Y%m%dT%H%M%SZ')}"
