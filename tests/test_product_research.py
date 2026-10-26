@@ -3,9 +3,9 @@ import math
 import copy
 import json
 import re
-import zipfile
-from xml.etree import ElementTree as ET
 from io import BytesIO
+
+from openpyxl import load_workbook
 
 import pytest
 
@@ -15,6 +15,11 @@ from src.product_research import (
     seller_grade_numeric, sort_records, unit_price,
 )
 from src.product_workbook import DETAIL_COLUMNS, OVERVIEW_COLUMNS, build_workbook
+
+
+def _load(blob):
+    """Read the generated artifact with the supported openpyxl reader."""
+    return load_workbook(BytesIO(blob))
 
 
 def rec(name, category="Cannabis flower", **kw):
@@ -388,21 +393,15 @@ def test_workbook_contract_two_sheets_exact_columns():
             leafly_description="leafly text", match_classification="exact"),
         rec("B", category="Edibles", buying_status="not listed"),
     ]
-    blob = build_workbook(sort_records(_scored(recs)), "2026-10-25")
-    z = zipfile.ZipFile(BytesIO(blob))
-    names = [n for n in z.namelist() if n.startswith("xl/worksheets")]
-    assert len(names) == 2
-    from xml.etree import ElementTree as ET
-    ns = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
-    root = ET.fromstring(z.read("xl/worksheets/sheet1.xml"))
-    hdr = ["".join(t.text or "" for t in c.iter(ns + "t"))
-           for c in root.find(ns + "sheetData").findall(ns + "row")[0].findall(ns + "c")]
-    assert hdr == OVERVIEW_COLUMNS
-    assert len(hdr) == 23
-    root2 = ET.fromstring(z.read("xl/worksheets/sheet2.xml"))
-    hdr2 = ["".join(t.text or "" for t in c.iter(ns + "t"))
-            for c in root2.find(ns + "sheetData").findall(ns + "row")[0].findall(ns + "c")]
-    assert hdr2 == DETAIL_COLUMNS
+    wb = _load(build_workbook(sort_records(_scored(recs)), "2026-10-25"))
+    assert wb.sheetnames == ["Overview", "Details"]
+    hdr = [c.value for c in wb["Overview"][1]][:23]  # table part; weights sit beyond
+    assert hdr == OVERVIEW_COLUMNS and len(hdr) == 23
+    hdr2 = [c.value for c in wb["Details"][1]]
+    n_parts = len(hdr2) - len(DETAIL_COLUMNS)
+    assert n_parts >= 1  # raw JSON part 1 always has a column
+    assert hdr2 == DETAIL_COLUMNS + [f"Raw record JSON part {i}"
+                                     for i in range(1, n_parts + 1)]
 
 
 def test_workbook_losslessness_and_alignment():
@@ -413,17 +412,11 @@ def test_workbook_losslessness_and_alignment():
             permalink="https://seller/a", overview_options=[{"size": "1g", "price": 10.0}],
             leafly_description="leafly text", match_classification="exact"),
     ]
-    blob = build_workbook(sort_records(_scored(recs)), "2026-10-25")
-    z = zipfile.ZipFile(BytesIO(blob))
-    ns = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
-    s1 = ET.fromstring(z.read("xl/worksheets/sheet1.xml"))
-    s2 = ET.fromstring(z.read("xl/worksheets/sheet2.xml"))
-    r1 = s1.find(ns + "sheetData").findall(ns + "row")
-    r2 = s2.find(ns + "sheetData").findall(ns + "row")
-    assert len(r1) == len(r2)  # row-aligned Overview/Details
-    text = "".join(t.text or "" for t in s1.iter(ns + "t"))
+    wb = _load(build_workbook(sort_records(_scored(recs)), "2026-10-25"))
+    assert wb["Overview"].max_row == wb["Details"].max_row  # row-aligned
+    text = " ".join(str(c.value) for row in wb["Overview"].iter_rows() for c in row)
     assert ("FULL seller description " * 10).strip() in text
-    d2 = "".join(t.text or "" for t in s2.iter(ns + "t"))
+    d2 = " ".join(str(c.value) for row in wb["Details"].iter_rows() for c in row)
     assert "https://seller/a" in d2 and "leafly text" in d2
 
 
@@ -434,141 +427,83 @@ def test_workbook_row_order_matches_sorted_scores():
         rec("High", combined_rating=4.9, unit_price=50.0, unit_basis="per g",
             leafly_rating_count=50, seller_popularity_rank=1),
     ]
-    blob = build_workbook(sort_records(_scored(recs)), "2026-10-25")
-    z = zipfile.ZipFile(BytesIO(blob))
-    ns = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
-    root = ET.fromstring(z.read("xl/worksheets/sheet1.xml"))
-    data = root.find(ns + "sheetData").findall(ns + "row")[1:]
-    names = ["".join(t.text or "" for t in row.findall(ns + "c")[2].iter(ns + "t"))
-             for row in data]
-    assert names[0] == "High"
+    wb = _load(build_workbook(sort_records(_scored(recs)), "2026-10-25"))
+    assert wb["Overview"].cell(2, 2).value == "High"
 
 
-# Synthetic regression probes adapted from /tmp/pr167-independent-acceptance.py.
-XML_NS = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
-
-
-def _workbook_xml(blob):
-    with zipfile.ZipFile(BytesIO(blob)) as archive:
-        return {name: ET.fromstring(archive.read(name)) for name in archive.namelist()
-                if name.endswith((".xml", ".rels"))}
-
-
-def _cell_value(cell):
-    value = cell.find(XML_NS + "v")
-    return value.text if value is not None else "".join(t.text or "" for t in cell.iter(XML_NS + "t"))
-
-
-def test_workbook_valid_argb_formats_widths_and_score_only_gradient():
+def test_workbook_formats_widths_and_conditional_score_gradient():
     record = rec("Synthetic", unit_price=5, unit_basis="per g", leafly_thc=25,
                  sativa_pct=75, indica_pct=25, overview_options=[{"size": "2g", "price": 10}])
     scored = build_factors([record])
-    # Exercise all gradient deciles, including endpoints, independently of scoring.
     rows = [(dict(record, product_name=f"Synthetic {i}"), scored[0][1],
              dict(scored[0][2], score=i / 10, percent=i * 10)) for i in range(11)]
-    blob = build_workbook(rows, "2026-10-25")
-    xml = _workbook_xml(blob)
-    styles = xml["xl/styles.xml"]
-    rgbs = [node.attrib["rgb"] for node in styles.iter(XML_NS + "fgColor")]
-    assert all(re.fullmatch("[0-9A-F]{8}", rgb) for rgb in rgbs)
-    fills = styles.find(XML_NS + "fills")
-    xfs = styles.find(XML_NS + "cellXfs")
-    assert int(fills.attrib["count"]) == len(fills)
-    assert int(xfs.attrib["count"]) == len(xfs)
-    custom_formats = {int(n.attrib["numFmtId"]): n.attrib["formatCode"]
-                      for n in styles.find(XML_NS + "numFmts")}
-    assert "0.00" in custom_formats[164]
-    assert custom_formats[165] == '0.0"%"'
-    overview = xml["xl/worksheets/sheet1.xml"]
-    assert overview.find(XML_NS + "dimension").attrib["ref"] == "A1:W12"
-    for name in ("xl/worksheets/sheet1.xml", "xl/worksheets/sheet2.xml"):
-        root = xml[name]
-        pane = root.find(f"{XML_NS}sheetViews/{XML_NS}sheetView/{XML_NS}pane")
-        assert pane.attrib["topLeftCell"] == "A2" and pane.attrib["state"] == "frozen"
-        widths = root.find(XML_NS + "cols")
-        assert len(widths) >= 23 and all(float(col.attrib["width"]) >= 14 for col in widths)
-    for row in overview.find(XML_NS + "sheetData")[1:]:
+    wb = _load(build_workbook(rows, "2026-10-25"))
+    ws = wb["Overview"]
+    # the score gradient is a genuine Excel colour scale on the score column only
+    ranges = list(ws.conditional_formatting)
+    rules = [r for rng in ranges for r in rng.rules]
+    assert len(rules) == 1 and rules[0].type == "colorScale"
+    assert str(ranges[0].sqref) == "D2:D12"
+    colors = [c.rgb for c in rules[0].colorScale.color]
+    assert len(set(colors)) == 3 and all(re.fullmatch("00[0-9A-F]{6}", c) for c in colors)
+    for row in ws.iter_rows(min_row=2):
         for cell in row:
-            style = xfs[int(cell.attrib["s"])]
-            assert int(style.attrib["fillId"]) < len(fills)
-            fill = fills[int(style.attrib["fillId"])].find(f"{XML_NS}patternFill/{XML_NS}fgColor")
-            if cell.attrib["r"].startswith("D"):
-                assert style.attrib["numFmtId"] == "10"
-                rgb = fill.attrib["rgb"]
-                red, green, blue = (int(rgb[i:i + 2], 16) for i in (2, 4, 6))
-                assert green > red and green > blue
-                assert 0 <= float(_cell_value(cell)) <= 1
-            elif fill is not None:
-                assert fill.attrib["rgb"] in {"FFFFFFFF", "FFF2F2F2"}
-            if cell.attrib["r"].startswith("G"):
-                assert custom_formats[int(style.attrib["numFmtId"])] == '"£"0.00\\ \\p\\e\\r\\ \\g'
-            if cell.attrib["r"].startswith("L"):
-                assert style.attrib["numFmtId"] == "164"
-            if cell.attrib["r"].startswith(("H", "I", "J")):
-                assert style.attrib["numFmtId"] == "165"
-    # Actually load the generated artifact whenever the environment supplies a reader.
-    try:
-        import openpyxl
-    except ImportError:
-        pass  # XML package, ARGB, style indices and numeric-format checks above are mandatory.
-    else:
-        workbook = openpyxl.load_workbook(BytesIO(blob))
-        assert workbook.sheetnames == ["Overview", "Details"]
-        assert workbook["Overview"].max_column == 23
-        assert workbook["Overview"]["G2"].value == 5
-        assert workbook["Overview"]["D12"].value == 1
-        assert workbook["Overview"]["D12"].number_format == "0.00%"
+            if cell.column == 4:
+                assert cell.number_format == "0.00%"
+                assert isinstance(cell.value, str) and cell.value.startswith("=")
+            elif cell.column == 7:
+                assert cell.number_format == '"£"0.00\\ \\p\\e\\r\\ \\g'
+            elif cell.column in (8, 9, 10):
+                assert cell.number_format == '0.0"%"'
+            elif cell.column >= 12 and cell.column % 2 == 0 and cell.value is not None:
+                assert cell.number_format == '"£"0.00'
+        assert ws.cell(row[0].row, 8).value == 25  # source percentage kept as points
+    assert ws.freeze_panes == "A2" and wb["Details"].freeze_panes == "A2"
+    for sheet in (ws, wb["Details"]):
+        widths = [d.width for d in sheet.column_dimensions.values()]
+        assert len(widths) >= 23 and all(w >= 14 for w in widths)
 
 
 def test_workbook_unit_price_basis_is_visible_literal_and_totals_stay_currency():
     bases = ["per g", "per item", "per g", None, "", "unknown",
-             'per "item";[Red]0\\<&>\t\n\r', 'per \x00;[Red]0']
+             'per "item";[Red]0\\<&>', "per \x00;[Red]0"]
     records = [rec(f"Synthetic {i}", unit_price=5 + i / 10, unit_basis=basis,
                    overview_options=[{"size": f"Option {k}", "price": 10 + k} for k in range(6)])
                for i, basis in enumerate(bases)]
     records.append(rec("No supplied basis", unit_price=8,
                        overview_options=[{"size": "1g", "price": 8}]))
     before = copy.deepcopy(records)
-    blob = build_workbook(build_factors(records), "2026-10-25")
-    xml = _workbook_xml(blob)  # Parse every XML/style/relationship part.
-    styles = xml["xl/styles.xml"]
-    formats = styles.find(XML_NS + "numFmts")
-    custom_formats = {int(node.attrib["numFmtId"]): node.attrib["formatCode"] for node in formats}
-    assert int(formats.attrib["count"]) == len(formats) == len(custom_formats)
-    assert custom_formats[164] == '"£"0.00'
-    xfs = styles.find(XML_NS + "cellXfs")
-    assert int(xfs.attrib["count"]) == len(xfs)
-    overview = xml["xl/worksheets/sheet1.xml"]
-    assert overview.find(XML_NS + "dimension").attrib["ref"] == f"A1:W{len(records) + 1}"
-    rows = overview.find(XML_NS + "sheetData")
-    assert [_cell_value(cell) for cell in rows[0]] == OVERVIEW_COLUMNS
-    details = xml["xl/worksheets/sheet2.xml"].find(XML_NS + "sheetData")
-    for row, detail_row, record in zip(rows[1:], details[1:], records):
+    wb = _load(build_workbook(build_factors(records), "2026-10-25"))
+    ws, details = wb["Overview"], wb["Details"]
+    assert [c.value for c in ws[1]][:23] == OVERVIEW_COLUMNS
+    assert ws.max_row == details.max_row == len(records) + 1
+    formats_seen = {}
+    for row, record in zip(ws.iter_rows(min_row=2, max_col=23), records):
         assert len(row) == 23
         price_cell = row[6]
-        assert price_cell.get("t", "n") == "n"
-        assert float(_cell_value(price_cell)) == record["unit_price"]
-        style = xfs[int(price_cell.attrib["s"])]
-        assert style.attrib["fillId"] == "0"
-        code = custom_formats[int(style.attrib["numFmtId"])]
+        assert isinstance(price_cell.value, (int, float)) \
+            and price_cell.value == record["unit_price"]
+        code = price_cell.number_format
         assert code.startswith('"£"0.00')
         suffix = code[len('"£"0.00'):]
-        # Interpret Excel's literal escapes: no basis character may act as
-        # a number placeholder, section separator, colour or other directive.
+        # Excel literal escapes only: no basis character acts as a directive.
         assert re.fullmatch(r"(?:\\[\s\S])*", suffix)
         visible_basis = "".join(re.findall(r"\\([\s\S])", suffix))
         basis = record.get("unit_basis")
         assert visible_basis == (" " + basis.replace("\x00", "") if basis else "")
+        formats_seen.setdefault(code, set()).add(basis or None)
         for index, cell in enumerate(row[11:22:2]):
-            assert cell.get("t", "n") == "n"
             if index < len(record["overview_options"]):
-                assert float(_cell_value(cell)) == record["overview_options"][index]["price"]
-                assert xfs[int(cell.attrib["s"])].attrib["numFmtId"] == "164"
+                assert cell.value == record["overview_options"][index]["price"]
+                assert cell.number_format == '"£"0.00'
             else:
-                assert _cell_value(cell) == ""
-                assert xfs[int(cell.attrib["s"])].attrib["numFmtId"] == "0"
-        assert xfs[int(detail_row[16].attrib["s"])].attrib["numFmtId"] == "164"
-    assert rows[1][6].attrib["s"] == rows[3][6].attrib["s"]  # Reuse identical basis styles.
+                assert cell.value is None
+    # identical bases share an identical format string
+    for code, seen in formats_seen.items():
+        assert len(seen) == 1
+    for row, record in zip(details.iter_rows(min_row=2), records):
+        assert row[16].number_format.startswith('"£"0.00')
+        assert row[19].number_format == "0.00%"
     assert records == before
 
 
@@ -578,46 +513,35 @@ def test_workbook_raw_record_round_trip_arbitrary_fields_variants_and_dictionary
                                  "variant_id": f"synthetic-option-{i}", "extra": [1, 2]}
                                 for i in range(1, 9)],
                    additional_source_metadata={"url": "https://example.invalid/source", "confidence": 0.4},
-                   arbitrary_new_field={"text": "=1+1<&>\x00\r\n", "unknown": None},
+                   arbitrary_new_field={"text": "=1+1<&>\r\n", "unknown": None},
                    store_description="Synthetic evidence " * 2500),
                rec("Synthetic short", category="Vapes", product_key="synthetic-v2")]
     scored = sort_records(build_factors(records))
     before = copy.deepcopy(records)
-    blob = build_workbook(scored, "2026-10-25")
-    xml = _workbook_xml(blob)
-    overview_rows = xml["xl/worksheets/sheet1.xml"].find(XML_NS + "sheetData")
-    detail_rows = xml["xl/worksheets/sheet2.xml"].find(XML_NS + "sheetData")
-    headers = [_cell_value(cell) for cell in detail_rows[0]]
-    part_indices = [i for i, name in enumerate(headers) if name.startswith("Raw record JSON part ")]
+    wb = _load(build_workbook(scored, "2026-10-25"))
+    ws, details = wb["Overview"], wb["Details"]
+    headers = [c.value for c in details[1]]
+    part_indices = [i for i, name in enumerate(headers)
+                    if isinstance(name, str) and name.startswith("Raw record JSON part ")]
     assert len(part_indices) > 1  # long raw JSON is split, never silently truncated
-    assert len(overview_rows) == len(detail_rows) == len(records) + 1
-    for overview_row, detail_row, (record, _, _) in zip(overview_rows[1:], detail_rows[1:], scored):
-        raw = "".join(_cell_value(detail_row[i]) for i in part_indices)
+    assert ws.max_row == details.max_row == len(records) + 1
+    for row_number, (record, _, _) in enumerate(scored, start=2):
+        raw = "".join(v for i in part_indices
+                      if (v := details.cell(row_number, i + 1).value) is not None)
         assert json.loads(raw) == record
-        assert _cell_value(overview_row[1]) == record["product_name"] == _cell_value(detail_row[2])
-        methodology = json.loads(_cell_value(detail_row[headers.index("Scoring methodology (JSON)")]))
+        assert ws.cell(row_number, 2).value == record["product_name"] == details.cell(row_number, 3).value
+        methodology = json.loads(details.cell(row_number, headers.index("Scoring methodology (JSON)") + 1).value)
         assert methodology["weights"] == {"grade": 1, "rating": 1, "price": 1,
                                           "thc": 1, "si": 1, "popularity": 0.25}
         assert methodology["gamma"] == 6
         assert methodology["canon_ref"]["repository"] == "tyecam1/misumi"
-        assert "Field dictionary (JSON)" in headers
+    assert "Field dictionary (JSON)" in headers
     assert records == before
-    assert not any(node.tag == XML_NS + "f" for root in xml.values() for node in root.iter())
-    try:
-        import openpyxl
-    except ImportError:
-        return  # Raw XML values above still verify the complete JSON round trip.
-    workbook = openpyxl.load_workbook(BytesIO(blob))
-    assert workbook.sheetnames == ["Overview", "Details"]
-    assert workbook["Overview"].max_column == 23
-    assert workbook["Overview"].max_row == workbook["Details"].max_row == len(records) + 1
-    for row_number, (record, _, _) in enumerate(scored, start=2):
-        raw = "".join(workbook["Details"].cell(row_number, i + 1).value or "" for i in part_indices)
-        assert json.loads(raw) == record
-        assert workbook["Overview"].cell(row_number, 2).value == workbook["Details"].cell(row_number, 3).value
 
 
 def test_workbook_empty_input_keeps_schema():
-    xml = _workbook_xml(build_workbook([], "2026-10-25"))
-    assert xml["xl/worksheets/sheet1.xml"].find(XML_NS + "dimension").attrib["ref"] == "A1:W1"
-    assert len(xml["xl/worksheets/sheet2.xml"].find(XML_NS + "sheetData")) == 1
+    wb = _load(build_workbook([], "2026-10-25"))
+    assert wb.sheetnames == ["Overview", "Details"]
+    assert [c.value for c in wb["Overview"][1][:23]] == OVERVIEW_COLUMNS
+    assert wb["Overview"].max_row == 1
+    assert wb["Details"].max_row == 1

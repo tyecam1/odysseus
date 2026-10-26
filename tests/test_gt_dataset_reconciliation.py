@@ -1,0 +1,115 @@
+"""Tests for the deterministic GT dataset reconciliation."""
+import pytest
+
+from src.gt_dataset_reconciliation import (
+    find_duplicates, match_research_to_store, normalize_name, reconcile,
+    verify_popularity_capture,
+)
+
+
+def row(name):
+    return {"product_name": name}
+
+
+def prod(pid, name, options=()):
+    return {"id": pid, "name": name, "type": "variable",
+            "in_stock": True, "options": [{"id": i} for i in options]}
+
+
+def capture(ids):
+    return {"captured_at": "2026-10-25T12:00:00+00:00",
+            "source": "https://thegreenteam.store/wp-json/wc/store/v1/products?orderby=popularity",
+            "method": "WooCommerce Store API orderby=popularity, full pagination",
+            "total": len(ids),
+            "ordering": [{"rank": i + 1, "id": pid, "name": f"p{pid}"}
+                         for i, pid in enumerate(ids)]}
+
+
+def test_normalize_unifies_entities_dashes_and_retail_grades():
+    assert normalize_name("Animal Runtz &#8211; AA") == \
+        normalize_name("Animal Runtz – AA")
+    assert normalize_name("SuperBoof AA+") == normalize_name("SuperBoof")
+    assert normalize_name("Cali Gold – Full Melt 90–120u") == \
+        normalize_name("Cali Gold Full Melt 90-120u")
+
+
+def test_research_78_join_to_69_products_and_two_store_only_additions():
+    research = [row(f"Product {i}") for i in range(76)]
+    store = [prod(900 + i, f"Product {i}") for i in range(67)]
+    store += [prod(5000, "Amnesia Haze"), prod(5001, "10/10 Boys Vapes")]
+    result = match_research_to_store(research, store)
+    assert len(result["matched"]) == 67
+    assert len(result["research_not_listed"]) == 9
+    assert result["store_only_additions"] == [
+        {"store_id": 5000, "store_name": "Amnesia Haze"},
+        {"store_id": 5001, "store_name": "10/10 Boys Vapes"}]
+    # the workbook record total: every research row + store-only additions
+    assert len(research) + len(result["store_only_additions"]) == 78
+
+
+def test_unmatched_research_rows_are_never_invented_into_matches():
+    research = [row("Cookie Dawg"), row("Totally Absent Item")]
+    store = [prod(1, "Cookie Dawg &#8211; AA")]
+    result = match_research_to_store(research, store)
+    assert result["matched"][0]["store_id"] == 1
+    assert result["research_not_listed"] == [
+        {"product_name": "Totally Absent Item", "classification": "not listed"}]
+
+
+def test_popularity_capture_verification():
+    good = capture([7, 3, 9])
+    assert verify_popularity_capture(good) == []
+    bad = dict(good, total=5)
+    assert any("total" in p for p in verify_popularity_capture(bad))
+    broken = dict(good, ordering=[good["ordering"][0], good["ordering"][2]])
+    assert any("contiguous" in p for p in verify_popularity_capture(broken))
+    dup = dict(good, ordering=[good["ordering"][0], dict(good["ordering"][0], rank=2)])
+    assert any("duplicate" in p for p in verify_popularity_capture(dup))
+
+
+def test_parent_child_relationships_use_option_variation_ids():
+    store = [prod(1, "Parent", options=(11, 12, 13))]
+    rel = parent_child(store)
+    assert rel == [{"parent_id": 1, "parent_name": "Parent",
+                    "type": "variable", "variation_ids": [11, 12, 13]}]
+
+
+def parent_child(store):
+    from src.gt_dataset_reconciliation import parent_child_relationships
+    return parent_child_relationships(store)
+
+
+def test_duplicates_detected_after_normalization():
+    store = [prod(1, "Gelato &#8211; AA"), prod(2, "Gelato AA")]
+    assert find_duplicates(store) == [{"normalized": "gelato",
+                                       "names": ["Gelato &#8211; AA", "Gelato AA"]}]
+
+
+def test_full_reconcile_classifies_and_totals():
+    research = [row(f"P{i}") for i in range(5)] + [row("Delisted Item")]
+    store = [prod(100 + i, f"P{i}", options=(200 + i,)) for i in range(5)]
+    store.append(prod(1, "Brand New Product"))
+    cap = capture([100, 101, 102, 103, 104, 1])  # Delisted absent from capture
+    prior = store + [prod(999, "Removed Product")]
+    result = reconcile(research, store, cap, prior)
+    assert result["research_rows"] == 6 and result["store_products"] == 6
+    assert result["popularity_capture_verified"] is True
+    assert result["expected_record_total"] == 7  # 6 research + 1 store-only
+    assert result["store_only_additions"] == [
+        {"store_id": 1, "store_name": "Brand New Product"}]
+    assert result["removals_vs_prior"] == [
+        {"store_id": 999, "store_name": "Removed Product"}]
+    assert result["purchase_status"]["purchasable_store_ids"] == [
+        1, 100, 101, 102, 103, 104]
+    assert result["purchase_status"]["purchasable_unverified_against_popularity"] == []
+    assert len(result["parent_child"]) == 6
+
+
+def test_capture_violations_flag_unverified_purchase_status():
+    research = [row("P0")]
+    store = [prod(100, "P0"), prod(777, "Off Capture")]
+    cap = capture([100])  # missing 777
+    result = reconcile(research, store, cap)
+    assert result["popularity_capture_verified"] is False
+    assert result["popularity_capture_violations"]
+    assert 777 in result["purchase_status"]["purchasable_unverified_against_popularity"]
