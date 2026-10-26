@@ -158,6 +158,30 @@ class MusicRuntime:
             return None
         return ""
 
+    def _title_and_artist_match(self, query: str, kind: str) -> str:
+        """For "<title> by <artist>": the URI of the ONE result whose artist contains the artist and whose title is (or starts with, ignoring punctuation and
+        a trailing "(Rip)"-style suffix) the title. "" when there is no such single result, so the controller asks instead of guessing."""
+        parts = re.split(r"\s+by\s+", query, maxsplit=1, flags=re.I)
+        if len(parts) != 2 or not parts[0].strip() or not parts[1].strip() or self._provider is None:
+            return ""
+        flat = lambda v: re.sub(r"[^a-z0-9]", "", v.casefold())      # noqa: E731
+
+        def base_title(title: str) -> str:                           # "Arevil's Gardens (Rip)" / "Blue - Remastered" -> the title without a trailing suffix
+            return flat(re.sub(r"\s*[(\[].*?[)\]]\s*$|\s+-\s+.*$", "", title))
+
+        def artist_is(spoken: str, listed: str) -> bool:             # the spoken artist IS one of the listed artists (whole name, "The" optional): never a substring
+            wanted = re.sub(r"^the", "", spoken)
+            return any(re.sub(r"^the", "", flat(name)) == wanted for name in listed.split(", ")) or flat(listed) == spoken
+
+        title, artist = flat(parts[0]), flat(parts[1])
+        try:
+            found = [i for i in self._provider.search(query, kind)
+                     if artist and title and artist_is(artist, i.artist) and title in (base_title(i.title), flat(i.title))]
+        except Exception:  # noqa: BLE001
+            return ""
+        uris = {i.uri for i in found}
+        return next(iter(uris)) if len(uris) == 1 else ""
+
     def _idle_default_device(self):
         """The configured default device when it is present exactly once. Whether it may be used (only when nothing is active) is decided by the
         controller against ITS OWN device read, via the "idle-id:" reference, so a device becoming active in between is never overridden."""
@@ -237,6 +261,15 @@ class MusicRuntime:
         if device_ref and "device" not in kwargs:
             kwargs["device"] = device_ref
         result: MusicResult = controller.handle(action, request_id=rid, explicit_command=True, guest=False, **kwargs)
+        if result.status == "clarify" and action in ("play", "queue") and kwargs.get("query") and re.search(r"\sby\s", kwargs["query"], re.I):
+            # "<title> by <artist>" that the search left ambiguous only because of noise or a "(Rip)"-style suffix: if exactly ONE result matches both the
+            # artist and the title, that is what was asked for. Two matches (or none) stay a question.
+            exact = self._title_and_artist_match(kwargs["query"], command.kind)
+            if exact:
+                retry = {"uri": exact, "kind": command.kind}
+                if kwargs.get("device"):
+                    retry["device"] = kwargs["device"]
+                result = controller.handle(action, request_id=rid, explicit_command=True, guest=False, **retry)       # the SAME id: one write reservation
         return {"status": result.status, "data": result.data, "trace": result.trace, "text": _speak(result)}
 
 

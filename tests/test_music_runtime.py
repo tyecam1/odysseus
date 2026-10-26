@@ -770,3 +770,74 @@ def test_a_pronoun_with_a_device_is_a_resume_never_a_title_search():
     assert parse_music_command("play the music on the laptop") == MusicCommand("resume", device_hint="laptop")
     assert parse_music_command("queue it on the laptop") is None
     assert parse_music_command("play something on the tv") is None
+
+
+# ---------------------------------------------------------------------------------------------------------------------- "<title> by <artist>"
+NOISY = {"tracks": {"items": [
+    {"uri": "spotify:track:6s7RPRB3sNO4bpaIYntHZ2", "name": "Arevil's Gardens (Rip)", "artists": [{"name": "The Land of Rah"}]},
+    {"uri": "spotify:track:4DaMind0000000000000001", "name": "4 Da Mind", "artists": [{"name": "Masta Ace Incorporated"}]},
+    {"uri": "spotify:track:Sundiata00000000000001", "name": "Sundiata", "artists": [{"name": "Fuse ODG"}]}]}}
+
+
+def test_title_by_artist_plays_the_one_result_that_matches_both(tmp_path):
+    http = FakeHttp()
+    runtime = make_runtime(tmp_path, http)
+    http.push(200, ONE_ACTIVE)                  # the controller's device read
+    http.push(200, NOISY)                       # its search: three different tracks, no exact title -> a question
+    http.push(200, NOISY)                       # my title+artist resolution: exactly one matches both
+    http.push(200, ONE_ACTIVE)                  # the controller again, now with the exact URI
+    http.push(204)
+    http.push(200, dict(PLAYING, item=dict(PLAYING["item"], uri="spotify:track:6s7RPRB3sNO4bpaIYntHZ2")))
+    out = music_reply(runtime, "play Arevil's Gardens by The Land of Rah", "jin", "ta1", allow_writes=True)
+    assert out["status"] == "done"
+    put = [c for c in http.calls if c[0] == "PUT" and "/play" in c[1]][0]
+    assert json.loads(put[3]) == {"uris": ["spotify:track:6s7RPRB3sNO4bpaIYntHZ2"]}
+
+
+def test_title_by_artist_with_two_matching_results_still_asks(tmp_path):
+    http = FakeHttp()
+    runtime = make_runtime(tmp_path, http)
+    two = {"tracks": {"items": [
+        {"uri": "spotify:track:aaa111", "name": "Blue", "artists": [{"name": "Joni Mitchell"}]},
+        {"uri": "spotify:track:bbb222", "name": "Blue (Live)", "artists": [{"name": "Joni Mitchell"}]}]}}
+    http.push(200, ONE_ACTIVE)
+    http.push(200, two)                          # the controller's search: two matches -> a question
+    http.push(200, two)                          # my resolution: two distinct matches -> stays a question
+    out = music_reply(runtime, "play Blue by Joni Mitchell", "jin", "ta2", allow_writes=True)
+    assert out["status"] == "clarify" and writes(http) == []
+
+
+def test_an_artist_that_is_only_a_substring_or_a_longer_title_never_counts_as_a_match(tmp_path):
+    """Sol: 'play Blue by Rah' played Sarah's Blue; 'play Blue by New Order' played Blue Monday because it was the only prefix match."""
+    for spoken, items in (("Blue by Rah", [("Blue", "Sarah"), ("Other Song", "Rah Rah")]),
+                          ("Blue by New Order", [("Blue Monday", "New Order"), ("Unrelated", "Someone")])):
+        http = FakeHttp()
+        runtime = make_runtime(tmp_path / spoken.replace(" ", "_"), http)
+        results = {"tracks": {"items": [{"uri": "spotify:track:%s%02d" % ("x" * 6, n), "name": title, "artists": [{"name": artist}]}
+                                        for n, (title, artist) in enumerate(items)]}}
+        http.push(200, ONE_ACTIVE)
+        http.push(200, results)
+        http.push(200, results)
+        out = music_reply(runtime, "play " + spoken, "jin", "m-" + spoken[:10].replace(" ", "_"), allow_writes=True)
+        assert out["status"] == "clarify" and writes(http) == [], spoken
+
+
+def test_a_retried_request_after_a_resolved_ambiguity_does_not_write_twice(tmp_path):
+    """Sol: the second controller call used its own request id, so an identical retry could write again; both calls share one id now."""
+    http = FakeHttp()
+    runtime = make_runtime(tmp_path, http)
+    http.push(200, ONE_ACTIVE)
+    http.push(200, NOISY)
+    http.push(200, NOISY)
+    http.push(200, ONE_ACTIVE)
+    http.push(204)
+    http.push(200, dict(PLAYING, item=dict(PLAYING["item"], uri="spotify:track:6s7RPRB3sNO4bpaIYntHZ2")))
+    music_reply(runtime, "play Arevil's Gardens by The Land of Rah", "jin", "same-id", allow_writes=True)
+    assert len(writes(http)) == 1
+    runtime._results.clear()                                                  # even if the runtime's own result cache has forgotten the request
+    http.push(200, ONE_ACTIVE)                                                # the retry: this time the search returns ONE result, so the plain path would write
+    http.push(200, {"tracks": {"items": [NOISY["tracks"]["items"][0]]}})
+    http.push(204)
+    http.push(200, dict(PLAYING, item=dict(PLAYING["item"], uri="spotify:track:6s7RPRB3sNO4bpaIYntHZ2")))
+    out = music_reply(runtime, "play Arevil's Gardens by The Land of Rah", "jin", "same-id", allow_writes=True)
+    assert len(writes(http)) == 1, out
