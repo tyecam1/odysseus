@@ -147,6 +147,15 @@ def test_normalized_name_collision_never_drops_a_product():
     assert flipped["matched"][0]["store_id"] == result["matched"][0]["store_id"]
 
 
+def test_collision_group_matches_successive_research_rows():
+    research = [row("Gelato AA"), row("Gelato AAA")]
+    store = [prod(2, "Gelato AAA"), prod(1, "Gelato AA")]  # same normalized name
+    result = match_research_to_store(research, store)
+    assert sorted(m["store_id"] for m in result["matched"]) == [1, 2]
+    assert result["research_not_listed"] == []
+    assert result["store_only_additions"] == []
+
+
 def test_ambiguous_substring_never_matches():
     research = [row("Hash")]
     store = [prod(1, "Hash Lemon"), prod(2, "Lemon Hash Plaza")]

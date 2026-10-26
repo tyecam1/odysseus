@@ -182,6 +182,44 @@ def test_editing_weights_recalculates_all_scores(workbook_blob, tmp_path):
             (rec_["product_name"], got, expected)
 
 
+def test_non_applicable_factor_inputs_are_blank_so_count_matches_engine(workbook_blob):
+    """Edibles with a reported grade: the engine ignores the non-applicable
+    grade factor for the missing penalty, so the cell must stay blank."""
+    blob, scored = workbook_blob
+    wb = load_workbook(BytesIO(blob))
+    ws = wb["Details"]
+    headers = [c.value for c in ws[1]]
+    row = next(i for i, (rec_, _, _) in enumerate(scored, start=2)
+               if rec_["category"] == "Edibles")
+    # EdibleX has a seller-less record; give it a reported grade here via a
+    # fresh build to be exact.
+    from src.product_research import build_factors as bf
+    rec2 = rec("EdibleG", "Edibles", seller_tier="AA", combined_rating=4.0,
+               unit_price=5.0, unit_basis="per item", leafly_rating_count=10,
+               seller_popularity_rank=2)
+    blob2 = build_workbook(bf([rec2]), "2026-10-26")
+    ws2 = load_workbook(BytesIO(blob2))["Details"]
+    h2 = [c.value for c in ws2[1]]
+    assert ws2.cell(2, h2.index(FACTOR_INPUT_COLUMNS[0]) + 1).value is None  # grade
+    assert ws2.cell(2, h2.index(FACTOR_INPUT_COLUMNS[1]) + 1).value is not None
+    assert ws2.cell(2, h2.index("Applicable metric count") + 1).value == 3
+
+
+def test_raw_json_chunks_starting_with_equals_stay_text():
+    from src.product_research import build_factors as bf
+    desc = "=" * 70000
+    record = rec("EqHeavy", category="Vapes", store_description=desc)
+    blob = build_workbook(bf([record]), "2026-10-26")
+    ws = load_workbook(BytesIO(blob))["Details"]
+    headers = [c.value for c in ws[1]]
+    part_cols = [i for i, n in enumerate(headers)
+                 if isinstance(n, str) and n.startswith("Raw record JSON part ")]
+    chunks = [ws.cell(2, i + 1) for i in part_cols]
+    assert all(c.data_type == "s" for c in chunks), "evidence must never be a formula"
+    import json as _json
+    assert _json.loads("".join(c.value for c in chunks))["store_description"] == desc
+
+
 def test_clearing_factor_inputs_moves_the_missing_penalty(workbook_blob, tmp_path):
     """The missing-applicable count is live: clearing two present Edibles
     factors must apply the 0.8^max(0,m-1) penalty exactly as the engine."""

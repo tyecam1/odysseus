@@ -69,14 +69,15 @@ def match_research_to_store(
     for group in groups.values():
         group.sort(key=lambda p: p["id"])  # deterministic pick order
 
-    leftover_collisions: List[Dict[str, Any]] = []
-
     def take_group(key: str) -> Optional[Dict[str, Any]]:
-        group = groups.pop(key, None)
+        """Pop the lowest-id remaining member; leftovers stay reportable."""
+        group = groups.get(key)
         if not group:
             return None
-        leftover_collisions.extend(group[1:])  # never silently dropped
-        return group[0]
+        hit = group.pop(0)
+        if not group:
+            del groups[key]
+        return hit
 
     matched: List[Dict[str, Any]] = []
     unmatched: List[Dict[str, Any]] = []
@@ -96,8 +97,6 @@ def match_research_to_store(
                             "store_id": hit["id"], "store_name": hit["name"]})
     additions = [{"store_id": p["id"], "store_name": p["name"]}
                  for group in sorted(groups.items()) for p in group[1]]
-    additions += [{"store_id": p["id"], "store_name": p["name"]}
-                  for p in sorted(leftover_collisions, key=lambda p: p["id"])]
     additions.sort(key=lambda a: a["store_id"])
     return {"matched": matched, "research_not_listed": unmatched,
             "store_only_additions": additions}

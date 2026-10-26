@@ -133,15 +133,11 @@ def _clean(text: Any) -> str:
 
 
 def _split_raw_json(raw: str) -> List[str]:
-    """Split into cell-sized chunks; no chunk may start with '=' or Excel
-    would store evidence as a formula (shift the boundary instead)."""
-    parts = [raw[i:i + JSON_CHUNK_SIZE]
-             for i in range(0, len(raw), JSON_CHUNK_SIZE)]
-    for i in range(1, len(parts)):
-        while parts[i].startswith("="):
-            parts[i - 1] += parts[i][0]
-            parts[i] = parts[i][1:]
-    return parts
+    """Split into cell-sized chunks. Chunks starting with '=' are stored with
+    data_type 's' at write time (see below), so they remain literal evidence
+    text and never become live formulas."""
+    return [raw[i:i + JSON_CHUNK_SIZE]
+            for i in range(0, len(raw), JSON_CHUNK_SIZE)]
 
 
 def _factor_values(factors) -> Dict[str, Any]:
@@ -258,11 +254,16 @@ def build_workbook(scored_sorted, snapshot_date: str) -> bytes:
                 cell.fill = band
                 cell.alignment = top_align
 
-        # Details live-calculation inputs
+        # Details live-calculation inputs. Non-applicable factor metrics are
+        # left blank so COUNT() reproduces the engine's applicable-relative
+        # missing penalty (the engine ignores non-applicable factors too;
+        # their audit values remain in the JSON columns).
+        applicable = APPLICABLE.get(rec["category"],
+                                    ("rating", "price", "popularity"))
         fv = _factor_values(factors)
         for name in _METRIC_ORDER:
             cell = details.cell(r, IDX_FACTORS[_FACTOR_COLUMN_NAME[name]] + 1)
-            cell.value = fv[name]
+            cell.value = fv[name] if name in applicable else None
             cell.number_format = FACTOR_FMT
             cell.alignment = top_align
         for name in _METRIC_ORDER:
@@ -273,10 +274,7 @@ def build_workbook(scored_sorted, snapshot_date: str) -> bytes:
         gamma_cell = details.cell(r, IDX_GAMMA + 1, GAMMA)
         gamma_cell.number_format = FACTOR_FMT
         gamma_cell.alignment = top_align
-        app_cell = details.cell(r, IDX_APPLICABLE_COUNT + 1,
-                                len(APPLICABLE.get(
-                                    rec["category"],
-                                    ("rating", "price", "popularity"))))
+        app_cell = details.cell(r, IDX_APPLICABLE_COUNT + 1, len(applicable))
         app_cell.alignment = top_align
 
         # live formula chain
