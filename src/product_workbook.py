@@ -3,9 +3,10 @@
 
 Repaired in the 2026-10-26 corrective round: built on openpyxl (a supported,
 tested spreadsheet implementation) instead of hand-rolled OOXML. Composite
-scores are LIVE Excel formulas over Details factor-input cells and editable
-configurable weight cells, so editing an input or a weight recalculates every
-affected score. The score gradient is a genuine Excel conditional colour
+scores are LIVE Excel formulas over per-row Details inputs (six factor cells,
+six weight cells, gamma, applicable-metric count), so editing an input or a
+weight recalculates GM -> B -> C -> missing penalty -> score exactly as the
+Python engine. The score gradient is a genuine Excel conditional colour
 scale, not static per-decile fills. The generation script is the
 deterministic regeneration/re-sort mechanism: rows are ordered by
 product_research.sort_records before writing, because Excel cannot
@@ -14,6 +15,7 @@ automatically re-sort rows when inputs change.
 
 from __future__ import annotations
 
+import io
 import json
 import math
 from datetime import datetime, timezone
@@ -26,8 +28,8 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 from src.product_research import (
-    CANON_REF, GAMMA, SCORING_METHODOLOGY, W_GRADE, W_POPULARITY, W_PRICE,
-    W_RATING, W_SI, W_THC,
+    APPLICABLE, CANON_REF, GAMMA, SCORING_METHODOLOGY, W_GRADE, W_POPULARITY,
+    W_PRICE, W_RATING, W_SI, W_THC,
 )
 
 OVERVIEW_COLUMNS = [
@@ -53,61 +55,56 @@ _BASE_DETAIL_COLUMNS = [
     "Field dictionary (JSON)",
 ]
 
-# Live-calculation columns appended to Details. The six factor cells are the
-# EDITABLE INPUTS of the score formulas; the rest are live formula columns.
+# Live-calculation columns appended to Details. Everything except the audit
+# JSON columns is a per-row EDITABLE INPUT or a live formula, so editing an
+# input or weight recalculates that row's score.
 FACTOR_INPUT_COLUMNS = [
     "Grade factor (input)", "Rating factor (input)", "Price factor (input)",
     "THC factor (input)", "Sativa/Indica factor (input)",
     "Popularity factor (input)",
 ]
+WEIGHT_COLUMNS = [
+    "Weight: grade (input)", "Weight: rating (input)",
+    "Weight: price (input)", "Weight: thc (input)",
+    "Weight: sativa/indica (input)", "Weight: popularity (input)",
+]
+_METRIC_ORDER = ("grade", "rating", "price", "thc", "si", "popularity")
 _CALC_COLUMNS = (
-    ["Missing applicable count"]
-    + [f"w*ln(f) ({name})" for name in
-       ("grade", "rating", "price", "thc", "si", "popularity")]
+    ["Gamma (input)", "Applicable metric count"]
+    + [f"w*ln(f) ({name})" for name in _METRIC_ORDER]
     + ["Sum of present weights", "GM (live)", "B (live)", "C (live)"]
 )
-DETAIL_COLUMNS = _BASE_DETAIL_COLUMNS + FACTOR_INPUT_COLUMNS + _CALC_COLUMNS
+DETAIL_COLUMNS = (_BASE_DETAIL_COLUMNS + FACTOR_INPUT_COLUMNS
+                  + WEIGHT_COLUMNS + _CALC_COLUMNS)
 
-IDX_MISSING_COUNT = len(_BASE_DETAIL_COLUMNS) + len(FACTOR_INPUT_COLUMNS)
 IDX_FACTORS = {name: len(_BASE_DETAIL_COLUMNS) + i
                for i, name in enumerate(FACTOR_INPUT_COLUMNS)}
-IDX_CONTRIB = {name: IDX_MISSING_COUNT + 1 + i
-               for i, name in
-               enumerate(("grade", "rating", "price", "thc", "si", "popularity"))}
-IDX_WSUM = IDX_CONTRIB["popularity"] + 1
+IDX_WEIGHTS = {name: len(_BASE_DETAIL_COLUMNS) + len(FACTOR_INPUT_COLUMNS) + i
+               for i, name in enumerate(WEIGHT_COLUMNS)}
+IDX_GAMMA = IDX_WEIGHTS[WEIGHT_COLUMNS[-1]] + 1
+IDX_APPLICABLE_COUNT = IDX_GAMMA + 1
+IDX_CONTRIB = {name: IDX_APPLICABLE_COUNT + 1 + i for i, name
+               in enumerate(_METRIC_ORDER)}
+IDX_WSUM = IDX_CONTRIB[_METRIC_ORDER[-1]] + 1
 IDX_GM = IDX_WSUM + 1
 IDX_B = IDX_GM + 1
 IDX_C = IDX_B + 1
+IDX_LIVE_LAST = IDX_C
 
-# Configurable weight cells live on Overview row 1 beyond the fixed 23-column
-# table (Y..AF), where they can never collide with data or raw-JSON parts.
-WEIGHT_SHEET = "Overview"
-WEIGHT_CELLS = {
-    "grade": "Z1", "rating": "AA1", "price": "AB1",
-    "thc": "AC1", "si": "AD1", "popularity": "AE1", "gamma": "AF1",
-}
+# Canon defaults for the per-row weight/gamma input cells.
 WEIGHT_DEFAULTS = {"grade": W_GRADE, "rating": W_RATING, "price": W_PRICE,
                    "thc": W_THC, "si": W_SI, "popularity": W_POPULARITY}
-_WEIGHT_TITLE = ("Configurable weights, order grade,rating,price,thc,si,"
-                 "popularity (edit Z1:AE1, gamma in AF1; all scores "
-                 "recalculate; the per-row factor (input) cells in Details "
-                 "feed the formulas. Regeneration/re-sort: rerun the "
-                 "deterministic build; Excel does not re-sort automatically)")
-_WEIGHT_LABELS = [("Y1", _WEIGHT_TITLE)]
-
-
-def _abs_ref(ref: str) -> str:
-    """'BH1' -> '$BH$1' (works for one- and two-letter columns)."""
-    return f"${ref[:-1]}${ref[-1]}"
+_FACTOR_COLUMN_NAME = dict(zip(_METRIC_ORDER, FACTOR_INPUT_COLUMNS))
+_WEIGHT_COLUMN_NAME = dict(zip(_METRIC_ORDER, WEIGHT_COLUMNS))
 
 FIELD_DICTIONARY = {
-    "Composite score (%)": "Relative comparison, not quality certainty; stored on a 0..1 scale; a LIVE formula over the Details factor inputs and weights",
+    "Composite score (%)": "Relative comparison, not quality certainty; stored on a 0..1 scale; a LIVE formula over the Details inputs and weights",
     "Leafly THC (%)": "Cultivar reference THC, not a batch measurement; source percentage points",
     "Sativa (%) / Indica (%)": "Stated source orientation in percentage points, not measured effects",
     "Unit price": "Minimum defensible price per stated unit; compare category AND unit basis only",
     "Inferred grade": "Injected estimate with confidence/provenance, distinct from seller-reported tier",
     "Normalized factors": "Category-relative multipliers; 1 is neutral; absent is not zero",
-    "Factor inputs (live calculation)": "The six '<metric> factor (input)' cells feed the live score formulas; edit one and its row's GM/B/C/score recalculate",
+    "Live calculation inputs": "Per row: six 'factor (input)' cells, six 'Weight:' cells, 'Gamma (input)' and 'Applicable metric count'. Editing any of them recalculates the row's w*ln(f), weight sum, GM, B, C and the Overview composite score, including the missing penalty via COUNT()",
     "Regeneration and re-sort": "Rerun the deterministic build to re-sort: row order (availability, category, score desc, unit price asc) is fixed at generation; Excel does not re-sort automatically",
     "Factor evidence and peer groups (JSON)": "Raw factor inputs, confidence, peer vectors and source pointers",
     "Raw record JSON parts": "Concatenate numbered parts in this row, then decode JSON for ALL input fields, variants and source metadata",
@@ -135,6 +132,18 @@ def _clean(text: Any) -> str:
     return s
 
 
+def _split_raw_json(raw: str) -> List[str]:
+    """Split into cell-sized chunks; no chunk may start with '=' or Excel
+    would store evidence as a formula (shift the boundary instead)."""
+    parts = [raw[i:i + JSON_CHUNK_SIZE]
+             for i in range(0, len(raw), JSON_CHUNK_SIZE)]
+    for i in range(1, len(parts)):
+        while parts[i].startswith("="):
+            parts[i - 1] += parts[i][0]
+            parts[i] = parts[i][1:]
+    return parts
+
+
 def _factor_values(factors) -> Dict[str, Any]:
     """The six editable factor inputs for one record."""
     return {
@@ -155,8 +164,7 @@ def build_workbook(scored_sorted, snapshot_date: str) -> bytes:
     """
     scored_sorted = list(scored_sorted)
     raw_records = [_json(rec) for rec, _, _ in scored_sorted]
-    raw_parts = [[raw[i:i + JSON_CHUNK_SIZE] for i in range(0, len(raw), JSON_CHUNK_SIZE)]
-                 for raw in raw_records]
+    raw_parts = [_split_raw_json(raw) for raw in raw_records]
     part_count = max((len(parts) for parts in raw_parts), default=1)
     detail_headers = DETAIL_COLUMNS + [f"Raw record JSON part {i}"
                                        for i in range(1, part_count + 1)]
@@ -186,7 +194,8 @@ def build_workbook(scored_sorted, snapshot_date: str) -> bytes:
     def basis_number_format(basis) -> str:
         if not basis:
             return MONEY_FMT
-        basis = "".join(ch for ch in str(basis) if not ILLEGAL_CHARACTERS_RE.match(ch))
+        basis = "".join(ch for ch in str(basis)
+                        if not ILLEGAL_CHARACTERS_RE.match(ch))
         if basis not in money_basis_fmt:
             # Excel's backslash quotes the next character literally, so no
             # basis character can act as a format directive.
@@ -203,12 +212,6 @@ def build_workbook(scored_sorted, snapshot_date: str) -> bytes:
         cell = details.cell(1, col, name)
         cell.font = hdr_font
         cell.alignment = top_align
-    for ref, label in _WEIGHT_LABELS:
-        overview[ref] = label
-        overview[ref].alignment = top_align
-    for metric, ref in WEIGHT_CELLS.items():
-        overview[ref] = (GAMMA if metric == "gamma"
-                         else WEIGHT_DEFAULTS[metric])
 
     # -- rows ----------------------------------------------------------------
     for r, (rec, factors, score) in enumerate(scored_sorted, start=2):
@@ -229,9 +232,16 @@ def build_workbook(scored_sorted, snapshot_date: str) -> bytes:
         for col, val in enumerate(ovals, start=1):
             cell = overview.cell(r, col)
             if col == 4:
+                app_letter = get_column_letter(IDX_APPLICABLE_COUNT + 1)
+                first_f = get_column_letter(
+                    IDX_FACTORS[FACTOR_INPUT_COLUMNS[0]] + 1)
+                last_f = get_column_letter(
+                    IDX_FACTORS[FACTOR_INPUT_COLUMNS[-1]] + 1)
+                c_letter = get_column_letter(IDX_C + 1)
                 cell.value = (
-                    f"=MIN(1,MAX(0,Details!{get_column_letter(IDX_C + 1)}{r}"
-                    f"*0.8^MAX(0,Details!{get_column_letter(IDX_MISSING_COUNT + 1)}{r}-1)))")
+                    f"=MIN(1,MAX(0,Details!{c_letter}{r}"
+                    f"*0.8^MAX(0,Details!{app_letter}{r}"
+                    f"-COUNT(Details!{first_f}{r}:{last_f}{r})-1)))")
                 cell.number_format = SCORE_FMT
             elif isinstance(val, (int, float)) and not isinstance(val, bool) \
                     and math.isfinite(val):
@@ -248,56 +258,69 @@ def build_workbook(scored_sorted, snapshot_date: str) -> bytes:
                 cell.fill = band
                 cell.alignment = top_align
 
-        # Details live-calculation chain
+        # Details live-calculation inputs
         fv = _factor_values(factors)
-        metric_order = ("grade", "rating", "price", "thc", "si", "popularity")
-        for name in metric_order:
+        for name in _METRIC_ORDER:
             cell = details.cell(r, IDX_FACTORS[_FACTOR_COLUMN_NAME[name]] + 1)
             cell.value = fv[name]
             cell.number_format = FACTOR_FMT
             cell.alignment = top_align
-        first_factor_letter = get_column_letter(IDX_FACTORS[FACTOR_INPUT_COLUMNS[0]] + 1)
-        weight_range = f"{WEIGHT_SHEET}!Z$1:AE$1"
-        for name in metric_order:
-            fletter = get_column_letter(
-                IDX_FACTORS[_FACTOR_COLUMN_NAME[name]] + 1)
-            contrib = details.cell(r, IDX_CONTRIB[name] + 1)
-            wref = WEIGHT_CELLS[name]
-            contrib.value = (f'=IF({fletter}{r}="",0,'
-                             f'{WEIGHT_SHEET}!{_abs_ref(wref)}*LN({fletter}{r}))')
-            contrib.number_format = FACTOR_FMT
-            contrib.alignment = top_align
+        for name in _METRIC_ORDER:
+            cell = details.cell(r, IDX_WEIGHTS[_WEIGHT_COLUMN_NAME[name]] + 1)
+            cell.value = WEIGHT_DEFAULTS[name]
+            cell.number_format = FACTOR_FMT
+            cell.alignment = top_align
+        gamma_cell = details.cell(r, IDX_GAMMA + 1, GAMMA)
+        gamma_cell.number_format = FACTOR_FMT
+        gamma_cell.alignment = top_align
+        app_cell = details.cell(r, IDX_APPLICABLE_COUNT + 1,
+                                len(APPLICABLE.get(
+                                    rec["category"],
+                                    ("rating", "price", "popularity"))))
+        app_cell.alignment = top_align
+
+        # live formula chain
+        f_letters = {name: get_column_letter(
+            IDX_FACTORS[_FACTOR_COLUMN_NAME[name]] + 1) for name in _METRIC_ORDER}
+        w_letters = {name: get_column_letter(
+            IDX_WEIGHTS[_WEIGHT_COLUMN_NAME[name]] + 1) for name in _METRIC_ORDER}
+        c_letters = {}
+        for name in _METRIC_ORDER:
+            c_letters[name] = get_column_letter(IDX_CONTRIB[name] + 1)
+            cell = details.cell(r, IDX_CONTRIB[name] + 1)
+            cell.value = (f'=IF({f_letters[name]}{r}="",0,'
+                          f'{w_letters[name]}{r}*LN({f_letters[name]}{r}))')
+            cell.number_format = FACTOR_FMT
+            cell.alignment = top_align
         wsum = details.cell(r, IDX_WSUM + 1)
-        wsum.value = (f"=SUMPRODUCT(({first_factor_letter}{r}:"
-                      f"{get_column_letter(IDX_FACTORS[FACTOR_INPUT_COLUMNS[-1]] + 1)}{r}"
-                      f'<>"")*{weight_range})')
+        wsum.value = (f"=SUMPRODUCT(({f_letters['grade']}{r}:"
+                      f"{f_letters['popularity']}{r}<>\"\")"
+                      f"*{w_letters['grade']}{r}:{w_letters['popularity']}{r})")
         wsum.number_format = FACTOR_FMT
-        c_letters = [get_column_letter(IDX_CONTRIB[n] + 1) for n in metric_order]
+        wsum_letter = get_column_letter(IDX_WSUM + 1)
         gm = details.cell(r, IDX_GM + 1)
-        gm.value = (f"=IF({get_column_letter(IDX_WSUM + 1)}{r}<=0,1,"
-                    f"EXP(({c_letters[0]}{r}+{c_letters[1]}{r}+{c_letters[2]}{r}"
-                    f"+{c_letters[3]}{r}+{c_letters[4]}{r}+{c_letters[5]}{r})"
-                    f"/{get_column_letter(IDX_WSUM + 1)}{r}))")
+        gm.value = (f"=IF({wsum_letter}{r}<=0,1,"
+                    f"EXP(({c_letters['grade']}{r}+{c_letters['rating']}{r}"
+                    f"+{c_letters['price']}{r}+{c_letters['thc']}{r}"
+                    f"+{c_letters['si']}{r}+{c_letters['popularity']}{r})"
+                    f"/{wsum_letter}{r}))")
         gm.number_format = FACTOR_FMT
-        b_cell = details.cell(r, IDX_B + 1)
         gm_letter = get_column_letter(IDX_GM + 1)
-        ws_letter = get_column_letter(IDX_WSUM + 1)
-        b_cell.value = (f"=MIN(1,MAX(0,0.5+({gm_letter}{r}-1)*{ws_letter}{r}"
-                        f"/({ws_letter}{r}+2)))")
+        b_cell = details.cell(r, IDX_B + 1)
+        b_cell.value = (f"=MIN(1,MAX(0,0.5+({gm_letter}{r}-1)*{wsum_letter}{r}"
+                        f"/({wsum_letter}{r}+2)))")
         b_cell.number_format = FACTOR_FMT
         b_letter = get_column_letter(IDX_B + 1)
+        g_letter = get_column_letter(IDX_GAMMA + 1)
         c_cell = details.cell(r, IDX_C + 1)
-        gamma_ref = f"{WEIGHT_SHEET}!{_abs_ref(WEIGHT_CELLS['gamma'])}"
         c_cell.value = (f"=IF(AND({b_letter}{r}>0,{b_letter}{r}<1),"
-                        f"{b_letter}{r}^{gamma_ref}"
-                        f"/({b_letter}{r}^{gamma_ref}"
-                        f"+(1-{b_letter}{r})^{gamma_ref}),"
+                        f"{b_letter}{r}^{g_letter}{r}"
+                        f"/({b_letter}{r}^{g_letter}{r}"
+                        f"+(1-{b_letter}{r})^{g_letter}{r}),"
                         f"{b_letter}{r})")
         c_cell.number_format = FACTOR_FMT
-        m_cell = details.cell(r, IDX_MISSING_COUNT + 1)
-        m_cell.value = len(score["missing_applicable"])
 
-        # static audit columns
+        # static audit columns (1..len(base)); raw parts beyond the live block
         dvals = [
             rec.get("product_key") or rec["product_name"], rec["category"],
             rec["product_name"], rec.get("buying_status", "unknown"),
@@ -325,11 +348,7 @@ def build_workbook(scored_sorted, snapshot_date: str) -> bytes:
             _json({"canon_ref": CANON_REF, **SCORING_METHODOLOGY}),
             _json(FIELD_DICTIONARY),
         ]
-        dvals.extend(raw_parts[r - 2] + [None] * (part_count - len(raw_parts[r - 2])))
-        part_start = len(DETAIL_COLUMNS) + 1  # raw parts live beyond the calc block
         for col, val in enumerate(dvals, start=1):
-            if col > len(_BASE_DETAIL_COLUMNS):
-                continue  # factor/calc columns were written as live cells above
             cell = details.cell(r, col)
             if isinstance(val, (int, float)) and not isinstance(val, bool) \
                     and math.isfinite(val):
@@ -342,7 +361,9 @@ def build_workbook(scored_sorted, snapshot_date: str) -> bytes:
                 cell.number_format = SCORE_FMT
             cell.alignment = top_align
         for i, part in enumerate(raw_parts[r - 2]):
-            cell = details.cell(r, part_start + i, _clean(part))
+            cell = details.cell(r, len(DETAIL_COLUMNS) + 1 + i)
+            cell.value = part
+            cell.data_type = "s"  # evidence text, never a formula
             cell.alignment = top_align
 
     # genuine Excel conditional colour scale on the score column only
@@ -362,20 +383,7 @@ def build_workbook(scored_sorted, snapshot_date: str) -> bytes:
     for i in range(1, len(detail_headers) + 1):
         details.column_dimensions[get_column_letter(i)].width = \
             60 if i in (7, 8) else 28
-    for letter in ("Y", "Z", "AA", "AB", "AC", "AD", "AE", "AF"):
-        overview.column_dimensions[letter].width = 30
 
-    import io
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
-
-
-_FACTOR_COLUMN_NAME = {
-    "grade": "Grade factor (input)",
-    "rating": "Rating factor (input)",
-    "price": "Price factor (input)",
-    "thc": "THC factor (input)",
-    "si": "Sativa/Indica factor (input)",
-    "popularity": "Popularity factor (input)",
-}

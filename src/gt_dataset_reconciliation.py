@@ -58,21 +58,36 @@ def match_research_to_store(
 
     Returns matched pairs (with store ids), research rows with no store match
     (classified not listed), and store-only additions. Never invents matches:
-    equality first, then substring containment, then nothing.
+    equality first, then a UNIQUE substring containment, then nothing.
+    Normalized-name collisions never silently drop a product: one member of a
+    collision group may be matched and the rest are reported under
+    ``store_only_additions`` (and ``duplicates``).
     """
-    by_norm: Dict[str, Dict[str, Any]] = {}
+    groups: Dict[str, List[Dict[str, Any]]] = {}
     for product in store_products:
-        by_norm.setdefault(normalize_name(product["name"]), product)
+        groups.setdefault(normalize_name(product["name"]), []).append(product)
+    for group in groups.values():
+        group.sort(key=lambda p: p["id"])  # deterministic pick order
+
+    leftover_collisions: List[Dict[str, Any]] = []
+
+    def take_group(key: str) -> Optional[Dict[str, Any]]:
+        group = groups.pop(key, None)
+        if not group:
+            return None
+        leftover_collisions.extend(group[1:])  # never silently dropped
+        return group[0]
+
     matched: List[Dict[str, Any]] = []
     unmatched: List[Dict[str, Any]] = []
     for row in research_rows:
         key = normalize_name(row["product_name"])
-        hit = by_norm.pop(key, None)
+        hit = take_group(key)
         if hit is None:
-            for sk in sorted(by_norm):
-                if key in sk or sk in key:
-                    hit = by_norm.pop(sk)
-                    break
+            candidates = [sk for sk in sorted(groups)
+                          if key in sk or sk in key]
+            if len(candidates) == 1:  # ambiguous partial names never match
+                hit = take_group(candidates[0])
         if hit is None:
             unmatched.append({"product_name": row["product_name"],
                               "classification": "not listed"})
@@ -80,7 +95,10 @@ def match_research_to_store(
             matched.append({"product_name": row["product_name"],
                             "store_id": hit["id"], "store_name": hit["name"]})
     additions = [{"store_id": p["id"], "store_name": p["name"]}
-                 for _, p in sorted(by_norm.items(), key=lambda kv: kv[1]["id"])]
+                 for group in sorted(groups.items()) for p in group[1]]
+    additions += [{"store_id": p["id"], "store_name": p["name"]}
+                  for p in sorted(leftover_collisions, key=lambda p: p["id"])]
+    additions.sort(key=lambda a: a["store_id"])
     return {"matched": matched, "research_not_listed": unmatched,
             "store_only_additions": additions}
 
@@ -122,10 +140,19 @@ def reconcile(research_rows: Sequence[Mapping[str, Any]],
     if uncovered:
         pop_violations = pop_violations + [
             f"{len(uncovered)} store products absent from the popularity capture"]
+    extras = pop_ids - store_ids
+    if extras:
+        pop_violations = pop_violations + [
+            f"{len(extras)} capture ids absent from the store capture"]
     pop_verified = not pop_violations
+    # purchasable requires stock AND presence in the popularity capture;
+    # out-of-stock store products are classified separately.
+    in_stock_ids = {p["id"] for p in store_products if p.get("in_stock")}
     purchase = {
-        "purchasable_store_ids": sorted(store_ids & pop_ids),
-        "purchasable_unverified_against_popularity": sorted(uncovered),
+        "purchasable_store_ids": sorted(in_stock_ids & pop_ids),
+        "out_of_stock_store_ids": sorted(store_ids - in_stock_ids),
+        "purchasable_unverified_against_popularity":
+            sorted(in_stock_ids - pop_ids),
     }
     removals: List[Dict[str, Any]] = []
     if prior_store_products is not None:

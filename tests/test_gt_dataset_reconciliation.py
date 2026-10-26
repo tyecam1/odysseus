@@ -113,3 +113,45 @@ def test_capture_violations_flag_unverified_purchase_status():
     assert result["popularity_capture_verified"] is False
     assert result["popularity_capture_violations"]
     assert 777 in result["purchase_status"]["purchasable_unverified_against_popularity"]
+
+
+def test_capture_extras_are_not_silent():
+    research = [row("P0"), row("P1")]
+    store = [prod(100, "P0"), prod(101, "P1")]
+    cap = capture([100, 101, 999])  # stale/extra id
+    result = reconcile(research, store, cap)
+    assert result["popularity_capture_verified"] is False
+    assert any("capture ids absent from the store capture" in v
+               for v in result["popularity_capture_violations"])
+
+
+def test_out_of_stock_products_are_not_purchasable():
+    research = [row("P0"), row("P1")]
+    store = [prod(100, "P0"), dict(prod(101, "P1"), in_stock=False)]
+    cap = capture([100, 101])
+    result = reconcile(research, store, cap)
+    assert result["purchase_status"]["purchasable_store_ids"] == [100]
+    assert result["purchase_status"]["out_of_stock_store_ids"] == [101]
+
+
+def test_normalized_name_collision_never_drops_a_product():
+    research = [row("Gelato AA")]
+    store = [prod(2, "Gelato AAA"), prod(1, "Gelato AA")]  # same normalized name
+    result = match_research_to_store(research, store)
+    assert len(result["matched"]) == 1
+    # the unmatched collision member must still be reported, deterministically
+    assert result["store_only_additions"] == [
+        {"store_id": 2, "store_name": "Gelato AAA"}]
+    # and reversing the input order must not change the matched id
+    flipped = match_research_to_store(research, list(reversed(store)))
+    assert flipped["matched"][0]["store_id"] == result["matched"][0]["store_id"]
+
+
+def test_ambiguous_substring_never_matches():
+    research = [row("Hash")]
+    store = [prod(1, "Hash Lemon"), prod(2, "Lemon Hash Plaza")]
+    result = match_research_to_store(research, store)
+    assert result["matched"] == []
+    assert result["research_not_listed"] == [
+        {"product_name": "Hash", "classification": "not listed"}]
+    assert [a["store_id"] for a in result["store_only_additions"]] == [1, 2]
