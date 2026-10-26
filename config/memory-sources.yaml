@@ -51,13 +51,6 @@ sources:
     domain: neutral
     status: planned
 
-sensitivity_rules:
-  # Enforced by the P4 broker, not by this file alone — recorded here so the
-  # allowlist and the rule that governs it live next to each other.
-  default: domain-scoped
-  cross_domain_write: deny
-
-
   - id: initialising-prompt-register
     description: global operator-authored initialising prompts and application-rating pointers
     domain: neutral
@@ -69,3 +62,9 @@ sensitivity_rules:
       but must not inject a prompt automatically, treat ratings as authority, or
       duplicate prompt bodies into domain memory. Exact prompt text remains at
       the registry's immutable prompt_path.
+
+sensitivity_rules:
+  # Enforced by the P4 broker, not by this file alone — recorded here so the
+  # allowlist and the rule that governs it live next to each other.
+  default: domain-scoped
+  cross_domain_write: deny
