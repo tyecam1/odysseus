@@ -256,3 +256,18 @@ def test_revoke_goes_through_the_manager_so_a_refresh_in_flight_cannot_undo_it(m
     lines = []
     assert laptop.cmd_revoke(None, out=lines.append) == 0
     assert calls == ["manager", "revoke"]
+
+
+def test_setup_without_a_terminal_leaves_the_dashboard_open_and_saves_nothing(monkeypatch, tmp_path):
+    monkeypatch.setattr(laptop, "CONFIG_PATH", str(tmp_path / "config.json"))
+    monkeypatch.setattr(laptop.webbrowser, "open", lambda url: True)
+    monkeypatch.setattr(laptop.os, "system", lambda cmd: 0)
+    monkeypatch.setattr("builtins.input", lambda prompt="": (_ for _ in ()).throw(EOFError()))
+    lines = []
+
+    class Args:
+        port, client_id = 18475, ""
+
+    assert laptop.cmd_setup(Args, out=lines.append) == 3
+    assert any("--client-id" in line for line in lines)
+    assert laptop.load_config(str(tmp_path / "config.json")) is None
