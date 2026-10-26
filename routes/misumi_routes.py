@@ -23,6 +23,7 @@ from src.misumi_household import (
     INVENTORY_INTENT, HouseholdReadOnlyAdapter, infer_household_domain, item_question, names_non_physical,
 )
 from src.misumi_memory import MisumiMemory
+from src.music_runtime import MUSIC_PERSONA, MusicRuntime, music_reply
 from src.misumi_observability import MisumiEventLog
 from src.misumi_advisory import Advisory, advisory_instruction, parse_advisory
 from src.misumi_persona_routing import resolve_auto_lead
@@ -124,6 +125,8 @@ class MisumiRespondRequest(BaseModel):
     retention_mode: Literal["auto", "off"] = "auto"
     persist_turn: bool = True
     history_mode: Optional[Literal["auto", "off"]] = None
+    # Optional client idempotency key: a retried music command carrying the same key is answered from the first result, not executed again.
+    request_id: Optional[str] = Field(default=None, max_length=64, pattern=r"^[A-Za-z0-9._:-]{1,64}$")
 
 
 class MisumiRouteExplainRequest(BaseModel):
@@ -1473,6 +1476,8 @@ def setup_misumi_routes(
 ) -> APIRouter:
     router = APIRouter(prefix="/misumi", tags=["misumi"])
     adapter = HouseholdReadOnlyAdapter()
+    # Jin's music capability (Spotify). Present only when the owner has authorised it on this runtime; MISUMI_MUSIC=0 switches it off.
+    music_runtime = MusicRuntime(DATA_DIR) if os.environ.get("MISUMI_MUSIC", "1") != "0" else None
     task_router = MisumiTaskRouter(adapter)
     events = MisumiEventLog()
     memory = MisumiMemory(memory_root)
@@ -1934,6 +1939,56 @@ def setup_misumi_routes(
                 "the main assistant always keeps them.")}
         # Strip only the bounded address forms; preserve names used as household content and the original prompt for other paths.
         hh_prompt = strip_addressee(prompt)
+        # Music is Jin's governed capability: a plain request to play/pause/skip/queue/ask what's playing is executed (or honestly refused) here,
+        # in a worker thread (the Spotify calls block), and answered in Jin's voice. Anything else falls through unchanged.
+        # Only the user's own words (body.prompt) can be a music command: never the interface context or intent fallback (ambient text), and
+        # changing playback needs the caller's execute authority. body.request_id is an optional client idempotency key (a retried request
+        # with the same key does not play twice).
+        music_text = strip_addressee((body.prompt or "").strip()) if (body.prompt or "").strip() else ""
+        music_writes = True
+        try:
+            _require_api_scope(request, "misumi:execute")
+        except HTTPException:
+            music_writes = False
+        music_turn = (await asyncio.to_thread(music_reply, music_runtime, music_text, persona, body.request_id or request_id, music_writes)
+                      if (music_runtime is not None and music_text) else None)
+        if music_turn is not None:
+            music_persona = MUSIC_PERSONA
+            events.emit({
+                "request_id": request_id,
+                "persona": music_persona,
+                "persona_source": "auto" if auto_route else "requested",
+                "routing": routing,
+                "files_read": [],
+                "files_changed": [],
+                "model": None,
+                "backend": None,
+                "latency_ms": int((time.monotonic() - started) * 1000),
+                "outcome": "music:" + str(music_turn["status"]),
+                "approval_mode": "none",
+            })
+            music_response = {
+                "text": music_turn["text"],
+                "state": "speaking",
+                "mood": body.mood or "focused",
+                "source": "music",
+                "node": "odysseus",
+                "persona": music_persona,
+                "persona_source": "auto" if auto_route else "requested",
+                "who": persona_record(music_persona).get("display_name"),
+                "audio_url": None,
+                "voice": None,
+                "tts_provider": None,
+                "request_id": request_id,
+                "sources": [],
+                "session_id": body.session_id,
+                "retention": None,
+                "history_persisted": False,
+                "music": {"status": music_turn["status"], "capability": "music.*", "provider": "spotify"},
+            }
+            if routing is not None:
+                music_response["routing"] = routing
+            return music_response
         domain = infer_household_domain(hh_prompt)
         # A question about one item is resolved against the allowlisted household record index. The household answers on its
         # own ONLY for an exact record; any other item question goes to the model (with the candidate records as quoted data
