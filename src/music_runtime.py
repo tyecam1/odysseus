@@ -112,7 +112,10 @@ class MusicRuntime:
         Changing playback needs ``allow_writes`` (the caller's execute authority); reading it does not."""
         if command.action not in _READS and not allow_writes:
             return {"status": "refused", "data": {}, "trace": {}, "text": "This connection isn't allowed to change playback."}
-        controller = self._build()
+        try:
+            controller = self._build()
+        except OSError:
+            controller = None
         if controller is None:
             return {"status": "not_connected", "data": {}, "trace": {},
                     "text": "Spotify isn't connected on this system yet, so I can't play anything. The owner has to authorise it first."}

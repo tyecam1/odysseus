@@ -77,7 +77,7 @@ def parse_music_command(text: str) -> Optional[MusicCommand]:
     if _DEVICES.match(bare):
         return MusicCommand("devices")
     work_with_please = work
-    match = _VOLUME_SET.match(work)
+    match = _VOLUME_SET.match(bare)
     if match:
         return MusicCommand("volume", volume=int(match.group("n")))
     match = _VOLUME_REL.match(bare)
