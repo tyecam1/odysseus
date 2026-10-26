@@ -65,6 +65,7 @@ from __future__ import annotations
 import argparse
 import glob
 import os
+import re
 import signal
 import stat
 import subprocess
@@ -89,17 +90,44 @@ START_URL = "https://www.instagram.com/accounts/login/"
 def _find_chromium_binary() -> str:
     """Locate the Playwright-managed Chromium binary already installed
     for this host (shared with src/meta_export_automation.py - both use
-    the same ~/.cache/ms-playwright cache and the same persistent
+    the same Playwright browsers cache and the same persistent
     profile, so a session established here is exactly what the steady-
     state automation reuses)."""
-    candidates = sorted(
-        glob.glob(str(Path.home() / ".cache" / "ms-playwright" / "chromium-*" / "chrome-linux64" / "chrome")),
-        reverse=True,
+    bases = []
+    env_base = os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
+    if env_base:
+        bases.append(Path(env_base))
+    bases.append(Path.home() / ".cache" / "ms-playwright")
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if local_app_data:
+        bases.append(Path(local_app_data) / "ms-playwright")
+    leaves = (
+        ("chromium-*", "chrome-linux64", "chrome"),
+        ("chromium-*", "chrome-win64", "chrome.exe"),
+        ("chromium-*", "chrome-win", "chrome.exe"),
     )
+    candidates = [
+        path
+        for base in bases
+        for leaf in leaves
+        for path in glob.glob(str(base.joinpath(*leaf)))
+    ]
+
+    def _revision(path: str) -> tuple:
+        # Revision comes from the chromium-NNNN directory component itself,
+        # never a parent directory that merely contains such a name.
+        revs = [
+            int(part.split("-", 1)[1])
+            for part in Path(path).parts
+            if part.startswith("chromium-") and part[len("chromium-"):].isdigit()
+        ]
+        return (-(max(revs) if revs else 0), path)
+
     if candidates:
-        return candidates[0]
+        return sorted(candidates, key=_revision)[0]
+    searched = ", ".join(str(base) for base in bases)
     raise SystemExit(
-        "no Playwright-managed Chromium found under ~/.cache/ms-playwright - "
+        f"no Playwright-managed Chromium found (searched {searched}) - "
         "run `python3 -m playwright install chromium` once first (or "
         "`npx playwright install chromium`, same shared cache either way)"
     )
