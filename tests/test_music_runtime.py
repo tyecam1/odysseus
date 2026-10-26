@@ -841,3 +841,38 @@ def test_a_retried_request_after_a_resolved_ambiguity_does_not_write_twice(tmp_p
     http.push(200, dict(PLAYING, item=dict(PLAYING["item"], uri="spotify:track:6s7RPRB3sNO4bpaIYntHZ2")))
     out = music_reply(runtime, "play Arevil's Gardens by The Land of Rah", "jin", "same-id", allow_writes=True)
     assert len(writes(http)) == 1, out
+
+
+def test_the_field_filtered_search_is_used_to_find_title_and_artist(tmp_path):
+    """Live finding: the plain 'X by Y' search returned noise without the track; track:"X" artist:"Y" returns it."""
+    http = FakeHttp()
+    runtime = make_runtime(tmp_path, http)
+    only = {"tracks": {"items": [NOISY["tracks"]["items"][0]]}}
+    http.push(200, ONE_ACTIVE)
+    http.push(200, NOISY)                        # the controller's plain search: noise
+    http.push(200, only)                         # my filtered search: the exact track
+    http.push(200, ONE_ACTIVE)
+    http.push(204)
+    http.push(200, dict(PLAYING, item=dict(PLAYING["item"], uri="spotify:track:6s7RPRB3sNO4bpaIYntHZ2")))
+    out = music_reply(runtime, "play Arevil's Gardens by The Land of Rah", "jin", "ff1", allow_writes=True)
+    assert out["status"].startswith("done")
+    sent = " ".join(urllib.parse.unquote_plus(c[1]) for c in http.calls if "/search" in c[1])
+    assert "track:\"Arevil's Gardens\" artist:\"The Land of Rah\"" in sent
+
+
+def test_a_filtered_search_with_only_near_misses_falls_back_to_the_plain_query(tmp_path):
+    """Sol: filtered results of just 'Blue Boy' stopped the loop before the plain query (which holds 'Blue') was tried."""
+    http = FakeHttp()
+    runtime = make_runtime(tmp_path, http)
+    plain = {"tracks": {"items": [{"uri": "spotify:track:aaa111", "name": "Blue", "artists": [{"name": "Joni Mitchell"}]},
+                                  {"uri": "spotify:track:zzz999", "name": "Other", "artists": [{"name": "Nobody"}]}]}}
+    near = {"tracks": {"items": [{"uri": "spotify:track:bbb222", "name": "Blue Boy", "artists": [{"name": "Joni Mitchell"}]}]}}
+    http.push(200, ONE_ACTIVE)
+    http.push(200, plain)                        # the controller's plain search: two results -> a question
+    http.push(200, near)                         # my filtered search: only a near miss
+    http.push(200, plain)                        # my plain search: 'Blue' by Joni Mitchell matches strictly
+    http.push(200, ONE_ACTIVE)
+    http.push(204)
+    http.push(200, dict(PLAYING, item=dict(PLAYING["item"], uri="spotify:track:aaa111")))
+    out = music_reply(runtime, "play Blue by Joni Mitchell", "jin", "ff2", allow_writes=True)
+    assert out["status"].startswith("done") and [json.loads(c[3]) for c in writes(http) if "/play" in c[1]] == [{"uris": ["spotify:track:aaa111"]}]
