@@ -19,6 +19,7 @@ import argparse
 import hashlib
 import json
 import logging
+import math
 import os
 import shutil
 import stat
@@ -32,6 +33,7 @@ from urllib.parse import urlparse
 
 from src.constants import DATA_DIR
 from src.instagram_import_job import DEFAULT_EXPORTS_DIR
+from src.misumi_state_io import DEFAULT_LOCK_TIMEOUT_S, _os_lock, _os_unlock
 from src.meta_export_automation import (
     PROFILE_DIR,
     MetaSessionExpired,
@@ -39,6 +41,7 @@ from src.meta_export_automation import (
     _guarded_goto,
     _install_navigation_guard,
 )
+from src.private_state_io import check_private_path, private_dir as _private_dir, private_file
 
 
 logger = logging.getLogger(__name__)
@@ -150,21 +153,6 @@ def instagram_export_job_registration() -> dict[str, Any]:
     }
 
 
-def _private_dir(path: Path) -> None:
-    path.mkdir(parents=True, exist_ok=True, mode=0o700)
-    try:
-        path.chmod(0o700)
-    except OSError:
-        pass
-
-
-def _fchmod_owner_only(fd: int) -> None:
-    """Harden an already-open fd to owner-only where the platform supports it."""
-    if hasattr(os, "fchmod"):
-        os.fchmod(fd, stat.S_IRUSR | stat.S_IWUSR)
-    # Windows has no os.fchmod; the fd is created with a restrictive mode
-    # argument and the data directory's ownership ACLs already limit access
-    # to the service user, so there is nothing further to tighten here.
 
 def _fsync_dir(path: Path) -> None:
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
@@ -179,55 +167,17 @@ def _fsync_dir(path: Path) -> None:
 
 
 @contextmanager
-def _acquisition_lock(state_path: Path):
-    """Serialize acquisition transitions across processes (POSIX or Windows)."""
-    _private_dir(state_path.parent)
+def _acquisition_lock(state_path: Path, *, timeout: float = DEFAULT_LOCK_TIMEOUT_S):
+    """Serialize transitions on the same lock inode on POSIX and Windows."""
+    if not math.isfinite(timeout) or timeout < 0:
+        raise ValueError("acquisition lock timeout must be finite and nonnegative")
     lock_path = state_path.parent / f".{state_path.name}.lock"
-    flags = os.O_RDWR | os.O_CREAT
-    flags |= getattr(os, "O_CLOEXEC", 0)
-    flags |= getattr(os, "O_NOFOLLOW", 0)
-    fd = os.open(lock_path, flags, stat.S_IRUSR | stat.S_IWUSR)
-    try:
-        _fchmod_owner_only(fd)
-        unlock = _lock_fd_exclusive(fd)
+    with private_file(lock_path, os.O_RDWR | os.O_CREAT) as fd:
+        _os_lock(fd, timeout)
         try:
             yield
         finally:
-            unlock()
-    finally:
-        os.close(fd)
-
-
-def _lock_fd_exclusive(fd: int) -> Callable[[], None]:
-    """Lock fd exclusively; return an unlock callable.
-
-    Uses fcntl on POSIX and msvcrt on Windows. RuntimeError is a last resort
-    only when the platform supports neither locking primitive.
-    """
-    try:
-        import fcntl
-    except ImportError:
-        fcntl = None  # type: ignore[assignment]
-    if fcntl is not None:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        return lambda: fcntl.flock(fd, fcntl.LOCK_UN)
-    try:
-        import msvcrt
-    except ImportError:
-        msvcrt = None  # type: ignore[assignment]
-    if msvcrt is not None:
-        # msvcrt has no blocking lock; emulate fcntl's blocking LOCK_EX with
-        # bounded non-blocking retries.
-        import time
-
-        while True:
-            try:
-                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
-                break
-            except OSError:
-                time.sleep(0.1)
-        return lambda: msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
-    raise RuntimeError("durable Instagram acquisition requires POSIX or Windows file locking")
+            _os_unlock(fd, close=False)
 
 
 def save_acquisition_state(
@@ -237,6 +187,8 @@ def save_acquisition_state(
     """Persist state 0600 using fsync + atomic sibling replacement."""
     target = Path(path)
     _private_dir(target.parent)
+    if target.exists() or target.is_symlink():
+        check_private_path(target)
     payload = dict(state)
     payload["version"] = STATE_VERSION
     if payload.get("state") not in STATES:
@@ -245,18 +197,16 @@ def save_acquisition_state(
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     flags |= getattr(os, "O_CLOEXEC", 0)
     flags |= getattr(os, "O_NOFOLLOW", 0)
-    fd = os.open(tmp, flags, stat.S_IRUSR | stat.S_IWUSR)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8", closefd=False) as handle:
-            json.dump(payload, handle, sort_keys=True, separators=(",", ":"))
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
+        with private_file(tmp, flags) as fd:
+            with os.fdopen(fd, "w", encoding="utf-8", closefd=False) as handle:
+                json.dump(payload, handle, sort_keys=True, separators=(",", ":"))
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
         os.replace(tmp, target)
-        os.chmod(target, 0o600)
         _fsync_dir(target.parent)
     finally:
-        os.close(fd)
         try:
             tmp.unlink()
         except FileNotFoundError:
@@ -272,15 +222,11 @@ def _append_operator_gate(
     flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
     flags |= getattr(os, "O_CLOEXEC", 0)
     flags |= getattr(os, "O_NOFOLLOW", 0)
-    fd = os.open(path, flags, stat.S_IRUSR | stat.S_IWUSR)
-    try:
-        _fchmod_owner_only(fd)
+    with private_file(path, flags) as fd:
         with os.fdopen(fd, "a", encoding="utf-8", closefd=False) as handle:
             handle.write(json.dumps(dict(gate), sort_keys=True, separators=(",", ":")) + "\n")
             handle.flush()
             os.fsync(handle.fileno())
-    finally:
-        os.close(fd)
 
 
 def _new_state(now: datetime) -> dict[str, Any]:
@@ -342,6 +288,9 @@ def load_acquisition_state(
     """
     current = now or _utcnow()
     target = Path(path)
+    if target.exists() or target.is_symlink():
+        check_private_path(target.parent)
+        check_private_path(target)
     try:
         with target.open("r", encoding="utf-8") as handle:
             state = json.load(handle)
