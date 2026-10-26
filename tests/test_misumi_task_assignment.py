@@ -12,6 +12,9 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from routes import misumi_routes as mr
+from tests.test_misumi_durable_authority import _turn, estate  # noqa: F401
+from tests.test_misumi_ratification_dialogue import _isolated_seed_root  # noqa: F401  (autouse seed root)
+from tests.test_misumi_round8_repairs import _ratify_route
 from services.memory.skills import SkillsManager
 from src.misumi_team_formation import plan_team, task_assignment
 
@@ -49,9 +52,13 @@ def test_the_assignment_never_changes_who_is_recruited_or_why():
     assert set(item) == {"persona", "kind", "evidence", "edge", "assignment"}
 
 
-def test_no_recruitment_means_no_assignment():
-    result = plan("Plan a quiet evening")
-    assert result["decision"] == "solo" and result["supports"] == []
+def test_assignments_are_independent_between_turns_and_a_quiet_turn_has_none():
+    first = plan("Plan the meals within the budget")
+    support(first)["assignment"]["focus_intents"].append("leak")
+    second = plan("Plan the meals within the budget")
+    assert support(second)["assignment"]["focus_intents"] == ["budget"]           # no shared state across turns
+    quiet = plan("Plan a quiet evening")
+    assert quiet["decision"] == "solo" and quiet["supports"] == [] and "assignment" not in str(quiet)
 
 
 @pytest.mark.parametrize("raw,expected", [
@@ -137,3 +144,52 @@ def test_route_explain_exposes_the_assignment_for_a_caller_selected_lead(client)
     assert body["team"]["supports"][0]["persona"] == "l"
     assert body["team"]["supports"][0]["assignment"] == {"task_role": "critic", "focus_intents": ["budget"]}
     assert body["executes_model"] is False and body["writes_state"] is False
+
+
+# --- a support that is ALSO the learned (structured) consult never received an assignment, so none may be reported ---------------
+
+
+def test_the_reported_support_drops_the_assignment_only_for_the_structured_overlap():
+    item = {"persona": "jin", "kind": "intent", "assignment": task_assignment(["music"])}
+    other = {"persona": "misato", "kind": "named", "assignment": task_assignment([])}
+    assert "assignment" not in mr._reported_support(item, "jin") and mr._reported_support(item, "jin")["persona"] == "jin"
+    assert mr._reported_support(other, "jin") is other and mr._reported_support(item, None) is item
+    assert mr._handover_purpose("caretaker", mr._reported_support(item, "jin").get("assignment")) == "analyse from the caretaker perspective"
+
+
+def test_through_the_real_route_only_the_non_overlapping_support_receives_an_assignment(estate, monkeypatch):
+    _ratify_route(estate, "kitchen", "r")                         # a ratified learned route: "kitchen" questions also consult jin
+    received = {}
+
+    async def fake_consult(prompt, target, backend, model, lead="aoteru", structured=False, assignment=None):
+        received[target] = (structured, assignment)
+        return "ANGLE: alternatives"
+
+    async def fake_turn(prompt, persona, **kwargs):
+        return {"answer": "ok", "memory": None, "artifact": None, "retention_decided": True}
+
+    monkeypatch.setattr(mr, "_consult_persona", fake_consult)
+    monkeypatch.setattr(mr, "_model_turn", fake_turn)
+    monkeypatch.setattr(mr, "_team_plan", lambda prompt, persona, primary_reply="": {
+        "decision": "team", "reasons": ["test"], "excluded": [], "supports": [
+            {"persona": "jin", "kind": "intent", "evidence": {"named_at": None, "intents": ["music"]}, "edge": True,
+             "assignment": task_assignment(["music"])},
+            {"persona": "misato", "kind": "intent", "evidence": {"named_at": None, "intents": ["rota"]}, "edge": True,
+             "assignment": task_assignment(["rota"])}]})
+    from src.misumi_observability import MisumiEventLog
+    emitted = []
+    original_emit = MisumiEventLog.emit
+
+    def capture(self, event):
+        emitted.append(event)
+        return original_emit(self, event)
+    monkeypatch.setattr(MisumiEventLog, "emit", capture)
+    _turn(estate, "Any ideas to make the kitchen feel brighter?", persona="auto", session="assign-overlap")
+    assert received["jin"] == (True, None)                         # the learned consult: structured, never an assignment
+    assert received["misato"] == (False, {"task_role": "critic", "focus_intents": ["rota"]})
+    # what the response/event REPORTS must match what the consult actually received
+    team = next(event["team"] for event in emitted if event.get("team"))
+    by_persona = {item["persona"]: item for item in team["supports"]}
+    assert "assignment" not in by_persona["jin"] and by_persona["misato"]["assignment"] == {"task_role": "critic", "focus_intents": ["rota"]}
+    purposes = {item["to"]: item["purpose"] for item in team["handovers"]}
+    assert "critic" not in purposes["jin"] and purposes["misato"].startswith("critic: analyse from the ") and purposes["misato"].endswith("focusing on rota")

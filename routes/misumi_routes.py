@@ -338,6 +338,14 @@ def _assignment_instruction(assignment: Optional[Dict[str, Any]]) -> str:
     return text + ". This is a temporary assignment: your identity and permanent role are unchanged."
 
 
+def _reported_support(item: Dict[str, Any], structured_persona: Optional[str]) -> Dict[str, Any]:
+    """A support record as REPORTED: a persona consulted as the learned (structured) consult never received this turn's assignment, so the
+    team block must not claim one for it (Sol review of the assignment PR)."""
+    if structured_persona and item.get("persona") == structured_persona:
+        return {key: value for key, value in item.items() if key != "assignment"}
+    return item
+
+
 def _handover_purpose(role: Any, assignment: Optional[Dict[str, Any]]) -> str:
     base = f"analyse from the {role} perspective"
     task_role, focus = _assignment_parts(assignment)
@@ -2241,6 +2249,7 @@ def setup_misumi_routes(
             _persist_conversation_turn(session_manager, session_id, prompt, text, persona)
 
         team_block: Optional[Dict[str, Any]] = None
+        structured_overlap = learned_consult["persona"] if learned_consult is not None else None
         if team_plan is not None and backend and model and model_required:
             team_block = {
                 "lead": persona,
@@ -2248,13 +2257,14 @@ def setup_misumi_routes(
                 "reasons": team_plan["reasons"],
                 "excluded": team_plan["excluded"],
                 "supports": [
-                    {**item, **consult_trace.get(item["persona"], {"status": "not-run"})}
+                    {**_reported_support(item, structured_overlap), **consult_trace.get(item["persona"], {"status": "not-run"})}
                     for item in team_plan["supports"]
                 ],
                 "handovers": [
                     {
                         "from": persona, "to": item["persona"], "returned_to": persona,
-                        "purpose": _handover_purpose(persona_record(item['persona']).get('role'), item.get('assignment')),
+                        "purpose": _handover_purpose(persona_record(item['persona']).get('role'),
+                                                     _reported_support(item, structured_overlap).get('assignment')),
                     }
                     for item in team_plan["supports"]
                 ],
