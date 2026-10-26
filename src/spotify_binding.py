@@ -41,6 +41,7 @@ API_URL = "https://api.spotify.com/v1"
 SCOPES = ("user-read-playback-state", "user-read-currently-playing", "user-modify-playback-state")
 SESSION_TTL_S = 600
 REFRESH_SKEW_S = 60
+LOCK_WAIT_S = 30
 HTTP_TIMEOUT_S = 15
 MAX_RESPONSE_BYTES = 1 << 20
 _SEARCH_TYPES = {"track", "album", "playlist", "artist"}
@@ -159,6 +160,38 @@ class MemoryTokenStore:
             self._record = None
 
 
+def _lock_file(handle, wait_s: float) -> None:
+    """Take an exclusive OS lock on `handle`, polling until `wait_s`; raises ProviderError("offline") if it stays contended."""
+    deadline = time.monotonic() + wait_s
+    while True:
+        try:
+            if os.name == "nt":
+                import msvcrt
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except OSError:
+            if time.monotonic() >= deadline:
+                raise ProviderError("offline", "token store busy") from None
+            time.sleep(0.05)
+
+
+def _unlock_file(handle) -> None:
+    try:
+        if os.name == "nt":
+            import msvcrt
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    except OSError:
+        pass
+
+
 class FileTokenStore:
     """Token custody in one file, always passed through caller-supplied ``protect``/``unprotect`` (Windows DPAPI on the laptop).
 
@@ -173,26 +206,23 @@ class FileTokenStore:
 
     @contextlib.contextmanager
     def exclusive(self):
-        """One refresh/revoke at a time across threads AND processes (an OS lock on a sibling lock file)."""
-        with self._exclusive:
+        """One refresh/revoke at a time across threads AND processes (an OS lock on a sibling lock file).
+
+        Acquisition is bounded (LOCK_WAIT_S, longer than one HTTP call) and non-blocking-polled on both platforms, because msvcrt's blocking
+        lock gives up after about ten seconds with a bare OSError; contention that outlasts the bound is a typed "offline" error."""
+        if not self._exclusive.acquire(timeout=LOCK_WAIT_S):
+            raise ProviderError("offline", "token store busy")
+        try:
             directory = os.path.dirname(os.path.abspath(self.path))
             os.makedirs(directory, exist_ok=True)
             with open(self.path + ".lock", "a+b") as handle:
-                if os.name == "nt":
-                    import msvcrt
-                    handle.seek(0)
-                    msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
-                else:
-                    import fcntl
-                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                _lock_file(handle, LOCK_WAIT_S)
                 try:
                     yield
                 finally:
-                    if os.name == "nt":
-                        handle.seek(0)
-                        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-                    else:
-                        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                    _unlock_file(handle)
+        finally:
+            self._exclusive.release()
 
     def load(self) -> Optional[TokenRecord]:
         with self._lock:
@@ -313,17 +343,19 @@ class TokenManager:
         if record is None:
             raise ProviderError("auth", "not connected")
         if force_refresh or record.expires_at - self._now() <= REFRESH_SKEW_S:
-            record = self._refresh(record.refresh_token, force_refresh)
+            record = self._refresh(record, force_refresh)
         return record.access_token
 
-    def _refresh(self, stale_refresh_token: str, force: bool) -> TokenRecord:
-        """Refresh under the store's exclusive section, as compare-and-swap: whoever got the lock first rotates the token; everyone else
-        reloads and uses the result instead of replaying a refresh token that is already spent (which would read as invalid_grant)."""
+    def _refresh(self, stale: TokenRecord, force: bool) -> TokenRecord:
+        """Refresh under the store's exclusive section, as compare-and-swap on the record this caller saw: whoever got the lock first
+        refreshes; everyone else reloads and uses that result instead of refreshing again (and, when Spotify rotates the refresh token,
+        instead of replaying a spent one, which would read as invalid_grant). The access token changes on every refresh even when the
+        refresh token does not, so it is the generation marker."""
         with self.store.exclusive():
             record = self.store.load()
             if record is None:
                 raise ProviderError("auth", "not connected")          # revoked while this call was waiting
-            if record.refresh_token != stale_refresh_token and record.expires_at - self._now() > REFRESH_SKEW_S:
+            if record.access_token != stale.access_token and record.expires_at - self._now() > REFRESH_SKEW_S:
                 return record                                          # another manager already refreshed
             status, headers, body = self.http("POST", TOKEN_URL, {"Content-Type": "application/x-www-form-urlencoded"}, _form({
                 "grant_type": "refresh_token", "refresh_token": record.refresh_token, "client_id": self.client_id}), HTTP_TIMEOUT_S)

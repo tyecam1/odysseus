@@ -21,6 +21,7 @@ import html
 import http.server
 import json
 import os
+import socket
 import sys
 import threading
 import time
@@ -105,6 +106,16 @@ def redirect_uri(port):
 
 
 # --------------------------------------------------------------------------------------------------------------------- loopback callback
+CONNECTION_DEADLINE_S = 10
+
+
+def _hang_up(connection):
+    try:
+        connection.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        pass
+
+
 _PAGE = "<!doctype html><meta charset=utf-8><title>Misumi</title><body style='font:16px sans-serif;margin:3em'><h2>%s</h2><p>You can close this tab.</p>"
 
 
@@ -118,7 +129,17 @@ def wait_for_callback(port, timeout=WAIT_S, started=None, expected_state=None):
     result, ready = {}, threading.Event()
 
     class Handler(http.server.BaseHTTPRequestHandler):
-        timeout = 5                            # per accepted connection
+        timeout = 5                            # inactivity timeout per accepted connection
+
+        def handle(self):
+            """An ABSOLUTE deadline too: a client that keeps trickling bytes never trips the inactivity timeout."""
+            killer = threading.Timer(CONNECTION_DEADLINE_S, lambda: _hang_up(self.connection))
+            killer.daemon = True
+            killer.start()
+            try:
+                super().handle()
+            finally:
+                killer.cancel()
 
         def log_message(self, *args):          # no request logging: the query holds the authorisation code
             pass
@@ -302,7 +323,7 @@ def cmd_command(args, out=print):
 
 
 def cmd_revoke(args, out=print):
-    make_store().clear()
+    sb.TokenManager("", make_store(), sb.urllib_http).revoke()       # through the manager: ordered after any refresh in flight
     out("Local tokens removed. To end the grant at Spotify, remove the app at https://www.spotify.com/account/apps/.")
     return 0
 

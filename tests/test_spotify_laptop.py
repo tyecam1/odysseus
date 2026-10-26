@@ -217,3 +217,42 @@ def test_dpapi_round_trip_hides_the_plaintext():
     assert b"synthetic-secret-token" not in blob and laptop.dpapi_unprotect(blob) == b"synthetic-secret-token"
     with pytest.raises(OSError):
         laptop.dpapi_unprotect(blob[:-3] + b"xyz")
+
+
+def test_a_client_that_trickles_bytes_is_cut_at_the_absolute_connection_deadline(monkeypatch):
+    """Sol: the 5 s timeout measures inactivity, so a client sending a byte every few seconds could hold the single listener indefinitely."""
+    monkeypatch.setattr(laptop, "CONNECTION_DEADLINE_S", 1.0)
+    port = free_port()
+    box, thread = serve(port, timeout=8)
+    trickler = socket.create_connection(("127.0.0.1", port), timeout=5)
+    trickler.sendall(b"GET /callback?code=x&state=y HTTP/1.1\r\n")
+    began = time.monotonic()
+    dropped = False
+    try:
+        for _ in range(40):
+            time.sleep(0.25)
+            trickler.sendall(b"X-A: 1\r\n")
+    except OSError:
+        dropped = True
+    assert dropped and time.monotonic() - began < 5
+    trickler.close()
+    assert get(port, "/callback?code=real&state=s")[0] == 200            # the listener is free again for the real callback
+    thread.join(5)
+    assert box["query"]["code"] == "real"
+
+
+def test_revoke_goes_through_the_manager_so_a_refresh_in_flight_cannot_undo_it(monkeypatch, tmp_path):
+    calls = []
+
+    class FakeManager:
+        def __init__(self, client_id, store, http):
+            calls.append("manager")
+
+        def revoke(self):
+            calls.append("revoke")
+
+    monkeypatch.setattr(laptop.sb, "TokenManager", FakeManager)
+    monkeypatch.setattr(laptop, "make_store", lambda: object())
+    lines = []
+    assert laptop.cmd_revoke(None, out=lines.append) == 0
+    assert calls == ["manager", "revoke"]

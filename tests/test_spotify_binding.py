@@ -446,7 +446,7 @@ def test_two_managers_sharing_a_store_do_not_spend_a_refresh_token_twice():
     first = sb.TokenManager(CLIENT, store, http, now=lambda: 990.0)
     second = sb.TokenManager(CLIENT, store, http, now=lambda: 990.0)
     http.push(200, token_body(access_token="SYNTH-ACCESS-R", refresh_token="SYNTH-REFRESH-R"))
-    stale = store.load().refresh_token
+    stale = store.load()
     assert first.access_token() == "SYNTH-ACCESS-R"
     # the second manager decided to refresh on the SAME stale record, before it saw the first's result
     assert second._refresh(stale, False).access_token == "SYNTH-ACCESS-R"
@@ -505,7 +505,8 @@ def test_a_rejected_refresh_token_that_someone_else_already_replaced_is_not_clea
     store.save(sb.TokenRecord(ACCESS, REFRESH, 1000.0, " ".join(sb.SCOPES), "synthuser"))
     manager = sb.TokenManager(CLIENT, store, http, now=lambda: 990.0)
     store.save(sb.TokenRecord("SYNTH-ACCESS-N", "SYNTH-REFRESH-N", 5000.0, " ".join(sb.SCOPES), "synthuser"))   # another process rotated
-    assert manager._refresh(REFRESH, False).access_token == "SYNTH-ACCESS-N" and http.calls == []
+    stale = sb.TokenRecord(ACCESS, REFRESH, 1000.0, " ".join(sb.SCOPES), "synthuser")
+    assert manager._refresh(stale, False).access_token == "SYNTH-ACCESS-N" and http.calls == []
     assert store.load().refresh_token == "SYNTH-REFRESH-N"
 
 
@@ -526,5 +527,64 @@ def test_file_store_exclusive_section_serialises_other_processes(tmp_path):
         with store.exclusive():
             waited = time.monotonic() - began
         assert waited >= 0.8
+    finally:
+        holder.wait(10)
+
+
+def test_refresh_coalescing_also_works_when_spotify_keeps_the_same_refresh_token():
+    """Sol: coalescing keyed on the refresh-token string refreshed twice when Spotify omits a new refresh token, and a 503 on the second broke valid credentials."""
+    http = FakeHttp()
+    store = sb.MemoryTokenStore()
+    store.save(sb.TokenRecord(ACCESS, REFRESH, 1000.0, " ".join(sb.SCOPES), "synthuser"))
+    first = sb.TokenManager(CLIENT, store, http, now=lambda: 990.0)
+    second = sb.TokenManager(CLIENT, store, http, now=lambda: 990.0)
+    stale = store.load()
+    body = token_body(access_token="SYNTH-ACCESS-K")
+    del body["refresh_token"]
+    http.push(200, body)
+    http.push(503, {})                                                  # a second, unnecessary refresh would fail with this
+    assert first.access_token() == "SYNTH-ACCESS-K"
+    assert second._refresh(stale, False).access_token == "SYNTH-ACCESS-K" and len(http.calls) == 1
+    assert second._refresh(stale, True).access_token == "SYNTH-ACCESS-K" and len(http.calls) == 1      # a forced refresh coalesces too
+
+
+def test_lock_contention_that_outlasts_the_bound_is_a_typed_offline_error(tmp_path, monkeypatch):
+    """Sol: msvcrt.LK_LOCK raises a bare OSError after ~10 s; contention now polls to a bound and reports offline."""
+    store = sb.FileTokenStore(str(tmp_path / "spotify.bin"), fake_protect, fake_unprotect)
+    monkeypatch.setattr(sb, "LOCK_WAIT_S", 0.3)
+    monkeypatch.setattr(sb, "_lock_file", lambda handle, wait_s: (_ for _ in ()).throw(ProviderError("offline", "token store busy")))
+    with pytest.raises(ProviderError) as exc:
+        with store.exclusive():
+            pass
+    assert exc.value.code == "offline"
+    store.save(sb.TokenRecord(ACCESS, REFRESH, 1000.0, "a", "u"))
+    manager = sb.TokenManager(CLIENT, store, FakeHttp(), now=lambda: 990.0)
+    with pytest.raises(ProviderError) as busy:
+        manager.access_token()                                          # expired grant -> refresh -> lock busy
+    assert busy.value.code == "offline"
+
+
+def test_the_real_file_lock_polls_and_gives_up_with_a_typed_error(tmp_path):
+    import subprocess
+    import sys
+    path = str(tmp_path / "spotify.bin")
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    code = ("import sys, time; sys.path.insert(0, %r)\n"
+            "from src import spotify_binding as sb\n"
+            "s = sb.FileTokenStore(%r, lambda b: b, lambda b: b)\n"
+            "with s.exclusive():\n    print('locked', flush=True); time.sleep(3)\n") % (root, path)
+    holder = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE, text=True)
+    try:
+        assert holder.stdout.readline().strip() == "locked"
+        original = sb.LOCK_WAIT_S
+        sb.LOCK_WAIT_S = 0.4
+        try:
+            began = time.monotonic()
+            with pytest.raises(ProviderError) as exc:
+                with sb.FileTokenStore(path, fake_protect, fake_unprotect).exclusive():
+                    pass
+            assert exc.value.code == "offline" and time.monotonic() - began < 2.5
+        finally:
+            sb.LOCK_WAIT_S = original
     finally:
         holder.wait(10)
