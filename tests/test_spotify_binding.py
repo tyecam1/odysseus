@@ -588,3 +588,24 @@ def test_the_real_file_lock_polls_and_gives_up_with_a_typed_error(tmp_path):
             sb.LOCK_WAIT_S = original
     finally:
         holder.wait(10)
+
+
+def test_a_delayed_401_for_an_already_replaced_token_reuses_the_newer_one():
+    """Sol third pass: a second caller's 401 for token A, after another caller already refreshed to B, forced a needless second refresh."""
+    store = sb.MemoryTokenStore()
+    store.save(sb.TokenRecord(ACCESS, REFRESH, 5000.0, " ".join(sb.SCOPES), "synthuser"))
+    seen = []
+
+    def http(method, url, headers, body, timeout):
+        seen.append((method, url, headers.get("Authorization")))
+        if len(seen) == 1:                                          # token A is sent, and meanwhile another caller refreshes to B
+            store.save(sb.TokenRecord("SYNTH-ACCESS-B", "SYNTH-REFRESH-B", 5000.0, " ".join(sb.SCOPES), "synthuser"))
+            return 401, {}, b"{}"
+        if url == sb.TOKEN_URL:
+            return 503, {}, b"{}"                                   # an unnecessary refresh would fail here
+        return 200, {}, json.dumps({"devices": []}).encode()
+
+    provider = sb.SpotifyProvider(sb.TokenManager(CLIENT, store, http, now=lambda: 1000.0), http)
+    assert provider.devices() == []
+    assert [s[1] == sb.TOKEN_URL for s in seen] == [False, False]
+    assert seen[0][2] == "Bearer " + ACCESS and seen[1][2] == "Bearer SYNTH-ACCESS-B"

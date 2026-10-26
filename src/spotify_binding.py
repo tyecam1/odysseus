@@ -338,10 +338,14 @@ class TokenManager:
     def connected(self) -> bool:
         return self.store.load() is not None
 
-    def access_token(self, *, force_refresh: bool = False) -> str:
+    def access_token(self, *, force_refresh: bool = False, rejected: str = "") -> str:
+        """A valid access token. `rejected` is the token Spotify just answered 401 for: if the store already holds a different, still-valid
+        token (another caller refreshed meanwhile), that one is returned and no second refresh is made."""
         record = self.store.load()
         if record is None:
             raise ProviderError("auth", "not connected")
+        if rejected and record.access_token != rejected and record.expires_at - self._now() > REFRESH_SKEW_S:
+            return record.access_token
         if force_refresh or record.expires_at - self._now() <= REFRESH_SKEW_S:
             record = self._refresh(record, force_refresh)
         return record.access_token
@@ -414,10 +418,11 @@ class SpotifyProvider:
 
     # ---- plumbing
     def _call(self, method: str, path: str, query: Optional[Dict[str, Any]] = None, body: Optional[Dict[str, Any]] = None,
-              *, _retried: bool = False) -> Tuple[int, Any]:
+              *, _retried: bool = False, _rejected: str = "") -> Tuple[int, Any]:
         url = API_URL + path + ("?" + urllib.parse.urlencode({k: v for k, v in (query or {}).items() if v not in (None, "")}) if query else "")
         payload = json.dumps(body).encode("utf-8") if body is not None else None
-        headers = {"Authorization": "Bearer " + self.tokens.access_token(force_refresh=_retried), "Accept": "application/json"}
+        token = self.tokens.access_token(force_refresh=_retried, rejected=_rejected)
+        headers = {"Authorization": "Bearer " + token, "Accept": "application/json"}
         if payload is not None:
             headers["Content-Type"] = "application/json"
         try:
@@ -428,8 +433,8 @@ class SpotifyProvider:
             raise ProviderError("offline", type(exc).__name__) from None
         if status == 401 and not _retried:
             if method == "GET":
-                return self._call(method, path, query, body, _retried=True)     # reads: one forced refresh and one replay
-            self.tokens.access_token(force_refresh=True)                        # writes are NEVER replayed: refresh for the next request only
+                return self._call(method, path, query, body, _retried=True, _rejected=token)   # reads: one (coalesced) refresh, one replay
+            self.tokens.access_token(force_refresh=True, rejected=token)        # writes are NEVER replayed: refresh for the next request only
             raise ProviderError("auth", "unauthorised")
         data = _json(raw)
         if status in (200, 201, 202, 204):
