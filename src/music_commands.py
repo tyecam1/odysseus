@@ -30,6 +30,7 @@ _VOLUME_SET = re.compile(r"^(?:set\s+)?(?:the\s+)?volume\s+(?:to\s+)?(?P<n>\d{1,
 _VOLUME_REL = re.compile(r"^(?:turn|bring|put|set|make)\s+(?:it|the\s+(?:music|volume|sound)|this)\s+(?P<d>up|down)(?:\s+a\s+(?:bit|little|touch))?$|^(?P<d2>louder|quieter|softer)$|^turn\s+(?P<d3>up|down)\s+the\s+(?:music|volume)$", re.I)
 _KIND = re.compile(r"^(?:the\s+)?(?P<k>album|playlist|artist|band)\s+(?P<q>.+)$", re.I)
 _NOT_MUSIC = re.compile(r"^(?:(?:a|the|some|another) )?(?:game|games|match|round|hand|cards|chess|hide and seek|fetch)\b|\bwith (?:me|us|him|her|them|the (?:kids|dog|cat))$", re.I)
+_ON_DEVICE = re.compile(r"\s+on\s+(?:the\s+|my\s+)?(?P<d>(?:(?!\s+on\s).){1,200})$", re.I)   # any characters, any length: an unrecognisable or overlong target must fail SAFE, never be ignored
 _LEADING_THE = re.compile(r"^(?:the\s+(?:song|track|tune)\s+)", re.I)
 
 
@@ -41,10 +42,36 @@ class MusicCommand:
     volume_delta: int = 0       # for relative volume; the runtime turns it into an absolute percent
     volume: Optional[int] = None
     fallback_query: str = ""    # the query without a trailing bare "please", tried only if the literal query finds nothing
+    device_hint: str = ""       # "on the laptop": a hint only; the runtime keeps it as a device if one matches, else it stays part of the query
+    query_with_hint: str = ""   # the query INCLUDING the trailing "on <hint>" (a title may end that way: "Stand on Me")
 
 
 def parse_music_command(text: str) -> Optional[MusicCommand]:
     """The music request in ``text``, or None when it is not one. Never raises."""
+    command = _parse(text)
+    if command is None:
+        return None
+    if command.action in ("play", "queue") and command.query:
+        match = _ON_DEVICE.search(command.query)
+        if match and match.start() > 0:
+            hint = re.sub(r"\s+please$", "", match.group("d").strip(), flags=re.I)
+            stripped = command.query[:match.start()].strip()
+            if not hint:
+                return None
+            if command.action == "play" and re.fullmatch(r"(?:it|that|this|the music)", stripped, re.I):
+                return MusicCommand("resume", device_hint=hint)    # "play it on the laptop" is a resume, never a search for a title called "It"
+            if re.fullmatch(r"(?:something|anything|whatever|some music|music|it|that|this|the music)", stripped, re.I):
+                return None                                        # "play something on the tv" names no music
+            fallback = command.fallback_query
+            fb_match = _ON_DEVICE.search(fallback) if fallback else None
+            if fb_match and fb_match.start() > 0:
+                fallback = fallback[:fb_match.start()].strip()          # the same device suffix must not survive in the fallback query
+            return MusicCommand(command.action, query=stripped, kind=command.kind, fallback_query=fallback,
+                                device_hint=hint, query_with_hint=command.query)
+    return command
+
+
+def _parse(text: str) -> Optional[MusicCommand]:
     if not isinstance(text, str):
         return None
     work = " ".join(text.split())
@@ -64,6 +91,13 @@ def parse_music_command(text: str) -> Optional[MusicCommand]:
     if not work:
         return None
     bare = _TAIL_PLEASE.sub("", work).strip()          # a command with no title in it can lose a trailing "please" safely
+    device_match = _ON_DEVICE.search(bare)
+    if device_match and device_match.start() > 0:
+        head = bare[:device_match.start()].strip()
+        hint = device_match.group("d").strip()
+        for pattern, action in ((_RESUME, "resume"), (_PAUSE, "pause"), (_NEXT, "next")):
+            if pattern.match(head) and not (action == "resume" and head.lower() not in ("resume", "unpause", "play", "start the music", "start music")):
+                return MusicCommand(action, device_hint=hint)
     if had_service and bare.lower() in ("play", "queue", "add"):
         bare = work                                    # "play Please on Spotify": nothing but "please" is left, so it is the title
     if _RESUME.match(bare):
@@ -77,7 +111,7 @@ def parse_music_command(text: str) -> Optional[MusicCommand]:
     if _DEVICES.match(bare):
         return MusicCommand("devices")
     work_with_please = work
-    match = _VOLUME_SET.match(bare)
+    match = _VOLUME_SET.match(work)
     if match:
         return MusicCommand("volume", volume=int(match.group("n")))
     match = _VOLUME_REL.match(bare)

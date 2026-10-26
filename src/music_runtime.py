@@ -112,10 +112,7 @@ class MusicRuntime:
         Changing playback needs ``allow_writes`` (the caller's execute authority); reading it does not."""
         if command.action not in _READS and not allow_writes:
             return {"status": "refused", "data": {}, "trace": {}, "text": "This connection isn't allowed to change playback."}
-        try:
-            controller = self._build()
-        except OSError:
-            controller = None
+        controller = self._build()
         if controller is None:
             return {"status": "not_connected", "data": {}, "trace": {},
                     "text": "Spotify isn't connected on this system yet, so I can't play anything. The owner has to authorise it first."}
@@ -124,6 +121,52 @@ class MusicRuntime:
         except Exception as exc:  # noqa: BLE001 - a bug here must become an honest sentence, never a failed turn
             logger.warning("music turn failed: %s", type(exc).__name__, exc_info=True)
             return {"status": "error", "data": {}, "trace": {}, "text": "The music service failed on that request; nothing was changed."}
+
+    def _device_config(self) -> Dict[str, Any]:
+        """Optional <data>/spotify/devices.json: {"default": "<device name>", "aliases": {"laptop": "<device name>", ...}}. Absent or damaged = empty."""
+        try:
+            data = json.loads((self.directory / "devices.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def _resolve_device_hint(self, hint: str):
+        """The Spotify device a spoken hint names: a configured alias, or an EXACT (case-insensitive) device name. Never a substring:
+        "play Sex on Fire" must not be able to select a device called FireTVStick."""
+        devices = self._provider.devices() if self._provider else []
+        wanted = hint.strip().lower()
+        raw = self._device_config().get("aliases")
+        aliases = {str(k).strip().lower(): v.strip().lower() for k, v in raw.items() if isinstance(v, str) and v.strip()} if isinstance(raw, dict) else {}
+        target = aliases.get(wanted, wanted)
+        matches = [d for d in devices if d.name.lower() == target]
+        return matches[0] if len(matches) == 1 else None
+
+    def _literal_title_exists(self, text: str, kind: str):
+        """Is the WHOLE phrase exactly a result's title or "title by artist"? The matching phrase, "" for no, or None when Spotify could not be asked (uncertain: the caller must stop).
+        Nothing is split or trimmed first, but a bare trailing "please" is tried both ways ("Sex on Fire please")."""
+        candidates = {re.sub(r"\s+", " ", text).strip().casefold()}
+        candidates.add(re.sub(r"\s+please$", "", re.sub(r"\s+", " ", text).strip(), flags=re.I).casefold())
+        asked = [text] + ([re.sub(r"\s+please$", "", text.strip(), flags=re.I)] if re.search(r"\s+please$", text.strip(), re.I) else [])
+        try:
+            for query in asked:
+                for item in (self._provider.search(query, kind) if self._provider else []):
+                    title = re.sub(r"\s+", " ", item.title).strip().casefold()
+                    both = re.sub(r"\s+", " ", "%s by %s" % (item.title, item.artist)).strip().casefold()
+                    if title in candidates or both in candidates:
+                        return query                                  # the phrase (with or without the trailing "please") that IS a title
+        except Exception:  # noqa: BLE001 - uncertainty is not "no": the write must not go ahead on a guess
+            return None
+        return ""
+
+    def _idle_default_device(self):
+        """The configured default device when it is present exactly once. Whether it may be used (only when nothing is active) is decided by the
+        controller against ITS OWN device read, via the "idle-id:" reference, so a device becoming active in between is never overridden."""
+        default = self._device_config().get("default")
+        if not isinstance(default, str) or not default.strip():
+            return None
+        devices = self._provider.devices() if self._provider else []
+        matches = [d for d in devices if d.name.lower() == default.strip().lower()]
+        return matches[0] if len(matches) == 1 else None
 
     def _target_device(self):
         """The device a volume change will act on: the active one, or the only one; None when it cannot be told."""
@@ -135,7 +178,7 @@ class MusicRuntime:
         key = request_id if re.fullmatch(r"[A-Za-z0-9._:-]{1,56}", request_id or "") else hashlib.sha256((request_id or "").encode("utf-8")).hexdigest()[:56]
         rid = "music-" + key                                         # never truncated: two distinct keys can never share a controller id
         is_write = command.action not in _READS
-        fingerprint = (command.action, command.query, command.kind, command.volume, command.volume_delta)
+        fingerprint = (command.action, command.query, command.kind, command.volume, command.volume_delta, command.device_hint, command.query_with_hint, command.fallback_query)
         if is_write:
             with self._lock:
                 seen = self._results.get(rid)
@@ -151,6 +194,26 @@ class MusicRuntime:
 
     def _execute(self, controller: MusicController, command: MusicCommand, rid: str) -> Dict[str, Any]:
         action, kwargs = command.action, {}
+        device_ref = ""                                               # "id:<spotify id>" once WE chose the device: exact, immune to name prefixes
+        if command.device_hint:
+            found = self._resolve_device_hint(command.device_hint)
+            literal = (self._literal_title_exists(command.query_with_hint, command.kind)
+                       if action in ("play", "queue") and command.query_with_hint else False)
+            if literal is None:                                       # Spotify could not be asked whether the phrase is a title: stop, do not guess
+                return {"status": "clarify", "data": {}, "trace": {},
+                        "text": "I couldn't check that with Spotify just now, so I haven't played anything. Try again in a moment."}
+            if found is not None and literal:                         # the whole phrase is a real title AND its tail names a device: never guess which
+                return {"status": "clarify", "data": {}, "trace": {},
+                        "text": "Did you mean the track %s, or %s on %s? Say which." % (command.query_with_hint, command.query, found.name)}
+            if found is not None:
+                device_ref = "id:" + found.id
+            elif literal:
+                command = MusicCommand(action, query=literal, kind=command.kind)                             # a real title ending "on ..."
+            else:                                                     # an unresolved explicit target is never guessed at or played to the active device
+                return {"status": "clarify", "data": {}, "trace": {}, "text": "I don't know a device called %s." % command.device_hint}
+        if not device_ref and action in ("play", "queue", "resume"):
+            idle = self._idle_default_device()
+            device_ref = "idle-id:" + idle.id if idle is not None else ""
         if action in ("play", "queue"):
             query = command.query
             if command.fallback_query and self._provider is not None:       # "play Blue please": the literal wins if it exists, else drop the "please"
@@ -168,9 +231,11 @@ class MusicRuntime:
                     return {"status": "clarify", "data": {}, "trace": {},
                             "text": "I can't tell how loud it is right now. Say a number, like volume 30."}
                 volume = max(0, min(100, target.volume + command.volume_delta))
-                kwargs = {"volume": volume, "device": target.name}
+                kwargs = {"volume": volume, "device": "id:" + target.id}
             else:
                 kwargs = {"volume": volume}
+        if device_ref and "device" not in kwargs:
+            kwargs["device"] = device_ref
         result: MusicResult = controller.handle(action, request_id=rid, explicit_command=True, guest=False, **kwargs)
         return {"status": result.status, "data": result.data, "trace": result.trace, "text": _speak(result)}
 
