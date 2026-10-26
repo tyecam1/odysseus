@@ -77,16 +77,108 @@ def test_nothing_arriving_times_out_and_releases_the_port():
         s.bind(("127.0.0.1", port))                       # the port is free again
 
 
-def test_the_listener_binds_loopback_only():
+def test_the_listener_binds_loopback_only(monkeypatch):
+    """Record the address the server really binds (not a LAN probe that passes vacuously when there is no LAN address)."""
+    bound = []
+
+    class Recording(laptop.http.server.HTTPServer):
+        def __init__(self, address, handler):
+            bound.append(address)
+            super().__init__(address, handler)
+
+    monkeypatch.setattr(laptop.http.server, "HTTPServer", Recording)
     port = free_port()
     box, thread = serve(port, timeout=3)
-    lan = [a for a in socket.gethostbyname_ex(socket.gethostname())[2] if not a.startswith("127.")]
-    for address in lan[:1]:
-        with socket.socket() as s:
-            s.settimeout(1)
-            assert s.connect_ex((address, port)) != 0
     get(port, "/callback?code=c&state=s")
     thread.join(5)
+    assert bound == [("127.0.0.1", port)]
+
+
+def test_a_forged_callback_does_not_end_the_authorisation():
+    """Sol: any request with the right Host used to be accepted and close the listener before state validation."""
+    port = free_port()
+    box, started = {}, threading.Event()
+
+    def run():
+        try:
+            box["query"] = laptop.wait_for_callback(port, timeout=10, started=started, expected_state="REAL-STATE")
+        except Exception as exc:  # noqa: BLE001
+            box["error"] = exc
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    assert started.wait(5)
+    assert get(port, "/callback?code=forged&state=wrong")[0] == 400
+    assert get(port, "/callback?code=forged")[0] == 400
+    assert "query" not in box and thread.is_alive()
+    assert get(port, "/callback?code=real&state=REAL-STATE")[0] == 200
+    thread.join(5)
+    assert box["query"] == {"code": "real", "state": "REAL-STATE"}
+
+
+def test_a_half_sent_request_cannot_hold_the_listener_past_its_deadline():
+    port = free_port()
+    box, thread = serve(port, timeout=1.5)
+    stalled = socket.create_connection(("127.0.0.1", port), timeout=5)
+    stalled.sendall(b"GET /callback HTTP/1.1\r\n")                 # never finishes the headers
+    began = time.monotonic()
+    thread.join(15)
+    stalled.close()
+    assert not thread.is_alive() and isinstance(box.get("error"), TimeoutError)
+    assert time.monotonic() - began < 12
+
+
+def test_consent_is_not_opened_when_the_port_cannot_be_bound(monkeypatch, tmp_path):
+    """Sol: with the port squatted the helper still opened consent, so a squatter could receive the code and state."""
+    squatter = socket.socket()
+    squatter.bind(("127.0.0.1", 0))
+    squatter.listen(1)
+    port = squatter.getsockname()[1]
+    try:
+        monkeypatch.setattr(laptop, "load_config", lambda: {"client_id": "abc123DEF456ghi789", "port": port})
+        opened, lines = [], []
+        monkeypatch.setattr(laptop.webbrowser, "open", lambda url: opened.append(url) or True)
+
+        class Args:
+            pass
+
+        assert laptop.cmd_authorise(Args, out=lines.append) == 1
+        assert opened == [] and any("NOT opened" in line for line in lines)
+    finally:
+        squatter.close()
+
+
+def test_authorise_reports_pending_acceptance_not_connected(monkeypatch, tmp_path):
+    port = free_port()
+    monkeypatch.setattr(laptop, "load_config", lambda: {"client_id": "abc123DEF456ghi789", "port": port})
+    monkeypatch.setattr(laptop, "TOKEN_PATH", str(tmp_path / "token.bin"))
+    monkeypatch.setattr(laptop, "dpapi_protect", lambda b: b"P" + b)
+    monkeypatch.setattr(laptop, "dpapi_unprotect", lambda b: b[1:])
+    seen = {}
+
+    def fake_open(url):
+        query = dict(laptop.urllib.parse.parse_qsl(laptop.urllib.parse.urlsplit(url).query))
+        seen["state"] = query["state"]
+        threading.Thread(target=lambda: get(port, "/callback?code=synth&state=" + query["state"]), daemon=True).start()
+        return True
+
+    monkeypatch.setattr(laptop.webbrowser, "open", fake_open)
+    scripted = [
+        (200, {}, json.dumps({"access_token": "SYNTH-A", "refresh_token": "SYNTH-R", "expires_in": 3600,
+                              "scope": " ".join(laptop.sb.SCOPES)}).encode()),
+        (200, {}, json.dumps({"id": "synthuser", "product": "premium"}).encode()),
+    ]
+    monkeypatch.setattr(laptop.sb, "urllib_http", lambda *a, **k: scripted.pop(0))
+    lines = []
+
+    class Args:
+        pass
+
+    assert laptop.cmd_authorise(Args, out=lines.append) == 0
+    text = "\n".join(lines)
+    assert "Authorised and verified" in text and "NOT yet counted as connected" in text and "Connected:" not in text
+    assert "SYNTH-A" not in text and "SYNTH-R" not in text
+    assert os.path.exists(str(tmp_path / "token.bin"))
 
 
 def test_config_is_validated(tmp_path):

@@ -4,6 +4,7 @@ Everything runs against a fake transport: no network, no credentials. Tokens use
 
 import json
 import os
+import time
 import urllib.parse
 
 import pytest
@@ -384,10 +385,18 @@ def test_garbage_bodies_do_not_crash_the_reads():
     assert provider.devices() == []
 
 
-def test_the_real_transport_refuses_non_spotify_hosts_without_any_request():
-    for url in ("http://api.spotify.com/v1/me", "https://evil.example/token", "https://api.spotify.com.evil.example/v1/me"):
-        with pytest.raises(ProviderError):
+def test_the_real_transport_refuses_non_spotify_hosts_without_any_request(monkeypatch):
+    """The guard must refuse BEFORE any opener exists: an offline network error (also a ProviderError) must not satisfy this test."""
+    def forbidden(*args, **kwargs):
+        raise AssertionError("the transport was reached for a non-Spotify url")
+
+    monkeypatch.setattr(sb.urllib.request, "build_opener", forbidden)
+    monkeypatch.setattr(sb.urllib.request, "urlopen", forbidden)
+    for url in ("http://api.spotify.com/v1/me", "https://evil.example/token", "https://api.spotify.com.evil.example/v1/me",
+                "https://accounts.spotify.com.evil.example/api/token", "ftp://api.spotify.com/v1/me", "https://api.spotify.com@evil.example/v1/me"):
+        with pytest.raises(ProviderError) as exc:
             sb.urllib_http("GET", url, {}, None, 1)
+        assert exc.value.code == "unexpected" and "non-Spotify" in str(exc.value)
 
 
 # --------------------------------------------------------------------------------------------------------------- through the governed controller
@@ -411,3 +420,111 @@ def test_the_controller_governs_the_real_provider_guest_duplicates_and_reads():
     http.push(429, {}, {"retry-after": "5"})
     failed = controller.handle("resume", request_id="r4", explicit_command=True)
     assert failed.status == "error" and failed.data == {"retry_after": 5} and ACCESS not in json.dumps(failed.trace)
+
+
+# --------------------------------------------------------------------------------------------------------------- Sol review of #176
+def test_a_write_that_gets_a_401_is_never_replayed():
+    http = FakeHttp()
+    provider, _, _ = connected(http)
+    http.push(401, {})
+    http.push(200, token_body(access_token="SYNTH-ACCESS-5"))
+    with pytest.raises(ProviderError) as exc:
+        provider.next("dev1")
+    assert exc.value.code == "auth"
+    assert [c["method"] for c in http.calls] == ["POST", "POST"] and http.calls[0]["url"] != sb.TOKEN_URL and http.calls[1]["url"] == sb.TOKEN_URL
+    assert len([c for c in http.calls if "/me/player/next" in c["url"]]) == 1          # the write went out exactly once
+    http.push(204)
+    provider.next("dev1")                                                              # the refreshed token serves the NEXT request
+    assert http.calls[-1]["headers"]["Authorization"] == "Bearer SYNTH-ACCESS-5"
+
+
+def test_two_managers_sharing_a_store_do_not_spend_a_refresh_token_twice():
+    """Both read the same expiring grant; the second must reuse the first's rotated tokens instead of replaying a spent refresh token."""
+    http = FakeHttp()
+    store = sb.MemoryTokenStore()
+    store.save(sb.TokenRecord(ACCESS, REFRESH, 1000.0, " ".join(sb.SCOPES), "synthuser"))
+    first = sb.TokenManager(CLIENT, store, http, now=lambda: 990.0)
+    second = sb.TokenManager(CLIENT, store, http, now=lambda: 990.0)
+    http.push(200, token_body(access_token="SYNTH-ACCESS-R", refresh_token="SYNTH-REFRESH-R"))
+    stale = store.load().refresh_token
+    assert first.access_token() == "SYNTH-ACCESS-R"
+    # the second manager decided to refresh on the SAME stale record, before it saw the first's result
+    assert second._refresh(stale, False).access_token == "SYNTH-ACCESS-R"
+    assert len(http.calls) == 1 and store.load().refresh_token == "SYNTH-REFRESH-R"
+
+
+def test_a_concurrent_refresh_race_across_threads_makes_one_token_request():
+    import threading
+    gate = threading.Event()
+    seen = []
+
+    def http(method, url, headers, body, timeout):
+        seen.append(url)
+        gate.wait(2)
+        return 200, {}, json.dumps(token_body(access_token="SYNTH-ACCESS-T", refresh_token="SYNTH-REFRESH-T")).encode()
+
+    store = sb.MemoryTokenStore()
+    store.save(sb.TokenRecord(ACCESS, REFRESH, 1000.0, " ".join(sb.SCOPES), "synthuser"))
+    managers = [sb.TokenManager(CLIENT, store, http, now=lambda: 990.0) for _ in range(4)]
+    results = []
+    threads = [threading.Thread(target=lambda m=m: results.append(m.access_token())) for m in managers]
+    for th in threads:
+        th.start()
+    gate.set()
+    for th in threads:
+        th.join(5)
+    assert results == ["SYNTH-ACCESS-T"] * 4 and len(seen) == 1 and store.load().refresh_token == "SYNTH-REFRESH-T"
+
+
+def test_a_refresh_in_flight_cannot_resurrect_revoked_credentials():
+    import threading
+    entered, release = threading.Event(), threading.Event()
+
+    def http(method, url, headers, body, timeout):
+        entered.set()
+        release.wait(3)
+        return 200, {}, json.dumps(token_body(access_token="SYNTH-ACCESS-Z", refresh_token="SYNTH-REFRESH-Z")).encode()
+
+    store = sb.MemoryTokenStore()
+    store.save(sb.TokenRecord(ACCESS, REFRESH, 1000.0, " ".join(sb.SCOPES), "synthuser"))
+    manager = sb.TokenManager(CLIENT, store, http, now=lambda: 990.0)
+    worker = threading.Thread(target=lambda: manager.access_token())
+    worker.start()
+    assert entered.wait(3)
+    revoker = threading.Thread(target=manager.revoke)
+    revoker.start()                     # queued behind the refresh: it must run AFTER the refresh saves, and win
+    release.set()
+    worker.join(5)
+    revoker.join(5)
+    assert store.load() is None and not manager.connected()
+
+
+def test_a_rejected_refresh_token_that_someone_else_already_replaced_is_not_cleared():
+    http = FakeHttp()
+    store = sb.MemoryTokenStore()
+    store.save(sb.TokenRecord(ACCESS, REFRESH, 1000.0, " ".join(sb.SCOPES), "synthuser"))
+    manager = sb.TokenManager(CLIENT, store, http, now=lambda: 990.0)
+    store.save(sb.TokenRecord("SYNTH-ACCESS-N", "SYNTH-REFRESH-N", 5000.0, " ".join(sb.SCOPES), "synthuser"))   # another process rotated
+    assert manager._refresh(REFRESH, False).access_token == "SYNTH-ACCESS-N" and http.calls == []
+    assert store.load().refresh_token == "SYNTH-REFRESH-N"
+
+
+def test_file_store_exclusive_section_serialises_other_processes(tmp_path):
+    import subprocess
+    import sys
+    path = str(tmp_path / "spotify.bin")
+    store = sb.FileTokenStore(path, fake_protect, fake_unprotect)
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    code = ("import sys, time; sys.path.insert(0, %r)\n"
+            "from src import spotify_binding as sb\n"
+            "s = sb.FileTokenStore(%r, lambda b: b, lambda b: b)\n"
+            "with s.exclusive():\n    print('locked', flush=True); time.sleep(1.5)\n") % (root, path)
+    holder = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE, text=True)
+    try:
+        assert holder.stdout.readline().strip() == "locked"
+        began = time.monotonic()
+        with store.exclusive():
+            waited = time.monotonic() - began
+        assert waited >= 0.8
+    finally:
+        holder.wait(10)

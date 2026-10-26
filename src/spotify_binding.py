@@ -18,6 +18,7 @@ reach Spotify until a caller supplies a real transport.
 from __future__ import annotations
 
 import base64
+import contextlib
 import hashlib
 import hmac
 import json
@@ -137,6 +138,13 @@ class MemoryTokenStore:
     def __init__(self) -> None:
         self._record: Optional[TokenRecord] = None
         self._lock = threading.Lock()
+        self._exclusive = threading.RLock()
+
+    @contextlib.contextmanager
+    def exclusive(self):
+        """One refresh/revoke at a time across every manager sharing this store."""
+        with self._exclusive:
+            yield
 
     def load(self) -> Optional[TokenRecord]:
         with self._lock:
@@ -161,6 +169,30 @@ class FileTokenStore:
             raise ValueError("FileTokenStore needs protect and unprotect callables")
         self.path, self._protect, self._unprotect = path, protect, unprotect
         self._lock = threading.Lock()
+        self._exclusive = threading.RLock()
+
+    @contextlib.contextmanager
+    def exclusive(self):
+        """One refresh/revoke at a time across threads AND processes (an OS lock on a sibling lock file)."""
+        with self._exclusive:
+            directory = os.path.dirname(os.path.abspath(self.path))
+            os.makedirs(directory, exist_ok=True)
+            with open(self.path + ".lock", "a+b") as handle:
+                if os.name == "nt":
+                    import msvcrt
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                try:
+                    yield
+                finally:
+                    if os.name == "nt":
+                        handle.seek(0)
+                        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                    else:
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
     def load(self) -> Optional[TokenRecord]:
         with self._lock:
@@ -277,41 +309,50 @@ class TokenManager:
         return self.store.load() is not None
 
     def access_token(self, *, force_refresh: bool = False) -> str:
-        with self._lock:
+        record = self.store.load()
+        if record is None:
+            raise ProviderError("auth", "not connected")
+        if force_refresh or record.expires_at - self._now() <= REFRESH_SKEW_S:
+            record = self._refresh(record.refresh_token, force_refresh)
+        return record.access_token
+
+    def _refresh(self, stale_refresh_token: str, force: bool) -> TokenRecord:
+        """Refresh under the store's exclusive section, as compare-and-swap: whoever got the lock first rotates the token; everyone else
+        reloads and uses the result instead of replaying a refresh token that is already spent (which would read as invalid_grant)."""
+        with self.store.exclusive():
             record = self.store.load()
             if record is None:
-                raise ProviderError("auth", "not connected")
-            if force_refresh or record.expires_at - self._now() <= REFRESH_SKEW_S:
-                record = self._refresh(record)
-            return record.access_token
-
-    def _refresh(self, record: TokenRecord) -> TokenRecord:
-        status, headers, body = self.http("POST", TOKEN_URL, {"Content-Type": "application/x-www-form-urlencoded"}, _form({
-            "grant_type": "refresh_token", "refresh_token": record.refresh_token, "client_id": self.client_id}), HTTP_TIMEOUT_S)
-        data = _json(body)
-        if status in (400, 401) and isinstance(data, dict) and data.get("error") in ("invalid_grant", "invalid_client"):
-            self.store.clear()
-            raise ProviderError("auth", "refresh token rejected")
-        if status == 429:
-            raise ProviderError("rate_limited", retry_after=_retry_after(headers))
-        if status != 200 or not isinstance(data, dict) or not data.get("access_token"):
-            raise ProviderError("offline" if status >= 500 else "unexpected", f"refresh status {status}")
-        try:
-            expires_in = float(data.get("expires_in", 0))
-        except (TypeError, ValueError):
-            raise ProviderError("unexpected", "bad expires_in") from None
-        granted = str(data.get("scope", "")) or record.scope
-        if set(granted.split()) != set(SCOPES):
-            self.store.clear()
-            raise ProviderError("auth", "scope changed")
-        fresh = TokenRecord(str(data["access_token"]), str(data.get("refresh_token") or record.refresh_token),
-                            self._now() + max(0.0, expires_in), " ".join(sorted(set(granted.split()))), record.user_id)
-        self.store.save(fresh)
-        return fresh
+                raise ProviderError("auth", "not connected")          # revoked while this call was waiting
+            if record.refresh_token != stale_refresh_token and record.expires_at - self._now() > REFRESH_SKEW_S:
+                return record                                          # another manager already refreshed
+            status, headers, body = self.http("POST", TOKEN_URL, {"Content-Type": "application/x-www-form-urlencoded"}, _form({
+                "grant_type": "refresh_token", "refresh_token": record.refresh_token, "client_id": self.client_id}), HTTP_TIMEOUT_S)
+            data = _json(body)
+            if status in (400, 401) and isinstance(data, dict) and data.get("error") in ("invalid_grant", "invalid_client"):
+                self.store.clear()                                     # still the same refresh token (we hold the lock): it really is dead
+                raise ProviderError("auth", "refresh token rejected")
+            if status == 429:
+                raise ProviderError("rate_limited", retry_after=_retry_after(headers))
+            if status != 200 or not isinstance(data, dict) or not data.get("access_token"):
+                raise ProviderError("offline" if status >= 500 else "unexpected", f"refresh status {status}")
+            try:
+                expires_in = float(data.get("expires_in", 0))
+            except (TypeError, ValueError):
+                raise ProviderError("unexpected", "bad expires_in") from None
+            granted = str(data.get("scope", "")) or record.scope
+            if set(granted.split()) != set(SCOPES):
+                self.store.clear()
+                raise ProviderError("auth", "scope changed")
+            fresh = TokenRecord(str(data["access_token"]), str(data.get("refresh_token") or record.refresh_token),
+                                self._now() + max(0.0, expires_in), " ".join(sorted(set(granted.split()))), record.user_id)
+            self.store.save(fresh)
+            return fresh
 
     def revoke(self) -> None:
-        """Forget the tokens locally. Spotify has no PKCE revoke endpoint: also remove the app under Account > Apps to end the grant there."""
-        self.store.clear()
+        """Forget the tokens locally, ordered after any refresh in flight (a refresh can never resurrect revoked credentials).
+        Spotify has no PKCE revoke endpoint: also remove the app under Account > Apps to end the grant there."""
+        with self.store.exclusive():
+            self.store.clear()
 
 
 def _rows(data: Any, *path: str) -> List[Any]:
@@ -354,7 +395,10 @@ class SpotifyProvider:
         except Exception as exc:  # noqa: BLE001 - never leak a transport exception (it could name a header)
             raise ProviderError("offline", type(exc).__name__) from None
         if status == 401 and not _retried:
-            return self._call(method, path, query, body, _retried=True)     # one forced refresh; a second 401 is a real auth failure
+            if method == "GET":
+                return self._call(method, path, query, body, _retried=True)     # reads: one forced refresh and one replay
+            self.tokens.access_token(force_refresh=True)                        # writes are NEVER replayed: refresh for the next request only
+            raise ProviderError("auth", "unauthorised")
         data = _json(raw)
         if status in (200, 201, 202, 204):
             return status, data

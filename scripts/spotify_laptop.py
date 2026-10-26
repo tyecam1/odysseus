@@ -16,6 +16,7 @@ Layout on the laptop (no repository checkout is needed): this file next to a src
 
 import argparse
 import ctypes
+import hmac
 import html
 import http.server
 import json
@@ -107,13 +108,18 @@ def redirect_uri(port):
 _PAGE = "<!doctype html><meta charset=utf-8><title>Misumi</title><body style='font:16px sans-serif;margin:3em'><h2>%s</h2><p>You can close this tab.</p>"
 
 
-def wait_for_callback(port, timeout=WAIT_S, started=None):
-    """Listen on 127.0.0.1:PORT only, accept exactly one GET /callback (a correct Host header), return its query as a dict.
+def wait_for_callback(port, timeout=WAIT_S, started=None, expected_state=None):
+    """Listen on 127.0.0.1:PORT only and return the query of the first GET /callback that has a correct Host header AND (when given) the
+    expected `state`. A forged or stray request gets a 400 and the listener keeps waiting, so it cannot cancel the real authorisation.
 
-    The page shown never echoes the query. Raises TimeoutError if nothing valid arrives in `timeout` seconds."""
+    The page shown never echoes the query. Accepted sockets time out after 5 s, so a half-sent request cannot hold the listener past its
+    deadline. Raises OSError if the port cannot be bound (so the caller never opens consent with nobody listening) and TimeoutError if nothing
+    valid arrives in `timeout` seconds."""
     result, ready = {}, threading.Event()
 
     class Handler(http.server.BaseHTTPRequestHandler):
+        timeout = 5                            # per accepted connection
+
         def log_message(self, *args):          # no request logging: the query holds the authorisation code
             pass
 
@@ -123,7 +129,12 @@ def wait_for_callback(port, timeout=WAIT_S, started=None):
                 self.send_response(404)
                 self.end_headers()
                 return
-            result.update(dict(urllib.parse.parse_qsl(parts.query)))
+            query = dict(urllib.parse.parse_qsl(parts.query))
+            if expected_state is not None and not hmac.compare_digest(str(query.get("state", "")).encode("utf-8"), expected_state.encode("utf-8")):
+                self.send_response(400)
+                self.end_headers()
+                return
+            result.update(query)
             body = (_PAGE % html.escape("Spotify authorisation received")).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -153,7 +164,8 @@ def make_store():
     return sb.FileTokenStore(TOKEN_PATH, dpapi_protect, dpapi_unprotect)
 
 
-def make_provider(cfg, store=None, http=sb.urllib_http):
+def make_provider(cfg, store=None, http=None):
+    http = http or sb.urllib_http                     # resolved per call, so a test (or a different transport) is honoured
     manager = sb.TokenManager(cfg["client_id"], store or make_store(), http)
     return sb.SpotifyProvider(manager, http), manager
 
@@ -190,13 +202,17 @@ def cmd_authorise(args, out=print):
 
     def listen():
         try:
-            holder["query"] = wait_for_callback(cfg["port"], started=started)
+            holder["query"] = wait_for_callback(cfg["port"], started=started, expected_state=session.state)
         except Exception as exc:  # noqa: BLE001
             holder["error"] = exc
+            started.set()                       # wake the caller: it checks for the error before opening consent
 
     thread = threading.Thread(target=listen, daemon=True)
     thread.start()
-    started.wait(5)
+    if not started.wait(5) or "error" in holder:
+        out("Cannot listen on 127.0.0.1:%d (%s); consent was NOT opened. Close whatever uses the port, or re-run setup with --port." % (
+            cfg["port"], type(holder.get("error", OSError())).__name__))
+        return 1
     out("Opening the official Spotify consent page in this browser. Log in and approve; I never see your password.")
     webbrowser.open(session.authorize_url())
     thread.join(WAIT_S + 10)
@@ -218,7 +234,8 @@ def cmd_authorise(args, out=print):
         return 1
     record.user_id = account["id"]
     make_store().save(record)
-    out("Connected: Spotify account %s... (plan: %s). Scopes: %s." % (account["id"][:3], account["product"] or "unknown", ", ".join(sb.SCOPES)))
+    out("Authorised and verified: Spotify account %s... (plan: %s), scopes: %s." % (account["id"][:3], account["product"] or "unknown", ", ".join(sb.SCOPES)))
+    out("NOT yet counted as connected: run 'status', 'devices', then one explicit command ('pause' or 'resume') to pass the live acceptance.")
     if account["product"] != "premium":
         out("Note: playback control needs Spotify Premium; read-only status will work, commands will be refused.")
     return 0
