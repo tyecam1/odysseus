@@ -16,6 +16,11 @@ from src.music_commands import MusicCommand, parse_music_command
 from src.music_runtime import MusicRuntime, _speak, music_reply
 from services.memory.skills import SkillsManager
 
+@pytest.fixture(autouse=True)
+def _no_backoff(monkeypatch):
+    monkeypatch.setattr(sb, "READ_BACKOFF_S", 0)
+
+
 ACCESS, REFRESH = "SYNTH-ACCESS-M", "SYNTH-REFRESH-M"
 SCOPE = " ".join(sb.SCOPES)
 

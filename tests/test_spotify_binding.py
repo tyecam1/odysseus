@@ -609,3 +609,52 @@ def test_a_delayed_401_for_an_already_replaced_token_reuses_the_newer_one():
     assert provider.devices() == []
     assert [s[1] == sb.TOKEN_URL for s in seen] == [False, False]
     assert seen[0][2] == "Bearer " + ACCESS and seen[1][2] == "Bearer SYNTH-ACCESS-B"
+
+
+# ---------------------------------------------------------------------------------------------------------------------- read retries (live: Spotify answers an intermittent 503 on /search)
+@pytest.fixture(autouse=True)
+def _no_backoff(monkeypatch):
+    monkeypatch.setattr(sb, "READ_BACKOFF_S", 0)
+
+
+def test_a_read_is_repeated_after_transient_5xx_and_succeeds():
+    http = FakeHttp()
+    provider, _, _ = connected(http)
+    http.push(503, {})
+    http.push(502, b"<html>")
+    http.push(200, {"devices": []})
+    assert provider.devices() == [] and [c["method"] for c in http.calls] == ["GET", "GET", "GET"]
+
+
+def test_a_read_gives_up_after_the_bounded_retries_with_a_typed_error():
+    http = FakeHttp()
+    provider, _, _ = connected(http)
+    for _ in range(sb.READ_RETRIES + 1):
+        http.push(503, {})
+    with pytest.raises(ProviderError) as exc:
+        provider.devices()
+    assert exc.value.code == "offline" and len(http.calls) == sb.READ_RETRIES + 1
+
+
+def test_a_transport_failure_on_a_read_is_repeated_too():
+    http = FakeHttp()
+    provider, _, _ = connected(http)
+    http.script.append(TimeoutError("slow"))
+    http.push(200, {"devices": []})
+    assert provider.devices() == [] and len(http.calls) == 2
+
+
+def test_writes_and_non_transient_read_errors_are_never_repeated():
+    http = FakeHttp()
+    provider, _, _ = connected(http)
+    http.push(503, {})
+    with pytest.raises(ProviderError):
+        provider.pause("dev1")
+    assert len(http.calls) == 1                                           # a write: one attempt only
+    for status, code in ((429, "rate_limited"), (403, "forbidden"), (404, "no_device")):
+        http2 = FakeHttp()
+        provider2, _, _ = connected(http2)
+        http2.push(status, {})
+        with pytest.raises(ProviderError) as exc:
+            provider2.devices()
+        assert exc.value.code == code and len(http2.calls) == 1

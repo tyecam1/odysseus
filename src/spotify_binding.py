@@ -42,6 +42,8 @@ SCOPES = ("user-read-playback-state", "user-read-currently-playing", "user-modif
 SESSION_TTL_S = 600
 REFRESH_SKEW_S = 60
 LOCK_WAIT_S = 30
+READ_RETRIES = 2
+READ_BACKOFF_S = 0.4
 HTTP_TIMEOUT_S = 15
 MAX_RESPONSE_BYTES = 1 << 20
 _SEARCH_TYPES = {"track", "album", "playlist", "artist"}
@@ -413,12 +415,25 @@ class SpotifyProvider:
     name = "spotify"
     simulated = False
 
-    def __init__(self, tokens: TokenManager, http: Http, *, expected_user_id: str = ""):
-        self.tokens, self.http, self.expected_user_id = tokens, http, expected_user_id
+    def __init__(self, tokens: TokenManager, http: Http, *, expected_user_id: str = "", sleep: Callable[[float], None] = time.sleep):
+        self.tokens, self.http, self.expected_user_id, self._sleep = tokens, http, expected_user_id, sleep
 
     # ---- plumbing
-    def _call(self, method: str, path: str, query: Optional[Dict[str, Any]] = None, body: Optional[Dict[str, Any]] = None,
-              *, _retried: bool = False, _rejected: str = "") -> Tuple[int, Any]:
+    def _call(self, method: str, path: str, query: Optional[Dict[str, Any]] = None, body: Optional[Dict[str, Any]] = None) -> Tuple[int, Any]:
+        """One Spotify request. READS (GET) are repeated up to READ_RETRIES more times, with a short backoff, when Spotify answers 5xx or the transport fails
+        (observed live: intermittent 503 on /search). WRITES are never repeated by this layer."""
+        attempt = 0
+        while True:
+            try:
+                return self._call_once(method, path, query, body)
+            except ProviderError as exc:
+                if method != "GET" or exc.code != "offline" or attempt >= READ_RETRIES:
+                    raise
+                self._sleep(READ_BACKOFF_S * (attempt + 1))
+                attempt += 1
+
+    def _call_once(self, method: str, path: str, query: Optional[Dict[str, Any]] = None, body: Optional[Dict[str, Any]] = None,
+                   *, _retried: bool = False, _rejected: str = "") -> Tuple[int, Any]:
         url = API_URL + path + ("?" + urllib.parse.urlencode({k: v for k, v in (query or {}).items() if v not in (None, "")}) if query else "")
         payload = json.dumps(body).encode("utf-8") if body is not None else None
         token = self.tokens.access_token(force_refresh=_retried, rejected=_rejected)
@@ -433,7 +448,7 @@ class SpotifyProvider:
             raise ProviderError("offline", type(exc).__name__) from None
         if status == 401 and not _retried:
             if method == "GET":
-                return self._call(method, path, query, body, _retried=True, _rejected=token)   # reads: one (coalesced) refresh, one replay
+                return self._call_once(method, path, query, body, _retried=True, _rejected=token)   # reads: one (coalesced) refresh, one replay
             self.tokens.access_token(force_refresh=True, rejected=token)        # writes are NEVER replayed: refresh for the next request only
             raise ProviderError("auth", "unauthorised")
         data = _json(raw)
