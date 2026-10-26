@@ -525,3 +525,80 @@ def test_installing_a_different_client_rebuilds_the_controller_so_the_old_client
     second = runtime._build()
     assert second is not first and runtime._built_for == "anotherclientid0001"
     assert runtime._build() is second                                # stable until the credentials change again
+
+
+# ---------------------------------------------------------------------------------------------------------------------- devices ("play ... on the laptop")
+TWO_IDLE = {"devices": [{"id": "d1", "name": "DESKTOP-7DJ1HMA", "is_active": False, "volume_percent": 40},
+                        {"id": "d2", "name": "R's FireTVStick", "is_active": False}]}
+ONE_ACTIVE = {"devices": [{"id": "d1", "name": "DESKTOP-7DJ1HMA", "is_active": True, "volume_percent": 40},
+                          {"id": "d2", "name": "R's FireTVStick", "is_active": False}]}
+TRACK = {"tracks": {"items": [{"uri": "spotify:track:aaa111", "name": "Blue", "artists": [{"name": "Joni Mitchell"}]}]}}
+
+
+def write_devices(runtime, **config):
+    (runtime.directory / "devices.json").write_text(json.dumps(config))
+
+
+def test_a_spoken_device_is_parsed_without_eating_titles_that_end_in_on():
+    cmd = parse_music_command("play Blue by Joni Mitchell on the laptop")
+    assert (cmd.query, cmd.device_hint, cmd.query_with_hint) == ("Blue by Joni Mitchell", "laptop", "Blue by Joni Mitchell on the laptop")
+    assert parse_music_command("pause on the tv") == MusicCommand("pause", device_hint="tv")
+    assert parse_music_command("play something on the tv") is None
+    assert parse_music_command("play Blue on my laptop please").device_hint == "laptop"
+    assert parse_music_command("play Stand on Me").query_with_hint == "Stand on Me"            # resolved at run time: "Me" is no device
+
+
+def test_a_device_alias_picks_the_device_and_nothing_else_is_touched(tmp_path):
+    http = FakeHttp()
+    runtime = make_runtime(tmp_path, http)
+    write_devices(runtime, aliases={"laptop": "DESKTOP-7DJ1HMA", "tv": "R's FireTVStick"})
+    http.push(200, TWO_IDLE)                      # resolving the hint
+    http.push(200, TWO_IDLE)                      # the controller's device resolution (by name)
+    http.push(200, TRACK)
+    http.push(204)
+    http.push(200, dict(PLAYING, device={"id": "d1"}, item=dict(PLAYING["item"], uri="spotify:track:aaa111")))
+    out = music_reply(runtime, "play Blue by Joni Mitchell on the laptop", "jin", "dv1", allow_writes=True)
+    assert out["status"] == "done" and "DESKTOP-7DJ1HMA" in out["text"]
+    put = [c for c in http.calls if c[0] == "PUT"][0]
+    assert dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(put[1]).query))["device_id"] == "d1"
+
+
+def test_a_title_that_ends_with_on_something_is_still_a_title_when_no_device_matches(tmp_path):
+    http = FakeHttp()
+    runtime = make_runtime(tmp_path, http)
+    http.push(200, TWO_IDLE)                      # hint "Me" matches nothing
+    http.push(200, TWO_IDLE)                      # controller: no active device, two devices -> asks
+    out = music_reply(runtime, "play Stand on Me", "jin", "dv2", allow_writes=True)
+    assert out["status"] == "clarify" and "Which device" in out["text"]
+    assert not [c for c in http.calls if "/search" in c[1] and "Stand+on+Me" not in c[1] and "Stand%20on%20Me" not in c[1] and "q=Stand&" in c[1]]
+
+
+def test_the_configured_default_is_used_only_when_nothing_is_active(tmp_path):
+    http = FakeHttp()
+    runtime = make_runtime(tmp_path, http)
+    write_devices(runtime, default="DESKTOP-7DJ1HMA")
+    http.push(200, TWO_IDLE)                      # idle default lookup
+    http.push(200, TWO_IDLE)                      # controller device resolution
+    http.push(200, TRACK)
+    http.push(204)
+    http.push(200, PLAYING)
+    out = music_reply(runtime, "play Blue by Joni Mitchell", "jin", "dv3", allow_writes=True)
+    assert out["status"].startswith("done") and "DESKTOP-7DJ1HMA" in out["text"]
+    http2 = FakeHttp()
+    runtime2 = make_runtime(tmp_path / "b", http2)
+    write_devices(runtime2, default="R's FireTVStick")
+    http2.push(200, ONE_ACTIVE)                   # an active device exists: the default must not override it
+    http2.push(200, ONE_ACTIVE)
+    http2.push(200, TRACK)
+    http2.push(204)
+    http2.push(200, PLAYING)
+    out2 = music_reply(runtime2, "play Blue by Joni Mitchell", "jin", "dv4", allow_writes=True)
+    assert "DESKTOP-7DJ1HMA" in out2["text"] and "FireTV" not in out2["text"]
+
+
+def test_an_unknown_device_for_a_command_is_refused_plainly(tmp_path):
+    http = FakeHttp()
+    runtime = make_runtime(tmp_path, http)
+    http.push(200, TWO_IDLE)
+    out = music_reply(runtime, "pause on the kitchen", "jin", "dv5", allow_writes=True)
+    assert out["status"] == "clarify" and "don't know a device called kitchen" in out["text"] and {c[0] for c in http.calls} == {"GET"}

@@ -112,10 +112,7 @@ class MusicRuntime:
         Changing playback needs ``allow_writes`` (the caller's execute authority); reading it does not."""
         if command.action not in _READS and not allow_writes:
             return {"status": "refused", "data": {}, "trace": {}, "text": "This connection isn't allowed to change playback."}
-        try:
-            controller = self._build()
-        except OSError:
-            controller = None
+        controller = self._build()
         if controller is None:
             return {"status": "not_connected", "data": {}, "trace": {},
                     "text": "Spotify isn't connected on this system yet, so I can't play anything. The owner has to authorise it first."}
@@ -124,6 +121,39 @@ class MusicRuntime:
         except Exception as exc:  # noqa: BLE001 - a bug here must become an honest sentence, never a failed turn
             logger.warning("music turn failed: %s", type(exc).__name__, exc_info=True)
             return {"status": "error", "data": {}, "trace": {}, "text": "The music service failed on that request; nothing was changed."}
+
+    def _device_config(self) -> Dict[str, Any]:
+        """Optional <data>/spotify/devices.json: {"default": "<device name>", "aliases": {"laptop": "<device name>", ...}}. Absent or damaged = empty."""
+        try:
+            data = json.loads((self.directory / "devices.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def _resolve_device_hint(self, hint: str):
+        """The Spotify device named by a spoken hint ("laptop", "the tv"): a configured alias, else a unique case-insensitive name match."""
+        devices = self._provider.devices() if self._provider else []
+        wanted = hint.strip().lower()
+        aliases = {str(k).strip().lower(): str(v) for k, v in (self._device_config().get("aliases") or {}).items()} if isinstance(self._device_config().get("aliases"), dict) else {}
+        by_name = {d.name.lower(): d for d in devices}
+        name = aliases.get(wanted)
+        if name and name.lower() in by_name:
+            return by_name[name.lower()]
+        exact = [d for d in devices if d.name.lower() == wanted]
+        if len(exact) == 1:
+            return exact[0]
+        partial = [d for d in devices if len(wanted) >= 3 and wanted in d.name.lower()]      # a short hint ('me') must never match inside a name
+        return partial[0] if len(partial) == 1 else None
+
+    def _idle_default_device(self):
+        """The configured default device, but only when nothing is active (an active device is never overridden) and the default is present."""
+        default = self._device_config().get("default")
+        if not isinstance(default, str) or not default.strip():
+            return None
+        devices = self._provider.devices() if self._provider else []
+        if any(d.active for d in devices):
+            return None
+        return next((d for d in devices if d.name.lower() == default.strip().lower()), None)
 
     def _target_device(self):
         """The device a volume change will act on: the active one, or the only one; None when it cannot be told."""
@@ -135,7 +165,7 @@ class MusicRuntime:
         key = request_id if re.fullmatch(r"[A-Za-z0-9._:-]{1,56}", request_id or "") else hashlib.sha256((request_id or "").encode("utf-8")).hexdigest()[:56]
         rid = "music-" + key                                         # never truncated: two distinct keys can never share a controller id
         is_write = command.action not in _READS
-        fingerprint = (command.action, command.query, command.kind, command.volume, command.volume_delta)
+        fingerprint = (command.action, command.query, command.kind, command.volume, command.volume_delta, command.device_hint)
         if is_write:
             with self._lock:
                 seen = self._results.get(rid)
@@ -151,6 +181,18 @@ class MusicRuntime:
 
     def _execute(self, controller: MusicController, command: MusicCommand, rid: str) -> Dict[str, Any]:
         action, kwargs = command.action, {}
+        device_name = ""
+        if command.device_hint:
+            found = self._resolve_device_hint(command.device_hint)
+            if found is not None:
+                device_name = found.name
+            elif action in ("play", "queue") and command.query_with_hint:
+                command = MusicCommand(action, query=command.query_with_hint, kind=command.kind, fallback_query=command.fallback_query)   # a title that ends "on ..."
+            else:
+                return {"status": "clarify", "data": {}, "trace": {}, "text": "I don't know a device called %s." % command.device_hint}
+        elif action in ("play", "queue", "resume"):
+            idle = self._idle_default_device()
+            device_name = idle.name if idle is not None else ""
         if action in ("play", "queue"):
             query = command.query
             if command.fallback_query and self._provider is not None:       # "play Blue please": the literal wins if it exists, else drop the "please"
@@ -171,6 +213,8 @@ class MusicRuntime:
                 kwargs = {"volume": volume, "device": target.name}
             else:
                 kwargs = {"volume": volume}
+        if device_name and "device" not in kwargs:
+            kwargs["device"] = device_name
         result: MusicResult = controller.handle(action, request_id=rid, explicit_command=True, guest=False, **kwargs)
         return {"status": result.status, "data": result.data, "trace": result.trace, "text": _speak(result)}
 
