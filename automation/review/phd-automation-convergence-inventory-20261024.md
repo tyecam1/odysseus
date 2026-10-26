@@ -50,7 +50,7 @@ six candidates (`agent_run_evaluator.py`, `engine_objective_validator.py`,
 demonstrated backend replacement exists (`src/routing_evaluator.py` remains
 routing-only; `src/misumi_observability.py` is domain-specific, not a general
 layer); every candidate still has live PhD callers; PhD-side development is
-actively extending these modules (#629 added `supervision_update_extractor.py`);
+continuing PhD-side automation development (e.g. #629 added `supervision_update_extractor.py`, outside these six candidates);
 and cross-repo owner approvals for a semantics-preserving migration are not in
 place. Migration today would be inventory-statistic-driven. Re-assess only when
 a backend replacement has passed the PhD consumers' own tests and both
