@@ -406,7 +406,7 @@ def test_the_controller_governs_the_real_provider_guest_duplicates_and_reads():
     controller = MusicController(provider)
     http.push(200, {"devices": [{"id": "dev1", "name": "Kitchen", "is_active": True, "volume_percent": 30}]})
     http.push(204)
-    http.push(200, {"is_playing": False, "item": {"uri": "spotify:track:t1", "name": "Song", "type": "track", "artists": []}})
+    http.push(200, {"is_playing": False, "device": {"id": "dev1"}, "item": {"uri": "spotify:track:t1", "name": "Song", "type": "track", "artists": []}})
     result = controller.handle("pause", request_id="r1", explicit_command=True)
     assert result.ok and result.status == "done" and not result.simulated and not result.message.startswith("[simulation]")
     assert [c["method"] for c in http.calls] == ["GET", "PUT", "GET"]       # devices, the write, then a read-back of the real state

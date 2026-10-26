@@ -21,7 +21,7 @@ import re
 import math
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Dict, List, Optional, Protocol, Tuple
 
 READ_ACTIONS = frozenset({"search", "devices", "now_playing"})
@@ -31,6 +31,7 @@ DEFAULT_MAX_VOLUME = 80  # percent; a higher request is refused, never clamped s
 MAX_OPTIONS = 3  # choices offered when asking the user to disambiguate
 MAX_DEVICES_LISTED = 5
 _REMEMBERED_REQUESTS = 4096  # write request ids remembered per controller; when full, new writes are refused, never evicted
+_OUTCOME_UNKNOWN_CODES = frozenset({"offline", "unexpected"})  # after a write was submitted these cannot prove "nothing happened"
 _URI = re.compile(r"spotify:(?:track|album|playlist|artist|episode|show):[A-Za-z0-9]{1,64}")
 _REQUEST_ID = re.compile(r"[A-Za-z0-9._:-]{1,64}")  # ids are opaque and short; anything else is refused, so traces can never carry free text
 
@@ -206,7 +207,7 @@ class MusicController:
                     result = self._failure(action, ProviderError("unexpected"), rid)
                 with self._lock:
                     self._inflight.pop(rid, None)
-                    if result.status in ("done", "done_unconfirmed", "error"):
+                    if result.status in ("done", "done_unconfirmed", "unknown_outcome", "error"):
                         self._seen[rid] = (fingerprint, result)
                 flight.result = result
                 flight.event.set()
@@ -261,8 +262,15 @@ class MusicController:
                 if isinstance(resolved, MusicResult):
                     return resolved
                 target = resolved.uri
-            self._dispatch(action, chosen.id, target, volume_value)
-            return self._confirm(action, chosen, target, request_id)
+            try:
+                self._dispatch(action, chosen.id, target, volume_value)
+            except ProviderError as exc:
+                if exc.code not in _OUTCOME_UNKNOWN_CODES:
+                    raise                                   # a typed refusal (auth, rate limit, no device...): the provider did not act
+                return self._unknown_outcome(action, chosen, request_id)
+            except Exception:  # noqa: BLE001 - the request may already have left this process
+                return self._unknown_outcome(action, chosen, request_id)
+            return self._confirm(action, chosen, target, request_id, volume_value)
         except ProviderError as exc:
             return self._failure(action, exc, request_id)
 
@@ -280,25 +288,59 @@ class MusicController:
         elif action == "volume":
             self.provider.set_volume(int(volume), device_id)
 
-    def _confirm(self, action: str, device: Device, target: str, request_id: str) -> MusicResult:
-        """Report the ACTUAL state where it can be read back; say so when it cannot."""
+    def _confirm(self, action: str, device: Device, target: str, request_id: str, volume: Optional[int] = None) -> MusicResult:
+        """Report the ACTUAL state where it can be read back; say so when it cannot. A read-back on a DIFFERENT device is not a confirmation."""
         try:
             now = self.provider.now_playing()
         except Exception:  # noqa: BLE001 - the write already happened; an unreadable state is reported as unconfirmed
             now = None
+        on_target = bool(now) and now.device_id == device.id          # a missing id is not evidence (Spotify may omit it)
+        wrong_device = bool(now) and now.device_id is not None and not on_target
         confirmed = {
             "play": lambda n: bool(n and n.playing and n.item and n.item.uri == target),
             "pause": lambda n: bool(n and not n.playing),
             "resume": lambda n: bool(n and n.playing),
         }.get(action)
-        ok = True if confirmed is None else bool(confirmed(now))
+        if action == "volume":
+            ok = self._volume_confirmed(device, volume)
+        else:
+            if confirmed is not None:
+                ok = bool(confirmed(now)) and on_target
+            elif action == "next":
+                ok = on_target                                   # a skip is confirmed only by the player showing on the target device
+            else:
+                ok = not wrong_device                            # queue: Spotify's acceptance is all there is; a read-back on another device is a mismatch
         verb = {"play": "Playing", "queue": "Queued", "pause": "Paused", "resume": "Resumed", "next": "Skipped",
                 "volume": "Volume set"}[action]
         status = "done" if ok else "done_unconfirmed"
-        text = f"{verb} on {device.name}." if ok else f"{verb} on {device.name}, but I could not confirm the player's state."
+        if ok:
+            text = f"{verb} on {device.name}."
+        elif wrong_device:
+            text = f"{verb} on {device.name} was sent, but Spotify reports the player on a different device, so I can't confirm it."
+        else:
+            text = f"{verb} on {device.name}, but I could not confirm the player's state."
         return self._result(action, status, _say(self.provider, text), request_id, {"device_id": device.id})
 
-    # ------------------------------------------------------------------ resolution
+    def _volume_confirmed(self, device: Device, wanted: Optional[int]) -> bool:
+        try:
+            return any(d.id == device.id and d.volume is not None and d.volume == wanted for d in self.provider.devices())
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _unknown_outcome(self, action: str, device: Device, request_id: str) -> MusicResult:
+        """The write was submitted but no answer proves whether it happened: say exactly that, never "nothing changed", never repeat it."""
+        state = ""
+        try:
+            now = self.provider.now_playing()
+            if now is not None and now.item is not None:
+                state = " Right now it shows %s: %s." % ("playing" if now.playing else "paused", now.item.title)
+        except Exception:  # noqa: BLE001 - best-effort, read-only
+            pass
+        text = (f"I sent that to {device.name} but never got a clear answer, so I can't tell whether it happened.{state} "
+                "I have not tried again.")
+        return self._result(action, "unknown_outcome", _say(self.provider, text), request_id, {"device_id": device.id},
+                            "Check the player, then ask again if you still want it.", code="unknown_outcome")
+
     def _resolve_device(self, wanted: str):
         devices = self.provider.devices()
         if not devices:
@@ -426,7 +468,7 @@ class SimulatedMusicProvider:
     def devices(self) -> List[Device]:
         self._log("devices")
         self._check()
-        return list(self._devices)
+        return [replace(d, volume=self.volume.get(d.id, d.volume)) for d in self._devices]
 
     def now_playing(self) -> Optional[NowPlaying]:
         self._log("now_playing")

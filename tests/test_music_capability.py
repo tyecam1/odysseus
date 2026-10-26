@@ -203,7 +203,7 @@ def test_a_provider_that_raises_anything_gives_a_typed_result_and_is_not_retried
     controller, provider = _ctl()
     provider.pause = lambda device_id: (_ for _ in ()).throw(RuntimeError("binding bug"))
     first = _do(controller, "pause", "boom")
-    assert first.status == "error" and first.trace["error"] == "unexpected"
+    assert first.status == "unknown_outcome" and first.trace["error"] == "unknown_outcome"      # it may have reached the provider: never "nothing happened"
     provider.pause = lambda device_id: provider.calls.append(("pause", (device_id,)))
     assert _do(controller, "pause", "boom") is first and provider.writes() == []
     provider.devices = lambda: (_ for _ in ()).throw(KeyError("shape changed"))
@@ -450,3 +450,71 @@ def test_idle_id_uses_the_device_only_when_nothing_is_active():
     busy = _do(controller2, "pause", "ii2", device="idle-id:d2")
     assert busy.ok and "Laptop." in busy.message                              # something IS active: it is never overridden
     assert not any(name == "pause" and "d2" in args for name, args in provider2.calls)
+
+
+# --- read-back must be on the TARGET device, and a lost answer is "outcome unknown", never "nothing happened" -----------------
+
+
+def test_a_read_back_on_another_device_is_not_a_confirmation():
+    from src.music_capability import NowPlaying
+    controller, provider = _ctl(devices=[Device("target", "Laptop", True), Device("other", "TV", False)])
+    provider.now_playing = lambda: NowPlaying(Item("spotify:track:sim0001", "Kind of Blue"), True, "other")
+    result = _do(controller, "play", "wd1", query="Kind of Blue", device="id:target")
+    assert result.status == "done_unconfirmed" and "different device" in result.message
+
+
+def test_a_read_back_on_the_target_device_is_confirmed():
+    controller, provider = _ctl(devices=[Device("target", "Laptop", True)])
+    assert _do(controller, "play", "wd2", query="Kind of Blue", device="id:target").status == "done"
+
+
+@pytest.mark.parametrize("code", ["offline", "unexpected"])
+def test_a_write_whose_answer_was_lost_is_reported_as_unknown_and_never_repeated(code):
+    from src.music_capability import ProviderError
+    controller, provider = _ctl()
+    calls = []
+
+    def lost(uri, device_id):
+        calls.append(uri)
+        raise ProviderError(code)
+
+    provider.queue = lost
+    first = _do(controller, "queue", "q1", query="Kind of Blue")
+    assert first.status == "unknown_outcome" and "can't tell whether it happened" in first.message and "not tried again" in first.message
+    assert "nothing" not in first.message.lower()
+    again = _do(controller, "queue", "q1", query="Kind of Blue")          # the same id: the stored answer, no second provider call
+    assert again.status == "unknown_outcome" and calls == ["spotify:track:sim0001"]
+
+
+def test_a_typed_refusal_is_still_an_error_because_the_provider_did_not_act():
+    from src.music_capability import ProviderError
+    controller, provider = _ctl()
+
+    def refused(uri, device_id):
+        raise ProviderError("rate_limited", retry_after=3)
+
+    provider.queue = refused
+    assert _do(controller, "queue", "q2", query="Kind of Blue").status == "error"
+
+
+def test_volume_is_confirmed_only_when_the_device_reports_the_level():
+    controller, provider = _ctl(devices=[Device("target", "Laptop", True, 20)])
+    provider.devices = lambda: [Device("target", "Laptop", True, 20)]
+    assert _do(controller, "volume", "v1", volume=30, device="id:target").status == "done_unconfirmed"
+    provider.devices = lambda: [Device("target", "Laptop", True, 30)]
+    assert _do(controller, "volume", "v2", volume=30, device="id:target").status == "done"
+
+
+def test_a_read_back_without_a_device_id_is_not_a_confirmation():
+    from src.music_capability import NowPlaying
+    controller, provider = _ctl(devices=[Device("target", "Laptop", True)])
+    provider.now_playing = lambda: NowPlaying(Item("spotify:track:sim0001", "Kind of Blue"), True, None)
+    assert _do(controller, "play", "nd1", query="Kind of Blue", device="id:target").status == "done_unconfirmed"
+
+
+def test_a_skip_or_queue_with_the_player_on_another_device_is_not_reported_as_done():
+    from src.music_capability import NowPlaying
+    controller, provider = _ctl(devices=[Device("target", "Laptop", True), Device("other", "TV", False)])
+    provider.now_playing = lambda: NowPlaying(Item("spotify:track:sim0001", "Kind of Blue"), True, "other")
+    assert _do(controller, "next", "sk1", device="id:target").status == "done_unconfirmed"
+    assert _do(controller, "queue", "sk2", query="Kind of Blue", device="id:target").status == "done_unconfirmed"
