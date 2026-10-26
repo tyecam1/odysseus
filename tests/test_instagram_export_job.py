@@ -1025,3 +1025,27 @@ def test_acquisition_lock_and_state_survive_windows_without_os_fchmod(monkeypatc
     if hasattr(os, "fchmod"):
         # On POSIX the created files are still owner-only.
         assert stat.S_IMODE(state_path.stat().st_mode) == 0o600
+
+
+def test_acquisition_lock_falls_back_to_msvcrt_without_fcntl(monkeypatch, tmp_path):
+    """Without fcntl (e.g. Windows), the lock uses the msvcrt path."""
+    import sys
+
+    import src.instagram_export_job as export_job
+
+    lock_calls = []
+
+    fake_msvcrt = types.SimpleNamespace(
+        LK_NBLCK=2,
+        LK_UNLCK=0,
+        locking=lambda fd, mode, nbytes: lock_calls.append(mode),
+    )
+    # A None entry in sys.modules makes `import fcntl` raise ImportError.
+    monkeypatch.setitem(sys.modules, "fcntl", None)
+    monkeypatch.setitem(sys.modules, "msvcrt", fake_msvcrt)
+
+    state_path = tmp_path / "governed" / "instagram" / "acquisition-state.json"
+    with export_job._acquisition_lock(state_path):
+        assert lock_calls == [fake_msvcrt.LK_NBLCK]
+
+    assert lock_calls == [fake_msvcrt.LK_NBLCK, fake_msvcrt.LK_UNLCK]

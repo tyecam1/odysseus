@@ -180,7 +180,7 @@ def _fsync_dir(path: Path) -> None:
 
 @contextmanager
 def _acquisition_lock(state_path: Path):
-    """Serialize acquisition transitions across processes on the lab host."""
+    """Serialize acquisition transitions across processes (POSIX or Windows)."""
     _private_dir(state_path.parent)
     lock_path = state_path.parent / f".{state_path.name}.lock"
     flags = os.O_RDWR | os.O_CREAT
@@ -189,18 +189,45 @@ def _acquisition_lock(state_path: Path):
     fd = os.open(lock_path, flags, stat.S_IRUSR | stat.S_IWUSR)
     try:
         _fchmod_owner_only(fd)
+        unlock = _lock_fd_exclusive(fd)
         try:
-            import fcntl
-        except ImportError as exc:  # pragma: no cover - acquisition runs on the POSIX lab host
-            raise RuntimeError("durable Instagram acquisition requires POSIX file locking") from exc
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        yield
-    finally:
-        try:
-            if "fcntl" in locals():
-                fcntl.flock(fd, fcntl.LOCK_UN)
+            yield
         finally:
-            os.close(fd)
+            unlock()
+    finally:
+        os.close(fd)
+
+
+def _lock_fd_exclusive(fd: int) -> Callable[[], None]:
+    """Lock fd exclusively; return an unlock callable.
+
+    Uses fcntl on POSIX and msvcrt on Windows. RuntimeError is a last resort
+    only when the platform supports neither locking primitive.
+    """
+    try:
+        import fcntl
+    except ImportError:
+        fcntl = None  # type: ignore[assignment]
+    if fcntl is not None:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        return lambda: fcntl.flock(fd, fcntl.LOCK_UN)
+    try:
+        import msvcrt
+    except ImportError:
+        msvcrt = None  # type: ignore[assignment]
+    if msvcrt is not None:
+        # msvcrt has no blocking lock; emulate fcntl's blocking LOCK_EX with
+        # bounded non-blocking retries.
+        import time
+
+        while True:
+            try:
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                break
+            except OSError:
+                time.sleep(0.1)
+        return lambda: msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+    raise RuntimeError("durable Instagram acquisition requires POSIX or Windows file locking")
 
 
 def save_acquisition_state(
