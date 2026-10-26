@@ -14,6 +14,9 @@ from pathlib import Path
 from typing import Iterator
 
 
+_OWNER_PLACEHOLDERS = frozenset({"S-1-3-4", "S-1-3-0"})  # OWNER RIGHTS, CREATOR OWNER
+
+
 def _windows_private(path: Path, fd: int | None = None) -> None:
     """Inspect the real security descriptor (including inherited grants)."""
     import ctypes as c
@@ -95,7 +98,10 @@ def _windows_private(path: Path, fd: int | None = None) -> None:
             if ace_type != 0:
                 raise PermissionError(f"unsupported private storage ACL: {path}")
             mask = c.cast(ace.value + 4, c.POINTER(w.DWORD))[0]
-            if mask and sid_text(ace.value + 8) not in trusted:
+            # OWNER RIGHTS (S-1-3-4) and CREATOR OWNER (S-1-3-0) name "whoever owns this object". CPython's mkdir(mode=0o700) writes an OWNER RIGHTS
+            # allow ACE into the protected DACL it creates, so without this a directory created here was rejected by its own validator. They are
+            # exactly as private as the owner, which was verified above to be the user, SYSTEM or Administrators.
+            if mask and sid_text(ace.value + 8) not in trusted | _OWNER_PLACEHOLDERS:
                 raise PermissionError(f"private storage grants access outside user/SYSTEM/Administrators: {path}")
     finally:
         kernel.LocalFree(descriptor)
@@ -145,5 +151,24 @@ def private_file(path: Path, flags: int) -> Iterator[int]:
         else:
             path.chmod(0o600)
         yield fd
+    finally:
+        os.close(fd)
+
+
+def read_private_bytes(path: Path) -> bytes:
+    """Read a private state file, validating the object actually opened (not a pathname that could be swapped after a check).
+
+    Raises FileNotFoundError when absent. POSIX opens with O_NOFOLLOW; on Windows the opened handle's owner and DACL are checked."""
+    path = Path(path)
+    if not (path.exists() or path.is_symlink()):
+        raise FileNotFoundError(str(path))
+    check_private_path(path.parent)
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+    fd = os.open(path, flags)
+    try:
+        if os.name == "nt":
+            _windows_private(path, fd)
+        with os.fdopen(fd, "rb", closefd=False) as handle:
+            return handle.read()
     finally:
         os.close(fd)

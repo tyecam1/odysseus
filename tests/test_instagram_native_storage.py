@@ -273,3 +273,48 @@ def test_lock_rejects_unbounded_timeout(private_root, timeout):
     with pytest.raises(ValueError, match="finite"):
         with _acquisition_lock(private_root / "state.json", timeout=timeout):
             pytest.fail("invalid timeout must not enter lock")
+
+
+# --- Sol review of #178 ------------------------------------------------------------------------------------------------------------------
+
+
+def test_read_private_bytes_returns_content_and_reports_absence(tmp_path):
+    from src.private_state_io import private_dir, private_file, read_private_bytes
+
+    root = tmp_path / "state"
+    private_dir(root)
+    with pytest.raises(FileNotFoundError):
+        read_private_bytes(root / "missing.json")
+    with private_file(root / "state.json", os.O_WRONLY | os.O_CREAT | os.O_TRUNC) as fd:
+        os.write(fd, b'{"state": "scheduled"}')
+    assert read_private_bytes(root / "state.json") == b'{"state": "scheduled"}'
+
+
+@pytest.mark.skipif(os.name == "nt", reason="O_NOFOLLOW symlink behaviour is POSIX")
+def test_read_private_bytes_never_follows_a_symlink_at_the_final_component(tmp_path):
+    from src.private_state_io import private_dir, read_private_bytes
+
+    root = tmp_path / "state"
+    private_dir(root)
+    outside = tmp_path / "elsewhere.json"
+    outside.write_text('{"state": "scheduled"}')
+    (root / "state.json").symlink_to(outside)
+    with pytest.raises(OSError):
+        read_private_bytes(root / "state.json")
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows ACL behaviour")
+def test_windows_accepts_directories_python_creates_and_still_refuses_broader_grants(tmp_path):
+    """Sol: CPython's mkdir(mode=0o700) writes an OWNER RIGHTS allow ACE; the validator used to reject the directories it had just created."""
+    import subprocess
+
+    from src.private_state_io import check_private_path, private_dir
+
+    root = tmp_path / "state"
+    private_dir(root / "instagram" / "deep")
+    check_private_path(root / "instagram" / "deep")
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    subprocess.run(["icacls", str(shared), "/grant", "Everyone:(R)"], check=True, capture_output=True)
+    with pytest.raises(PermissionError):
+        check_private_path(shared)

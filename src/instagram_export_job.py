@@ -41,7 +41,7 @@ from src.meta_export_automation import (
     _guarded_goto,
     _install_navigation_guard,
 )
-from src.private_state_io import check_private_path, private_dir as _private_dir, private_file
+from src.private_state_io import check_private_path, private_dir as _private_dir, private_file, read_private_bytes
 
 
 logger = logging.getLogger(__name__)
@@ -288,12 +288,8 @@ def load_acquisition_state(
     """
     current = now or _utcnow()
     target = Path(path)
-    if target.exists() or target.is_symlink():
-        check_private_path(target.parent)
-        check_private_path(target)
     try:
-        with target.open("r", encoding="utf-8") as handle:
-            state = json.load(handle)
+        state = json.loads(read_private_bytes(target).decode("utf-8"))
         if not isinstance(state, dict) or state.get("state") not in STATES:
             raise ValueError("invalid state document")
         return state

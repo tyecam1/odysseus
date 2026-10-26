@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from src.constants import DATA_DIR
-from src.private_state_io import check_private_path, private_file
+from src.private_state_io import check_private_path, private_file, read_private_bytes
 
 
 logger = logging.getLogger(__name__)
@@ -80,11 +80,8 @@ def last_import_run(
 ) -> Optional[dict[str, Any]]:
     """Return the most recent valid accounting record, or ``None``."""
     path = Path(run_log_path)
-    if path.exists() or path.is_symlink():
-        check_private_path(path.parent)
-        check_private_path(path)
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        lines = read_private_bytes(path).decode("utf-8").splitlines()
     except FileNotFoundError:
         return None
     for line in reversed(lines):
