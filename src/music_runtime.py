@@ -179,17 +179,18 @@ class MusicRuntime:
             clean = lambda v: v.replace('"', " ").strip()            # noqa: E731
             # Spotify's field filters find "Arevil's Gardens" by "The Land of Rah" exactly where a plain "<title> by <artist>" search returns noise
             asked = ['%s:"%s" artist:"%s"' % (field, clean(parts[0]), clean(parts[1]))] if field else []
-            results = []
             for q in asked + [query]:
-                results = self._provider.search(q, kind)
-                if results:
-                    break
-            found = [i for i in results
-                     if artist and title and artist_is(artist, i.artist) and title in (base_title(i.title), flat(i.title))]
+                found = [i for i in self._provider.search(q, kind)
+                         if artist and title and artist_is(artist, i.artist) and title in (base_title(i.title), flat(i.title))]
+                uris = {i.uri for i in found}
+                if len(uris) == 1:
+                    return next(iter(uris))
+                if len(uris) > 1:
+                    return ""                                       # several distinct exact matches: stays a question
+                # no strict match in this result set (noise, or only "Blue Boy"): try the next query before giving up
         except Exception:  # noqa: BLE001
             return ""
-        uris = {i.uri for i in found}
-        return next(iter(uris)) if len(uris) == 1 else ""
+        return ""
 
     def _idle_default_device(self):
         """The configured default device when it is present exactly once. Whether it may be used (only when nothing is active) is decided by the
