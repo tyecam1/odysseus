@@ -348,6 +348,10 @@ def test_read_private_bytes_refuses_a_file_that_changes_identity_between_check_a
     real_stat = os.fstat
     other = tmp_path / "other"
     other.write_text("x")
-    monkeypatch.setattr(psio.os, "fstat", lambda fd: real_stat(os.open(other, os.O_RDONLY)))
-    with pytest.raises(psio.PrivateStorageRefused):
-        psio.read_private_bytes(path)
+    other_fd = os.open(other, os.O_RDONLY)
+    try:
+        monkeypatch.setattr(psio.os, "fstat", lambda fd: real_stat(other_fd))
+        with pytest.raises(psio.PrivateStorageRefused):
+            psio.read_private_bytes(path)
+    finally:
+        os.close(other_fd)
