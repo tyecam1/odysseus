@@ -294,8 +294,8 @@ class MusicController:
             now = self.provider.now_playing()
         except Exception:  # noqa: BLE001 - the write already happened; an unreadable state is reported as unconfirmed
             now = None
-        on_target = bool(now) and (now.device_id is None or now.device_id == device.id)
-        wrong_device = bool(now) and not on_target
+        on_target = bool(now) and now.device_id == device.id          # a missing id is not evidence (Spotify may omit it)
+        wrong_device = bool(now) and now.device_id is not None and not on_target
         confirmed = {
             "play": lambda n: bool(n and n.playing and n.item and n.item.uri == target),
             "pause": lambda n: bool(n and not n.playing),
@@ -304,13 +304,18 @@ class MusicController:
         if action == "volume":
             ok = self._volume_confirmed(device, volume)
         else:
-            ok = True if confirmed is None else bool(confirmed(now)) and on_target
+            if confirmed is not None:
+                ok = bool(confirmed(now)) and on_target
+            elif action == "next":
+                ok = on_target                                   # a skip is confirmed only by the player showing on the target device
+            else:
+                ok = not wrong_device                            # queue: Spotify's acceptance is all there is; a read-back on another device is a mismatch
         verb = {"play": "Playing", "queue": "Queued", "pause": "Paused", "resume": "Resumed", "next": "Skipped",
                 "volume": "Volume set"}[action]
         status = "done" if ok else "done_unconfirmed"
         if ok:
             text = f"{verb} on {device.name}."
-        elif wrong_device and confirmed is not None:
+        elif wrong_device:
             text = f"{verb} on {device.name} was sent, but Spotify reports the player on a different device, so I can't confirm it."
         else:
             text = f"{verb} on {device.name}, but I could not confirm the player's state."

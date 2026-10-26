@@ -941,3 +941,17 @@ def test_relative_volume_with_two_active_players_asks_instead_of_guessing(tmp_pa
                                 {"id": "b", "name": "TV", "is_active": True, "volume_percent": 70}]})
     out = music_reply(runtime, "turn the music down", "jin", "vol-2", allow_writes=True, origin="typed")
     assert out["status"] == "clarify" and len(http.calls) == 1
+
+
+def test_a_request_id_refused_for_its_origin_cannot_be_replayed_as_typed(tmp_path):
+    http = FakeHttp()
+    runtime = make_runtime(tmp_path, http)
+    first = music_reply(runtime, "skip this song", "jin", "replay-1", allow_writes=True, origin="voice_unaddressed")
+    again = music_reply(runtime, "skip this song", "jin", "replay-1", allow_writes=True, origin="typed")
+    assert first["status"] == again["status"] == "refused" and http.calls == []
+
+
+def test_an_unknown_outcome_speaks_its_recovery_instruction():
+    from src.music_capability import MusicResult
+    spoken = _speak(MusicResult("queue", "unknown_outcome", "I sent that.", suggestion="Check the player, then ask again if you still want it."))
+    assert spoken.endswith("still want it.")

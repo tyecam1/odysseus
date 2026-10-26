@@ -503,3 +503,18 @@ def test_volume_is_confirmed_only_when_the_device_reports_the_level():
     assert _do(controller, "volume", "v1", volume=30, device="id:target").status == "done_unconfirmed"
     provider.devices = lambda: [Device("target", "Laptop", True, 30)]
     assert _do(controller, "volume", "v2", volume=30, device="id:target").status == "done"
+
+
+def test_a_read_back_without_a_device_id_is_not_a_confirmation():
+    from src.music_capability import NowPlaying
+    controller, provider = _ctl(devices=[Device("target", "Laptop", True)])
+    provider.now_playing = lambda: NowPlaying(Item("spotify:track:sim0001", "Kind of Blue"), True, None)
+    assert _do(controller, "play", "nd1", query="Kind of Blue", device="id:target").status == "done_unconfirmed"
+
+
+def test_a_skip_or_queue_with_the_player_on_another_device_is_not_reported_as_done():
+    from src.music_capability import NowPlaying
+    controller, provider = _ctl(devices=[Device("target", "Laptop", True), Device("other", "TV", False)])
+    provider.now_playing = lambda: NowPlaying(Item("spotify:track:sim0001", "Kind of Blue"), True, "other")
+    assert _do(controller, "next", "sk1", device="id:target").status == "done_unconfirmed"
+    assert _do(controller, "queue", "sk2", query="Kind of Blue", device="id:target").status == "done_unconfirmed"

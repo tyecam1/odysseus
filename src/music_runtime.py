@@ -70,6 +70,7 @@ class MusicRuntime:
         self._controller: Optional[MusicController] = None
         self._provider: Optional[SpotifyProvider] = None
         self._built_for: Optional[str] = None                          # the client id the cached controller was built with
+        self._denied: "OrderedDict[str, bool]" = OrderedDict()         # request ids refused for their origin
         self._results: "OrderedDict[str, tuple]" = OrderedDict()       # completed writes by request id, so a retry returns the first answer
 
     # ------------------------------------------------------------------ state
@@ -128,6 +129,17 @@ class MusicRuntime:
             if command.action in _READS:
                 return {"status": "error", "data": {}, "trace": {}, "text": "The music service failed on that request."}
             return dict(_UNKNOWN_WRITE)      # reached only if _run itself failed: it cannot say whether a write went out
+
+    def note_denied(self, request_id: str) -> None:
+        """A write refused for its origin burns its id: replaying the same id as "typed" must not turn the refusal into a playback change."""
+        with self._lock:
+            self._denied[request_id] = True
+            while len(self._denied) > 256:
+                self._denied.popitem(last=False)
+
+    def was_denied(self, request_id: str) -> bool:
+        with self._lock:
+            return request_id in self._denied
 
     def _device_config(self) -> Dict[str, Any]:
         """Optional <data>/spotify/devices.json: {"default": "<device name>", "aliases": {"laptop": "<device name>", ...}}. Absent or damaged = empty."""
@@ -315,7 +327,7 @@ def _speak(result: MusicResult) -> str:
     elif result.data.get("devices") is not None:
         names = ", ".join(d.get("name", "") + (" (active)" if d.get("active") else "") for d in result.data["devices"])
         text = "%s %s" % (text, names)
-    if result.suggestion and result.status in ("error", "not_found"):
+    if result.suggestion and result.status in ("error", "not_found", "unknown_outcome"):
         text = "%s %s" % (text, result.suggestion)
     return text
 
@@ -338,6 +350,11 @@ def music_reply(runtime: MusicRuntime, prompt: str, lead: str, request_id: str, 
     command = parse_music_command(prompt)
     if not runtime.wants(command, prompt, lead):
         return None
+    if command.action not in _READS:
+        if allow_writes and origin not in WRITE_ORIGINS:
+            runtime.note_denied(request_id)
+        elif allow_writes and runtime.was_denied(request_id):
+            return runtime.handle(command, request_id, False, "That request id was already refused; send it again as a new request.")
     if allow_writes and origin not in WRITE_ORIGINS:
         return runtime.handle(command, request_id, False, UNADDRESSED_REFUSAL)       # absent or unaddressed origin: fail closed, reads still work
     return runtime.handle(command, request_id, allow_writes)
