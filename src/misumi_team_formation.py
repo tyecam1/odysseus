@@ -28,6 +28,21 @@ from typing import Any
 
 HEAD = "aoteru"
 MAX_SUPPORT = 2
+
+# A support persona keeps its identity and permanent role; for ONE turn it is also given a task assignment: a task role plus the intents that
+# justified recruiting it (evidence already recorded by selection, never invented). Ephemeral: nothing here is stored, learned or promoted.
+TASK_ROLE_CRITIC = "critic"
+MAX_FOCUS = 5
+_FOCUS_TOKEN = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
+
+
+def task_assignment(intents: Any) -> dict[str, Any]:
+    focus: list[str] = []
+    for item in intents or []:
+        token = str(item).strip().lower()
+        if _FOCUS_TOKEN.fullmatch(token) and token not in focus:
+            focus.append(token)
+    return {"task_role": TASK_ROLE_CRITIC, "focus_intents": focus[:MAX_FOCUS]}
 _COMPLEX = re.compile(
     r"\b(plan|planning|decide|decision|compare|review|risk|coordinate|approach|strategy|trade-?off)\b",
     re.IGNORECASE,
@@ -135,6 +150,7 @@ def plan_team(
             "evidence": {"named_at": min(info["mentions"]) if info["mentions"] else None,
                          "intents": info["hits"]},
             "edge": item in edges,
+            "assignment": task_assignment(info["hits"]),
         })
     if chosen:
         plan["decision"] = "team"

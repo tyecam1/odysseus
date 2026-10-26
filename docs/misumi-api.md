@@ -96,6 +96,16 @@ model, tool, consultation, household read, or state update. `persona` is `auto` 
 Persona ids are the ids supported by the current persona policy; matching ignores surrounding whitespace and case. An unknown id returns
 422 rather than silently falling back to Aoteru.
 
+## Per-turn task assignments for support personas
+
+A persona recruited as a support keeps its identity and permanent role. For that one turn it is also given a **task assignment**,
+`{"task_role": "critic", "focus_intents": ["budget"]}`: a task role plus the routing intents that justified recruiting it, taken only
+from the evidence team selection already records (a persona named without intent evidence gets an empty focus). The assignment appears
+on each support record of the `team` block in `/misumi/respond` and in `/misumi/route-explain`, is stated to the support in its
+consultation prompt as one fixed sentence ("your identity and permanent role are unchanged"), and is reflected in the handover purpose
+(`critic: analyse from the ... perspective, focusing on budget`). It is ephemeral: nothing is stored, learned or promoted, recruitment
+rules are unchanged, a learned (structured) consult never receives one, and focus values are limited to plain tokens (maximum 5).
+
 ## Task planning
 
 ```http

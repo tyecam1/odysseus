@@ -145,7 +145,7 @@ def test_undo_is_limited_to_the_same_principal_and_session(estate):
 def _record_lead_inputs(estate, monkeypatch, consult_text="alternatives"):
     seen = {"contributions": [], "advisory": [], "consulted": [], "structured": []}
 
-    async def fake_consult(prompt, target, backend, model, lead="aoteru", structured=False):
+    async def fake_consult(prompt, target, backend, model, lead="aoteru", structured=False, assignment=None):
         seen["consulted"].append(target)
         seen["structured"].append(structured)
         return consult_text
