@@ -535,7 +535,9 @@ def _salvage_answer(raw: Optional[str]) -> Optional[str]:
     Returns the decoded answer, ended at the last complete sentence when the reply was cut off, or None when the text is not an
     answer-bearing JSON object. Other keys (memory, artifact) are never returned.
     """
-    text = (raw or "").strip()
+    # a model that "thinks" first (qwen3) emits <think>...</think> before the JSON; _json_object strips it for complete replies, so
+    # a cut-off reply must be cleaned the same way or the raw JSON wrapper reaches the user
+    text = re.sub(r"<think>.*?</think>", "", str(raw or ""), flags=re.I | re.S).strip()
     if text.startswith("```"):
         text = text.split("\n", 1)[1] if "\n" in text else ""
     text = text.strip()

@@ -127,3 +127,19 @@ def test_plain_text_and_non_answer_json_keep_the_old_behaviour():
 def test_a_code_fenced_truncated_reply_is_salvaged_too():
     answer = turn('```json\n{"answer": "Fenced reply. And a cut')["answer"]
     assert answer.startswith("Fenced reply.") and "```" not in answer
+
+
+@pytest.mark.parametrize("raw", [
+    '<think>Reasoning first.</think>{"answer":"After thinking. More unfinished',
+    '<THINK>\nMulti\nline\n</THINK>\n{"answer":"Loud tags. And a cut',
+    '<think>a</think><think>b</think>```json\n{"answer":"Two think blocks and a fence. Then a cut',
+])
+def test_a_think_block_before_a_truncated_json_reply_is_not_shown_and_does_not_hide_the_answer(raw):
+    answer = turn(raw)["answer"]
+    assert not answer.lstrip().startswith("{") and '"answer"' not in answer and "<think" not in answer.lower() and "</think" not in answer.lower()
+    assert answer.endswith(".") or answer.endswith("...")
+    assert answer.split(".")[0] in {"After thinking", "Loud tags", "Two think blocks and a fence"}
+
+
+def test_a_reply_that_is_only_an_unterminated_think_block_is_not_json_and_keeps_the_old_behaviour():
+    assert _salvage_answer("<think>still reasoning when the output limit hit") is None
