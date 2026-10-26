@@ -175,7 +175,16 @@ class MusicRuntime:
 
         title, artist = flat(parts[0]), flat(parts[1])
         try:
-            found = [i for i in self._provider.search(query, kind)
+            field = {"track": "track", "album": "album"}.get(kind)
+            clean = lambda v: v.replace('"', " ").strip()            # noqa: E731
+            # Spotify's field filters find "Arevil's Gardens" by "The Land of Rah" exactly where a plain "<title> by <artist>" search returns noise
+            asked = ['%s:"%s" artist:"%s"' % (field, clean(parts[0]), clean(parts[1]))] if field else []
+            results = []
+            for q in asked + [query]:
+                results = self._provider.search(q, kind)
+                if results:
+                    break
+            found = [i for i in results
                      if artist and title and artist_is(artist, i.artist) and title in (base_title(i.title), flat(i.title))]
         except Exception:  # noqa: BLE001
             return ""
