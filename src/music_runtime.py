@@ -32,6 +32,9 @@ MUSIC_PERSONA = "jin"
 _SPOTIFY_NAMED = re.compile(r"\bspotify\b", re.I)
 _MUSICAL_WORDS = re.compile(r"\b(?:music|song|songs|track|tracks|tune|tunes|playlist|album|record|spotify)\b", re.I)
 _READS = frozenset({"now_playing", "devices"})
+_NOT_CHANGED = "The music service failed on that request; nothing was changed."
+_UNKNOWN_TEXT = "That request hit an error after it may have reached Spotify, so I can't tell whether playback changed. I have not tried again."
+_UNKNOWN_WRITE = {"status": "unknown_outcome", "data": {}, "trace": {}, "text": _UNKNOWN_TEXT}
 _BY_ARTIST = re.compile(r"\bby\s+\S+", re.I)
 
 
@@ -107,11 +110,11 @@ class MusicRuntime:
             return False                                        # "turn it down" could be the TV: needs Jin, Spotify or a musical word
         return len(prompt.split()) <= 3                         # a bare "pause", "skip", "what's playing"
 
-    def handle(self, command: MusicCommand, request_id: str, allow_writes: bool = False) -> Dict[str, Any]:
+    def handle(self, command: MusicCommand, request_id: str, allow_writes: bool = False, refusal: str = "") -> Dict[str, Any]:
         """Run one command (blocking; call from a worker thread). Returns {"text", "status", "data", "trace"}; never raises.
         Changing playback needs ``allow_writes`` (the caller's execute authority); reading it does not."""
         if command.action not in _READS and not allow_writes:
-            return {"status": "refused", "data": {}, "trace": {}, "text": "This connection isn't allowed to change playback."}
+            return {"status": "refused", "data": {}, "trace": {}, "text": refusal or "This connection isn't allowed to change playback."}
         controller = self._build()
         if self._provider is not None:
             self._provider.begin_turn()                  # one budget for every Spotify call of this spoken request (retries included)
@@ -122,7 +125,9 @@ class MusicRuntime:
             return self._run(controller, command, request_id)
         except Exception as exc:  # noqa: BLE001 - a bug here must become an honest sentence, never a failed turn
             logger.warning("music turn failed: %s", type(exc).__name__, exc_info=True)
-            return {"status": "error", "data": {}, "trace": {}, "text": "The music service failed on that request; nothing was changed."}
+            if command.action in _READS:
+                return {"status": "error", "data": {}, "trace": {}, "text": "The music service failed on that request."}
+            return dict(_UNKNOWN_WRITE)      # reached only if _run itself failed: it cannot say whether a write went out
 
     def _device_config(self) -> Dict[str, Any]:
         """Optional <data>/spotify/devices.json: {"default": "<device name>", "aliases": {"laptop": "<device name>", ...}}. Absent or damaged = empty."""
@@ -208,6 +213,8 @@ class MusicRuntime:
         """The device a volume change will act on: the active one, or the only one; None when it cannot be told."""
         devices = self._provider.devices() if self._provider else []
         active = [d for d in devices if d.active]
+        if len(active) > 1:
+            return None                                  # two players are active: never guess which one "turn it down" means
         return active[0] if active else (devices[0] if len(devices) == 1 else None)
 
     def _run(self, controller: MusicController, command: MusicCommand, request_id: str) -> Dict[str, Any]:
@@ -220,7 +227,15 @@ class MusicRuntime:
                 seen = self._results.get(rid)
             if seen is not None and seen[0] == fingerprint:           # a retry: answer from the first run BEFORE resolving anything relative
                 return seen[1]
-        result = self._execute(controller, command, rid)
+        attempt = {"submitted": False}
+        try:
+            result = self._execute(controller, command, rid, attempt)
+        except Exception as exc:  # noqa: BLE001 - a bug here must become an honest sentence, never a failed turn
+            logger.warning("music turn failed: %s", type(exc).__name__, exc_info=True)
+            if is_write and attempt["submitted"]:
+                result = dict(_UNKNOWN_WRITE)          # the write left this process: never "nothing was changed"; the id is remembered, so no repeat
+            else:
+                result = {"status": "error", "data": {}, "trace": {}, "text": _NOT_CHANGED if is_write else "The music service failed on that request."}
         if is_write and result["status"] not in ("error", "not_connected"):
             with self._lock:
                 self._results[rid] = (fingerprint, result)
@@ -228,7 +243,8 @@ class MusicRuntime:
                     self._results.popitem(last=False)
         return result
 
-    def _execute(self, controller: MusicController, command: MusicCommand, rid: str) -> Dict[str, Any]:
+    def _execute(self, controller: MusicController, command: MusicCommand, rid: str, attempt: Optional[Dict[str, bool]] = None) -> Dict[str, Any]:
+        attempt = attempt if attempt is not None else {"submitted": False}
         action, kwargs = command.action, {}
         device_ref = ""                                               # "id:<spotify id>" once WE chose the device: exact, immune to name prefixes
         if command.device_hint:
@@ -272,6 +288,7 @@ class MusicRuntime:
                 kwargs = {"volume": volume}
         if device_ref and "device" not in kwargs:
             kwargs["device"] = device_ref
+        attempt["submitted"] = action not in _READS
         result: MusicResult = controller.handle(action, request_id=rid, explicit_command=True, guest=False, **kwargs)
         if result.status == "clarify" and action in ("play", "queue") and kwargs.get("query") and re.search(r"\sby\s", kwargs["query"], re.I):
             # "<title> by <artist>" that the search left ambiguous only because of noise or a "(Rip)"-style suffix: if exactly ONE result matches both the
@@ -281,6 +298,7 @@ class MusicRuntime:
                 retry = {"uri": exact, "kind": command.kind}
                 if kwargs.get("device"):
                     retry["device"] = kwargs["device"]
+                attempt["submitted"] = action not in _READS
                 result = controller.handle(action, request_id=rid, explicit_command=True, guest=False, **retry)       # the SAME id: one write reservation
         return {"status": result.status, "data": result.data, "trace": result.trace, "text": _speak(result)}
 
@@ -308,9 +326,18 @@ def _option(option: Any) -> str:
     return str(option)
 
 
-def music_reply(runtime: MusicRuntime, prompt: str, lead: str, request_id: str, allow_writes: bool = False) -> Optional[Dict[str, Any]]:
+# Where a request came from, as asserted by the trusted caller (the kiosk). Hearing room speech is not authority to change the owner's account:
+# only a request addressed to the assistant (wake word, push-to-talk) or typed may write; unaddressed speech (a TV, a guest talking) may only read.
+WRITE_ORIGINS = frozenset({"typed", "voice_addressed"})
+UNADDRESSED_REFUSAL = 'I only change the music when you speak to me directly, like "Aoteru, pause". I left it as it is.'
+
+
+def music_reply(runtime: MusicRuntime, prompt: str, lead: str, request_id: str, allow_writes: bool = False,
+                origin: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """Blocking helper for the respond route: the music answer for this turn, or None when the turn is not a music request."""
     command = parse_music_command(prompt)
     if not runtime.wants(command, prompt, lead):
         return None
+    if allow_writes and origin not in WRITE_ORIGINS:
+        return runtime.handle(command, request_id, False, UNADDRESSED_REFUSAL)       # absent or unaddressed origin: fail closed, reads still work
     return runtime.handle(command, request_id, allow_writes)

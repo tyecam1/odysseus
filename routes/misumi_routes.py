@@ -127,6 +127,9 @@ class MisumiRespondRequest(BaseModel):
     history_mode: Optional[Literal["auto", "off"]] = None
     # Optional client idempotency key: a retried music command carrying the same key is answered from the first result, not executed again.
     request_id: Optional[str] = Field(default=None, max_length=64, pattern=r"^[A-Za-z0-9._:-]{1,64}$")
+    # How the caller got the words: "typed", "voice_addressed" (wake word / push-to-talk) or "voice_unaddressed" (room speech answered by the
+    # speech responder). Playback WRITES need typed/voice_addressed; an absent origin is treated as unaddressed. Asserted by the trusted kiosk.
+    origin: Optional[Literal["typed", "voice_addressed", "voice_unaddressed"]] = None
 
 
 class MisumiRouteExplainRequest(BaseModel):
@@ -1950,7 +1953,7 @@ def setup_misumi_routes(
             _require_api_scope(request, "misumi:execute")
         except HTTPException:
             music_writes = False
-        music_turn = (await asyncio.to_thread(music_reply, music_runtime, music_text, persona, body.request_id or request_id, music_writes)
+        music_turn = (await asyncio.to_thread(music_reply, music_runtime, music_text, persona, body.request_id or request_id, music_writes, body.origin)
                       if (music_runtime is not None and music_text) else None)
         if music_turn is not None:
             music_persona = MUSIC_PERSONA

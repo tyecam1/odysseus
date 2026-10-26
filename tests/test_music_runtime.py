@@ -97,7 +97,7 @@ def test_not_configured_means_not_connected_and_no_request_is_made(tmp_path):
     http = FakeHttp()
     runtime = make_runtime(tmp_path, http, configured=False)
     assert not runtime.configured()
-    out = music_reply(runtime, "pause", "jin", "r1", allow_writes=True)
+    out = music_reply(runtime, "pause", "jin", "r1", allow_writes=True, origin="typed")
     assert out["status"] == "not_connected" and "isn't connected" in out["text"] and http.calls == []
 
 
@@ -109,7 +109,7 @@ def test_play_resolves_the_duplicate_release_and_reads_the_state_back(tmp_path):
     http.push(200, {"tracks": {"items": [dict(row, uri="spotify:track:aaa111"), dict(row, uri="spotify:track:bbb222")]}})   # the same release twice
     http.push(204)
     http.push(200, dict(PLAYING, item=dict(PLAYING["item"], uri="spotify:track:aaa111")))
-    out = music_reply(runtime, "play Arevil's Gardens by The Land of Rah on Spotify", "jin", "r2", allow_writes=True)
+    out = music_reply(runtime, "play Arevil's Gardens by The Land of Rah on Spotify", "jin", "r2", allow_writes=True, origin="typed")
     assert out["status"] == "done" and out["text"].startswith("Playing on Laptop")
     put = [c for c in http.calls if c[0] == "PUT"][0]
     assert json.loads(put[3]) == {"uris": ["spotify:track:aaa111"]}
@@ -124,7 +124,7 @@ def test_an_ambiguous_request_lists_the_choices_instead_of_guessing(tmp_path):
     http.push(200, {"tracks": {"items": [
         {"uri": "spotify:track:aaa111", "name": "Blue", "artists": [{"name": "Joni Mitchell"}]},
         {"uri": "spotify:track:bbb222", "name": "Blue", "artists": [{"name": "Eiffel 65"}]}]}})
-    out = music_reply(runtime, "play blue", "jin", "r3", allow_writes=True)
+    out = music_reply(runtime, "play blue", "jin", "r3", allow_writes=True, origin="typed")
     assert out["status"] == "clarify" and "Joni Mitchell" in out["text"] and "Eiffel 65" in out["text"] and "Say which one" in out["text"]
     assert {c[0] for c in http.calls} == {"GET"}                     # nothing was written
 
@@ -136,7 +136,7 @@ def test_relative_volume_reads_the_active_device_and_stays_bounded(tmp_path):
     http.push(200, DEVICE)                  # the controller's device resolution
     http.push(204)
     http.push(200, PLAYING)
-    out = music_reply(runtime, "turn it down", "jin", "r4", allow_writes=True)
+    out = music_reply(runtime, "turn it down", "jin", "r4", allow_writes=True, origin="typed")
     put = [c for c in http.calls if c[0] == "PUT"][0]
     assert dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(put[1]).query))["volume_percent"] == "25" and out["status"].startswith("done")
 
@@ -146,8 +146,8 @@ def test_what_is_playing_and_devices_are_read_only(tmp_path):
     runtime = make_runtime(tmp_path, http)
     http.push(200, PLAYING)
     http.push(200, DEVICE)
-    now = music_reply(runtime, "what's playing", "aoteru", "r5", allow_writes=True)
-    devices = music_reply(runtime, "list my devices", "aoteru", "r6", allow_writes=True)
+    now = music_reply(runtime, "what's playing", "aoteru", "r5", allow_writes=True, origin="typed")
+    devices = music_reply(runtime, "list my devices", "aoteru", "r6", allow_writes=True, origin="typed")
     assert "Song" in now["text"] and "Artist" in now["text"] and "Laptop (active)" in devices["text"]
     assert {c[0] for c in http.calls} == {"GET"}
 
@@ -157,7 +157,7 @@ def test_failures_become_honest_sentences(tmp_path):
     runtime = make_runtime(tmp_path, http)
     http.push(200, DEVICE)
     http.push(429, {}, {"retry-after": "5"})
-    out = music_reply(runtime, "pause", "jin", "r7", allow_writes=True)
+    out = music_reply(runtime, "pause", "jin", "r7", allow_writes=True, origin="typed")
     assert out["status"] == "error" and "slow down" in out["text"] and "Try again shortly" in out["text"]
 
 
@@ -194,7 +194,7 @@ def app_client(tmp_path, monkeypatch):
 
 
 def ask(client, prompt, persona="auto"):
-    response = client.post("/misumi/respond", json={"prompt": prompt, "persona": persona, "persist_turn": False, "retention_mode": "off"})
+    response = client.post("/misumi/respond", json={"prompt": prompt, "persona": persona, "origin": "typed", "persist_turn": False, "retention_mode": "off"})
     assert response.status_code == 200
     return response.json()
 
@@ -286,13 +286,13 @@ def test_relative_volume_acts_on_the_device_it_can_read_not_a_guess(tmp_path):
     http.push(200, {"devices": [{"id": "d1", "name": "Hall", "is_active": False, "volume_percent": 10}]})
     http.push(204)
     http.push(200, PLAYING)
-    music_reply(runtime, "turn the music down", "jin", "rv1", allow_writes=True)
+    music_reply(runtime, "turn the music down", "jin", "rv1", allow_writes=True, origin="typed")
     put = [c for c in http.calls if c[0] == "PUT"]
     assert put and dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(put[0][1]).query))["volume_percent"] == "0"
     http2 = FakeHttp()
     runtime2 = make_runtime(tmp_path / "b", http2)
     http2.push(200, {"devices": [{"id": "d1", "name": "Hall", "is_active": False}, {"id": "d2", "name": "Den", "is_active": False}]})
-    out = music_reply(runtime2, "turn the music down", "jin", "rv2", allow_writes=True)
+    out = music_reply(runtime2, "turn the music down", "jin", "rv2", allow_writes=True, origin="typed")
     assert out["status"] == "clarify" and "Say a number" in out["text"] and {c[0] for c in http2.calls} == {"GET"}
 
 
@@ -300,7 +300,7 @@ def test_two_inactive_speakers_produce_a_choice_not_a_crash(tmp_path):
     http = FakeHttp()
     runtime = make_runtime(tmp_path, http)
     http.push(200, {"devices": [{"id": "d1", "name": "Hall", "is_active": False}, {"id": "d2", "name": "Den", "is_active": False}]})
-    out = music_reply(runtime, "pause", "jin", "rd1", allow_writes=True)
+    out = music_reply(runtime, "pause", "jin", "rd1", allow_writes=True, origin="typed")
     assert out["status"] == "clarify" and "Hall" in out["text"] and "Den" in out["text"] and "failed" not in out["text"]
 
 
@@ -319,9 +319,9 @@ def test_the_same_request_id_never_plays_twice(tmp_path):
     http.push(200, DEVICE)
     http.push(204)
     http.push(200, dict(PLAYING, is_playing=False))
-    music_reply(runtime, "pause", "jin", "same-key", allow_writes=True)
+    music_reply(runtime, "pause", "jin", "same-key", allow_writes=True, origin="typed")
     before = len(http.calls)
-    again = music_reply(runtime, "pause", "jin", "same-key", allow_writes=True)
+    again = music_reply(runtime, "pause", "jin", "same-key", allow_writes=True, origin="typed")
     assert again["status"].startswith("done") and len(http.calls) == before
 
 
@@ -365,7 +365,7 @@ def _scoped_client(tmp_path, monkeypatch, scopes):
 
 def test_a_read_only_token_cannot_skip_a_track_through_respond(tmp_path, monkeypatch):
     client, http = _scoped_client(tmp_path, monkeypatch, ["misumi:read"])
-    body = client.post("/misumi/respond", json={"prompt": "skip this song", "persist_turn": False, "retention_mode": "off"}).json()
+    body = client.post("/misumi/respond", json={"prompt": "skip this song", "origin": "typed", "persist_turn": False, "retention_mode": "off"}).json()
     assert body["source"] == "music" and "isn't allowed to change playback" in body["text"] and http.calls == []
 
 
@@ -374,10 +374,10 @@ def test_an_execute_token_can_and_a_client_key_makes_a_retry_safe(tmp_path, monk
     http.push(200, DEVICE)
     http.push(204)
     http.push(200, PLAYING)
-    first = client.post("/misumi/respond", json={"prompt": "skip this song", "request_id": "client-op-1", "persist_turn": False,
+    first = client.post("/misumi/respond", json={"prompt": "skip this song", "origin": "typed", "request_id": "client-op-1", "persist_turn": False,
                                                   "retention_mode": "off"}).json()
     calls = len(http.calls)
-    second = client.post("/misumi/respond", json={"prompt": "skip this song", "request_id": "client-op-1", "persist_turn": False,
+    second = client.post("/misumi/respond", json={"prompt": "skip this song", "request_id": "client-op-1", "origin": "typed", "persist_turn": False,
                                                    "retention_mode": "off"}).json()
     assert first["source"] == second["source"] == "music" and len(http.calls) == calls                    # the retry did not skip twice
 
@@ -449,7 +449,7 @@ def test_a_device_with_no_readable_level_is_never_guessed_at(tmp_path):
     http = FakeHttp()
     runtime = make_runtime(tmp_path, http)
     http.push(200, {"devices": [{"id": "d1", "name": "Hall", "is_active": True}]})
-    out = music_reply(runtime, "turn the music down", "jin", "rg1", allow_writes=True)
+    out = music_reply(runtime, "turn the music down", "jin", "rg1", allow_writes=True, origin="typed")
     assert out["status"] == "clarify" and "Say a number" in out["text"] and {c[0] for c in http.calls} == {"GET"}
 
 
@@ -480,7 +480,7 @@ def test_the_trailing_please_fallback_is_used_only_when_the_literal_finds_nothin
     http.push(200, {"tracks": {"items": [{"uri": "spotify:track:aaa111", "name": "Blue", "artists": [{"name": "Joni Mitchell"}]}]}})
     http.push(204)
     http.push(200, dict(PLAYING, item=dict(PLAYING["item"], uri="spotify:track:aaa111")))
-    out = music_reply(runtime, "play Blue please on Spotify", "jin", "rf1", allow_writes=True)
+    out = music_reply(runtime, "play Blue please on Spotify", "jin", "rf1", allow_writes=True, origin="typed")
     assert out["status"] == "done"
     searches = [urllib.parse.parse_qs(urllib.parse.urlsplit(c[1]).query).get("q") for c in http.calls if "/search" in c[1]]
     assert searches == [["Blue please"], ["Blue"]]
@@ -491,7 +491,7 @@ def test_the_trailing_please_fallback_is_used_only_when_the_literal_finds_nothin
     http2.push(200, {"tracks": {"items": [{"uri": "spotify:track:p1", "name": "Please Please Please", "artists": [{"name": "Sabrina Carpenter"}]}]}})
     http2.push(204)
     http2.push(200, dict(PLAYING, item=dict(PLAYING["item"], uri="spotify:track:p1")))
-    music_reply(runtime2, "play Please Please Please on Spotify", "jin", "rf2", allow_writes=True)
+    music_reply(runtime2, "play Please Please Please on Spotify", "jin", "rf2", allow_writes=True, origin="typed")
     assert [urllib.parse.parse_qs(urllib.parse.urlsplit(c[1]).query).get("q") for c in http2.calls if "/search" in c[1]] == [["Please Please Please"]] * 2
 
 
@@ -502,8 +502,8 @@ def test_long_distinct_request_keys_never_collide(tmp_path):
         http.push(200, DEVICE)
         http.push(204)
         http.push(200, PLAYING)
-    first = music_reply(runtime, "skip this song", "jin", "a" * 48 + "-first", allow_writes=True)
-    second = music_reply(runtime, "skip this song", "jin", "a" * 48 + "-second", allow_writes=True)
+    first = music_reply(runtime, "skip this song", "jin", "a" * 48 + "-first", allow_writes=True, origin="typed")
+    second = music_reply(runtime, "skip this song", "jin", "a" * 48 + "-second", allow_writes=True, origin="typed")
     assert first["status"].startswith("done") and second["status"].startswith("done")
     assert len([c for c in http.calls if c[0] == "POST" and "/next" in c[1]]) == 2                 # both really skipped
 
@@ -515,9 +515,9 @@ def test_a_retried_relative_volume_returns_the_first_answer_without_recomputing(
     http.push(200, DEVICE)
     http.push(204)
     http.push(200, PLAYING)
-    first = music_reply(runtime, "turn the music down", "jin", "vol-key", allow_writes=True)
+    first = music_reply(runtime, "turn the music down", "jin", "vol-key", allow_writes=True, origin="typed")
     calls = len(http.calls)
-    retry = music_reply(runtime, "turn the music down", "jin", "vol-key", allow_writes=True)
+    retry = music_reply(runtime, "turn the music down", "jin", "vol-key", allow_writes=True, origin="typed")
     assert retry == first and len(http.calls) == calls                # no device read, no write, no "different command" refusal
 
 
@@ -579,7 +579,7 @@ def test_a_device_alias_selects_that_device_by_id_and_nothing_else(tmp_path):
     http.push(200, track("Blue"))
     http.push(204)
     http.push(200, dict(PLAYING, device={"id": "d1"}, item=dict(PLAYING["item"], uri="spotify:track:aaa111")))
-    out = music_reply(runtime, "play Blue by Joni Mitchell on the laptop", "jin", "dv1", allow_writes=True)
+    out = music_reply(runtime, "play Blue by Joni Mitchell on the laptop", "jin", "dv1", allow_writes=True, origin="typed")
     assert out["status"] == "done" and [device_of(c) for c in writes(http)] == ["d1"]
 
 
@@ -593,7 +593,7 @@ def test_a_title_suffix_can_never_select_a_device_by_substring(tmp_path):
     http.push(200, track("Sex on Fire", "spotify:track:fire01", "Kings of Leon"))
     http.push(204)
     http.push(200, PLAYING)
-    music_reply(runtime, "play Sex on Fire", "jin", "dv2", allow_writes=True)
+    music_reply(runtime, "play Sex on Fire", "jin", "dv2", allow_writes=True, origin="typed")
     assert [device_of(c) for c in writes(http)] == ["d1"] and "Sex" in searches(http)[0]         # the laptop, never d2 (the TV)
     assert "Sex on Fire" in searches(http)
 
@@ -604,7 +604,7 @@ def test_an_unresolved_explicit_device_is_clarified_not_played_on_the_active_tv(
     runtime = make_runtime(tmp_path, http)
     http.push(200, ONE_ACTIVE)
     http.push(200, track("Blue"))                                    # a hit, but not an exact title match for 'Blue on the kitchen speaker'
-    out = music_reply(runtime, "play Blue on the kitchen speaker", "jin", "dv3", allow_writes=True)
+    out = music_reply(runtime, "play Blue on the kitchen speaker", "jin", "dv3", allow_writes=True, origin="typed")
     assert out["status"] == "clarify" and "don't know a device called kitchen speaker" in out["text"] and writes(http) == []
 
 
@@ -619,7 +619,7 @@ def test_a_real_title_ending_in_on_is_played_and_honours_the_idle_default(tmp_pa
     http.push(200, track("Stand on Me", "spotify:track:me0001", "Someone"))
     http.push(204)
     http.push(200, PLAYING)
-    music_reply(runtime, "play Stand on Me", "jin", "dv4", allow_writes=True)
+    music_reply(runtime, "play Stand on Me", "jin", "dv4", allow_writes=True, origin="typed")
     assert [device_of(c) for c in writes(http)] == ["d1"] and searches(http)[-1] == "Stand on Me"
 
 
@@ -632,7 +632,7 @@ def test_the_default_is_used_only_when_nothing_is_active(tmp_path):
     http.push(200, track("Blue"))
     http.push(204)
     http.push(200, PLAYING)
-    music_reply(runtime, "play Blue by Joni Mitchell", "jin", "dv5", allow_writes=True)
+    music_reply(runtime, "play Blue by Joni Mitchell", "jin", "dv5", allow_writes=True, origin="typed")
     assert [device_of(c) for c in writes(http)] == ["d1"]                       # the active laptop; the idle default (the TV) never overrides it
 
 
@@ -641,7 +641,7 @@ def test_malformed_alias_values_are_ignored(tmp_path):
     runtime = make_runtime(tmp_path, http)
     write_devices(runtime, aliases={"laptop": 123, "tv": ""})
     http.push(200, TWO_IDLE)
-    out = music_reply(runtime, "pause on the laptop", "jin", "dv6", allow_writes=True)
+    out = music_reply(runtime, "pause on the laptop", "jin", "dv6", allow_writes=True, origin="typed")
     assert out["status"] == "clarify" and "don't know a device called laptop" in out["text"] and writes(http) == []
 
 
@@ -655,9 +655,9 @@ def test_a_retry_key_cannot_replay_a_different_restored_title(tmp_path):
         http.push(200, track("Moonlight on Water", "spotify:track:mw0001", "X"))
         http.push(204)
         http.push(200, PLAYING)
-    music_reply(runtime, "play Moonlight on Water", "jin", "same", allow_writes=True)
+    music_reply(runtime, "play Moonlight on Water", "jin", "same", allow_writes=True, origin="typed")
     after_first = len(http.calls)
-    music_reply(runtime, "play Moonlight on the Water", "jin", "same", allow_writes=True)      # same key, different words
+    music_reply(runtime, "play Moonlight on the Water", "jin", "same", allow_writes=True, origin="typed")      # same key, different words
     assert len(http.calls) > after_first                                                       # it was executed/checked, not answered from the first result
 
 
@@ -665,7 +665,7 @@ def test_an_unknown_device_for_a_command_is_refused_plainly(tmp_path):
     http = FakeHttp()
     runtime = make_runtime(tmp_path, http)
     http.push(200, TWO_IDLE)
-    out = music_reply(runtime, "pause on the kitchen", "jin", "dv7", allow_writes=True)
+    out = music_reply(runtime, "pause on the kitchen", "jin", "dv7", allow_writes=True, origin="typed")
     assert out["status"] == "clarify" and "don't know a device called kitchen" in out["text"] and {c[0] for c in http.calls} == {"GET"}
 
 
@@ -676,7 +676,7 @@ def test_an_unresolved_target_after_an_artist_clause_is_not_validated_as_just_th
     runtime = make_runtime(tmp_path, http)
     http.push(200, ONE_ACTIVE)
     http.push(200, track("Blue"))
-    out = music_reply(runtime, "play Blue by Joni Mitchell on the kitchen speaker", "jin", "e1", allow_writes=True)
+    out = music_reply(runtime, "play Blue by Joni Mitchell on the kitchen speaker", "jin", "e1", allow_writes=True, origin="typed")
     assert out["status"] == "clarify" and "don't know a device called kitchen speaker" in out["text"] and writes(http) == []
 
 
@@ -686,7 +686,7 @@ def test_a_device_name_with_unusual_characters_still_fails_safe(tmp_path):
     for i, text in enumerate(("play Blue on B&O", "play Blue on Küche", "play Blue on x")):
         http.push(200, ONE_ACTIVE)
         http.push(200, track("Blue"))
-        out = music_reply(runtime, text, "jin", "e2-%d" % i, allow_writes=True)
+        out = music_reply(runtime, text, "jin", "e2-%d" % i, allow_writes=True, origin="typed")
         assert out["status"] == "clarify" and "I don't know a device called" in out["text"], text
     assert writes(http) == []
 
@@ -697,7 +697,7 @@ def test_a_phrase_that_is_both_a_real_title_and_a_device_asks_which(tmp_path):
     both = {"devices": [{"id": "d1", "name": "Laptop", "is_active": True, "volume_percent": 40}, {"id": "d3", "name": "Fire", "is_active": False}]}
     http.push(200, both)
     http.push(200, track("Sex on Fire", "spotify:track:fire01", "Kings of Leon"))
-    out = music_reply(runtime, "play Sex on Fire", "jin", "e3", allow_writes=True)
+    out = music_reply(runtime, "play Sex on Fire", "jin", "e3", allow_writes=True, origin="typed")
     assert out["status"] == "clarify" and "Did you mean the track Sex on Fire" in out["text"] and writes(http) == []
 
 
@@ -708,7 +708,7 @@ def test_a_duplicated_default_name_selects_nothing(tmp_path):
     twin = {"devices": [{"id": "a", "name": "Speaker", "is_active": False}, {"id": "b", "name": "Speaker", "is_active": False}]}
     http.push(200, twin)                                             # default lookup: two devices called Speaker -> none chosen
     http.push(200, twin)                                             # controller: two idle devices -> asks
-    out = music_reply(runtime, "play Blue by Joni Mitchell", "jin", "e4", allow_writes=True)
+    out = music_reply(runtime, "play Blue by Joni Mitchell", "jin", "e4", allow_writes=True, origin="typed")
     assert out["status"] == "clarify" and writes(http) == []
 
 
@@ -721,7 +721,7 @@ def test_a_device_that_becomes_active_after_the_default_was_chosen_is_not_overri
     http.push(200, track("Blue"))
     http.push(204)
     http.push(200, PLAYING)
-    music_reply(runtime, "play Blue by Joni Mitchell", "jin", "e5", allow_writes=True)
+    music_reply(runtime, "play Blue by Joni Mitchell", "jin", "e5", allow_writes=True, origin="typed")
     assert [device_of(c) for c in writes(http)] == ["d1"]            # the laptop, not the TV
 
 
@@ -738,7 +738,7 @@ def test_a_trailing_please_cannot_hide_a_title_and_device_ambiguity(tmp_path):
     http.push(200, both)
     http.push(200, {"tracks": {"items": []}})                                           # "Sex on Fire please" finds nothing...
     http.push(200, track("Sex on Fire", "spotify:track:fire01", "Kings of Leon"))       # ...but "Sex on Fire" is a real title
-    out = music_reply(runtime, "play Sex on Fire please", "jin", "f1", allow_writes=True)
+    out = music_reply(runtime, "play Sex on Fire please", "jin", "f1", allow_writes=True, origin="typed")
     assert out["status"] == "clarify" and "Did you mean the track" in out["text"] and writes(http) == []
 
 
@@ -749,7 +749,7 @@ def test_an_overlong_device_name_still_fails_closed(tmp_path):
     assert cmd.device_hint == "downstairs kitchen Sonos surround sound speaker"
     http.push(200, ONE_ACTIVE)
     http.push(200, track("Blue"))
-    out = music_reply(runtime, "play Blue on the downstairs kitchen Sonos surround sound speaker", "jin", "f2", allow_writes=True)
+    out = music_reply(runtime, "play Blue on the downstairs kitchen Sonos surround sound speaker", "jin", "f2", allow_writes=True, origin="typed")
     assert out["status"] == "clarify" and "don't know a device called" in out["text"] and writes(http) == []
 
 
@@ -759,7 +759,7 @@ def test_a_failed_title_check_stops_the_write(tmp_path):
     both = {"devices": [{"id": "d1", "name": "Laptop", "is_active": True, "volume_percent": 40}, {"id": "d3", "name": "Fire", "is_active": False}]}
     http.push(200, both)
     http.push(503, {})                                                                  # Spotify cannot be asked whether "Sex on Fire" is a title
-    out = music_reply(runtime, "play Sex on Fire", "jin", "f3", allow_writes=True)
+    out = music_reply(runtime, "play Sex on Fire", "jin", "f3", allow_writes=True, origin="typed")
     assert out["status"] == "clarify" and "couldn't check" in out["text"] and writes(http) == []
 
 
@@ -792,8 +792,8 @@ def test_title_by_artist_plays_the_one_result_that_matches_both(tmp_path):
     http.push(200, NOISY)                       # my title+artist resolution: exactly one matches both
     http.push(200, ONE_ACTIVE)                  # the controller again, now with the exact URI
     http.push(204)
-    http.push(200, dict(PLAYING, item=dict(PLAYING["item"], uri="spotify:track:6s7RPRB3sNO4bpaIYntHZ2")))
-    out = music_reply(runtime, "play Arevil's Gardens by The Land of Rah", "jin", "ta1", allow_writes=True)
+    http.push(200, dict(PLAYING, device={"id": "d1"}, item=dict(PLAYING["item"], uri="spotify:track:6s7RPRB3sNO4bpaIYntHZ2")))
+    out = music_reply(runtime, "play Arevil's Gardens by The Land of Rah", "jin", "ta1", allow_writes=True, origin="typed")
     assert out["status"] == "done"
     put = [c for c in http.calls if c[0] == "PUT" and "/play" in c[1]][0]
     assert json.loads(put[3]) == {"uris": ["spotify:track:6s7RPRB3sNO4bpaIYntHZ2"]}
@@ -808,7 +808,7 @@ def test_title_by_artist_with_two_matching_results_still_asks(tmp_path):
     http.push(200, ONE_ACTIVE)
     http.push(200, two)                          # the controller's search: two matches -> a question
     http.push(200, two)                          # my resolution: two distinct matches -> stays a question
-    out = music_reply(runtime, "play Blue by Joni Mitchell", "jin", "ta2", allow_writes=True)
+    out = music_reply(runtime, "play Blue by Joni Mitchell", "jin", "ta2", allow_writes=True, origin="typed")
     assert out["status"] == "clarify" and writes(http) == []
 
 
@@ -823,7 +823,7 @@ def test_an_artist_that_is_only_a_substring_or_a_longer_title_never_counts_as_a_
         http.push(200, ONE_ACTIVE)
         http.push(200, results)
         http.push(200, results)
-        out = music_reply(runtime, "play " + spoken, "jin", "m-" + spoken[:10].replace(" ", "_"), allow_writes=True)
+        out = music_reply(runtime, "play " + spoken, "jin", "m-" + spoken[:10].replace(" ", "_"), allow_writes=True, origin="typed")
         assert out["status"] == "clarify" and writes(http) == [], spoken
 
 
@@ -837,14 +837,14 @@ def test_a_retried_request_after_a_resolved_ambiguity_does_not_write_twice(tmp_p
     http.push(200, ONE_ACTIVE)
     http.push(204)
     http.push(200, dict(PLAYING, item=dict(PLAYING["item"], uri="spotify:track:6s7RPRB3sNO4bpaIYntHZ2")))
-    music_reply(runtime, "play Arevil's Gardens by The Land of Rah", "jin", "same-id", allow_writes=True)
+    music_reply(runtime, "play Arevil's Gardens by The Land of Rah", "jin", "same-id", allow_writes=True, origin="typed")
     assert len(writes(http)) == 1
     runtime._results.clear()                                                  # even if the runtime's own result cache has forgotten the request
     http.push(200, ONE_ACTIVE)                                                # the retry: this time the search returns ONE result, so the plain path would write
     http.push(200, {"tracks": {"items": [NOISY["tracks"]["items"][0]]}})
     http.push(204)
     http.push(200, dict(PLAYING, item=dict(PLAYING["item"], uri="spotify:track:6s7RPRB3sNO4bpaIYntHZ2")))
-    out = music_reply(runtime, "play Arevil's Gardens by The Land of Rah", "jin", "same-id", allow_writes=True)
+    out = music_reply(runtime, "play Arevil's Gardens by The Land of Rah", "jin", "same-id", allow_writes=True, origin="typed")
     assert len(writes(http)) == 1, out
 
 
@@ -859,7 +859,7 @@ def test_the_field_filtered_search_is_used_to_find_title_and_artist(tmp_path):
     http.push(200, ONE_ACTIVE)
     http.push(204)
     http.push(200, dict(PLAYING, item=dict(PLAYING["item"], uri="spotify:track:6s7RPRB3sNO4bpaIYntHZ2")))
-    out = music_reply(runtime, "play Arevil's Gardens by The Land of Rah", "jin", "ff1", allow_writes=True)
+    out = music_reply(runtime, "play Arevil's Gardens by The Land of Rah", "jin", "ff1", allow_writes=True, origin="typed")
     assert out["status"].startswith("done")
     sent = " ".join(urllib.parse.unquote_plus(c[1]) for c in http.calls if "/search" in c[1])
     assert "track:\"Arevil's Gardens\" artist:\"The Land of Rah\"" in sent
@@ -879,5 +879,65 @@ def test_a_filtered_search_with_only_near_misses_falls_back_to_the_plain_query(t
     http.push(200, ONE_ACTIVE)
     http.push(204)
     http.push(200, dict(PLAYING, item=dict(PLAYING["item"], uri="spotify:track:aaa111")))
-    out = music_reply(runtime, "play Blue by Joni Mitchell", "jin", "ff2", allow_writes=True)
+    out = music_reply(runtime, "play Blue by Joni Mitchell", "jin", "ff2", allow_writes=True, origin="typed")
     assert out["status"].startswith("done") and [json.loads(c[3]) for c in writes(http) if "/play" in c[1]] == [{"uris": ["spotify:track:aaa111"]}]
+
+
+# ---------------------------------------------------------------------------------------------------------------------- write authority by origin
+@pytest.mark.parametrize("origin", [None, "voice_unaddressed"])
+def test_room_speech_without_an_addressed_origin_cannot_change_playback(tmp_path, monkeypatch, origin):
+    client, http = _scoped_client(tmp_path, monkeypatch, ["misumi:read", "misumi:execute"])
+    body = {"prompt": "skip this song", "persist_turn": False, "retention_mode": "off"}
+    if origin:
+        body["origin"] = origin
+    out = client.post("/misumi/respond", json=body).json()
+    assert out["source"] == "music" and out["music"]["status"] == "refused" and "speak to me directly" in out["text"] and http.calls == []
+
+
+def test_unaddressed_speech_may_still_ask_what_is_playing(tmp_path, monkeypatch):
+    client, http = _scoped_client(tmp_path, monkeypatch, ["misumi:read", "misumi:execute"])
+    http.push(200, PLAYING)
+    out = client.post("/misumi/respond", json={"prompt": "what's playing", "origin": "voice_unaddressed", "persist_turn": False, "retention_mode": "off"}).json()
+    assert out["music"]["status"] == "done"
+
+
+def test_an_addressed_voice_request_still_works_hands_free(tmp_path, monkeypatch):
+    client, http = _scoped_client(tmp_path, monkeypatch, ["misumi:read", "misumi:execute"])
+    http.push(200, DEVICE)
+    http.push(204)
+    http.push(200, PLAYING)
+    out = client.post("/misumi/respond", json={"prompt": "skip this song", "origin": "voice_addressed", "persist_turn": False, "retention_mode": "off"}).json()
+    assert out["music"]["status"] == "done" and len(http.calls) == 3
+
+
+# ---------------------------------------------------------------------------------------------------------------------- honest failure after a write may have left
+def test_an_error_after_the_write_was_submitted_never_claims_nothing_changed(tmp_path, monkeypatch):
+    import src.music_runtime as mr
+    http = FakeHttp()
+    runtime = make_runtime(tmp_path, http)
+    http.push(200, DEVICE)
+    http.push(204)
+    http.push(200, PLAYING)
+    monkeypatch.setattr(mr, "_speak", lambda result: (_ for _ in ()).throw(RuntimeError("boom")))
+    first = music_reply(runtime, "skip this song", "jin", "late-1", allow_writes=True, origin="typed")
+    assert first["status"] == "unknown_outcome" and "nothing was changed" not in first["text"] and "not tried again" in first["text"]
+    calls = len(http.calls)
+    again = music_reply(runtime, "skip this song", "jin", "late-1", allow_writes=True, origin="typed")
+    assert again["status"] == "unknown_outcome" and len(http.calls) == calls            # the retry returns the stored answer: no second skip
+
+
+def test_an_error_before_anything_was_submitted_may_say_nothing_changed(tmp_path, monkeypatch):
+    http = FakeHttp()
+    runtime = make_runtime(tmp_path, http)
+    monkeypatch.setattr(runtime, "_idle_default_device", lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+    out = music_reply(runtime, "play Blue by Joni Mitchell", "jin", "early-1", allow_writes=True, origin="typed")
+    assert out["status"] == "error" and "nothing was changed" in out["text"]
+
+
+def test_relative_volume_with_two_active_players_asks_instead_of_guessing(tmp_path):
+    http = FakeHttp()
+    runtime = make_runtime(tmp_path, http)
+    http.push(200, {"devices": [{"id": "a", "name": "Laptop", "is_active": True, "volume_percent": 40},
+                                {"id": "b", "name": "TV", "is_active": True, "volume_percent": 70}]})
+    out = music_reply(runtime, "turn the music down", "jin", "vol-2", allow_writes=True, origin="typed")
+    assert out["status"] == "clarify" and len(http.calls) == 1
