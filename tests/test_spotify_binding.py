@@ -609,3 +609,126 @@ def test_a_delayed_401_for_an_already_replaced_token_reuses_the_newer_one():
     assert provider.devices() == []
     assert [s[1] == sb.TOKEN_URL for s in seen] == [False, False]
     assert seen[0][2] == "Bearer " + ACCESS and seen[1][2] == "Bearer SYNTH-ACCESS-B"
+
+
+# ---------------------------------------------------------------------------------------------------------------------- read retries (live: Spotify answers an intermittent 503 on /search)
+@pytest.fixture(autouse=True)
+def _no_backoff(monkeypatch):
+    monkeypatch.setattr(sb, "READ_BACKOFF_S", 0)
+
+
+def test_a_read_is_repeated_after_transient_5xx_and_succeeds():
+    http = FakeHttp()
+    provider, _, _ = connected(http)
+    http.push(503, {})
+    http.push(502, b"<html>")
+    http.push(200, {"devices": []})
+    assert provider.devices() == [] and [c["method"] for c in http.calls] == ["GET", "GET", "GET"]
+
+
+def test_a_read_gives_up_after_the_bounded_retries_with_a_typed_error():
+    http = FakeHttp()
+    provider, _, _ = connected(http)
+    for _ in range(sb.READ_RETRIES + 1):
+        http.push(503, {})
+    with pytest.raises(ProviderError) as exc:
+        provider.devices()
+    assert exc.value.code == "offline" and len(http.calls) == sb.READ_RETRIES + 1
+
+
+def test_a_transport_failure_on_a_read_is_repeated_too():
+    http = FakeHttp()
+    provider, _, _ = connected(http)
+    http.script.append(TimeoutError("slow"))
+    http.push(200, {"devices": []})
+    assert provider.devices() == [] and len(http.calls) == 2
+
+
+def test_writes_and_non_transient_read_errors_are_never_repeated():
+    http = FakeHttp()
+    provider, _, _ = connected(http)
+    http.push(503, {})
+    with pytest.raises(ProviderError):
+        provider.pause("dev1")
+    assert len(http.calls) == 1                                           # a write: one attempt only
+    for status, code in ((429, "rate_limited"), (403, "forbidden"), (404, "no_device")):
+        http2 = FakeHttp()
+        provider2, _, _ = connected(http2)
+        http2.push(status, {})
+        with pytest.raises(ProviderError) as exc:
+            provider2.devices()
+        assert exc.value.code == code and len(http2.calls) == 1
+
+
+def test_a_token_refresh_failure_is_never_repeated_by_the_read_retry():
+    """Sol: an offline refresh POST was repeated by the GET wrapper; a lost response could then burn a rotated refresh token."""
+    http = FakeHttp()
+    provider, manager, store = connected(http, now=lambda: 4990.0)             # the token is about to expire: the first call refreshes
+    http.push(503, {})                                                          # the refresh POST fails
+    with pytest.raises(ProviderError) as exc:
+        provider.devices()
+    assert exc.value.code == "offline" and len(http.calls) == 1 and http.calls[0]["url"] == sb.TOKEN_URL
+    assert store.load() is not None                                             # and nothing was cleared
+
+
+def test_the_turn_deadline_stops_retries_and_late_writes():
+    http = FakeHttp()
+    provider, _, _ = connected(http)
+    provider.begin_turn(0.0)                                                    # the budget is already spent
+    with pytest.raises(ProviderError) as read:
+        provider.devices()
+    with pytest.raises(ProviderError) as write:
+        provider.pause("dev1")
+    assert read.value.code == "offline" and write.value.code == "offline" and http.calls == []
+    provider.begin_turn(1.0)                                                    # too little left to wait and try again
+    http.push(503, {})
+    with pytest.raises(ProviderError):
+        provider.devices()
+    assert len(http.calls) == 1
+    provider.begin_turn(30)
+    http.push(503, {})
+    http.push(200, {"devices": []})
+    assert provider.devices() == [] and len(http.calls) == 3                    # with budget left the retry still happens
+
+
+def test_a_single_request_never_outlives_the_turn_budget():
+    seen = []
+
+    def http(method, url, headers, body, timeout):
+        seen.append(timeout)
+        return 200, {}, b'{"devices": []}'
+
+    store = sb.MemoryTokenStore()
+    store.save(sb.TokenRecord(ACCESS, REFRESH, 5000.0, " ".join(sb.SCOPES), "u"))
+    provider = sb.SpotifyProvider(sb.TokenManager(CLIENT, store, http, now=lambda: 1000.0), http)
+    provider.begin_turn(4.0)
+    provider.devices()
+    assert seen and seen[0] <= 4.0
+
+
+def test_a_write_is_refused_when_the_token_refresh_used_up_the_turn_budget():
+    """Sol: the deadline was checked before token acquisition only, so a 2 s refresh at second 29.5 let the write start at 31.5."""
+    clock = [1000.0]
+    http_calls = []
+
+    def http(method, url, headers, body, timeout):
+        http_calls.append((method, url))
+        if url == sb.TOKEN_URL:
+            clock[0] += 5.0                                                     # the refresh itself takes the rest of the budget
+            return 200, {}, json.dumps(token_body(access_token="SYNTH-ACCESS-LATE")).encode()
+        return 204, {}, b""
+
+    store = sb.MemoryTokenStore()
+    store.save(sb.TokenRecord(ACCESS, REFRESH, 1010.0, " ".join(sb.SCOPES), "u"))   # expires within the refresh skew: the next call refreshes
+    manager = sb.TokenManager(CLIENT, store, http, now=lambda: clock[0] + 995)
+    provider = sb.SpotifyProvider(manager, http)
+    real = sb.time.monotonic
+    sb.time.monotonic = lambda: clock[0]
+    try:
+        provider.begin_turn(3.0)
+        with pytest.raises(ProviderError) as exc:
+            provider.next("dev1")
+    finally:
+        sb.time.monotonic = real
+    assert exc.value.code == "offline" and "deadline" in str(exc.value)
+    assert [c for c in http_calls if c[0] == "POST" and "/next" in c[1]] == []   # the playback write never went out
