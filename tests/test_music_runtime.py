@@ -569,6 +569,7 @@ def test_a_device_alias_selects_that_device_by_id_and_nothing_else(tmp_path):
     runtime = make_runtime(tmp_path, http)
     write_devices(runtime, aliases={"laptop": "DESKTOP-7DJ1HMA", "tv": "R's FireTVStick"})
     http.push(200, TWO_IDLE)                                         # resolving the hint
+    http.push(200, track("Blue"))                                    # the whole phrase is checked as a title: it is not one
     http.push(200, TWO_IDLE)                                         # the controller's own read (by id)
     http.push(200, track("Blue"))
     http.push(204)
@@ -661,3 +662,64 @@ def test_an_unknown_device_for_a_command_is_refused_plainly(tmp_path):
     http.push(200, TWO_IDLE)
     out = music_reply(runtime, "pause on the kitchen", "jin", "dv7", allow_writes=True)
     assert out["status"] == "clarify" and "don't know a device called kitchen" in out["text"] and {c[0] for c in http.calls} == {"GET"}
+
+
+# ---------------------------------------------------------------------------------------------------------------------- Sol second pass on #180
+def test_an_unresolved_target_after_an_artist_clause_is_not_validated_as_just_the_title(tmp_path):
+    """Sol: splitting at 'by' let 'Blue by Joni Mitchell on the kitchen speaker' pass as the title 'Blue' and play on the active TV."""
+    http = FakeHttp()
+    runtime = make_runtime(tmp_path, http)
+    http.push(200, ONE_ACTIVE)
+    http.push(200, track("Blue"))
+    out = music_reply(runtime, "play Blue by Joni Mitchell on the kitchen speaker", "jin", "e1", allow_writes=True)
+    assert out["status"] == "clarify" and "don't know a device called kitchen speaker" in out["text"] and writes(http) == []
+
+
+def test_a_device_name_with_unusual_characters_still_fails_safe(tmp_path):
+    http = FakeHttp()
+    runtime = make_runtime(tmp_path, http)
+    for i, text in enumerate(("play Blue on B&O", "play Blue on Küche", "play Blue on x")):
+        http.push(200, ONE_ACTIVE)
+        http.push(200, track("Blue"))
+        out = music_reply(runtime, text, "jin", "e2-%d" % i, allow_writes=True)
+        assert out["status"] == "clarify" and "I don't know a device called" in out["text"], text
+    assert writes(http) == []
+
+
+def test_a_phrase_that_is_both_a_real_title_and_a_device_asks_which(tmp_path):
+    http = FakeHttp()
+    runtime = make_runtime(tmp_path, http)
+    both = {"devices": [{"id": "d1", "name": "Laptop", "is_active": True, "volume_percent": 40}, {"id": "d3", "name": "Fire", "is_active": False}]}
+    http.push(200, both)
+    http.push(200, track("Sex on Fire", "spotify:track:fire01", "Kings of Leon"))
+    out = music_reply(runtime, "play Sex on Fire", "jin", "e3", allow_writes=True)
+    assert out["status"] == "clarify" and "Did you mean the track Sex on Fire" in out["text"] and writes(http) == []
+
+
+def test_a_duplicated_default_name_selects_nothing(tmp_path):
+    http = FakeHttp()
+    runtime = make_runtime(tmp_path, http)
+    write_devices(runtime, default="Speaker")
+    twin = {"devices": [{"id": "a", "name": "Speaker", "is_active": False}, {"id": "b", "name": "Speaker", "is_active": False}]}
+    http.push(200, twin)                                             # default lookup: two devices called Speaker -> none chosen
+    http.push(200, twin)                                             # controller: two idle devices -> asks
+    out = music_reply(runtime, "play Blue by Joni Mitchell", "jin", "e4", allow_writes=True)
+    assert out["status"] == "clarify" and writes(http) == []
+
+
+def test_a_device_that_becomes_active_after_the_default_was_chosen_is_not_overridden(tmp_path):
+    http = FakeHttp()
+    runtime = make_runtime(tmp_path, http)
+    write_devices(runtime, default="R's FireTVStick")
+    http.push(200, TWO_IDLE)                                         # my read: both idle -> the default (TV) is a candidate
+    http.push(200, ONE_ACTIVE)                                       # the controller's read: the laptop is now active
+    http.push(200, track("Blue"))
+    http.push(204)
+    http.push(200, PLAYING)
+    music_reply(runtime, "play Blue by Joni Mitchell", "jin", "e5", allow_writes=True)
+    assert [device_of(c) for c in writes(http)] == ["d1"]            # the laptop, not the TV
+
+
+def test_the_politeness_fallback_does_not_keep_the_device_suffix():
+    cmd = parse_music_command("play Blue on the laptop please")
+    assert cmd.query == "Blue" and cmd.device_hint == "laptop" and "laptop" not in cmd.fallback_query

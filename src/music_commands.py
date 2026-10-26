@@ -30,7 +30,7 @@ _VOLUME_SET = re.compile(r"^(?:set\s+)?(?:the\s+)?volume\s+(?:to\s+)?(?P<n>\d{1,
 _VOLUME_REL = re.compile(r"^(?:turn|bring|put|set|make)\s+(?:it|the\s+(?:music|volume|sound)|this)\s+(?P<d>up|down)(?:\s+a\s+(?:bit|little|touch))?$|^(?P<d2>louder|quieter|softer)$|^turn\s+(?P<d3>up|down)\s+the\s+(?:music|volume)$", re.I)
 _KIND = re.compile(r"^(?:the\s+)?(?P<k>album|playlist|artist|band)\s+(?P<q>.+)$", re.I)
 _NOT_MUSIC = re.compile(r"^(?:(?:a|the|some|another) )?(?:game|games|match|round|hand|cards|chess|hide and seek|fetch)\b|\bwith (?:me|us|him|her|them|the (?:kids|dog|cat))$", re.I)
-_ON_DEVICE = re.compile(r"\s+on\s+(?:the\s+|my\s+)?(?P<d>(?:(?!\s+on\s)[A-Za-z0-9' _-]){2,40})$", re.I)
+_ON_DEVICE = re.compile(r"\s+on\s+(?:the\s+|my\s+)?(?P<d>(?:(?!\s+on\s).){1,40})$", re.I)   # any characters: an unrecognisable target must still fail SAFE, never be ignored
 _LEADING_THE = re.compile(r"^(?:the\s+(?:song|track|tune)\s+)", re.I)
 
 
@@ -58,7 +58,11 @@ def parse_music_command(text: str) -> Optional[MusicCommand]:
             stripped = command.query[:match.start()].strip()
             if not hint or re.fullmatch(r"(?:something|anything|whatever|some music|music)", stripped, re.I):
                 return None                                        # "play something on the tv" names no music
-            return MusicCommand(command.action, query=stripped, kind=command.kind, fallback_query=command.fallback_query,
+            fallback = command.fallback_query
+            fb_match = _ON_DEVICE.search(fallback) if fallback else None
+            if fb_match and fb_match.start() > 0:
+                fallback = fallback[:fb_match.start()].strip()          # the same device suffix must not survive in the fallback query
+            return MusicCommand(command.action, query=stripped, kind=command.kind, fallback_query=fallback,
                                 device_hint=hint, query_with_hint=command.query)
     return command
 

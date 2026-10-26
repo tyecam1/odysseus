@@ -304,6 +304,12 @@ class MusicController:
         if not devices:
             raise ProviderError("no_device", "no playback device is available")
         name = str(wanted or "").strip().lower()
+        if name.startswith("idle-id:"):                  # "use this device, but only if nothing is playing anywhere": decided on THIS read of the devices
+            active = [d for d in devices if d.active]
+            if active:
+                name = ""                                # something is active: the ordinary rules apply and the active device is never overridden
+            else:
+                name = "id:" + name[len("idle-id:"):]
         if name.startswith("id:"):                       # a caller that already chose a device by id gets exactly that device or a clarification
             chosen = [d for d in devices if d.id.lower() == name[3:]]
             if len(chosen) == 1:

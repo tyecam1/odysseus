@@ -141,23 +141,29 @@ class MusicRuntime:
         matches = [d for d in devices if d.name.lower() == target]
         return matches[0] if len(matches) == 1 else None
 
-    def _exact_title_exists(self, text: str, kind: str) -> bool:
-        """Does Spotify have a track/album/... whose title is exactly this ("Stand on Me", "Riders on the Storm")? Used before a trailing "on ..." is trusted as a title."""
-        title = re.split(r"\s+by\s+", text, maxsplit=1, flags=re.I)[0].strip().casefold()
+    def _literal_title_exists(self, text: str, kind: str) -> bool:
+        """Is the WHOLE phrase (including any trailing "on ..." and any "by <artist>") exactly a result's title or "title by artist"? Nothing is split or
+        trimmed first: "Blue by Joni Mitchell on the kitchen speaker" must not be validated as just "Blue"."""
+        wanted = re.sub(r"\s+", " ", text).strip().casefold()
         try:
-            return any(item.title.strip().casefold() == title for item in (self._provider.search(text, kind) if self._provider else []))
+            for item in (self._provider.search(text, kind) if self._provider else []):
+                title = re.sub(r"\s+", " ", item.title).strip().casefold()
+                both = re.sub(r"\s+", " ", "%s by %s" % (item.title, item.artist)).strip().casefold()
+                if wanted in (title, both):
+                    return True
         except Exception:  # noqa: BLE001
             return False
+        return False
 
     def _idle_default_device(self):
-        """The configured default device, but only when nothing is active (an active device is never overridden) and the default is present."""
+        """The configured default device when it is present exactly once. Whether it may be used (only when nothing is active) is decided by the
+        controller against ITS OWN device read, via the "idle-id:" reference, so a device becoming active in between is never overridden."""
         default = self._device_config().get("default")
         if not isinstance(default, str) or not default.strip():
             return None
         devices = self._provider.devices() if self._provider else []
-        if any(d.active for d in devices):
-            return None
-        return next((d for d in devices if d.name.lower() == default.strip().lower()), None)
+        matches = [d for d in devices if d.name.lower() == default.strip().lower()]
+        return matches[0] if len(matches) == 1 else None
 
     def _target_device(self):
         """The device a volume change will act on: the active one, or the only one; None when it cannot be told."""
@@ -188,15 +194,19 @@ class MusicRuntime:
         device_ref = ""                                               # "id:<spotify id>" once WE chose the device: exact, immune to name prefixes
         if command.device_hint:
             found = self._resolve_device_hint(command.device_hint)
+            literal = action in ("play", "queue") and bool(command.query_with_hint) and self._literal_title_exists(command.query_with_hint, command.kind)
+            if found is not None and literal:                         # the whole phrase is a real title AND its tail names a device: never guess which
+                return {"status": "clarify", "data": {}, "trace": {},
+                        "text": "Did you mean the track %s, or %s on %s? Say which." % (command.query_with_hint, command.query, found.name)}
             if found is not None:
                 device_ref = "id:" + found.id
-            elif action in ("play", "queue") and command.query_with_hint and self._exact_title_exists(command.query_with_hint, command.kind):
-                command = MusicCommand(action, query=command.query_with_hint, kind=command.kind, fallback_query=command.fallback_query)   # a real title ending "on ..."
+            elif literal:
+                command = MusicCommand(action, query=command.query_with_hint, kind=command.kind)         # a real title ending "on ..."
             else:                                                     # an unresolved explicit target is never guessed at or played to the active device
                 return {"status": "clarify", "data": {}, "trace": {}, "text": "I don't know a device called %s." % command.device_hint}
         if not device_ref and action in ("play", "queue", "resume"):
             idle = self._idle_default_device()
-            device_ref = "id:" + idle.id if idle is not None else ""
+            device_ref = "idle-id:" + idle.id if idle is not None else ""
         if action in ("play", "queue"):
             query = command.query
             if command.fallback_query and self._provider is not None:       # "play Blue please": the literal wins if it exists, else drop the "please"
