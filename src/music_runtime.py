@@ -29,7 +29,8 @@ logger = logging.getLogger(__name__)
 MUSIC_PERSONA = "jin"
 _SPOTIFY_NAMED = re.compile(r"\bspotify\b", re.I)
 _MUSICAL_WORDS = re.compile(r"\b(?:music|song|songs|track|tracks|tune|tunes|playlist|album|record|spotify)\b", re.I)
-_TRANSPORT_OR_READ = frozenset({"pause", "resume", "next", "now_playing", "devices", "volume"})
+_READS = frozenset({"now_playing", "devices"})
+_BY_ARTIST = re.compile(r"\bby\s+\S+", re.I)
 
 
 def music_dir(data_dir: Any) -> Path:
@@ -87,17 +88,22 @@ class MusicRuntime:
 
     # ------------------------------------------------------------------ requests
     def wants(self, command: Optional[MusicCommand], prompt: str, lead: str) -> bool:
-        """Is this turn plainly a music request for Jin's capability (rather than talk that happens to contain "play")?"""
+        """Is this turn plainly a music request for Jin's capability (rather than talk that happens to contain "play" or "pause")?"""
         if command is None:
             return False
-        if lead == MUSIC_PERSONA or _SPOTIFY_NAMED.search(prompt):
+        if lead == MUSIC_PERSONA or _SPOTIFY_NAMED.search(prompt) or _MUSICAL_WORDS.search(prompt):
             return True
-        if command.action in _TRANSPORT_OR_READ:
-            return True                                    # a bare "pause", "skip", "what's playing", "turn it down"
-        return False                                       # play/queue of a named thing needs Jin or an explicit Spotify mention
+        if command.action in ("play", "queue"):
+            return bool(_BY_ARTIST.search(prompt))             # "play Blue by Joni Mitchell"; a bare "play something" is not enough
+        if command.action == "volume":
+            return False                                        # "turn it down" could be the TV: needs Jin, Spotify or a musical word
+        return len(prompt.split()) <= 3                         # a bare "pause", "skip", "what's playing"
 
-    def handle(self, command: MusicCommand, request_id: str) -> Dict[str, Any]:
-        """Run one command (blocking; call from a worker thread). Returns {"text", "status", "data", "trace"}; never raises."""
+    def handle(self, command: MusicCommand, request_id: str, allow_writes: bool = False) -> Dict[str, Any]:
+        """Run one command (blocking; call from a worker thread). Returns {"text", "status", "data", "trace"}; never raises.
+        Changing playback needs ``allow_writes`` (the caller's execute authority); reading it does not."""
+        if command.action not in _READS and not allow_writes:
+            return {"status": "refused", "data": {}, "trace": {}, "text": "This connection isn't allowed to change playback."}
         controller = self._build()
         if controller is None:
             return {"status": "not_connected", "data": {}, "trace": {},
@@ -108,6 +114,12 @@ class MusicRuntime:
             logger.warning("music turn failed: %s", type(exc).__name__, exc_info=True)
             return {"status": "error", "data": {}, "trace": {}, "text": "The music service failed on that request; nothing was changed."}
 
+    def _target_device(self):
+        """The device a volume change will act on: the active one, or the only one; None when it cannot be told."""
+        devices = self._provider.devices() if self._provider else []
+        active = [d for d in devices if d.active]
+        return active[0] if active else (devices[0] if len(devices) == 1 else None)
+
     def _run(self, controller: MusicController, command: MusicCommand, request_id: str) -> Dict[str, Any]:
         rid = "music-" + re.sub(r"[^A-Za-z0-9._:-]", "", request_id)[:48]
         action, kwargs = command.action, {}
@@ -115,10 +127,15 @@ class MusicRuntime:
             kwargs = {"query": command.query, "kind": command.kind}
         elif action == "volume":
             volume = command.volume
-            if volume is None:                             # relative: read the active device's level first
-                level = next((d.volume for d in (self._provider.devices() if self._provider else []) if d.active and d.volume is not None), None)
-                volume = max(0, min(100, (50 if level is None else level) + command.volume_delta))
-            kwargs = {"volume": volume}
+            if volume is None:                             # relative: act on the device we can actually read the level of
+                target = self._target_device()
+                if target is None or target.volume is None:
+                    return {"status": "clarify", "data": {}, "trace": {},
+                            "text": "I can't tell how loud it is right now. Say a number, like volume 30."}
+                volume = max(0, min(100, target.volume + command.volume_delta))
+                kwargs = {"volume": volume, "device": target.name}
+            else:
+                kwargs = {"volume": volume}
         result: MusicResult = controller.handle(action, request_id=rid, explicit_command=True, guest=False, **kwargs)
         return {"status": result.status, "data": result.data, "trace": result.trace, "text": _speak(result)}
 
@@ -127,7 +144,7 @@ def _speak(result: MusicResult) -> str:
     text = result.message
     options = result.data.get("options") if isinstance(result.data, dict) else None
     if result.status == "clarify" and options:
-        listed = "; ".join("%s%s" % (o.get("title", ""), (" by " + o["artist"]) if o.get("artist") else "") for o in options[:3])
+        listed = "; ".join(_option(o) for o in options[:3])
         text = "%s %s. Say which one." % (text, listed)
     elif result.status == "done" and result.data.get("results"):
         listed = "; ".join("%s%s" % (o.get("title", ""), (" by " + o["artist"]) if o.get("artist") else "") for o in result.data["results"][:3])
@@ -140,9 +157,15 @@ def _speak(result: MusicResult) -> str:
     return text
 
 
-def music_reply(runtime: MusicRuntime, prompt: str, lead: str, request_id: str) -> Optional[Dict[str, Any]]:
+def _option(option: Any) -> str:
+    if isinstance(option, dict):
+        return "%s%s" % (option.get("title", ""), (" by " + option["artist"]) if option.get("artist") else "")
+    return str(option)
+
+
+def music_reply(runtime: MusicRuntime, prompt: str, lead: str, request_id: str, allow_writes: bool = False) -> Optional[Dict[str, Any]]:
     """Blocking helper for the respond route: the music answer for this turn, or None when the turn is not a music request."""
     command = parse_music_command(prompt)
     if not runtime.wants(command, prompt, lead):
         return None
-    return runtime.handle(command, request_id)
+    return runtime.handle(command, request_id, allow_writes)

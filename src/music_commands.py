@@ -16,14 +16,14 @@ MAX_QUERY_CHARS = 120
 VOLUME_STEP = 15
 
 _POLITE = re.compile(r"^(?:(?:hey|ok|okay|right|so|now)[,\s]+)*(?:(?:please|can you|could you|would you|will you|i(?:'d| would) like you to|go ahead and)[,\s]+)*", re.I)
-_TAIL = re.compile(r"[\s,.!?]*(?:please|thanks|thank you|for me)?[\s,.!?]*$", re.I)
+_TAIL = re.compile(r"(?:[\s,]+please|,\s*thanks?|,\s*thank you|\s+for me)?[\s,.!?]*$", re.I)
 _SERVICE = re.compile(r"\s+(?:on|in|using|with|through|via)\s+(?:the\s+)?spotify\b", re.I)
 _PLAY = re.compile(r"^(?:play|put on|stick on|throw on|start playing|start)\s+(?P<q>.+)$", re.I)
 _QUEUE = re.compile(r"^(?:queue(?: up)?|add)\s+(?P<q>.+?)(?:\s+to\s+(?:the\s+|my\s+)?(?:queue|up next))?$", re.I)
-_RESUME = re.compile(r"^(?:play|resume|continue|unpause|keep (?:playing|going)|carry on|play (?:it|the music|music) (?:again)?|start (?:the )?music)$", re.I)
-_PAUSE = re.compile(r"^(?:pause(?: (?:it|the music|music|this|the song|the track))?|stop (?:the )?(?:music|playing|playback|song|track)|stop (?:it|this))$", re.I)
-_NEXT = re.compile(r"^(?:skip(?: (?:it|this|this song|this track|the song|the track))?|next(?: (?:song|track|one))?|play (?:the )?next (?:song|track|one))$", re.I)
-_NOW = re.compile(r"^(?:what(?:'s| is| song is| track is)?\s+(?:this|that)?\s*(?:song|track)?\s*(?:playing|on)?(?: right now| now)?|what(?:'s| is) playing(?: right now| now)?|what song is (?:this|playing)|what(?:'s| is) this (?:song|track)|who(?:'s| is) this by|what am i listening to)$", re.I)
+_RESUME = re.compile(r"^(?:play|resume|unpause|play (?:it|the music|music)(?: again)?|start (?:the )?music|keep (?:the )?music (?:playing|going))$", re.I)
+_PAUSE = re.compile(r"^(?:pause(?: (?:it|the music|music|this|the song|the track))?|stop (?:the )?(?:music|playing|playback|song|track))$", re.I)
+_NEXT = re.compile(r"^(?:skip(?: (?:this|this song|this track|the song|the track))?|next(?: (?:song|track))|play (?:the )?next (?:song|track))$", re.I)
+_NOW = re.compile(r"^(?:what(?:'s| is) playing(?: right now| now)?|what(?:'s| is) this (?:song|track)|what (?:song|track) is (?:this|playing)|who(?:'s| is) this (?:song |track )?by|what am i listening to)$", re.I)
 _DEVICES = re.compile(r"^(?:(?:list|show|what|which)\s+(?:are\s+)?(?:the\s+|my\s+)?(?:spotify\s+)?(?:devices|speakers)(?:\s+(?:are\s+)?(?:available|there))?|what can (?:you|we) play (?:on|through))$", re.I)
 _VOLUME_SET = re.compile(r"^(?:set\s+)?(?:the\s+)?volume\s+(?:to\s+)?(?P<n>\d{1,3})\s*(?:%|percent)?$", re.I)
 _VOLUME_REL = re.compile(r"^(?:turn|bring|put|set|make)\s+(?:it|the\s+(?:music|volume|sound)|this)\s+(?P<d>up|down)(?:\s+a\s+(?:bit|little|touch))?$|^(?P<d2>louder|quieter|softer)$|^turn\s+(?P<d3>up|down)\s+the\s+(?:music|volume)$", re.I)
@@ -50,7 +50,9 @@ def parse_music_command(text: str) -> Optional[MusicCommand]:
         return None
     work = _POLITE.sub("", work, count=1).strip()
     work = _SERVICE.sub("", work)
-    work = _TAIL.sub("", work).strip()
+    trimmed = _TAIL.sub("", work).strip()
+    # "play Please" / "play Thank You" are titles, not politeness: never strip a trailing word down to a bare verb
+    work = work.strip(" " + chr(92) + "t,.!?") if trimmed.lower() in ("play", "queue", "add") else trimmed
     if not work:
         return None
     if _RESUME.match(work):
@@ -80,7 +82,9 @@ def parse_music_command(text: str) -> Optional[MusicCommand]:
 
 
 def _target(action: str, raw: str) -> Optional[MusicCommand]:
-    query = _TAIL.sub("", raw).strip().strip("\"'“”‘’")
+    query = _TAIL.sub("", raw).strip()
+    query = query if query else raw.strip()
+    query = query.strip("\"'“”‘’")
     kind = "track"
     match = _KIND.match(query)
     if match:

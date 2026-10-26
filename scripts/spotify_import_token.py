@@ -37,12 +37,32 @@ def parse_payload(raw: str):
 
 
 def install(directory: str, client: str, record, protect, unprotect) -> None:
+    """Replace the credential PAIR (client id + token) as a unit, under the same lock a refresh takes.
+
+    The client file is staged first (a failure there touches nothing); the old token and client are kept so a failure after the token is
+    replaced restores the pair. Holding exclusive() means a refresh in flight finishes first and cannot overwrite what is installed here."""
     os.makedirs(directory, exist_ok=True)
-    sb.FileTokenStore(os.path.join(directory, "token.bin"), protect, unprotect).save(record)
-    tmp = os.path.join(directory, "client.json.tmp")
-    with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump({"client_id": client}, fh)                   # the client id of a PKCE app is public
-    os.replace(tmp, os.path.join(directory, "client.json"))
+    token_path = os.path.join(directory, "token.bin")
+    client_path = os.path.join(directory, "client.json")
+    store = sb.FileTokenStore(token_path, protect, unprotect)
+    with store.exclusive():
+        staged = client_path + ".tmp"
+        with open(staged, "w", encoding="utf-8") as fh:
+            json.dump({"client_id": client}, fh)                    # the client id of a PKCE app is public
+        old_token = open(token_path, "rb").read() if os.path.exists(token_path) else None
+        try:
+            store.save(record)
+            os.replace(staged, client_path)
+        except BaseException:
+            if old_token is None:
+                if os.path.exists(token_path):
+                    os.remove(token_path)
+            else:
+                with open(token_path, "wb") as fh:
+                    fh.write(old_token)
+            if os.path.exists(staged):
+                os.remove(staged)
+            raise
 
 
 def main(argv=None) -> int:

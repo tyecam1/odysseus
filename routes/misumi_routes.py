@@ -125,6 +125,8 @@ class MisumiRespondRequest(BaseModel):
     retention_mode: Literal["auto", "off"] = "auto"
     persist_turn: bool = True
     history_mode: Optional[Literal["auto", "off"]] = None
+    # Optional client idempotency key: a retried music command carrying the same key is answered from the first result, not executed again.
+    request_id: Optional[str] = Field(default=None, max_length=64, pattern=r"^[A-Za-z0-9._:-]{1,64}$")
 
 
 class MisumiRouteExplainRequest(BaseModel):
@@ -1939,7 +1941,17 @@ def setup_misumi_routes(
         hh_prompt = strip_addressee(prompt)
         # Music is Jin's governed capability: a plain request to play/pause/skip/queue/ask what's playing is executed (or honestly refused) here,
         # in a worker thread (the Spotify calls block), and answered in Jin's voice. Anything else falls through unchanged.
-        music_turn = await asyncio.to_thread(music_reply, music_runtime, hh_prompt, persona, request_id) if music_runtime is not None else None
+        # Only the user's own words (body.prompt) can be a music command: never the interface context or intent fallback (ambient text), and
+        # changing playback needs the caller's execute authority. body.request_id is an optional client idempotency key (a retried request
+        # with the same key does not play twice).
+        music_text = strip_addressee((body.prompt or "").strip()) if (body.prompt or "").strip() else ""
+        music_writes = True
+        try:
+            _require_api_scope(request, "misumi:execute")
+        except HTTPException:
+            music_writes = False
+        music_turn = (await asyncio.to_thread(music_reply, music_runtime, music_text, persona, body.request_id or request_id, music_writes)
+                      if (music_runtime is not None and music_text) else None)
         if music_turn is not None:
             music_persona = MUSIC_PERSONA
             events.emit({

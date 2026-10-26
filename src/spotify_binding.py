@@ -474,8 +474,8 @@ class SpotifyProvider:
             artists = row.get("artists") or ([{"name": row.get("owner", {}).get("display_name", "")}] if kind == "playlist" else [])
             artist = ", ".join(str(a.get("name", "")) for a in artists if isinstance(a, dict) and a.get("name"))[:120]
             item = Item(str(row["uri"]), str(row["name"])[:160], artist, kind)
-            if any(o.title.casefold() == item.title.casefold() and o.artist.casefold() == item.artist.casefold() for o in out):
-                continue                           # the same release listed twice (single and album) is one choice, not an ambiguity
+            if kind == "track" and any(o.title.casefold() == item.title.casefold() and o.artist.casefold() == item.artist.casefold() for o in out):
+                continue                           # a track listed twice (single and album) is one choice; playlists/albums/artists with equal names are not merged
             out.append(item)
         return out
 

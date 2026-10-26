@@ -92,7 +92,7 @@ def test_not_configured_means_not_connected_and_no_request_is_made(tmp_path):
     http = FakeHttp()
     runtime = make_runtime(tmp_path, http, configured=False)
     assert not runtime.configured()
-    out = music_reply(runtime, "pause", "jin", "r1")
+    out = music_reply(runtime, "pause", "jin", "r1", allow_writes=True)
     assert out["status"] == "not_connected" and "isn't connected" in out["text"] and http.calls == []
 
 
@@ -104,7 +104,7 @@ def test_play_resolves_the_duplicate_release_and_reads_the_state_back(tmp_path):
     http.push(200, {"tracks": {"items": [dict(row, uri="spotify:track:aaa111"), dict(row, uri="spotify:track:bbb222")]}})   # the same release twice
     http.push(204)
     http.push(200, dict(PLAYING, item=dict(PLAYING["item"], uri="spotify:track:aaa111")))
-    out = music_reply(runtime, "play Arevil's Gardens by The Land of Rah on Spotify", "jin", "r2")
+    out = music_reply(runtime, "play Arevil's Gardens by The Land of Rah on Spotify", "jin", "r2", allow_writes=True)
     assert out["status"] == "done" and out["text"].startswith("Playing on Laptop")
     put = [c for c in http.calls if c[0] == "PUT"][0]
     assert json.loads(put[3]) == {"uris": ["spotify:track:aaa111"]}
@@ -119,7 +119,7 @@ def test_an_ambiguous_request_lists_the_choices_instead_of_guessing(tmp_path):
     http.push(200, {"tracks": {"items": [
         {"uri": "spotify:track:aaa111", "name": "Blue", "artists": [{"name": "Joni Mitchell"}]},
         {"uri": "spotify:track:bbb222", "name": "Blue", "artists": [{"name": "Eiffel 65"}]}]}})
-    out = music_reply(runtime, "play blue", "jin", "r3")
+    out = music_reply(runtime, "play blue", "jin", "r3", allow_writes=True)
     assert out["status"] == "clarify" and "Joni Mitchell" in out["text"] and "Eiffel 65" in out["text"] and "Say which one" in out["text"]
     assert {c[0] for c in http.calls} == {"GET"}                     # nothing was written
 
@@ -131,7 +131,7 @@ def test_relative_volume_reads_the_active_device_and_stays_bounded(tmp_path):
     http.push(200, DEVICE)                  # the controller's device resolution
     http.push(204)
     http.push(200, PLAYING)
-    out = music_reply(runtime, "turn it down", "jin", "r4")
+    out = music_reply(runtime, "turn it down", "jin", "r4", allow_writes=True)
     put = [c for c in http.calls if c[0] == "PUT"][0]
     assert dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(put[1]).query))["volume_percent"] == "25" and out["status"].startswith("done")
 
@@ -141,8 +141,8 @@ def test_what_is_playing_and_devices_are_read_only(tmp_path):
     runtime = make_runtime(tmp_path, http)
     http.push(200, PLAYING)
     http.push(200, DEVICE)
-    now = music_reply(runtime, "what's playing", "aoteru", "r5")
-    devices = music_reply(runtime, "list my devices", "aoteru", "r6")
+    now = music_reply(runtime, "what's playing", "aoteru", "r5", allow_writes=True)
+    devices = music_reply(runtime, "list my devices", "aoteru", "r6", allow_writes=True)
     assert "Song" in now["text"] and "Artist" in now["text"] and "Laptop (active)" in devices["text"]
     assert {c[0] for c in http.calls} == {"GET"}
 
@@ -152,7 +152,7 @@ def test_failures_become_honest_sentences(tmp_path):
     runtime = make_runtime(tmp_path, http)
     http.push(200, DEVICE)
     http.push(429, {}, {"retry-after": "5"})
-    out = music_reply(runtime, "pause", "jin", "r7")
+    out = music_reply(runtime, "pause", "jin", "r7", allow_writes=True)
     assert out["status"] == "error" and "slow down" in out["text"] and "Try again shortly" in out["text"]
 
 
@@ -240,3 +240,209 @@ def test_music_can_be_switched_off(tmp_path, monkeypatch):
     app = FastAPI()
     app.include_router(misumi_routes.setup_misumi_routes(SkillsManager(str(tmp_path / "skills"))))
     assert ask(TestClient(app), "pause the music")["source"] != "music"
+
+
+# ---------------------------------------------------------------------------------------------------------------------- Sol review of #179
+@pytest.mark.parametrize("text,expected", [
+    ("play Thank You on Spotify", MusicCommand("play", query="Thank You")),
+    ("play Please on Spotify", MusicCommand("play", query="Please")),
+    ("play No Thanks on Spotify", MusicCommand("play", query="No Thanks")),
+    ("play Blue, please", MusicCommand("play", query="Blue")),
+    ("pause please", MusicCommand("pause")),
+])
+def test_politeness_words_that_are_titles_stay_in_the_query(text, expected):
+    assert parse_music_command(text) == expected
+
+
+@pytest.mark.parametrize("text", ["What is this?", "what is this", "continue", "carry on", "skip it", "stop it", "stop this", "keep going"])
+def test_ordinary_conversation_is_not_taken_for_a_music_command(text):
+    assert parse_music_command(text) is None
+
+
+def test_a_bare_volume_change_needs_a_musical_context(tmp_path):
+    runtime = make_runtime(tmp_path, FakeHttp(), configured=False)
+    for prompt in ("turn it down", "louder"):
+        assert runtime.wants(parse_music_command(prompt), prompt, "aoteru") is False       # could be the TV
+        assert runtime.wants(parse_music_command(prompt), prompt, "jin") is True
+    assert runtime.wants(parse_music_command("turn the music down"), "turn the music down", "aoteru") is True
+
+
+def test_play_by_an_artist_is_enough_but_a_bare_play_is_not(tmp_path):
+    runtime = make_runtime(tmp_path, FakeHttp(), configured=False)
+    assert runtime.wants(parse_music_command("play Blue by Joni Mitchell"), "play Blue by Joni Mitchell", "aoteru") is True
+    assert runtime.wants(parse_music_command("play Kind of Blue"), "play Kind of Blue", "aoteru") is False
+
+
+def test_relative_volume_acts_on_the_device_it_can_read_not_a_guess(tmp_path):
+    """Sol: with only an inactive speaker at 10%, 'turn it down' used to assume 50% and set 35%."""
+    http = FakeHttp()
+    runtime = make_runtime(tmp_path, http)
+    http.push(200, {"devices": [{"id": "d1", "name": "Hall", "is_active": False, "volume_percent": 10}]})
+    http.push(200, {"devices": [{"id": "d1", "name": "Hall", "is_active": False, "volume_percent": 10}]})
+    http.push(204)
+    http.push(200, PLAYING)
+    music_reply(runtime, "turn the music down", "jin", "rv1", allow_writes=True)
+    put = [c for c in http.calls if c[0] == "PUT"]
+    assert put and dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(put[0][1]).query))["volume_percent"] == "0"
+    http2 = FakeHttp()
+    runtime2 = make_runtime(tmp_path / "b", http2)
+    http2.push(200, {"devices": [{"id": "d1", "name": "Hall", "is_active": False}, {"id": "d2", "name": "Den", "is_active": False}]})
+    out = music_reply(runtime2, "turn the music down", "jin", "rv2", allow_writes=True)
+    assert out["status"] == "clarify" and "Say a number" in out["text"] and {c[0] for c in http2.calls} == {"GET"}
+
+
+def test_two_inactive_speakers_produce_a_choice_not_a_crash(tmp_path):
+    http = FakeHttp()
+    runtime = make_runtime(tmp_path, http)
+    http.push(200, {"devices": [{"id": "d1", "name": "Hall", "is_active": False}, {"id": "d2", "name": "Den", "is_active": False}]})
+    out = music_reply(runtime, "pause", "jin", "rd1", allow_writes=True)
+    assert out["status"] == "clarify" and "Hall" in out["text"] and "Den" in out["text"] and "failed" not in out["text"]
+
+
+def test_a_caller_without_execute_authority_can_read_but_never_change_playback(tmp_path):
+    http = FakeHttp()
+    runtime = make_runtime(tmp_path, http)
+    out = music_reply(runtime, "skip this song", "jin", "ra1", allow_writes=False)
+    assert out["status"] == "refused" and "isn't allowed to change playback" in out["text"] and http.calls == []
+    http.push(200, PLAYING)
+    assert "Song" in music_reply(runtime, "what's playing", "jin", "ra2", allow_writes=False)["text"]
+
+
+def test_the_same_request_id_never_plays_twice(tmp_path):
+    http = FakeHttp()
+    runtime = make_runtime(tmp_path, http)
+    http.push(200, DEVICE)
+    http.push(204)
+    http.push(200, dict(PLAYING, is_playing=False))
+    music_reply(runtime, "pause", "jin", "same-key", allow_writes=True)
+    before = len(http.calls)
+    again = music_reply(runtime, "pause", "jin", "same-key", allow_writes=True)
+    assert again["status"].startswith("done") and len(http.calls) == before
+
+
+def test_playlists_and_albums_with_equal_names_are_separate_choices(tmp_path):
+    http = FakeHttp()
+    runtime = make_runtime(tmp_path, http)
+    provider = runtime._build() and runtime._provider
+    http.push(200, {"playlists": {"items": [
+        {"uri": "spotify:playlist:p1", "name": "Road Trip", "owner": {"display_name": "Alex"}},
+        {"uri": "spotify:playlist:p2", "name": "Road Trip", "owner": {"display_name": "Alex"}}]}})
+    assert [i.uri for i in provider.search("road trip", "playlist")] == ["spotify:playlist:p1", "spotify:playlist:p2"]
+
+
+def test_a_context_only_turn_is_never_a_music_command(tmp_path, monkeypatch):
+    http = FakeHttp()
+    runtime = make_runtime(tmp_path, http)
+    monkeypatch.setattr(misumi_routes, "MusicRuntime", lambda data_dir: runtime)
+    monkeypatch.setenv("MISUMI_HOUSEHOLD_ROOT", str(tmp_path))
+    app = FastAPI()
+    app.include_router(misumi_routes.setup_misumi_routes(SkillsManager(str(tmp_path / "skills"))))
+    response = TestClient(app).post("/misumi/respond", json={"prompt": "", "context": "resume", "persist_turn": False, "retention_mode": "off"})
+    assert response.status_code == 200 and response.json()["source"] != "music" and http.calls == []
+
+
+def _scoped_client(tmp_path, monkeypatch, scopes):
+    http = FakeHttp()
+    runtime = make_runtime(tmp_path, http)
+    monkeypatch.setattr(misumi_routes, "MusicRuntime", lambda data_dir: runtime)
+    monkeypatch.setenv("MISUMI_HOUSEHOLD_ROOT", str(tmp_path))
+    app = FastAPI()
+
+    @app.middleware("http")
+    async def as_api_token(request, call_next):
+        request.state.api_token = True
+        request.state.api_token_scopes = scopes
+        return await call_next(request)
+
+    app.include_router(misumi_routes.setup_misumi_routes(SkillsManager(str(tmp_path / "skills"))))
+    return TestClient(app), http
+
+
+def test_a_read_only_token_cannot_skip_a_track_through_respond(tmp_path, monkeypatch):
+    client, http = _scoped_client(tmp_path, monkeypatch, ["misumi:read"])
+    body = client.post("/misumi/respond", json={"prompt": "skip this song", "persist_turn": False, "retention_mode": "off"}).json()
+    assert body["source"] == "music" and "isn't allowed to change playback" in body["text"] and http.calls == []
+
+
+def test_an_execute_token_can_and_a_client_key_makes_a_retry_safe(tmp_path, monkeypatch):
+    client, http = _scoped_client(tmp_path, monkeypatch, ["misumi:read", "misumi:execute"])
+    http.push(200, DEVICE)
+    http.push(204)
+    http.push(200, PLAYING)
+    first = client.post("/misumi/respond", json={"prompt": "skip this song", "request_id": "client-op-1", "persist_turn": False,
+                                                  "retention_mode": "off"}).json()
+    calls = len(http.calls)
+    second = client.post("/misumi/respond", json={"prompt": "skip this song", "request_id": "client-op-1", "persist_turn": False,
+                                                   "retention_mode": "off"}).json()
+    assert first["source"] == second["source"] == "music" and len(http.calls) == calls                    # the retry did not skip twice
+
+
+# ---------------------------------------------------------------------------------------------------------------------- the token import
+def _import_module():
+    import importlib.util
+    import os
+    spec = importlib.util.spec_from_file_location("spotify_import_token", os.path.join(os.path.dirname(__file__), "..", "scripts", "spotify_import_token.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _record(token="SYNTH-ACCESS-I", refresh="SYNTH-REFRESH-I"):
+    return sb.TokenRecord(token, refresh, 4_000_000_000.0, SCOPE, "synthuser")
+
+
+def test_import_writes_the_pair_and_a_failure_restores_the_previous_pair(tmp_path, monkeypatch):
+    imp = _import_module()
+    directory = str(tmp_path / "spotify")
+    imp.install(directory, "clientaaaaaaaaaaaa", _record("A1", "R1"), protect, unprotect)
+    store = sb.FileTokenStore(directory + "/token.bin", protect, unprotect)
+    assert store.load().refresh_token == "R1" and json.load(open(directory + "/client.json"))["client_id"] == "clientaaaaaaaaaaaa"
+    real_replace = imp.os.replace
+    monkeypatch.setattr(imp.os, "replace", lambda a, b: (_ for _ in ()).throw(PermissionError("denied")) if str(b).endswith("client.json") else real_replace(a, b))
+    with pytest.raises(PermissionError):
+        imp.install(directory, "clientbbbbbbbbbbbb", _record("B1", "R2"), protect, unprotect)
+    monkeypatch.undo()
+    assert store.load().refresh_token == "R1"                                                   # the old token is back
+    assert json.load(open(directory + "/client.json"))["client_id"] == "clientaaaaaaaaaaaa"      # and so is the old client
+    assert not [n for n in __import__("os").listdir(directory) if n.endswith(".tmp")]
+
+
+def test_import_waits_for_a_refresh_in_flight_and_then_wins(tmp_path):
+    import threading
+    imp = _import_module()
+    directory = str(tmp_path / "spotify")
+    store = sb.FileTokenStore(directory + "/token.bin", protect, unprotect)
+    imp.install(directory, "clientaaaaaaaaaaaa", _record("A1", "R1"), protect, unprotect)
+    inside, release = threading.Event(), threading.Event()
+
+    def refresher():
+        with store.exclusive():                                  # what TokenManager._refresh holds while it talks to Spotify
+            inside.set()
+            release.wait(5)
+            store.save(_record("OLD-ACCOUNT", "R-OLD"))           # the late refresh result of the OLD account
+
+    worker = threading.Thread(target=refresher)
+    worker.start()
+    assert inside.wait(3)
+    installer = threading.Thread(target=lambda: imp.install(directory, "clientbbbbbbbbbbbb", _record("NEW", "R-NEW"), protect, unprotect))
+    installer.start()
+    release.set()
+    worker.join(5)
+    installer.join(5)
+    assert store.load().refresh_token == "R-NEW"                  # the import ran AFTER the refresh and replaced it
+
+
+def test_import_refuses_wrong_scopes_and_writes_nothing(tmp_path):
+    imp = _import_module()
+    payload = json.dumps({"client_id": "synthetic0client0id", "access_token": "a", "refresh_token": "r", "expires_at": 4e9,
+                          "scope": SCOPE + " playlist-modify-public", "user_id": "u"})
+    with pytest.raises(SystemExit):
+        imp.parse_payload(payload)
+
+
+def test_a_device_with_no_readable_level_is_never_guessed_at(tmp_path):
+    http = FakeHttp()
+    runtime = make_runtime(tmp_path, http)
+    http.push(200, {"devices": [{"id": "d1", "name": "Hall", "is_active": True}]})
+    out = music_reply(runtime, "turn the music down", "jin", "rg1", allow_writes=True)
+    assert out["status"] == "clarify" and "Say a number" in out["text"] and {c[0] for c in http.calls} == {"GET"}
