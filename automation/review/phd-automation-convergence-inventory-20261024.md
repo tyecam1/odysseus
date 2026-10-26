@@ -40,3 +40,18 @@ Method: read-only inventory by the Sol lane (gpt-6.1-sol, codex 0.163.0)
 against live GitHub state, 2026-10-24; findings re-checked by the controller
 before recording. Category-A list (98) intentionally omitted as PhD-domain
 provenance retained in place.
+
+## Migration verdict — 2026-10-26 review of the six "migrate" candidates
+
+Re-checked against live `dev` and `obsidian-PhD@main` (post #629): none of the
+six candidates (`agent_run_evaluator.py`, `engine_objective_validator.py`,
+`observability.py`, `session_closeout.py`, `skill_lifecycle.py`,
+`sleep_consolidation.py`) currently meets the placement conditions. No
+demonstrated backend replacement exists (`src/routing_evaluator.py` remains
+routing-only; `src/misumi_observability.py` is domain-specific, not a general
+layer); every candidate still has live PhD callers; PhD-side development is
+continuing PhD-side automation development (e.g. #629 added `supervision_update_extractor.py`, outside these six candidates);
+and cross-repo owner approvals for a semantics-preserving migration are not in
+place. Migration today would be inventory-statistic-driven. Re-assess only when
+a backend replacement has passed the PhD consumers' own tests and both
+repository owners have approved the move.
