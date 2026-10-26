@@ -263,19 +263,29 @@ def combined_popularity(leafly_count: Optional[int],
 
 
 def composite_score(factors: Factors, category: str,
-                    gamma: float = GAMMA) -> Dict[str, Any]:
-    """Canon section 3 equation, exact order of operations."""
+                    gamma: float = GAMMA,
+                    weight_overrides: Optional[Mapping[str, float]] = None
+                    ) -> Dict[str, Any]:
+    """Canon section 3 equation, exact order of operations.
+
+    weight_overrides lets a caller (e.g. the live workbook recalculation
+    check) recompute with different metric weights; canon defaults unchanged.
+    """
     applicable = APPLICABLE.get(category, {"rating", "price", "popularity"})
+    weights = {"grade": W_GRADE, "rating": W_RATING, "price": W_PRICE,
+               "thc": W_THC, "si": W_SI, "popularity": W_POPULARITY}
+    if weight_overrides:
+        weights = {**weights, **weight_overrides}
     weighted: List[Tuple[float, float]] = []
-    def take(name: str, weight: float, value: Optional[Any]):
-        if name in applicable and value is not None:
-            weighted.append((weight, float(value)))
-    take("grade", W_GRADE, factors.grade[0] if factors.grade else None)
-    take("rating", W_RATING, factors.rating)
-    take("price", W_PRICE, factors.price[0] if factors.price else None)
-    take("thc", W_THC, factors.thc)
-    take("si", W_SI, factors.si)
-    take("popularity", W_POPULARITY, factors.popularity)
+    def take(name: str, value: Optional[Any]):
+        if name in applicable and value is not None and weights[name]:
+            weighted.append((weights[name], float(value)))
+    take("grade", factors.grade[0] if factors.grade else None)
+    take("rating", factors.rating)
+    take("price", factors.price[0] if factors.price else None)
+    take("thc", factors.thc)
+    take("si", factors.si)
+    take("popularity", factors.popularity)
 
     present = {n for n, v in (
         ("grade", factors.grade), ("rating", factors.rating),
