@@ -46,7 +46,7 @@ def consults(estate, monkeypatch):
     """Record the lead's model call (including the advisory note) and make every consult answer."""
     seen = {"consulted": [], "advisory": []}
 
-    async def fake_consult(prompt, target, backend, model, lead="aoteru", structured=False):
+    async def fake_consult(prompt, target, backend, model, lead="aoteru", structured=False, assignment=None):
         seen["consulted"].append((target, lead))
         return "practical_steps" if structured else f"OK: {target} notes"  # round 12: ids from the closed vocabulary
 

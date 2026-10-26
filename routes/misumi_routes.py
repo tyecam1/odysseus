@@ -312,6 +312,48 @@ def _consultation_plan(prompt: str, primary_reply: str, persona: str) -> List[st
     return [item["persona"] for item in _team_plan(prompt, persona, primary_reply)["supports"]]
 
 
+_ASSIGNABLE_ROLES = frozenset({"critic"})
+_ASSIGNMENT_FOCUS = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
+
+
+def _assignment_parts(assignment: Optional[Dict[str, Any]]) -> Tuple[Optional[str], List[str]]:
+    """(task role, focus intents) of a per-turn assignment, defensively re-validated; (None, []) when absent or not recognised."""
+    if not isinstance(assignment, dict):
+        return None, []
+    role = str(assignment.get("task_role") or "")
+    if role not in _ASSIGNABLE_ROLES:
+        return None, []
+    focus = [t for t in (assignment.get("focus_intents") or []) if isinstance(t, str) and _ASSIGNMENT_FOCUS.fullmatch(t)]
+    return role, list(dict.fromkeys(focus))[:5]
+
+
+def _assignment_instruction(assignment: Optional[Dict[str, Any]]) -> str:
+    """One fixed sentence for a support's consultation prompt: this turn's task role and focus. Identity and permanent role never change."""
+    role, focus = _assignment_parts(assignment)
+    if role is None:
+        return ""
+    text = f"For this request only you are assigned the task role of {role}"
+    if focus:
+        text += f", with focus on: {', '.join(focus)}"
+    return text + ". This is a temporary assignment: your identity and permanent role are unchanged."
+
+
+def _reported_support(item: Dict[str, Any], structured_persona: Optional[str]) -> Dict[str, Any]:
+    """A support record as REPORTED: a persona consulted as the learned (structured) consult never received this turn's assignment, so the
+    team block must not claim one for it (Sol review of the assignment PR)."""
+    if structured_persona and item.get("persona") == structured_persona:
+        return {key: value for key, value in item.items() if key != "assignment"}
+    return item
+
+
+def _handover_purpose(role: Any, assignment: Optional[Dict[str, Any]]) -> str:
+    base = f"analyse from the {role} perspective"
+    task_role, focus = _assignment_parts(assignment)
+    if task_role is None:
+        return base
+    return f"{task_role}: {base}" + (f", focusing on {', '.join(focus)}" if focus else "")
+
+
 async def _consult_persona(
     prompt: str,
     persona: str,
@@ -319,6 +361,7 @@ async def _consult_persona(
     model: str,
     lead: str = "aoteru",
     structured: bool = False,
+    assignment: Optional[Dict[str, Any]] = None,
 ) -> str:
     from src.llm_core import llm_call_async
     from src.persona_capabilities import capability_summary
@@ -337,6 +380,9 @@ async def _consult_persona(
     if capabilities:
         system += f"\n\n{capabilities}"
     system += f"\n{_RATIFICATION_CONSTRAINT}"
+    assignment_note = _assignment_instruction(assignment)
+    if assignment_note:
+        system += f"\n{assignment_note}"
     if structured:
         # Round 12: a LEARNED consult is a typed advisory, not a conversation: it may only choose ids from a closed vocabulary
         # (src/misumi_advisory.py). Whatever else it writes is discarded by the caller, never sanitised or forwarded.
@@ -2002,6 +2048,7 @@ def setup_misumi_routes(
                     item_unconfirmed = True
             else:
                 targets = [item["persona"] for item in team_plan["supports"]]
+                assignments = {item["persona"]: item.get("assignment") for item in team_plan["supports"]}
                 if learned_consult is not None:
                     if not _consultation_enabled():
                         learned_consult["status"] = "disabled"
@@ -2017,7 +2064,8 @@ def setup_misumi_routes(
                     try:
                         structured = learned_consult is not None and target == learned_consult["persona"]
                         contribution = await _consult_persona(prompt, target, backend, model, lead=persona,
-                                                              structured=structured)
+                                                              structured=structured,
+                                                              assignment=None if structured else assignments.get(target))
                         if structured:
                             advisory = parse_advisory(target, contribution)  # the raw reply ends here, whatever it said
                             if advisory is not None:
@@ -2201,6 +2249,7 @@ def setup_misumi_routes(
             _persist_conversation_turn(session_manager, session_id, prompt, text, persona)
 
         team_block: Optional[Dict[str, Any]] = None
+        structured_overlap = learned_consult["persona"] if learned_consult is not None else None
         if team_plan is not None and backend and model and model_required:
             team_block = {
                 "lead": persona,
@@ -2208,13 +2257,14 @@ def setup_misumi_routes(
                 "reasons": team_plan["reasons"],
                 "excluded": team_plan["excluded"],
                 "supports": [
-                    {**item, **consult_trace.get(item["persona"], {"status": "not-run"})}
+                    {**_reported_support(item, structured_overlap), **consult_trace.get(item["persona"], {"status": "not-run"})}
                     for item in team_plan["supports"]
                 ],
                 "handovers": [
                     {
                         "from": persona, "to": item["persona"], "returned_to": persona,
-                        "purpose": f"analyse from the {persona_record(item['persona']).get('role')} perspective",
+                        "purpose": _handover_purpose(persona_record(item['persona']).get('role'),
+                                                     _reported_support(item, structured_overlap).get('assignment')),
                     }
                     for item in team_plan["supports"]
                 ],
