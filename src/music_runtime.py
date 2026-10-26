@@ -165,10 +165,18 @@ class MusicRuntime:
         if len(parts) != 2 or not parts[0].strip() or not parts[1].strip() or self._provider is None:
             return ""
         flat = lambda v: re.sub(r"[^a-z0-9]", "", v.casefold())      # noqa: E731
+
+        def base_title(title: str) -> str:                           # "Arevil's Gardens (Rip)" / "Blue - Remastered" -> the title without a trailing suffix
+            return flat(re.sub(r"\s*[(\[].*?[)\]]\s*$|\s+-\s+.*$", "", title))
+
+        def artist_is(spoken: str, listed: str) -> bool:             # the spoken artist IS one of the listed artists (whole name, "The" optional): never a substring
+            wanted = re.sub(r"^the", "", spoken)
+            return any(re.sub(r"^the", "", flat(name)) == wanted for name in listed.split(", ")) or flat(listed) == spoken
+
         title, artist = flat(parts[0]), flat(parts[1])
         try:
             found = [i for i in self._provider.search(query, kind)
-                     if artist and artist in flat(i.artist) and title and flat(i.title).startswith(title)]
+                     if artist and title and artist_is(artist, i.artist) and title in (base_title(i.title), flat(i.title))]
         except Exception:  # noqa: BLE001
             return ""
         uris = {i.uri for i in found}
@@ -261,7 +269,7 @@ class MusicRuntime:
                 retry = {"uri": exact, "kind": command.kind}
                 if kwargs.get("device"):
                     retry["device"] = kwargs["device"]
-                result = controller.handle(action, request_id=rid + "-u", explicit_command=True, guest=False, **retry)
+                result = controller.handle(action, request_id=rid, explicit_command=True, guest=False, **retry)       # the SAME id: one write reservation
         return {"status": result.status, "data": result.data, "trace": result.trace, "text": _speak(result)}
 
 
