@@ -141,19 +141,22 @@ class MusicRuntime:
         matches = [d for d in devices if d.name.lower() == target]
         return matches[0] if len(matches) == 1 else None
 
-    def _literal_title_exists(self, text: str, kind: str) -> bool:
-        """Is the WHOLE phrase (including any trailing "on ..." and any "by <artist>") exactly a result's title or "title by artist"? Nothing is split or
-        trimmed first: "Blue by Joni Mitchell on the kitchen speaker" must not be validated as just "Blue"."""
-        wanted = re.sub(r"\s+", " ", text).strip().casefold()
+    def _literal_title_exists(self, text: str, kind: str):
+        """Is the WHOLE phrase exactly a result's title or "title by artist"? The matching phrase, "" for no, or None when Spotify could not be asked (uncertain: the caller must stop).
+        Nothing is split or trimmed first, but a bare trailing "please" is tried both ways ("Sex on Fire please")."""
+        candidates = {re.sub(r"\s+", " ", text).strip().casefold()}
+        candidates.add(re.sub(r"\s+please$", "", re.sub(r"\s+", " ", text).strip(), flags=re.I).casefold())
+        asked = [text] + ([re.sub(r"\s+please$", "", text.strip(), flags=re.I)] if re.search(r"\s+please$", text.strip(), re.I) else [])
         try:
-            for item in (self._provider.search(text, kind) if self._provider else []):
-                title = re.sub(r"\s+", " ", item.title).strip().casefold()
-                both = re.sub(r"\s+", " ", "%s by %s" % (item.title, item.artist)).strip().casefold()
-                if wanted in (title, both):
-                    return True
-        except Exception:  # noqa: BLE001
-            return False
-        return False
+            for query in asked:
+                for item in (self._provider.search(query, kind) if self._provider else []):
+                    title = re.sub(r"\s+", " ", item.title).strip().casefold()
+                    both = re.sub(r"\s+", " ", "%s by %s" % (item.title, item.artist)).strip().casefold()
+                    if title in candidates or both in candidates:
+                        return query                                  # the phrase (with or without the trailing "please") that IS a title
+        except Exception:  # noqa: BLE001 - uncertainty is not "no": the write must not go ahead on a guess
+            return None
+        return ""
 
     def _idle_default_device(self):
         """The configured default device when it is present exactly once. Whether it may be used (only when nothing is active) is decided by the
@@ -194,14 +197,18 @@ class MusicRuntime:
         device_ref = ""                                               # "id:<spotify id>" once WE chose the device: exact, immune to name prefixes
         if command.device_hint:
             found = self._resolve_device_hint(command.device_hint)
-            literal = action in ("play", "queue") and bool(command.query_with_hint) and self._literal_title_exists(command.query_with_hint, command.kind)
+            literal = (self._literal_title_exists(command.query_with_hint, command.kind)
+                       if action in ("play", "queue") and command.query_with_hint else False)
+            if literal is None:                                       # Spotify could not be asked whether the phrase is a title: stop, do not guess
+                return {"status": "clarify", "data": {}, "trace": {},
+                        "text": "I couldn't check that with Spotify just now, so I haven't played anything. Try again in a moment."}
             if found is not None and literal:                         # the whole phrase is a real title AND its tail names a device: never guess which
                 return {"status": "clarify", "data": {}, "trace": {},
                         "text": "Did you mean the track %s, or %s on %s? Say which." % (command.query_with_hint, command.query, found.name)}
             if found is not None:
                 device_ref = "id:" + found.id
             elif literal:
-                command = MusicCommand(action, query=command.query_with_hint, kind=command.kind)         # a real title ending "on ..."
+                command = MusicCommand(action, query=literal, kind=command.kind)                             # a real title ending "on ..."
             else:                                                     # an unresolved explicit target is never guessed at or played to the active device
                 return {"status": "clarify", "data": {}, "trace": {}, "text": "I don't know a device called %s." % command.device_hint}
         if not device_ref and action in ("play", "queue", "resume"):

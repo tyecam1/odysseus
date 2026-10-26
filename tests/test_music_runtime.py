@@ -723,3 +723,43 @@ def test_a_device_that_becomes_active_after_the_default_was_chosen_is_not_overri
 def test_the_politeness_fallback_does_not_keep_the_device_suffix():
     cmd = parse_music_command("play Blue on the laptop please")
     assert cmd.query == "Blue" and cmd.device_hint == "laptop" and "laptop" not in cmd.fallback_query
+
+
+# ---------------------------------------------------------------------------------------------------------------------- Sol third pass on #180
+def test_a_trailing_please_cannot_hide_a_title_and_device_ambiguity(tmp_path):
+    http = FakeHttp()
+    runtime = make_runtime(tmp_path, http)
+    both = {"devices": [{"id": "d1", "name": "Laptop", "is_active": True, "volume_percent": 40}, {"id": "d3", "name": "Fire", "is_active": False}]}
+    http.push(200, both)
+    http.push(200, {"tracks": {"items": []}})                                           # "Sex on Fire please" finds nothing...
+    http.push(200, track("Sex on Fire", "spotify:track:fire01", "Kings of Leon"))       # ...but "Sex on Fire" is a real title
+    out = music_reply(runtime, "play Sex on Fire please", "jin", "f1", allow_writes=True)
+    assert out["status"] == "clarify" and "Did you mean the track" in out["text"] and writes(http) == []
+
+
+def test_an_overlong_device_name_still_fails_closed(tmp_path):
+    http = FakeHttp()
+    runtime = make_runtime(tmp_path, http)
+    cmd = parse_music_command("play Blue on the downstairs kitchen Sonos surround sound speaker")
+    assert cmd.device_hint == "downstairs kitchen Sonos surround sound speaker"
+    http.push(200, ONE_ACTIVE)
+    http.push(200, track("Blue"))
+    out = music_reply(runtime, "play Blue on the downstairs kitchen Sonos surround sound speaker", "jin", "f2", allow_writes=True)
+    assert out["status"] == "clarify" and "don't know a device called" in out["text"] and writes(http) == []
+
+
+def test_a_failed_title_check_stops_the_write(tmp_path):
+    http = FakeHttp()
+    runtime = make_runtime(tmp_path, http)
+    both = {"devices": [{"id": "d1", "name": "Laptop", "is_active": True, "volume_percent": 40}, {"id": "d3", "name": "Fire", "is_active": False}]}
+    http.push(200, both)
+    http.push(503, {})                                                                  # Spotify cannot be asked whether "Sex on Fire" is a title
+    out = music_reply(runtime, "play Sex on Fire", "jin", "f3", allow_writes=True)
+    assert out["status"] == "clarify" and "couldn't check" in out["text"] and writes(http) == []
+
+
+def test_title_like_play_phrases_are_not_taken_as_a_bodyless_resume():
+    assert parse_music_command("play Music on the Radio") is None
+    assert parse_music_command("play music on the radio") is None
+    assert parse_music_command("resume on the laptop") == MusicCommand("resume", device_hint="laptop")
+    assert parse_music_command("play on the laptop") == MusicCommand("resume", device_hint="laptop")

@@ -30,7 +30,7 @@ _VOLUME_SET = re.compile(r"^(?:set\s+)?(?:the\s+)?volume\s+(?:to\s+)?(?P<n>\d{1,
 _VOLUME_REL = re.compile(r"^(?:turn|bring|put|set|make)\s+(?:it|the\s+(?:music|volume|sound)|this)\s+(?P<d>up|down)(?:\s+a\s+(?:bit|little|touch))?$|^(?P<d2>louder|quieter|softer)$|^turn\s+(?P<d3>up|down)\s+the\s+(?:music|volume)$", re.I)
 _KIND = re.compile(r"^(?:the\s+)?(?P<k>album|playlist|artist|band)\s+(?P<q>.+)$", re.I)
 _NOT_MUSIC = re.compile(r"^(?:(?:a|the|some|another) )?(?:game|games|match|round|hand|cards|chess|hide and seek|fetch)\b|\bwith (?:me|us|him|her|them|the (?:kids|dog|cat))$", re.I)
-_ON_DEVICE = re.compile(r"\s+on\s+(?:the\s+|my\s+)?(?P<d>(?:(?!\s+on\s).){1,40})$", re.I)   # any characters: an unrecognisable target must still fail SAFE, never be ignored
+_ON_DEVICE = re.compile(r"\s+on\s+(?:the\s+|my\s+)?(?P<d>(?:(?!\s+on\s).){1,200})$", re.I)   # any characters, any length: an unrecognisable or overlong target must fail SAFE, never be ignored
 _LEADING_THE = re.compile(r"^(?:the\s+(?:song|track|tune)\s+)", re.I)
 
 
@@ -92,7 +92,7 @@ def _parse(text: str) -> Optional[MusicCommand]:
         head = bare[:device_match.start()].strip()
         hint = device_match.group("d").strip()
         for pattern, action in ((_RESUME, "resume"), (_PAUSE, "pause"), (_NEXT, "next")):
-            if pattern.match(head):
+            if pattern.match(head) and not (action == "resume" and head.lower() not in ("resume", "unpause", "play", "start the music", "start music")):
                 return MusicCommand(action, device_hint=hint)
     if had_service and bare.lower() in ("play", "queue", "add"):
         bare = work                                    # "play Please on Spotify": nothing but "please" is left, so it is the title
