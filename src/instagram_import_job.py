@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from src.constants import DATA_DIR
-from src.private_state_io import check_private_path, private_file, read_private_bytes
+from src.private_state_io import private_file, read_private_bytes
 
 
 logger = logging.getLogger(__name__)

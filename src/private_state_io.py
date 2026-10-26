@@ -147,6 +147,8 @@ def private_file(path: Path, flags: int) -> Iterator[int]:
     try:
         if os.name == "nt":
             _windows_private(path, fd)
+        elif os.fstat(fd).st_uid != os.geteuid():
+            raise PrivateStorageRefused(f"private state file must be owned by this user: {path}")
         elif hasattr(os, "fchmod"):
             os.fchmod(fd, 0o600)
         else:
