@@ -1,5 +1,8 @@
 """Tests for the Green Team x Leafly scoring engine and workbook contract."""
 import math
+import copy
+import json
+import re
 import zipfile
 from xml.etree import ElementTree as ET
 from io import BytesIO
@@ -7,7 +10,7 @@ from io import BytesIO
 import pytest
 
 from src.product_research import (
-    APPLICABLE, GAMMA, RARITY_GRADES, apply_rarity_grade, build_factors,
+    APPLICABLE, GAMMA, _midrank_factor, apply_rarity_grade, build_factors,
     combined_popularity, combined_rating, composite_score, parse_quantity_grams,
     seller_grade_numeric, sort_records, unit_price,
 )
@@ -132,14 +135,212 @@ def test_single_peer_category_is_neutral():
     assert score["gm"] == 1.0
 
 
+def test_seller_only_singleton_popularity_is_present_and_neutral():
+    _, factors, score = build_factors([rec("Synthetic", "Vapes", seller_popularity_rank=1)])[0]
+    assert factors.popularity == 1.0
+    assert "popularity" not in score["missing_applicable"]
+
+
+def test_present_flower_reference_thc_and_orientation_are_scored():
+    record = rec("Synthetic flower", leafly_thc=25, sativa_pct=75, indica_pct=25,
+                 primary_leafly_source="https://example.invalid/cultivar")
+    before = copy.deepcopy(record)
+    _, factors, score = build_factors([record])[0]
+    assert factors.thc == factors.si == 1.0
+    assert {"thc", "si"}.isdisjoint(score["missing_applicable"])
+    assert record == before
+    assert factors.detail["thc"]["evidence_class"] == "cultivar_reference"
+    assert "never a batch measurement" in factors.detail["thc"]["basis"]
+    assert factors.detail["thc"]["source"] == record["primary_leafly_source"]
+    assert factors.detail["si"]["raw_values"] == {"sativa_pct": 75, "indica_pct": 25}
+
+
+def test_flower_reference_peers_ties_ordering_and_mean():
+    records = [rec(f"Synthetic {i}", leafly_thc=thc, sativa_pct=sativa, indica_pct=100-sativa)
+               for i, (thc, sativa) in enumerate([(10, 20), (25, 75), (25, 75), (30, 90)])]
+    scored = build_factors(records)
+    for metric in ("thc", "si"):
+        values = [getattr(f, metric) for _, f, _ in scored]
+        assert values[0] < values[1] == values[2] < values[3]
+        assert sum(values) / len(values) == pytest.approx(1)
+    scores = [score["score"] for _, _, score in scored]
+    assert scores[0] < scores[1] == scores[2] < scores[3]
+    equal = build_factors([rec(f"Synthetic equal {i}", leafly_thc=25, sativa_pct=75)
+                           for i in range(3)])
+    assert all(f.thc == f.si == 1 for _, f, _ in equal)
+
+
+@pytest.mark.parametrize("category", sorted(set(APPLICABLE) - {"Cannabis flower"}))
+def test_nonflower_reference_values_never_become_factors_or_peers(category):
+    flower = rec("Synthetic flower", leafly_thc=25, sativa_pct=75)
+    other = rec("Synthetic nonflower", category, leafly_thc=100, sativa_pct=100, indica_pct=0)
+    scored = {r["product_name"]: (f, score) for r, f, score in build_factors([flower, other])}
+    assert scored["Synthetic flower"][0].thc == scored["Synthetic flower"][0].si == 1
+    factors, score = scored["Synthetic nonflower"]
+    assert factors.thc is factors.si is None
+    assert {"thc", "si"}.isdisjoint(score["missing_applicable"] + score["factors_present"])
+
+
+@pytest.mark.parametrize("value", [None, True, "25", -1, 101, float("nan"), float("inf")])
+def test_invalid_flower_reference_values_are_missing_and_excluded_from_peers(value):
+    records = [rec("Synthetic valid", leafly_thc=25, sativa_pct=75),
+               rec("Synthetic invalid", leafly_thc=value, sativa_pct=value)]
+    (_, valid, _), (_, invalid, score) = build_factors(records)
+    assert valid.thc == valid.si == 1
+    assert invalid.thc is invalid.si is None
+    assert {"thc", "si"} <= set(score["missing_applicable"])
+    assert invalid.detail["thc"]["excluded_reason"]
+    assert invalid.detail["si"]["excluded_reason"]
+
+
+def test_orientation_single_axis_comparison_keeps_source_missingness():
+    records = [rec("Synthetic sativa", sativa_pct=75),
+               rec("Synthetic indica", indica_pct=25),
+               rec("Synthetic conflicting", sativa_pct=75, indica_pct=75)]
+    before = copy.deepcopy(records)
+    (_, sativa, _), (_, indica, _), (_, conflicting, score) = build_factors(records)
+    assert sativa.si == indica.si == 1
+    assert indica.detail["si"]["comparison_value"] == 75
+    assert indica.detail["si"]["raw_values"] == {"sativa_pct": None, "indica_pct": 25}
+    assert conflicting.si is None and "si" in score["missing_applicable"]
+    assert records == before
+
+
 def test_rarity_grade_only_for_ungraded_flower():
-    recs = [rec("Stardawg"), rec("Master Kush A", seller_tier="A"),
-            rec("Dank Gummies", category="Edibles")]
+    recs = [rec("Synthetic ungraded"), rec("Synthetic seller", seller_tier="A"),
+            rec("Synthetic edible", category="Edibles")]
+    policy = {r["product_name"]: {"tier": "AA", "confidence": 0.6,
+              "provenance": {"source": "synthetic-policy", "revision": "test-v1"}}
+              for r in recs}
     apply_rarity_grade(recs)
-    assert recs[0]["inferred_grade"]["tier"] == "A"
+    assert all("inferred_grade" not in r for r in recs)  # no bundled personal policy
+    build_factors(recs, rarity_policy=policy)
+    assert recs[0]["inferred_grade"]["tier"] == "AA"
+    assert recs[0]["inferred_grade"]["numeric"] == 2.0
+    assert recs[0]["inferred_grade"]["provenance"] == policy["Synthetic ungraded"]["provenance"]
     assert "inferred_grade" not in recs[1]  # seller grade preserved, no inference
     assert "inferred_grade" not in recs[2]  # not a flower
-    assert set(RARITY_GRADES) <= set(zip(*RARITY_GRADES.keys())) or True
+
+
+def test_reported_grade_overrides_stale_inference_on_repeated_build():
+    shared = dict(combined_rating=4.0, unit_price=10.0, unit_basis="per g",
+                  leafly_thc=25, sativa_pct=75, leafly_rating_count=10,
+                  seller_popularity_rank=1)
+    record = rec("Synthetic updated", **shared)
+    peer = rec("Synthetic peer", seller_tier="AA", **shared)
+    unrelated = [rec("Synthetic vape", "Vapes", combined_rating=4.5),
+                 rec("Synthetic vape peer", "Vapes", combined_rating=3.5)]
+    records = [record, peer, *unrelated]
+    fresh_records = copy.deepcopy(records)
+    fresh_records[0]["seller_tier"] = "AAA"
+    policy = {record["product_name"]: {
+        "tier": "A", "confidence": 0.8, "basis": "synthetic rarity estimate",
+        "provenance": {"source": "synthetic-policy", "revision": "test-v1"},
+    }}
+
+    first = build_factors(records, rarity_policy=policy)
+    audit = copy.deepcopy(record["inferred_grade"])
+    assert audit == {**policy[record["product_name"]], "numeric": 1.0}
+    assert first[0][1].grade == pytest.approx((1 - 0.8 * 0.5 / 7, 0.8))
+    assert first[0][2]["score"] < first[1][2]["score"]
+
+    record["seller_tier"] = "AAA"
+    rebuilt = build_factors(records, rarity_policy=policy)
+    fresh = build_factors(fresh_records, rarity_policy=policy)
+    assert rebuilt[0][0] is record
+    assert record["inferred_grade"] == audit  # audit survives seller precedence
+    assert record["seller_tier"] == "AAA"
+    assert "inferred_grade" not in fresh_records[0]
+    assert rebuilt[0][1].grade == pytest.approx((1 + 0.5 / 7, 1.0))
+    assert rebuilt[1][1].grade == pytest.approx((1 - 0.5 / 7, 1.0))
+    assert rebuilt[0][2]["score"] > rebuilt[1][2]["score"]
+    assert [(f, score) for _, f, score in rebuilt] == [(f, score) for _, f, score in fresh]
+    assert [r["product_name"] for r, _, _ in sort_records(rebuilt)] == [
+        r["product_name"] for r, _, _ in sort_records(fresh)]
+    for (_, before, _), (_, after, _) in zip(first, rebuilt):
+        assert (before.rating, before.price, before.thc, before.si,
+                before.popularity, before.detail) == (
+                    after.rating, after.price, after.thc, after.si,
+                    after.popularity, after.detail)
+    assert rebuilt[2:] == first[2:]  # other-category scores are unchanged
+
+
+@pytest.mark.parametrize("seller_tier", [None, "", "unknown"])
+def test_inferred_grade_fallback_survives_repeated_build_without_valid_seller_grade(seller_tier):
+    record = rec("Synthetic inferred", seller_tier=seller_tier)
+    peer = rec("Synthetic peer", seller_tier="AA")
+    policy = {record["product_name"]: {
+        "tier": "A", "confidence": 0.8, "provenance": "synthetic-policy",
+    }}
+    first = build_factors([record, peer], rarity_policy=policy)
+    before = copy.deepcopy(record)
+    rebuilt = build_factors([record, peer])
+    assert record == before
+    assert rebuilt == first
+    assert rebuilt[0][1].grade == pytest.approx((1 - 0.8 * 0.5 / 7, 0.8))
+    assert rebuilt[0][2]["score"] < rebuilt[1][2]["score"]
+
+
+@pytest.mark.parametrize("entry", [
+    {"tier": "AA", "confidence": 0.5},
+    {"tier": "unknown", "confidence": 0.5, "provenance": "synthetic"},
+    {"tier": "AA", "confidence": -0.1, "provenance": "synthetic"},
+    {"tier": "AA", "confidence": float("nan"), "provenance": "synthetic"},
+])
+def test_invalid_injected_grade_policy_rejected(entry):
+    with pytest.raises(ValueError):
+        apply_rarity_grade([rec("Synthetic")], {"Synthetic": entry})
+
+
+@pytest.mark.parametrize("values", [[4], [4, 4], [4, 4, 4], [1, 2, 2, 4, 9]])
+@pytest.mark.parametrize("smaller", [False, True])
+def test_midrank_ties_mean_and_direction(values, smaller):
+    factors = [_midrank_factor(values, i, 0.8, smaller) for i in range(len(values))]
+    assert sum(factors) / len(factors) == pytest.approx(1)
+    if len(set(values)) == 1:
+        assert factors == [1.0] * len(values)
+    else:
+        ordered = sorted(zip(values, factors))
+        for (a, fa), (b, fb) in zip(ordered, ordered[1:]):
+            if a == b:
+                assert fa == fb
+            else:
+                assert (fa > fb) if smaller else (fa < fb)
+
+
+def test_price_peers_require_same_category_and_unit_basis():
+    records = [rec("gram", "Vapes", unit_price=1, unit_basis="per g"),
+               rec("item", "Vapes", unit_price=100, unit_basis="per item"),
+               rec("other category", "Edibles", unit_price=10, unit_basis="per g")]
+    assert all(f.price[0] == 1 for _, f, _ in build_factors(records))
+    records.append(rec("expensive gram", "Vapes", unit_price=2, unit_basis="per g"))
+    factors = {r["product_name"]: f for r, f, _ in build_factors(records)}
+    assert factors["gram"].price[0] > 1 > factors["expensive gram"].price[0]
+    assert factors["item"].price == (1.0, "per item")
+
+
+@pytest.mark.parametrize("price,basis", [(0, "per g"), (-1, "per g"),
+    (float("nan"), "per g"), (float("inf"), "per g"), ("1", "per g"),
+    (True, "per g"), (1, None), (1, "")])
+def test_invalid_price_inputs_have_reasons(price, basis):
+    record = rec("Synthetic", "Vapes", unit_price=price, unit_basis=basis)
+    _, factor, score = build_factors([record])[0]
+    assert factor.price is None and "price" in score["missing_applicable"]
+    assert factor.detail["price"]["excluded_reason"]
+
+
+def test_invalid_options_excluded_with_source_quantities_preserved():
+    options = [{"size": "2g", "price": 10, "variant_id": "synthetic-v1"},
+               {"size": "1g", "price": "bad"}, {"size": "0g", "price": 1},
+               {"size": "-1g", "price": 1}, {"size": "1g", "price": float("inf")},
+               {"size": "1g", "price": True}, None]
+    best, basis, detail = unit_price(options)
+    assert (best, basis) == (5, "per g")
+    assert len(detail["excluded_options"]) == 6
+    assert all(detail["excluded_options"])
+    assert detail["source_options"] == options
+    assert detail["valid_options"] == [{"source_option_index": 0, "quantity_grams": 2,
+                                        "unit_price": 5, "unit_basis": "per g"}]
 
 
 def test_every_item_gets_a_score():
@@ -241,3 +442,182 @@ def test_workbook_row_order_matches_sorted_scores():
     names = ["".join(t.text or "" for t in row.findall(ns + "c")[2].iter(ns + "t"))
              for row in data]
     assert names[0] == "High"
+
+
+# Synthetic regression probes adapted from /tmp/pr167-independent-acceptance.py.
+XML_NS = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+
+
+def _workbook_xml(blob):
+    with zipfile.ZipFile(BytesIO(blob)) as archive:
+        return {name: ET.fromstring(archive.read(name)) for name in archive.namelist()
+                if name.endswith((".xml", ".rels"))}
+
+
+def _cell_value(cell):
+    value = cell.find(XML_NS + "v")
+    return value.text if value is not None else "".join(t.text or "" for t in cell.iter(XML_NS + "t"))
+
+
+def test_workbook_valid_argb_formats_widths_and_score_only_gradient():
+    record = rec("Synthetic", unit_price=5, unit_basis="per g", leafly_thc=25,
+                 sativa_pct=75, indica_pct=25, overview_options=[{"size": "2g", "price": 10}])
+    scored = build_factors([record])
+    # Exercise all gradient deciles, including endpoints, independently of scoring.
+    rows = [(dict(record, product_name=f"Synthetic {i}"), scored[0][1],
+             dict(scored[0][2], score=i / 10, percent=i * 10)) for i in range(11)]
+    blob = build_workbook(rows, "2026-10-25")
+    xml = _workbook_xml(blob)
+    styles = xml["xl/styles.xml"]
+    rgbs = [node.attrib["rgb"] for node in styles.iter(XML_NS + "fgColor")]
+    assert all(re.fullmatch("[0-9A-F]{8}", rgb) for rgb in rgbs)
+    fills = styles.find(XML_NS + "fills")
+    xfs = styles.find(XML_NS + "cellXfs")
+    assert int(fills.attrib["count"]) == len(fills)
+    assert int(xfs.attrib["count"]) == len(xfs)
+    custom_formats = {int(n.attrib["numFmtId"]): n.attrib["formatCode"]
+                      for n in styles.find(XML_NS + "numFmts")}
+    assert "0.00" in custom_formats[164]
+    assert custom_formats[165] == '0.0"%"'
+    overview = xml["xl/worksheets/sheet1.xml"]
+    assert overview.find(XML_NS + "dimension").attrib["ref"] == "A1:W12"
+    for name in ("xl/worksheets/sheet1.xml", "xl/worksheets/sheet2.xml"):
+        root = xml[name]
+        pane = root.find(f"{XML_NS}sheetViews/{XML_NS}sheetView/{XML_NS}pane")
+        assert pane.attrib["topLeftCell"] == "A2" and pane.attrib["state"] == "frozen"
+        widths = root.find(XML_NS + "cols")
+        assert len(widths) >= 23 and all(float(col.attrib["width"]) >= 14 for col in widths)
+    for row in overview.find(XML_NS + "sheetData")[1:]:
+        for cell in row:
+            style = xfs[int(cell.attrib["s"])]
+            assert int(style.attrib["fillId"]) < len(fills)
+            fill = fills[int(style.attrib["fillId"])].find(f"{XML_NS}patternFill/{XML_NS}fgColor")
+            if cell.attrib["r"].startswith("D"):
+                assert style.attrib["numFmtId"] == "10"
+                rgb = fill.attrib["rgb"]
+                red, green, blue = (int(rgb[i:i + 2], 16) for i in (2, 4, 6))
+                assert green > red and green > blue
+                assert 0 <= float(_cell_value(cell)) <= 1
+            elif fill is not None:
+                assert fill.attrib["rgb"] in {"FFFFFFFF", "FFF2F2F2"}
+            if cell.attrib["r"].startswith("G"):
+                assert custom_formats[int(style.attrib["numFmtId"])] == '"£"0.00\\ \\p\\e\\r\\ \\g'
+            if cell.attrib["r"].startswith("L"):
+                assert style.attrib["numFmtId"] == "164"
+            if cell.attrib["r"].startswith(("H", "I", "J")):
+                assert style.attrib["numFmtId"] == "165"
+    # Actually load the generated artifact whenever the environment supplies a reader.
+    try:
+        import openpyxl
+    except ImportError:
+        pass  # XML package, ARGB, style indices and numeric-format checks above are mandatory.
+    else:
+        workbook = openpyxl.load_workbook(BytesIO(blob))
+        assert workbook.sheetnames == ["Overview", "Details"]
+        assert workbook["Overview"].max_column == 23
+        assert workbook["Overview"]["G2"].value == 5
+        assert workbook["Overview"]["D12"].value == 1
+        assert workbook["Overview"]["D12"].number_format == "0.00%"
+
+
+def test_workbook_unit_price_basis_is_visible_literal_and_totals_stay_currency():
+    bases = ["per g", "per item", "per g", None, "", "unknown",
+             'per "item";[Red]0\\<&>\t\n\r', 'per \x00;[Red]0']
+    records = [rec(f"Synthetic {i}", unit_price=5 + i / 10, unit_basis=basis,
+                   overview_options=[{"size": f"Option {k}", "price": 10 + k} for k in range(6)])
+               for i, basis in enumerate(bases)]
+    records.append(rec("No supplied basis", unit_price=8,
+                       overview_options=[{"size": "1g", "price": 8}]))
+    before = copy.deepcopy(records)
+    blob = build_workbook(build_factors(records), "2026-10-25")
+    xml = _workbook_xml(blob)  # Parse every XML/style/relationship part.
+    styles = xml["xl/styles.xml"]
+    formats = styles.find(XML_NS + "numFmts")
+    custom_formats = {int(node.attrib["numFmtId"]): node.attrib["formatCode"] for node in formats}
+    assert int(formats.attrib["count"]) == len(formats) == len(custom_formats)
+    assert custom_formats[164] == '"£"0.00'
+    xfs = styles.find(XML_NS + "cellXfs")
+    assert int(xfs.attrib["count"]) == len(xfs)
+    overview = xml["xl/worksheets/sheet1.xml"]
+    assert overview.find(XML_NS + "dimension").attrib["ref"] == f"A1:W{len(records) + 1}"
+    rows = overview.find(XML_NS + "sheetData")
+    assert [_cell_value(cell) for cell in rows[0]] == OVERVIEW_COLUMNS
+    details = xml["xl/worksheets/sheet2.xml"].find(XML_NS + "sheetData")
+    for row, detail_row, record in zip(rows[1:], details[1:], records):
+        assert len(row) == 23
+        price_cell = row[6]
+        assert price_cell.get("t", "n") == "n"
+        assert float(_cell_value(price_cell)) == record["unit_price"]
+        style = xfs[int(price_cell.attrib["s"])]
+        assert style.attrib["fillId"] == "0"
+        code = custom_formats[int(style.attrib["numFmtId"])]
+        assert code.startswith('"£"0.00')
+        suffix = code[len('"£"0.00'):]
+        # Interpret Excel's literal escapes: no basis character may act as
+        # a number placeholder, section separator, colour or other directive.
+        assert re.fullmatch(r"(?:\\[\s\S])*", suffix)
+        visible_basis = "".join(re.findall(r"\\([\s\S])", suffix))
+        basis = record.get("unit_basis")
+        assert visible_basis == (" " + basis.replace("\x00", "") if basis else "")
+        for index, cell in enumerate(row[11:22:2]):
+            assert cell.get("t", "n") == "n"
+            if index < len(record["overview_options"]):
+                assert float(_cell_value(cell)) == record["overview_options"][index]["price"]
+                assert xfs[int(cell.attrib["s"])].attrib["numFmtId"] == "164"
+            else:
+                assert _cell_value(cell) == ""
+                assert xfs[int(cell.attrib["s"])].attrib["numFmtId"] == "0"
+        assert xfs[int(detail_row[16].attrib["s"])].attrib["numFmtId"] == "164"
+    assert rows[1][6].attrib["s"] == rows[3][6].attrib["s"]  # Reuse identical basis styles.
+    assert records == before
+
+
+def test_workbook_raw_record_round_trip_arbitrary_fields_variants_and_dictionary():
+    records = [rec("Synthetic long", product_key="synthetic-v1", unit_basis="per g", unit_price=5,
+                   raw_options=[{"size": f"{i}g", "price": i * 5,
+                                 "variant_id": f"synthetic-option-{i}", "extra": [1, 2]}
+                                for i in range(1, 9)],
+                   additional_source_metadata={"url": "https://example.invalid/source", "confidence": 0.4},
+                   arbitrary_new_field={"text": "=1+1<&>\x00\r\n", "unknown": None},
+                   store_description="Synthetic evidence " * 2500),
+               rec("Synthetic short", category="Vapes", product_key="synthetic-v2")]
+    scored = sort_records(build_factors(records))
+    before = copy.deepcopy(records)
+    blob = build_workbook(scored, "2026-10-25")
+    xml = _workbook_xml(blob)
+    overview_rows = xml["xl/worksheets/sheet1.xml"].find(XML_NS + "sheetData")
+    detail_rows = xml["xl/worksheets/sheet2.xml"].find(XML_NS + "sheetData")
+    headers = [_cell_value(cell) for cell in detail_rows[0]]
+    part_indices = [i for i, name in enumerate(headers) if name.startswith("Raw record JSON part ")]
+    assert len(part_indices) > 1  # long raw JSON is split, never silently truncated
+    assert len(overview_rows) == len(detail_rows) == len(records) + 1
+    for overview_row, detail_row, (record, _, _) in zip(overview_rows[1:], detail_rows[1:], scored):
+        raw = "".join(_cell_value(detail_row[i]) for i in part_indices)
+        assert json.loads(raw) == record
+        assert _cell_value(overview_row[1]) == record["product_name"] == _cell_value(detail_row[2])
+        methodology = json.loads(_cell_value(detail_row[headers.index("Scoring methodology (JSON)")]))
+        assert methodology["weights"] == {"grade": 1, "rating": 1, "price": 1,
+                                          "thc": 1, "si": 1, "popularity": 0.25}
+        assert methodology["gamma"] == 6
+        assert methodology["canon_ref"]["repository"] == "tyecam1/misumi"
+        assert "Field dictionary (JSON)" in headers
+    assert records == before
+    assert not any(node.tag == XML_NS + "f" for root in xml.values() for node in root.iter())
+    try:
+        import openpyxl
+    except ImportError:
+        return  # Raw XML values above still verify the complete JSON round trip.
+    workbook = openpyxl.load_workbook(BytesIO(blob))
+    assert workbook.sheetnames == ["Overview", "Details"]
+    assert workbook["Overview"].max_column == 23
+    assert workbook["Overview"].max_row == workbook["Details"].max_row == len(records) + 1
+    for row_number, (record, _, _) in enumerate(scored, start=2):
+        raw = "".join(workbook["Details"].cell(row_number, i + 1).value or "" for i in part_indices)
+        assert json.loads(raw) == record
+        assert workbook["Overview"].cell(row_number, 2).value == workbook["Details"].cell(row_number, 3).value
+
+
+def test_workbook_empty_input_keeps_schema():
+    xml = _workbook_xml(build_workbook([], "2026-10-25"))
+    assert xml["xl/worksheets/sheet1.xml"].find(XML_NS + "dimension").attrib["ref"] == "A1:W1"
+    assert len(xml["xl/worksheets/sheet2.xml"].find(XML_NS + "sheetData")) == 1

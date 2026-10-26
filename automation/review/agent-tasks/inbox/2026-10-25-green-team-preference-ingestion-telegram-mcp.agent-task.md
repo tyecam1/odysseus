@@ -103,3 +103,15 @@ Odysseus owns execution, MCP integration, tool routing, explicit external-send a
 - Tests: tests/test_product_research.py + tests/test_merchant_contact.py (27 passed).
 - Store popularity: verified orderby=popularity works; full 69-product ordinal captured 2026-10-25 (operator snapshot file).
 - Canon ingested as SourceEvent `misumi_preference_canon` (misumi@main 075b1547, blob 3ac07e49, validation all-pass).
+
+## PR167 correctness repair candidate (2026-10-25)
+
+The task remains unfinished. This supersedes the earlier standalone approval/send capability claim.
+
+- Valid ARGB fills and an actual openpyxl load verify a readable workbook with Overview/Details, exactly 23 Overview columns and aligned product rows. Raw-record JSON chunks retain arbitrary fields, variants and provenance; Details records methodology and a field dictionary.
+- Source-backed flower-reference THC/orientation now enter scoring; absent/invalid values remain missing and non-flower values stay inapplicable. Reference THC is not batch measurement. Tied midranks and singletons are neutral; price peers require the same category and explicit unit basis.
+- Private named-product rarity/confidence values are removed. Injected grade policy requires provenance; tests use synthetic names.
+- Outbound messaging is disabled for every transport. Standalone approval/send always raise `OutboundDisabled`; forged strings, concurrency, retries and new instances cannot dispatch. Draft/review works without transport. Integration with the existing governed approval/tool authority remains required.
+- Verification: 80 focused tests and 5 independent adapted acceptance probes passed; actual openpyxl reader, compileall and `git diff --check` passed. Leased execution `a698d350-3e99-4b12-b380-03375e0d891a` observed `gpt-6.1-sol` at high effort. Preserved WIP `d0718fc` remains intact.
+
+Merge, deployment and private source/store integration remain separate acceptance steps. No live merchant transport, credentials or user snapshots were accessed, and no messages were sent.
