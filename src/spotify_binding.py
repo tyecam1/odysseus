@@ -463,6 +463,10 @@ class SpotifyProvider:
             headers["Content-Type"] = "application/json"
         try:
             remaining = self._remaining()
+            if remaining is not None and remaining <= 0:     # token acquisition (a refresh) may have spent the budget: re-checked before EVERY request, replays and writes included
+                error = ProviderError("offline", "turn deadline")
+                error.no_retry = True
+                raise error
             timeout = HTTP_TIMEOUT_S if remaining is None else max(1.0, min(HTTP_TIMEOUT_S, remaining))
             status, response_headers, raw = self.http(method, url, headers, payload, timeout)
         except ProviderError:

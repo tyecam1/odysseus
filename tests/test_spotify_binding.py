@@ -704,3 +704,31 @@ def test_a_single_request_never_outlives_the_turn_budget():
     provider.begin_turn(4.0)
     provider.devices()
     assert seen and seen[0] <= 4.0
+
+
+def test_a_write_is_refused_when_the_token_refresh_used_up_the_turn_budget():
+    """Sol: the deadline was checked before token acquisition only, so a 2 s refresh at second 29.5 let the write start at 31.5."""
+    clock = [1000.0]
+    http_calls = []
+
+    def http(method, url, headers, body, timeout):
+        http_calls.append((method, url))
+        if url == sb.TOKEN_URL:
+            clock[0] += 5.0                                                     # the refresh itself takes the rest of the budget
+            return 200, {}, json.dumps(token_body(access_token="SYNTH-ACCESS-LATE")).encode()
+        return 204, {}, b""
+
+    store = sb.MemoryTokenStore()
+    store.save(sb.TokenRecord(ACCESS, REFRESH, 1010.0, " ".join(sb.SCOPES), "u"))   # expires within the refresh skew: the next call refreshes
+    manager = sb.TokenManager(CLIENT, store, http, now=lambda: clock[0] + 995)
+    provider = sb.SpotifyProvider(manager, http)
+    real = sb.time.monotonic
+    sb.time.monotonic = lambda: clock[0]
+    try:
+        provider.begin_turn(3.0)
+        with pytest.raises(ProviderError) as exc:
+            provider.next("dev1")
+    finally:
+        sb.time.monotonic = real
+    assert exc.value.code == "offline" and "deadline" in str(exc.value)
+    assert [c for c in http_calls if c[0] == "POST" and "/next" in c[1]] == []   # the playback write never went out
