@@ -835,7 +835,9 @@ def test_a_retried_request_after_a_resolved_ambiguity_does_not_write_twice(tmp_p
     music_reply(runtime, "play Arevil's Gardens by The Land of Rah", "jin", "same-id", allow_writes=True)
     assert len(writes(http)) == 1
     runtime._results.clear()                                                  # even if the runtime's own result cache has forgotten the request
-    http.push(200, ONE_ACTIVE)
-    http.push(200, NOISY)
+    http.push(200, ONE_ACTIVE)                                                # the retry: this time the search returns ONE result, so the plain path would write
+    http.push(200, {"tracks": {"items": [NOISY["tracks"]["items"][0]]}})
+    http.push(204)
+    http.push(200, dict(PLAYING, item=dict(PLAYING["item"], uri="spotify:track:6s7RPRB3sNO4bpaIYntHZ2")))
     out = music_reply(runtime, "play Arevil's Gardens by The Land of Rah", "jin", "same-id", allow_writes=True)
     assert len(writes(http)) == 1, out
