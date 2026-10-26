@@ -658,3 +658,49 @@ def test_writes_and_non_transient_read_errors_are_never_repeated():
         with pytest.raises(ProviderError) as exc:
             provider2.devices()
         assert exc.value.code == code and len(http2.calls) == 1
+
+
+def test_a_token_refresh_failure_is_never_repeated_by_the_read_retry():
+    """Sol: an offline refresh POST was repeated by the GET wrapper; a lost response could then burn a rotated refresh token."""
+    http = FakeHttp()
+    provider, manager, store = connected(http, now=lambda: 4990.0)             # the token is about to expire: the first call refreshes
+    http.push(503, {})                                                          # the refresh POST fails
+    with pytest.raises(ProviderError) as exc:
+        provider.devices()
+    assert exc.value.code == "offline" and len(http.calls) == 1 and http.calls[0]["url"] == sb.TOKEN_URL
+    assert store.load() is not None                                             # and nothing was cleared
+
+
+def test_the_turn_deadline_stops_retries_and_late_writes():
+    http = FakeHttp()
+    provider, _, _ = connected(http)
+    provider.begin_turn(0.0)                                                    # the budget is already spent
+    with pytest.raises(ProviderError) as read:
+        provider.devices()
+    with pytest.raises(ProviderError) as write:
+        provider.pause("dev1")
+    assert read.value.code == "offline" and write.value.code == "offline" and http.calls == []
+    provider.begin_turn(1.0)                                                    # too little left to wait and try again
+    http.push(503, {})
+    with pytest.raises(ProviderError):
+        provider.devices()
+    assert len(http.calls) == 1
+    provider.begin_turn(30)
+    http.push(503, {})
+    http.push(200, {"devices": []})
+    assert provider.devices() == [] and len(http.calls) == 3                    # with budget left the retry still happens
+
+
+def test_a_single_request_never_outlives_the_turn_budget():
+    seen = []
+
+    def http(method, url, headers, body, timeout):
+        seen.append(timeout)
+        return 200, {}, b'{"devices": []}'
+
+    store = sb.MemoryTokenStore()
+    store.save(sb.TokenRecord(ACCESS, REFRESH, 5000.0, " ".join(sb.SCOPES), "u"))
+    provider = sb.SpotifyProvider(sb.TokenManager(CLIENT, store, http, now=lambda: 1000.0), http)
+    provider.begin_turn(4.0)
+    provider.devices()
+    assert seen and seen[0] <= 4.0

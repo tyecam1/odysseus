@@ -113,6 +113,8 @@ class MusicRuntime:
         if command.action not in _READS and not allow_writes:
             return {"status": "refused", "data": {}, "trace": {}, "text": "This connection isn't allowed to change playback."}
         controller = self._build()
+        if self._provider is not None:
+            self._provider.begin_turn()                  # one budget for every Spotify call of this spoken request (retries included)
         if controller is None:
             return {"status": "not_connected", "data": {}, "trace": {},
                     "text": "Spotify isn't connected on this system yet, so I can't play anything. The owner has to authorise it first."}

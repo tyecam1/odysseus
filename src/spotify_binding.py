@@ -44,6 +44,7 @@ REFRESH_SKEW_S = 60
 LOCK_WAIT_S = 30
 READ_RETRIES = 2
 READ_BACKOFF_S = 0.4
+TURN_BUDGET_S = 30            # one spoken request, all its Spotify calls together
 HTTP_TIMEOUT_S = 15
 MAX_RESPONSE_BYTES = 1 << 20
 _SEARCH_TYPES = {"track", "album", "playlist", "artist"}
@@ -417,6 +418,15 @@ class SpotifyProvider:
 
     def __init__(self, tokens: TokenManager, http: Http, *, expected_user_id: str = "", sleep: Callable[[float], None] = time.sleep):
         self.tokens, self.http, self.expected_user_id, self._sleep = tokens, http, expected_user_id, sleep
+        self._turn = threading.local()                      # the deadline of the request running on THIS thread
+
+    def begin_turn(self, budget_s: float = TURN_BUDGET_S) -> None:
+        """Start a turn deadline on this thread: no call, retry or write starts after it, and no single request outlives it."""
+        self._turn.deadline = time.monotonic() + budget_s
+
+    def _remaining(self) -> Optional[float]:
+        deadline = getattr(self._turn, "deadline", None)
+        return None if deadline is None else deadline - time.monotonic()
 
     # ---- plumbing
     def _call(self, method: str, path: str, query: Optional[Dict[str, Any]] = None, body: Optional[Dict[str, Any]] = None) -> Tuple[int, Any]:
@@ -424,24 +434,37 @@ class SpotifyProvider:
         (observed live: intermittent 503 on /search). WRITES are never repeated by this layer."""
         attempt = 0
         while True:
+            remaining = self._remaining()
+            if remaining is not None and remaining <= 0:                # the turn is out of time: nothing more is started (a late write included)
+                raise ProviderError("offline", "turn deadline")
             try:
                 return self._call_once(method, path, query, body)
             except ProviderError as exc:
-                if method != "GET" or exc.code != "offline" or attempt >= READ_RETRIES:
+                if method != "GET" or exc.code != "offline" or attempt >= READ_RETRIES or getattr(exc, "no_retry", False):
                     raise
-                self._sleep(READ_BACKOFF_S * (attempt + 1))
+                delay = READ_BACKOFF_S * (attempt + 1)
+                remaining = self._remaining()
+                if remaining is not None and remaining <= delay + 1:      # not enough budget left to wait and try again
+                    raise
+                self._sleep(delay)
                 attempt += 1
 
     def _call_once(self, method: str, path: str, query: Optional[Dict[str, Any]] = None, body: Optional[Dict[str, Any]] = None,
                    *, _retried: bool = False, _rejected: str = "") -> Tuple[int, Any]:
         url = API_URL + path + ("?" + urllib.parse.urlencode({k: v for k, v in (query or {}).items() if v not in (None, "")}) if query else "")
         payload = json.dumps(body).encode("utf-8") if body is not None else None
-        token = self.tokens.access_token(force_refresh=_retried, rejected=_rejected)
+        try:
+            token = self.tokens.access_token(force_refresh=_retried, rejected=_rejected)
+        except ProviderError as exc:
+            exc.no_retry = True                              # a refresh POST is never repeated by the GET retry loop (a lost response could burn a rotated token)
+            raise
         headers = {"Authorization": "Bearer " + token, "Accept": "application/json"}
         if payload is not None:
             headers["Content-Type"] = "application/json"
         try:
-            status, response_headers, raw = self.http(method, url, headers, payload, HTTP_TIMEOUT_S)
+            remaining = self._remaining()
+            timeout = HTTP_TIMEOUT_S if remaining is None else max(1.0, min(HTTP_TIMEOUT_S, remaining))
+            status, response_headers, raw = self.http(method, url, headers, payload, timeout)
         except ProviderError:
             raise
         except Exception as exc:  # noqa: BLE001 - never leak a transport exception (it could name a header)
@@ -449,7 +472,11 @@ class SpotifyProvider:
         if status == 401 and not _retried:
             if method == "GET":
                 return self._call_once(method, path, query, body, _retried=True, _rejected=token)   # reads: one (coalesced) refresh, one replay
-            self.tokens.access_token(force_refresh=True, rejected=token)        # writes are NEVER replayed: refresh for the next request only
+            try:
+                self.tokens.access_token(force_refresh=True, rejected=token)    # writes are NEVER replayed: refresh for the next request only
+            except ProviderError as exc:
+                exc.no_retry = True
+                raise
             raise ProviderError("auth", "unauthorised")
         data = _json(raw)
         if status in (200, 201, 202, 204):
