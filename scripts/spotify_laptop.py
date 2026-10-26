@@ -206,7 +206,8 @@ def cmd_setup(args, out=print):
     try:
         client = (args.client_id or input("Paste the Client ID here (not the Client Secret): ")).strip()
     except EOFError:                         # no interactive terminal (for example launched by a tool): the dashboard is open, finish by hand
-        out("No terminal to type into. When you have the Client ID, run: python spotify_laptop.py setup --client-id <ID>")
+        out("No terminal to type into. When you have the Client ID, run: python spotify_laptop.py setup%s --client-id <ID>" % (
+            "" if port == DEFAULT_PORT else " --port %d" % port))
         return 3
     if not client.isalnum() or len(client) < 16:
         out("That does not look like a Spotify client id (letters and digits only). Nothing saved.")

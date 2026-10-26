@@ -271,3 +271,18 @@ def test_setup_without_a_terminal_leaves_the_dashboard_open_and_saves_nothing(mo
     assert laptop.cmd_setup(Args, out=lines.append) == 3
     assert any("--client-id" in line for line in lines)
     assert laptop.load_config(str(tmp_path / "config.json")) is None
+
+
+def test_the_recovery_command_keeps_a_non_default_port(monkeypatch, tmp_path):
+    """Sol: with --port 19000 the printed command omitted it, so following it registered a port that does not match the redirect URI."""
+    monkeypatch.setattr(laptop, "CONFIG_PATH", str(tmp_path / "config.json"))
+    monkeypatch.setattr(laptop.webbrowser, "open", lambda url: True)
+    monkeypatch.setattr(laptop.os, "system", lambda cmd: 0)
+    monkeypatch.setattr("builtins.input", lambda prompt="": (_ for _ in ()).throw(EOFError()))
+    lines = []
+
+    class Args:
+        port, client_id = 19000, ""
+
+    assert laptop.cmd_setup(Args, out=lines.append) == 3
+    assert any("--port 19000" in line and "--client-id" in line for line in lines)
