@@ -537,7 +537,7 @@ def _salvage_answer(raw: Optional[str]) -> Optional[str]:
     """
     # a model that "thinks" first (qwen3) emits <think>...</think> before the JSON; _json_object strips it for complete replies, so
     # a cut-off reply must be cleaned the same way or the raw JSON wrapper reaches the user
-    text = re.sub(r"<think>.*?</think>", "", str(raw or ""), flags=re.I | re.S).strip()
+    text = re.sub(r"^(?:\s*<think>.*?</think>)+", "", str(raw or ""), flags=re.I | re.S).strip()   # LEADING blocks only: a tag inside a JSON field is data
     if text.startswith("```"):
         text = text.split("\n", 1)[1] if "\n" in text else ""
     text = text.strip()

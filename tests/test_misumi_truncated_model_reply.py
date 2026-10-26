@@ -141,5 +141,14 @@ def test_a_think_block_before_a_truncated_json_reply_is_not_shown_and_does_not_h
     assert answer.split(".")[0] in {"After thinking", "Loud tags", "Two think blocks and a fence"}
 
 
-def test_a_reply_that_is_only_an_unterminated_think_block_is_not_json_and_keeps_the_old_behaviour():
-    assert _salvage_answer("<think>still reasoning when the output limit hit") is None
+def test_think_tags_inside_json_fields_are_data_not_blocks_and_never_expose_metadata():
+    """Sol review: stripping <think>...</think> ANYWHERE removed text across fields (from the memory reason into the answer) and exposed raw JSON."""
+    raw = '{"memory":{"text":"PRIVATE FACT","reason":"<think>"},"answer":"</think>Visible reply'
+    answer = turn(raw)["answer"]
+    assert "PRIVATE FACT" not in answer and not answer.lstrip().startswith("{") and '"memory"' not in answer
+    assert answer.startswith("</think>Visible reply")             # the answer string, as it was before this change
+
+
+def test_only_leading_think_blocks_are_stripped():
+    assert _salvage_answer('{"answer":"The tag <think>x</think> inside the answer stays. Then a cut').startswith("The tag <think>x</think> inside the answer stays.")
+
