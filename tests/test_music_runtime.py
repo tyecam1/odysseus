@@ -770,3 +770,38 @@ def test_a_pronoun_with_a_device_is_a_resume_never_a_title_search():
     assert parse_music_command("play the music on the laptop") == MusicCommand("resume", device_hint="laptop")
     assert parse_music_command("queue it on the laptop") is None
     assert parse_music_command("play something on the tv") is None
+
+
+# ---------------------------------------------------------------------------------------------------------------------- "<title> by <artist>"
+NOISY = {"tracks": {"items": [
+    {"uri": "spotify:track:6s7RPRB3sNO4bpaIYntHZ2", "name": "Arevil's Gardens (Rip)", "artists": [{"name": "The Land of Rah"}]},
+    {"uri": "spotify:track:4DaMind0000000000000001", "name": "4 Da Mind", "artists": [{"name": "Masta Ace Incorporated"}]},
+    {"uri": "spotify:track:Sundiata00000000000001", "name": "Sundiata", "artists": [{"name": "Fuse ODG"}]}]}}
+
+
+def test_title_by_artist_plays_the_one_result_that_matches_both(tmp_path):
+    http = FakeHttp()
+    runtime = make_runtime(tmp_path, http)
+    http.push(200, ONE_ACTIVE)                  # the controller's device read
+    http.push(200, NOISY)                       # its search: three different tracks, no exact title -> a question
+    http.push(200, NOISY)                       # my title+artist resolution: exactly one matches both
+    http.push(200, ONE_ACTIVE)                  # the controller again, now with the exact URI
+    http.push(204)
+    http.push(200, dict(PLAYING, item=dict(PLAYING["item"], uri="spotify:track:6s7RPRB3sNO4bpaIYntHZ2")))
+    out = music_reply(runtime, "play Arevil's Gardens by The Land of Rah", "jin", "ta1", allow_writes=True)
+    assert out["status"] == "done"
+    put = [c for c in http.calls if c[0] == "PUT" and "/play" in c[1]][0]
+    assert json.loads(put[3]) == {"uris": ["spotify:track:6s7RPRB3sNO4bpaIYntHZ2"]}
+
+
+def test_title_by_artist_with_two_matching_results_still_asks(tmp_path):
+    http = FakeHttp()
+    runtime = make_runtime(tmp_path, http)
+    two = {"tracks": {"items": [
+        {"uri": "spotify:track:aaa111", "name": "Blue", "artists": [{"name": "Joni Mitchell"}]},
+        {"uri": "spotify:track:bbb222", "name": "Blue (Live)", "artists": [{"name": "Joni Mitchell"}]}]}}
+    http.push(200, ONE_ACTIVE)
+    http.push(200, two)                          # the controller's search: two matches -> a question
+    http.push(200, two)                          # my resolution: two distinct matches -> stays a question
+    out = music_reply(runtime, "play Blue by Joni Mitchell", "jin", "ta2", allow_writes=True)
+    assert out["status"] == "clarify" and writes(http) == []
