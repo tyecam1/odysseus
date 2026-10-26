@@ -3,7 +3,8 @@ artifact_type: agent-task
 task_schema: agent-task/v2
 task_id: 2026-10-22-phd-supervision-progress-automation
 title: "Automate approved PhD supervision progress register after each meeting"
-status: open
+status: inbox
+lifecycle_note: "Location stays inbox (queued for its remaining acceptance path); implementation itself is DELIVERED via obsidian-PhD#625 and installed live - see the reconciliation section below. No Odysseus schema constrains status values; the dispatcher keys on directories."
 priority: high
 task_type: implementation
 created_by: chatgpt
