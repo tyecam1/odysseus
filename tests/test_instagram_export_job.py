@@ -1008,7 +1008,7 @@ def test_scheduler_honours_persisted_next_scheduled_at_after_restart(monkeypatch
 
 
 def test_acquisition_lock_and_state_survive_windows_without_os_fchmod(monkeypatch, tmp_path):
-    """Windows has no os.fchmod; the lock path must not raise AttributeError."""
+    """Missing-fchmod regression only; native proof lives in test_instagram_native_storage."""
     import os
 
     import src.instagram_export_job as export_job
@@ -1022,6 +1022,6 @@ def test_acquisition_lock_and_state_survive_windows_without_os_fchmod(monkeypatc
     lock_path = state_path.parent / ".acquisition-state.json.lock"
     assert lock_path.exists()
     assert state_path.exists()
-    if hasattr(os, "fchmod"):
+    if os.name != "nt":
         # On POSIX the created files are still owner-only.
         assert stat.S_IMODE(state_path.stat().st_mode) == 0o600

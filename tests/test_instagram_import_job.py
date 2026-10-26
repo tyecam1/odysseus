@@ -366,7 +366,7 @@ def test_an_older_snapshot_resurfacing_with_an_equal_saved_time_does_not_regress
 
 
 def test_append_import_run_survives_windows_without_os_fchmod(monkeypatch, tmp_path):
-    """Windows has no os.fchmod; append_import_run must not raise AttributeError."""
+    """Missing-fchmod regression only; native proof lives in test_instagram_native_storage."""
     import os
 
     monkeypatch.delattr(os, "fchmod", raising=False)
@@ -375,6 +375,6 @@ def test_append_import_run_survives_windows_without_os_fchmod(monkeypatch, tmp_p
     line = append_import_run(_record("2026-10-25T00:00:00Z", created=1), run_log)
 
     assert run_log.read_text(encoding="utf-8").splitlines() == [line]
-    if hasattr(os, "fchmod"):
+    if os.name != "nt":
         # On POSIX the created file is still owner-only.
         assert stat.S_IMODE(run_log.stat().st_mode) == 0o600
