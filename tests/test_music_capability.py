@@ -430,3 +430,13 @@ def test_hung_providers_stop_consuming_capacity_but_their_ids_stay_burnt(monkeyp
     stuck = controller.handle("pause", request_id="hang0", explicit_command=True)
     assert stuck.status == "refused" and "still running" in stuck.message   # and a retry of a hung id never writes again
     gate.set(); [t.join(5) for t in threads]
+
+
+def test_a_device_can_be_named_by_exact_id_and_a_vanished_id_is_a_clarification_not_a_neighbour():
+    controller, provider = _ctl(devices=[Device("d1", "Laptop", True, 40), Device("d2", "Laptop TV", False, 10)])
+    ok = _do(controller, "pause", "id1", device="id:d1")
+    assert ok.ok and "Laptop." in ok.message and "d1" in str(provider.calls)
+    provider._devices = [Device("d2", "Laptop TV", False, 10)]               # d1 disappears between reads
+    gone = _do(controller, "pause", "id2", device="id:d1")
+    assert gone.status == "clarify" and "no longer available" in gone.message
+    assert not any(name == "pause" and "d2" in args for name, args in provider.calls)       # never the 'Laptop TV' prefix neighbour

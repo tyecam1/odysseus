@@ -131,19 +131,23 @@ class MusicRuntime:
         return data if isinstance(data, dict) else {}
 
     def _resolve_device_hint(self, hint: str):
-        """The Spotify device named by a spoken hint ("laptop", "the tv"): a configured alias, else a unique case-insensitive name match."""
+        """The Spotify device a spoken hint names: a configured alias, or an EXACT (case-insensitive) device name. Never a substring:
+        "play Sex on Fire" must not be able to select a device called FireTVStick."""
         devices = self._provider.devices() if self._provider else []
         wanted = hint.strip().lower()
-        aliases = {str(k).strip().lower(): str(v) for k, v in (self._device_config().get("aliases") or {}).items()} if isinstance(self._device_config().get("aliases"), dict) else {}
-        by_name = {d.name.lower(): d for d in devices}
-        name = aliases.get(wanted)
-        if name and name.lower() in by_name:
-            return by_name[name.lower()]
-        exact = [d for d in devices if d.name.lower() == wanted]
-        if len(exact) == 1:
-            return exact[0]
-        partial = [d for d in devices if len(wanted) >= 3 and wanted in d.name.lower()]      # a short hint ('me') must never match inside a name
-        return partial[0] if len(partial) == 1 else None
+        raw = self._device_config().get("aliases")
+        aliases = {str(k).strip().lower(): v.strip().lower() for k, v in raw.items() if isinstance(v, str) and v.strip()} if isinstance(raw, dict) else {}
+        target = aliases.get(wanted, wanted)
+        matches = [d for d in devices if d.name.lower() == target]
+        return matches[0] if len(matches) == 1 else None
+
+    def _exact_title_exists(self, text: str, kind: str) -> bool:
+        """Does Spotify have a track/album/... whose title is exactly this ("Stand on Me", "Riders on the Storm")? Used before a trailing "on ..." is trusted as a title."""
+        title = re.split(r"\s+by\s+", text, maxsplit=1, flags=re.I)[0].strip().casefold()
+        try:
+            return any(item.title.strip().casefold() == title for item in (self._provider.search(text, kind) if self._provider else []))
+        except Exception:  # noqa: BLE001
+            return False
 
     def _idle_default_device(self):
         """The configured default device, but only when nothing is active (an active device is never overridden) and the default is present."""
@@ -165,7 +169,7 @@ class MusicRuntime:
         key = request_id if re.fullmatch(r"[A-Za-z0-9._:-]{1,56}", request_id or "") else hashlib.sha256((request_id or "").encode("utf-8")).hexdigest()[:56]
         rid = "music-" + key                                         # never truncated: two distinct keys can never share a controller id
         is_write = command.action not in _READS
-        fingerprint = (command.action, command.query, command.kind, command.volume, command.volume_delta, command.device_hint)
+        fingerprint = (command.action, command.query, command.kind, command.volume, command.volume_delta, command.device_hint, command.query_with_hint, command.fallback_query)
         if is_write:
             with self._lock:
                 seen = self._results.get(rid)
@@ -181,18 +185,18 @@ class MusicRuntime:
 
     def _execute(self, controller: MusicController, command: MusicCommand, rid: str) -> Dict[str, Any]:
         action, kwargs = command.action, {}
-        device_name = ""
+        device_ref = ""                                               # "id:<spotify id>" once WE chose the device: exact, immune to name prefixes
         if command.device_hint:
             found = self._resolve_device_hint(command.device_hint)
             if found is not None:
-                device_name = found.name
-            elif action in ("play", "queue") and command.query_with_hint:
-                command = MusicCommand(action, query=command.query_with_hint, kind=command.kind, fallback_query=command.fallback_query)   # a title that ends "on ..."
-            else:
+                device_ref = "id:" + found.id
+            elif action in ("play", "queue") and command.query_with_hint and self._exact_title_exists(command.query_with_hint, command.kind):
+                command = MusicCommand(action, query=command.query_with_hint, kind=command.kind, fallback_query=command.fallback_query)   # a real title ending "on ..."
+            else:                                                     # an unresolved explicit target is never guessed at or played to the active device
                 return {"status": "clarify", "data": {}, "trace": {}, "text": "I don't know a device called %s." % command.device_hint}
-        elif action in ("play", "queue", "resume"):
+        if not device_ref and action in ("play", "queue", "resume"):
             idle = self._idle_default_device()
-            device_name = idle.name if idle is not None else ""
+            device_ref = "id:" + idle.id if idle is not None else ""
         if action in ("play", "queue"):
             query = command.query
             if command.fallback_query and self._provider is not None:       # "play Blue please": the literal wins if it exists, else drop the "please"
@@ -210,11 +214,11 @@ class MusicRuntime:
                     return {"status": "clarify", "data": {}, "trace": {},
                             "text": "I can't tell how loud it is right now. Say a number, like volume 30."}
                 volume = max(0, min(100, target.volume + command.volume_delta))
-                kwargs = {"volume": volume, "device": target.name}
+                kwargs = {"volume": volume, "device": "id:" + target.id}
             else:
                 kwargs = {"volume": volume}
-        if device_name and "device" not in kwargs:
-            kwargs["device"] = device_name
+        if device_ref and "device" not in kwargs:
+            kwargs["device"] = device_ref
         result: MusicResult = controller.handle(action, request_id=rid, explicit_command=True, guest=False, **kwargs)
         return {"status": result.status, "data": result.data, "trace": result.trace, "text": _speak(result)}
 
