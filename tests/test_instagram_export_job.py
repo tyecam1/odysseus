@@ -1008,7 +1008,7 @@ def test_scheduler_honours_persisted_next_scheduled_at_after_restart(monkeypatch
 
 
 def test_acquisition_lock_and_state_survive_windows_without_os_fchmod(monkeypatch, tmp_path):
-    """Windows has no os.fchmod; the lock path must not raise AttributeError."""
+    """Missing-fchmod regression only; native proof lives in test_instagram_native_storage."""
     import os
 
     import src.instagram_export_job as export_job
@@ -1022,30 +1022,36 @@ def test_acquisition_lock_and_state_survive_windows_without_os_fchmod(monkeypatc
     lock_path = state_path.parent / ".acquisition-state.json.lock"
     assert lock_path.exists()
     assert state_path.exists()
-    if hasattr(os, "fchmod"):
+    if os.name != "nt":
         # On POSIX the created files are still owner-only.
         assert stat.S_IMODE(state_path.stat().st_mode) == 0o600
 
 
-def test_acquisition_lock_falls_back_to_msvcrt_without_fcntl(monkeypatch, tmp_path):
-    """Without fcntl (e.g. Windows), the lock uses the msvcrt path."""
-    import sys
+def test_acquisition_lock_uses_msvcrt_on_windows(monkeypatch, tmp_path):
+    """On Windows (os.name == "nt") the shared state lock uses msvcrt with bounded non-blocking retries; the acquisition lock is built on it."""
+    import os
+    import types
 
     import src.instagram_export_job as export_job
+    import src.misumi_state_io as state_io
 
     lock_calls = []
-
     fake_msvcrt = types.SimpleNamespace(
         LK_NBLCK=2,
         LK_UNLCK=0,
         locking=lambda fd, mode, nbytes: lock_calls.append(mode),
     )
-    # A None entry in sys.modules makes `import fcntl` raise ImportError.
-    monkeypatch.setitem(sys.modules, "fcntl", None)
-    monkeypatch.setitem(sys.modules, "msvcrt", fake_msvcrt)
-
-    state_path = tmp_path / "governed" / "instagram" / "acquisition-state.json"
-    with export_job._acquisition_lock(state_path):
-        assert lock_calls == [fake_msvcrt.LK_NBLCK]
-
+    monkeypatch.setattr(state_io, "msvcrt", fake_msvcrt, raising=False)
+    path = tmp_path / "lockfile"
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        monkeypatch.setattr(state_io.os, "name", "nt")      # only these two calls look at it; restored by monkeypatch
+        state_io._os_lock(fd, 1.0)
+        state_io._os_unlock(fd, close=False)
+    finally:
+        monkeypatch.undo()
+        os.close(fd)
     assert lock_calls == [fake_msvcrt.LK_NBLCK, fake_msvcrt.LK_UNLCK]
+    # and the acquisition lock really routes through the shared helpers
+    assert export_job._os_lock is state_io._os_lock and export_job._os_unlock is state_io._os_unlock
+

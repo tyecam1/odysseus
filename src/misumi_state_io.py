@@ -110,7 +110,8 @@ def _os_lock(fd: int, timeout: float) -> None:
             time.sleep(0.005)
 
 
-def _os_unlock(fd: int) -> None:
+def _os_unlock(fd: int, *, close: bool = True) -> None:
+    """Release the OS lock; external fd context managers may own the close."""
     try:
         if os.name == "nt":
             os.lseek(fd, 0, os.SEEK_SET)
@@ -118,7 +119,8 @@ def _os_unlock(fd: int) -> None:
         else:
             fcntl.flock(fd, fcntl.LOCK_UN)
     finally:
-        os.close(fd)
+        if close:
+            os.close(fd)
 
 
 class StateDir:
