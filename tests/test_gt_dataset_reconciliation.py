@@ -12,8 +12,11 @@ def row(name):
 
 
 def prod(pid, name, options=()):
-    return {"id": pid, "name": name, "type": "variable",
-            "in_stock": True, "options": [{"id": i} for i in options]}
+    # modern capture shape: the store returns an affirmative purchasability
+    # flag; legacy snapshots without it are covered by dedicated tests
+    return {"id": pid, "name": name, "type": "variable", "in_stock": True,
+            "is_purchasable": True,
+            "options": [{"id": i} for i in options]}
 
 
 def capture(ids):
@@ -179,3 +182,38 @@ def test_not_purchasable_flag_excludes_from_purchasable_ids():
     assert result["purchase_status"]["not_purchasable_store_ids"] == [101]
     # stock status stays separate from purchasability
     assert 101 not in result["purchase_status"]["out_of_stock_store_ids"]
+    assert 101 not in result["purchase_status"]["purchase_eligibility_unknown_store_ids"]
+
+
+def test_purchase_eligibility_flags_classified_separately():
+    # Affirmative true = verified purchasable; explicit false = verified
+    # not purchasable; absent field = unknown eligibility (strict mode).
+    research = [row("P0"), row("P1"), row("P2"), row("P3")]
+    store = [dict(prod(100, "P0"), is_purchasable=True),
+             dict(prod(101, "P1"), is_purchasable=False),
+             {k: v for k, v in prod(102, "P2").items()
+              if k != "is_purchasable"},  # field absent entirely
+             dict(prod(103, "P3"), in_stock=False)]
+    cap = capture([100, 101, 102, 103])
+    result = reconcile(research, store, cap)
+    ps = result["purchase_status"]
+    assert ps["purchasable_store_ids"] == [100]
+    assert ps["not_purchasable_store_ids"] == [101]
+    assert ps["purchase_eligibility_unknown_store_ids"] == [102]
+    assert ps["out_of_stock_store_ids"] == [103]
+
+
+def test_legacy_purchase_classification_preserves_historical_ids():
+    # A dated snapshot captured before the store exposed is_purchasable
+    # keeps its historical in-stock classification; verified purchases
+    # still exclude explicit false.
+    research = [row("P0"), row("P1"), row("P2")]
+    store = [prod(100, "P0"),
+             dict(prod(101, "P1"), is_purchasable=False),
+             prod(102, "P2")]
+    cap = capture([100, 101, 102])
+    result = reconcile(research, store, cap, legacy_purchase_classification=True)
+    ps = result["purchase_status"]
+    assert ps["purchasable_store_ids"] == [100, 102]
+    assert ps["not_purchasable_store_ids"] == [101]
+    assert ps["purchase_eligibility_unknown_store_ids"] == []

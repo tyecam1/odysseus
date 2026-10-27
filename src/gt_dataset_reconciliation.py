@@ -128,7 +128,8 @@ def find_duplicates(records: Iterable[Mapping[str, Any]], key: str = "name"
 def reconcile(research_rows: Sequence[Mapping[str, Any]],
               store_products: Sequence[Mapping[str, Any]],
               popularity_capture: Mapping[str, Any],
-              prior_store_products: Optional[Sequence[Mapping[str, Any]]] = None
+              prior_store_products: Optional[Sequence[Mapping[str, Any]]] = None,
+              legacy_purchase_classification: bool = False,
               ) -> Dict[str, Any]:
     """Full deterministic reconciliation record."""
     match = match_research_to_store(research_rows, store_products)
@@ -149,18 +150,38 @@ def reconcile(research_rows: Sequence[Mapping[str, Any]],
     # purchasable additionally requires the seller's purchasability flag
     # where the capture records it (dated snapshots may omit the field);
     # in_stock alone is stock presence, not verified purchasability.
-    in_stock_ids = {p["id"] for p in store_products if p.get("in_stock")}
+    raw_in_stock_ids = {p["id"] for p in store_products
+                        if p.get("in_stock")}
+    in_stock_ids = set(raw_in_stock_ids)
     # in-stock but explicitly not purchasable: a distinct classification,
     # never conflated with stock status
     not_purchasable_ids = {p["id"] for p in store_products
                            if p.get("in_stock")
                            and p.get("is_purchasable") is False}
+    # Purchase eligibility is a separate axis from stock status. Only an
+    # affirmative is_purchasable=True supports verified-purchasable;
+    # False is verified-not-purchasable; an absent field is unknown
+    # eligibility (unless the caller declares the snapshot legacy, i.e.
+    # captured before the store exposed the flag, preserving that
+    # snapshot's historical classification).
+    eligibility_unknown_ids = {p["id"] for p in store_products
+                               if p.get("in_stock")
+                               and "is_purchasable" not in p}
     in_stock_ids -= not_purchasable_ids
+    if legacy_purchase_classification:
+        # historical classification: unknown-eligibility rows stay in the
+        # in-stock classification and the unknown bucket stays empty
+        eligibility_unknown_ids = set()
+        in_stock_ids -= not_purchasable_ids
+    else:
+        in_stock_ids -= eligibility_unknown_ids
     purchase = {
         "purchasable_store_ids": sorted(in_stock_ids & pop_ids),
         "out_of_stock_store_ids": sorted(
-            (store_ids - in_stock_ids) - not_purchasable_ids),
+            (store_ids - raw_in_stock_ids) - not_purchasable_ids),
         "not_purchasable_store_ids": sorted(not_purchasable_ids),
+        "purchase_eligibility_unknown_store_ids": sorted(
+            eligibility_unknown_ids),
         "purchasable_unverified_against_popularity":
             sorted(in_stock_ids - pop_ids),
     }

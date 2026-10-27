@@ -31,6 +31,7 @@ W_PRICE = 1.0
 W_THC = 1.0
 W_SI = 1.0
 W_POPULARITY = 0.25
+RATING_FACTOR_CONFIDENCE = 0.8  # canon rating-factor confidence at full identity confidence
 GAMMA = 6.0
 SHRINK_PRIOR = 5.0
 FACTOR_BAND = (0.5, 1.5)
@@ -182,7 +183,13 @@ def combined_rating(leafly: Tuple[Optional[float], Optional[int]],
     if l_val is not None and not l_count:
         # rated but count unknown: low weight, scaled by identity confidence
         w_l = 0.5 * leafly_identity_confidence / (1 + SHRINK_PRIOR)
+    # weight-weighted identity confidence of the sources actually blended;
+    # a single present source carries its own confidence unchanged
     total = w_l + w_s
+    if total > 0:
+        detail["combined_identity_confidence"] = (
+            (w_l * leafly_identity_confidence
+             + w_s * seller_identity_confidence) / total)
     if total <= 0:
         # a rating exists but has no defensible weight: treat as present, weak
         val = l_val if l_val is not None else s_val
@@ -431,7 +438,16 @@ def build_factors(records: List[Dict[str, Any]], *,
                 f.grade = (_midrank_factor(gvals, gvals.index(my_g), conf), conf)
             if rvals and rec.get("combined_rating") is not None:
                 idx = [v for _, v in rvals].index(rec["combined_rating"])
-                f.rating = _midrank_factor([v for _, v in rvals], idx, 0.8)
+                # canon 3 confidence-shrink, as for grades: the rating
+                # factor's deviation is scaled by the identity confidence
+                # of the sources behind the combined rating, so a likely
+                # wrong-cultivar rating relaxes toward neutral while the
+                # raw star value and provenance stay in Details
+                rating_conf = RATING_FACTOR_CONFIDENCE * rec.get(
+                    "combined_rating_detail",
+                    {}).get("combined_identity_confidence", 1.0)
+                f.rating = _midrank_factor([v for _, v in rvals], idx,
+                                           rating_conf)
             price, basis = rec.get("unit_price"), rec.get("unit_basis")
             pvals = prices_by_basis.get(basis, []) if isinstance(basis, str) else []
             if pvals and _finite_number(price) and price > 0:

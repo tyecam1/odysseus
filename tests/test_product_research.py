@@ -667,3 +667,55 @@ def test_attach_combined_inputs_passes_identity_confidence():
                                  leafly_identity_confidence=0.3)
     assert records[0]["combined_rating"] == pytest.approx(blended)
     assert records[0]["combined_rating"] < 3.0  # attenuated toward seller
+
+
+def test_rating_factor_confidence_shrinks_with_identity_confidence():
+    # Canon 3 confidence-shrink: an identity-uncertain combined rating
+    # relaxes toward the neutral factor while the raw star value and its
+    # provenance stay untouched in the record.
+    from src.product_research import attach_combined_inputs
+    anchor = rec("Anchor", leafly_rating=2.0, leafly_rating_count=5,
+                 unit_price=10.0, unit_basis="per g")
+    exact_rec = rec("Exact", leafly_rating=5.0, leafly_rating_count=2000,
+                    unit_price=10.0, unit_basis="per g")
+    analogue_rec = rec("Analogue", leafly_rating=5.0, leafly_rating_count=2000,
+                       unit_price=10.0, unit_basis="per g",
+                       leafly_identity_confidence=0.3)
+    records = [anchor, exact_rec, analogue_rec]
+    attach_combined_inputs(records)
+    assert records[1]["combined_rating"] == records[2]["combined_rating"]
+    scored = sort_records(build_factors(records))
+    factors = {r["product_name"]: f for r, f, _ in scored}
+    f_exact = factors["Exact"].rating
+    f_analogue = factors["Analogue"].rating
+    assert f_exact != 1.0 and f_analogue != 1.0
+    # same star value, lower identity confidence -> deviation shrinks
+    assert abs(f_exact - 1.0) > abs(f_analogue - 1.0)
+    # zero identity confidence collapses the factor to exactly neutral
+    z = rec("Zero", leafly_rating=5.0, leafly_rating_count=2000,
+            unit_price=10.0, unit_basis="per g",
+            leafly_identity_confidence=0.0)
+    attach_combined_inputs([z])
+    f_z = build_factors([z])[0][1].rating
+    assert f_z == pytest.approx(1.0)
+    # conflicting seller rating: the blend's combined confidence sits
+    # between the two source confidences, so the deviation shrinks
+    both = rec("Both", leafly_rating=5.0, leafly_rating_count=2000,
+               seller_rating=1.0, seller_rating_count=50,
+               leafly_identity_confidence=0.3)
+    attach_combined_inputs([both])
+    f_both = build_factors([both])[0][1].rating
+    d_both = both["combined_rating_detail"]
+    assert 0.3 < d_both["combined_identity_confidence"] < 1.0
+    assert abs(f_both - 1.0) < abs(f_exact - 1.0)
+
+
+def test_combined_identity_confidence_is_weight_weighted():
+    _, d = combined_rating((5.0, 20), (1.0, 20),
+                           leafly_identity_confidence=0.3)
+    assert d["combined_identity_confidence"] == pytest.approx(
+        (d["weights"]["leafly"] * 0.3 + d["weights"]["seller"] * 1.0)
+        / (d["weights"]["leafly"] + d["weights"]["seller"]))
+    _, d2 = combined_rating((5.0, 20), (None, None),
+                            leafly_identity_confidence=0.3)
+    assert d2["combined_identity_confidence"] == pytest.approx(0.3)
