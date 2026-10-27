@@ -207,13 +207,20 @@ def test_legacy_purchase_classification_preserves_historical_ids():
     # A dated snapshot captured before the store exposed is_purchasable
     # keeps its historical in-stock classification; verified purchases
     # still exclude explicit false.
-    research = [row("P0"), row("P1"), row("P2")]
+    research = [row("P0"), row("P1"), row("P2"), row("P3")]
     store = [prod(100, "P0"),
              dict(prod(101, "P1"), is_purchasable=False),
-             prod(102, "P2")]
-    cap = capture([100, 101, 102])
+             {k: v for k, v in prod(102, "P2").items()
+              if k != "is_purchasable"},  # genuinely dated: flag absent
+             dict(prod(103, "P3"), is_purchasable=None)]
+    cap = capture([100, 101, 102, 103])
     result = reconcile(research, store, cap, legacy_purchase_classification=True)
     ps = result["purchase_status"]
     assert ps["purchasable_store_ids"] == [100, 102]
     assert ps["not_purchasable_store_ids"] == [101]
-    assert ps["purchase_eligibility_unknown_store_ids"] == []
+    assert ps["purchase_eligibility_unknown_store_ids"] == [103]
+    # strict mode classifies the same absent/null-flag rows as unknown
+    strict = reconcile(research, store, cap)
+    assert strict["purchase_status"]["purchasable_store_ids"] == [100]
+    assert sorted(strict["purchase_status"][
+        "purchase_eligibility_unknown_store_ids"]) == [102, 103]

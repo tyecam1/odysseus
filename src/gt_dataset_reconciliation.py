@@ -166,13 +166,17 @@ def reconcile(research_rows: Sequence[Mapping[str, Any]],
     # snapshot's historical classification).
     eligibility_unknown_ids = {p["id"] for p in store_products
                                if p.get("in_stock")
-                               and "is_purchasable" not in p}
+                               and p.get("is_purchasable") not in (True, False)}
     in_stock_ids -= not_purchasable_ids
     if legacy_purchase_classification:
-        # historical classification: unknown-eligibility rows stay in the
-        # in-stock classification and the unknown bucket stays empty
-        eligibility_unknown_ids = set()
+        # historical classification: rows where the flag was simply absent
+        # keep their in-stock classification; an explicit null in a legacy
+        # capture is still unknown, never verified-purchasable
+        eligibility_unknown_ids = {
+            p["id"] for p in store_products
+            if p.get("is_purchasable", "absent") is None}
         in_stock_ids -= not_purchasable_ids
+        in_stock_ids -= eligibility_unknown_ids
     else:
         in_stock_ids -= eligibility_unknown_ids
     purchase = {

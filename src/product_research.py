@@ -190,6 +190,12 @@ def combined_rating(leafly: Tuple[Optional[float], Optional[int]],
         detail["combined_identity_confidence"] = (
             (w_l * leafly_identity_confidence
              + w_s * seller_identity_confidence) / total)
+    else:
+        # no defensible weight: the retained value's own confidence still
+        # governs how strongly its factor may deviate
+        detail["combined_identity_confidence"] = (
+            leafly_identity_confidence if l_val is not None
+            else seller_identity_confidence)
     if total <= 0:
         # a rating exists but has no defensible weight: treat as present, weak
         val = l_val if l_val is not None else s_val
@@ -443,9 +449,9 @@ def build_factors(records: List[Dict[str, Any]], *,
                 # of the sources behind the combined rating, so a likely
                 # wrong-cultivar rating relaxes toward neutral while the
                 # raw star value and provenance stay in Details
-                rating_conf = RATING_FACTOR_CONFIDENCE * rec.get(
+                rating_conf = min(1.0, RATING_FACTOR_CONFIDENCE * rec.get(
                     "combined_rating_detail",
-                    {}).get("combined_identity_confidence", 1.0)
+                    {}).get("combined_identity_confidence", 1.0))
                 f.rating = _midrank_factor([v for _, v in rvals], idx,
                                            rating_conf)
             price, basis = rec.get("unit_price"), rec.get("unit_basis")
