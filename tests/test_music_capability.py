@@ -163,7 +163,7 @@ def test_a_safe_volume_is_applied():
 # --- provider failures are truthful ------------------------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("code,needle", [("auth", "reconnected"), ("forbidden", "not allowed"), ("rate_limited", "slow down"),
+@pytest.mark.parametrize("code,needle", [("auth", "reconnected"), ("forbidden", "Spotify refused"), ("rate_limited", "slow down"),
                                          ("offline", "can't reach")])
 def test_provider_failures_become_typed_results_with_an_honest_suggestion(code, needle):
     controller, provider = _ctl()

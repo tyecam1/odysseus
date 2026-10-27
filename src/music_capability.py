@@ -399,7 +399,7 @@ class MusicController:
     def _failure(self, action: str, exc: ProviderError, request_id: str) -> MusicResult:
         text, suggestion = {
             "auth": ("The music account needs to be reconnected.", "Ask the owner to reconnect the music account."),
-            "forbidden": ("This account is not allowed to do that.", "Check that the account has an eligible plan and scopes."),
+            "forbidden": ("Spotify refused that.", "That device may not allow it (a phone often refuses volume changes or a pause when already paused), or the account lacks an eligible plan."),
             "rate_limited": ("The music service asked me to slow down.", "Try again shortly."),
             "offline": ("I can't reach the music service.", "Try again when the connection is back."),
             "no_device": ("No playback device is available.", "Open the music app on a speaker and try again."),
