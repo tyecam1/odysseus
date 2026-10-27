@@ -331,6 +331,16 @@ def _quarantine_file(source_path: Path, quarantine_dir: Path, *, requested_at: f
     )
 
 
+def _run_headed() -> bool:
+    """Run the acquisition browser headed (default: headless).
+
+    Set ODYSSEUS_META_EXPORT_HEADED=1 on a host with a physical display when
+    Meta challenges headless fingerprints. The display is operator-provided;
+    nothing is exposed on the network by this switch.
+    """
+    return os.environ.get("ODYSSEUS_META_EXPORT_HEADED", "").strip().lower() in {"1", "true", "yes"}
+
+
 def request_and_download_instagram_export(
     quarantine_dir: str,
     *,
@@ -370,7 +380,7 @@ def request_and_download_instagram_export(
     with sync_playwright() as pw:
         context = pw.chromium.launch_persistent_context(
             str(resolved_profile_dir),
-            headless=True,
+            headless=not _run_headed(),
         )
         try:
             page = context.pages[0] if context.pages else context.new_page()
