@@ -732,10 +732,22 @@ def test_rating_factor_confidence_shrinks_with_identity_confidence():
                 combined_rating_detail={"combined_identity_confidence": 2.0})
     full = rec("Full", leafly_rating=5.0, leafly_rating_count=2000,
                unit_price=10.0, unit_basis="per g")
-    attach_combined_inputs([crazy, full])
-    both_c = build_factors([crazy, full])
+    # a lower-rated peer gives the rating midrank something to deviate from
+    peer = rec("Peer", leafly_rating=2.0, leafly_rating_count=5,
+               unit_price=10.0, unit_basis="per g")
+    attach_combined_inputs([crazy, full, peer])
+    both_c = build_factors([crazy, full, peer])
+    capped = rec("Capped", combined_rating=5.0, unit_price=10.0,
+                 unit_basis="per g",
+                 combined_rating_detail={"combined_identity_confidence": 1.0})
+    attach_combined_inputs([capped])
+    both_c = build_factors([crazy, full, peer, capped])
     fmap = {r["product_name"]: f for r, f, _ in both_c}
-    # clamped to 1.0: same confidence as an honest full-confidence record
+    # inflated 2.0 clamps to 1.0: identical to an explicit 1.0 and to the
+    # honest full-confidence record (factor confidence 0.8); the peer
+    # spread keeps factors off neutral so the check binds
+    assert fmap["Crazy"].rating != pytest.approx(1.0)
+    assert fmap["Crazy"].rating == pytest.approx(fmap["Capped"].rating)
     assert fmap["Crazy"].rating == pytest.approx(fmap["Full"].rating)
 
 

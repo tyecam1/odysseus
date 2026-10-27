@@ -155,9 +155,13 @@ def reconcile(research_rows: Sequence[Mapping[str, Any]],
     in_stock_ids = set(raw_in_stock_ids)
     # in-stock but explicitly not purchasable: a distinct classification,
     # never conflated with stock status
+    def _flag(p):
+        v = p.get("is_purchasable")
+        return v if (v is True or v is False) else None  # booleans only
+
     not_purchasable_ids = {p["id"] for p in store_products
                            if p.get("in_stock")
-                           and p.get("is_purchasable") is False}
+                           and _flag(p) is False}
     # Purchase eligibility is a separate axis from stock status. Only an
     # affirmative is_purchasable=True supports verified-purchasable;
     # False is verified-not-purchasable; an absent field is unknown
@@ -166,7 +170,7 @@ def reconcile(research_rows: Sequence[Mapping[str, Any]],
     # snapshot's historical classification).
     eligibility_unknown_ids = {p["id"] for p in store_products
                                if p.get("in_stock")
-                               and p.get("is_purchasable") not in (True, False)}
+                               and _flag(p) is None}
     in_stock_ids -= not_purchasable_ids
     if legacy_purchase_classification:
         # historical classification: rows where the flag was simply absent
@@ -174,7 +178,8 @@ def reconcile(research_rows: Sequence[Mapping[str, Any]],
         # capture is still unknown, never verified-purchasable
         eligibility_unknown_ids = {
             p["id"] for p in store_products
-            if p.get("is_purchasable", "absent") is None}
+            if p.get("in_stock")
+            and p.get("is_purchasable", "absent") is None}
         in_stock_ids -= not_purchasable_ids
         in_stock_ids -= eligibility_unknown_ids
     else:

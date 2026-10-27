@@ -449,9 +449,9 @@ def build_factors(records: List[Dict[str, Any]], *,
                 # of the sources behind the combined rating, so a likely
                 # wrong-cultivar rating relaxes toward neutral while the
                 # raw star value and provenance stay in Details
-                rating_conf = min(1.0, RATING_FACTOR_CONFIDENCE * rec.get(
-                    "combined_rating_detail",
-                    {}).get("combined_identity_confidence", 1.0))
+                rating_conf = RATING_FACTOR_CONFIDENCE * min(
+                    1.0, rec.get("combined_rating_detail", {}).get(
+                        "combined_identity_confidence", 1.0))
                 f.rating = _midrank_factor([v for _, v in rvals], idx,
                                            rating_conf)
             price, basis = rec.get("unit_price"), rec.get("unit_basis")

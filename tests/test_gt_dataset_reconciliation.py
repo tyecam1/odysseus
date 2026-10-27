@@ -224,3 +224,20 @@ def test_legacy_purchase_classification_preserves_historical_ids():
     assert strict["purchase_status"]["purchasable_store_ids"] == [100]
     assert sorted(strict["purchase_status"][
         "purchase_eligibility_unknown_store_ids"]) == [102, 103]
+
+
+def test_numeric_and_null_flags_are_not_affirmative_booleans():
+    # WooCommerce quirk guard: numeric 1/0 are not booleans; only the
+    # True/False literals count as affirmative/negative signals, and an
+    # out-of-stock null never lands in the unknown bucket.
+    research = [row("P0"), row("P1"), row("P2"), row("P3")]
+    store = [dict(prod(100, "P0"), is_purchasable=1),
+             dict(prod(101, "P1"), is_purchasable=0),
+             dict(prod(102, "P2"), is_purchasable=None),
+             dict(prod(103, "P3"), is_purchasable=None, in_stock=False)]
+    cap = capture([100, 101, 102, 103])
+    ps = reconcile(research, store, cap)["purchase_status"]
+    assert ps["purchasable_store_ids"] == []
+    assert ps["not_purchasable_store_ids"] == []
+    assert sorted(ps["purchase_eligibility_unknown_store_ids"]) == [100, 101, 102]
+    assert ps["out_of_stock_store_ids"] == [103]
