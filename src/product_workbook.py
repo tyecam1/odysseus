@@ -99,6 +99,8 @@ _WEIGHT_COLUMN_NAME = dict(zip(_METRIC_ORDER, WEIGHT_COLUMNS))
 
 FIELD_DICTIONARY = {
     "Composite score (%)": "Relative comparison, not quality certainty; stored on a 0..1 scale; a LIVE formula over the Details inputs and weights",
+    "Combined rating / 5": "Confidence/review-count moderated blend of Leafly and seller ratings (canon 1.10); unrated stays blank, never zero",
+    "Combined popularity index / 100": "Category-referenced combined popularity factor rescaled 0-100 (neutral 50 = index 50); derived from the Details popularity factor when no explicit index is supplied",
     "Leafly THC (%)": "Cultivar reference THC, not a batch measurement; source percentage points",
     "Sativa (%) / Indica (%)": "Stated source orientation in percentage points, not measured effects",
     "Unit price": "Minimum defensible price per stated unit; compare category AND unit basis only",
@@ -217,7 +219,12 @@ def build_workbook(scored_sorted, snapshot_date: str) -> bytes:
             rec["category"], rec["product_name"],
             rec.get("store_description") or rec.get("product_name", ""),
             None,  # live score formula below
-            rec.get("combined_rating"), rec.get("combined_popularity_index"),
+            rec.get("combined_rating"),
+            rec.get("combined_popularity_index")
+            if rec.get("combined_popularity_index") is not None
+            else (max(0.0, min(100.0, 50.0 * fv_pop))
+                  if (fv_pop := (factors.popularity if factors else None)) is not None
+                  else None),
             rec.get("unit_price"), rec.get("leafly_thc"), rec.get("sativa_pct"),
             rec.get("indica_pct"),
         ]

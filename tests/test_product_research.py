@@ -545,3 +545,73 @@ def test_workbook_empty_input_keeps_schema():
     assert [c.value for c in wb["Overview"][1][:23]] == OVERVIEW_COLUMNS
     assert wb["Overview"].max_row == 1
     assert wb["Details"].max_row == 1
+
+
+# --- combined rating / popularity Overview population (acceptance audit) -----
+
+def test_attach_combined_inputs_blends_raw_ratings():
+    records = [
+        rec("Rated both", leafly_rating=5.0, leafly_rating_count=2,
+            seller_rating=4.0, seller_rating_count=6),
+        rec("Leafly only", leafly_rating=4.5, leafly_rating_count=10),
+        rec("Unrated zero reviews", seller_rating=0.0, seller_rating_count=0),
+        rec("No rating data"),
+        rec("Pre-computed", combined_rating=3.14,
+            leafly_rating=5.0, leafly_rating_count=99),
+    ]
+    from src.product_research import attach_combined_inputs
+    attach_combined_inputs(records)
+    assert records[0]["combined_rating"] == pytest.approx(
+        combined_rating((5.0, 2), (4.0, 6))[0])
+    assert records[0]["combined_rating_detail"]["weights"]["leafly"] > 0
+    assert records[1]["combined_rating"] == pytest.approx(4.5)
+    assert records[2]["combined_rating"] is None  # unrated is not zero stars
+    assert "combined_rating" not in records[3]
+    assert records[4]["combined_rating"] == pytest.approx(3.14)  # never overwritten
+
+
+def test_overview_popularity_index_populated_from_factor():
+    records = [
+        rec("Ranked A", seller_popularity_rank=1, unit_price=10.0, unit_basis="per g"),
+        rec("Ranked B", seller_popularity_rank=2, unit_price=10.0, unit_basis="per g"),
+    ]
+    scored = sort_records(build_factors(records))
+    wb = _load(build_workbook(scored, "2026-10-25"))
+    ws = wb["Overview"]
+    col = OVERVIEW_COLUMNS.index("Combined popularity index / 100") + 1
+    values = [ws.cell(row, col).value for row in (2, 3)]
+    assert all(v is not None for v in values)  # regression: blank on 5d947fb
+    assert all(0.0 <= v <= 100.0 for v in values)
+    # better seller rank -> higher index; neutral factor would sit at 50
+    assert values[0] > values[1]
+
+
+def test_overview_combined_rating_populated_after_attach():
+    records = [
+        rec("Rated A", leafly_rating=5.0, leafly_rating_count=2,
+            unit_price=10.0, unit_basis="per g"),
+        rec("Rated B", leafly_rating=3.0, leafly_rating_count=8,
+            unit_price=10.0, unit_basis="per g"),
+    ]
+    from src.product_research import attach_combined_inputs
+    attach_combined_inputs(records)
+    scored = sort_records(build_factors(records))
+    wb = _load(build_workbook(scored, "2026-10-25"))
+    ws = wb["Overview"]
+    col = OVERVIEW_COLUMNS.index("Combined rating / 5") + 1
+    values = [ws.cell(row, col).value for row in (2, 3)]
+    assert all(v is not None for v in values)  # regression: blank on 5d947fb
+    assert all(0.0 <= v <= 5.0 for v in values)
+
+
+def test_overview_popularity_index_explicit_value_wins():
+    records = [
+        rec("Explicit", combined_popularity_index=77.0,
+            seller_popularity_rank=1, unit_price=10.0, unit_basis="per g"),
+        rec("Ranked", seller_popularity_rank=2, unit_price=10.0, unit_basis="per g"),
+    ]
+    scored = sort_records(build_factors(records))
+    wb = _load(build_workbook(scored, "2026-10-25"))
+    ws = wb["Overview"]
+    col = OVERVIEW_COLUMNS.index("Combined popularity index / 100") + 1
+    assert ws.cell(2, col).value == 77.0

@@ -347,6 +347,27 @@ def _effective_grade(rec: Dict[str, Any]) -> Tuple[Optional[float], float]:
     return inferred.get("numeric"), inferred.get("confidence", 1.0)
 
 
+def attach_combined_inputs(records: List[Dict[str, Any]]) -> None:
+    """Caller-owned preflight: populate rec["combined_rating"] from raw Leafly
+    and seller rating fields (canon section 1.10) when not already set.
+
+    build_factors itself never mutates records, so the conversion from raw
+    source ratings to its `combined_rating` input lives here, explicitly.
+    Unrated values (average_rating 0 with zero reviews) stay unrated.
+    """
+    for rec in records:
+        if rec.get("combined_rating") is not None:
+            continue
+        if (rec.get("leafly_rating") is None
+                and rec.get("seller_rating") is None):
+            continue
+        blended, detail = combined_rating(
+            (rec.get("leafly_rating"), rec.get("leafly_rating_count")),
+            (rec.get("seller_rating"), rec.get("seller_rating_count")))
+        rec["combined_rating"] = blended
+        rec["combined_rating_detail"] = detail
+
+
 def build_factors(records: List[Dict[str, Any]], *,
                   rarity_policy: Optional[Mapping[str, Dict[str, Any]]] = None
                   ) -> List[Tuple[Dict[str, Any], Factors, Dict[str, Any]]]:
