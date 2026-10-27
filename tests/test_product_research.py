@@ -639,6 +639,22 @@ def test_combined_rating_identity_confidence_attenuates_source_weight():
     solo, _ = combined_rating((4.0, 50), (None, None),
                               leafly_identity_confidence=0.3)
     assert solo == 4.0
+    # seller confidence is applied symmetrically: attenuating the seller
+    # side reduces its pull, moving the blend toward the Leafly value
+    exact_s = combined_rating((4.0, 10), (2.0, 50))[0]
+    s_att, _ = combined_rating((4.0, 10), (2.0, 50),
+                               seller_identity_confidence=0.3)
+    assert s_att > exact_s
+    # zero confidence with an unknown count removes the fallback pull
+    z, d = combined_rating((4.0, None), (2.0, 10),
+                           leafly_identity_confidence=0.0)
+    assert z == 2.0 and d["weights"]["leafly"] == 0.0
+    # confidence is bounded
+    import pytest as _pytest
+    with _pytest.raises(ValueError):
+        combined_rating((4.0, 10), (2.0, 10), leafly_identity_confidence=1.5)
+    with _pytest.raises(ValueError):
+        combined_rating((4.0, 10), (2.0, 10), seller_identity_confidence=-0.1)
 
 
 def test_attach_combined_inputs_passes_identity_confidence():

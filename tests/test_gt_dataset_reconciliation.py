@@ -176,4 +176,6 @@ def test_not_purchasable_flag_excludes_from_purchasable_ids():
     cap = capture([100, 101, 102])
     result = reconcile(research, store, cap)
     assert result["purchase_status"]["purchasable_store_ids"] == [100, 102]
-    assert 101 in result["purchase_status"]["out_of_stock_store_ids"]
+    assert result["purchase_status"]["not_purchasable_store_ids"] == [101]
+    # stock status stays separate from purchasability
+    assert 101 not in result["purchase_status"]["out_of_stock_store_ids"]

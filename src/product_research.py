@@ -149,8 +149,13 @@ def combined_rating(leafly: Tuple[Optional[float], Optional[int]],
     as the retail record (canon: never substitute an unsupported Leafly
     cultivar name as a verified rating). It scales the source's weight before
     count moderation and never changes an unblended single-source value's
-    identity, only its blend weight.
+    identity, only its blend weight. Each confidence must lie in [0, 1].
     """
+    for name, conf in (("leafly", leafly_identity_confidence),
+                       ("seller", seller_identity_confidence)):
+        if not (isinstance(conf, (int, float)) and not isinstance(conf, bool)
+                and 0.0 <= conf <= 1.0):
+            raise ValueError(f"{name}_identity_confidence must be in [0, 1]")
     l_val, l_count = leafly
     s_val, s_count = seller
     # canon 1.10: a store average_rating of 0 with zero reviews is UNRATED
@@ -172,9 +177,11 @@ def combined_rating(leafly: Tuple[Optional[float], Optional[int]],
         w_l = (leafly_identity_confidence * l_count
                / (leafly_identity_confidence * l_count + SHRINK_PRIOR))
     if s_val is not None and s_count:
-        w_s = s_count / (s_count + SHRINK_PRIOR)
+        w_s = (seller_identity_confidence * s_count
+               / (seller_identity_confidence * s_count + SHRINK_PRIOR))
     if l_val is not None and not l_count:
-        w_l = 0.5 * (1 / (1 + SHRINK_PRIOR))  # rated but count unknown: low weight
+        # rated but count unknown: low weight, scaled by identity confidence
+        w_l = 0.5 * leafly_identity_confidence / (1 + SHRINK_PRIOR)
     total = w_l + w_s
     if total <= 0:
         # a rating exists but has no defensible weight: treat as present, weak
