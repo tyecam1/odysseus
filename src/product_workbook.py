@@ -99,7 +99,7 @@ _WEIGHT_COLUMN_NAME = dict(zip(_METRIC_ORDER, WEIGHT_COLUMNS))
 
 FIELD_DICTIONARY = {
     "Composite score (%)": "Relative comparison, not quality certainty; stored on a 0..1 scale; a LIVE formula over the Details inputs and weights",
-    "Combined rating / 5": "Confidence/review-count moderated blend of Leafly and seller ratings (canon 1.10); unrated stays blank, never zero",
+    "Combined rating / 5": "Confidence/review-count moderated blend of Leafly and seller ratings (canon 1.10); taken from rec['combined_rating'] (callers may derive it with attach_combined_inputs); unrated stays blank, never zero",
     "Combined popularity index / 100": "Category-referenced combined popularity factor rescaled 0-100 (neutral 50 = index 50); derived from the Details popularity factor when no explicit index is supplied",
     "Leafly THC (%)": "Cultivar reference THC, not a batch measurement; source percentage points",
     "Sativa (%) / Indica (%)": "Stated source orientation in percentage points, not measured effects",

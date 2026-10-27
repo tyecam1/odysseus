@@ -558,6 +558,8 @@ def test_attach_combined_inputs_blends_raw_ratings():
         rec("No rating data"),
         rec("Pre-computed", combined_rating=3.14,
             leafly_rating=5.0, leafly_rating_count=99),
+        rec("Workbook field name", leafly_rating=5.0, leafly_rating_count=2,
+            seller_rating=4.0, seller_review_count=6),
     ]
     from src.product_research import attach_combined_inputs
     attach_combined_inputs(records)
@@ -568,6 +570,9 @@ def test_attach_combined_inputs_blends_raw_ratings():
     assert records[2]["combined_rating"] is None  # unrated is not zero stars
     assert "combined_rating" not in records[3]
     assert records[4]["combined_rating"] == pytest.approx(3.14)  # never overwritten
+    # seller_review_count (workbook schema name) must carry seller weight too
+    assert records[5]["combined_rating"] == pytest.approx(
+        combined_rating((5.0, 2), (4.0, 6))[0])
 
 
 def test_overview_popularity_index_populated_from_factor():

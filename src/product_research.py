@@ -351,9 +351,14 @@ def attach_combined_inputs(records: List[Dict[str, Any]]) -> None:
     """Caller-owned preflight: populate rec["combined_rating"] from raw Leafly
     and seller rating fields (canon section 1.10) when not already set.
 
-    build_factors itself never mutates records, so the conversion from raw
-    source ratings to its `combined_rating` input lives here, explicitly.
-    Unrated values (average_rating 0 with zero reviews) stay unrated.
+    Callers generating the workbook must invoke this before build_factors;
+    the raw-snapshot join itself stays caller-owned so no dataset-specific
+    logic is bundled here. Unrated values (average_rating 0 with zero
+    reviews) stay unrated. Both `seller_rating_count` and the workbook
+    schema's `seller_review_count` field names are accepted.
+
+    Note build_factors itself only stays non-mutating when no rarity_policy
+    is injected; an injected policy records rec["inferred_grade"] by design.
     """
     for rec in records:
         if rec.get("combined_rating") is not None:
@@ -363,7 +368,9 @@ def attach_combined_inputs(records: List[Dict[str, Any]]) -> None:
             continue
         blended, detail = combined_rating(
             (rec.get("leafly_rating"), rec.get("leafly_rating_count")),
-            (rec.get("seller_rating"), rec.get("seller_rating_count")))
+            (rec.get("seller_rating"),
+             rec.get("seller_rating_count",
+                     rec.get("seller_review_count"))))
         rec["combined_rating"] = blended
         rec["combined_rating_detail"] = detail
 
