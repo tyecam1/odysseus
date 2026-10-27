@@ -12,8 +12,11 @@ def row(name):
 
 
 def prod(pid, name, options=()):
-    return {"id": pid, "name": name, "type": "variable",
-            "in_stock": True, "options": [{"id": i} for i in options]}
+    # modern capture shape: the store returns an affirmative purchasability
+    # flag; legacy snapshots without it are covered by dedicated tests
+    return {"id": pid, "name": name, "type": "variable", "in_stock": True,
+            "is_purchasable": True,
+            "options": [{"id": i} for i in options]}
 
 
 def capture(ids):
@@ -179,3 +182,68 @@ def test_not_purchasable_flag_excludes_from_purchasable_ids():
     assert result["purchase_status"]["not_purchasable_store_ids"] == [101]
     # stock status stays separate from purchasability
     assert 101 not in result["purchase_status"]["out_of_stock_store_ids"]
+    assert 101 not in result["purchase_status"]["purchase_eligibility_unknown_store_ids"]
+
+
+def test_purchase_eligibility_flags_classified_separately():
+    # Affirmative true = verified purchasable; explicit false = verified
+    # not purchasable; absent field = unknown eligibility (strict mode).
+    research = [row("P0"), row("P1"), row("P2"), row("P3")]
+    store = [dict(prod(100, "P0"), is_purchasable=True),
+             dict(prod(101, "P1"), is_purchasable=False),
+             {k: v for k, v in prod(102, "P2").items()
+              if k != "is_purchasable"},  # field absent entirely
+             dict(prod(103, "P3"), in_stock=False)]
+    cap = capture([100, 101, 102, 103])
+    result = reconcile(research, store, cap)
+    ps = result["purchase_status"]
+    assert ps["purchasable_store_ids"] == [100]
+    assert ps["not_purchasable_store_ids"] == [101]
+    assert ps["purchase_eligibility_unknown_store_ids"] == [102]
+    assert ps["out_of_stock_store_ids"] == [103]
+
+
+def test_legacy_purchase_classification_preserves_historical_ids():
+    # A dated snapshot captured before the store exposed is_purchasable
+    # keeps its historical in-stock classification; verified purchases
+    # still exclude explicit false.
+    research = [row("P0"), row("P1"), row("P2"), row("P3")]
+    store = [prod(100, "P0"),
+             dict(prod(101, "P1"), is_purchasable=False),
+             {k: v for k, v in prod(102, "P2").items()
+              if k != "is_purchasable"},  # genuinely dated: flag absent
+             dict(prod(103, "P3"), is_purchasable=None)]
+    cap = capture([100, 101, 102, 103])
+    result = reconcile(research, store, cap, legacy_purchase_classification=True)
+    ps = result["purchase_status"]
+    assert ps["purchasable_store_ids"] == [100, 102]
+    assert ps["not_purchasable_store_ids"] == [101]
+    assert ps["purchase_eligibility_unknown_store_ids"] == [103]
+    # strict mode classifies the same absent/null-flag rows as unknown
+    strict = reconcile(research, store, cap)
+    assert strict["purchase_status"]["purchasable_store_ids"] == [100]
+    assert sorted(strict["purchase_status"][
+        "purchase_eligibility_unknown_store_ids"]) == [102, 103]
+
+
+def test_numeric_and_null_flags_are_not_affirmative_booleans():
+    # WooCommerce quirk guard: numeric 1/0 are not booleans; only the
+    # True/False literals count as affirmative/negative signals, and an
+    # out-of-stock null never lands in the unknown bucket.
+    research = [row("P0"), row("P1"), row("P2"), row("P3")]
+    store = [dict(prod(100, "P0"), is_purchasable=1),
+             dict(prod(101, "P1"), is_purchasable=0),
+             dict(prod(102, "P2"), is_purchasable=None),
+             dict(prod(103, "P3"), is_purchasable=None, in_stock=False)]
+    cap = capture([100, 101, 102, 103])
+    ps = reconcile(research, store, cap)["purchase_status"]
+    assert ps["purchasable_store_ids"] == []
+    assert ps["not_purchasable_store_ids"] == []
+    assert sorted(ps["purchase_eligibility_unknown_store_ids"]) == [100, 101, 102]
+    assert ps["out_of_stock_store_ids"] == [103]
+    # legacy mode: a present non-boolean flag is still never affirmative
+    legacy = reconcile(research, store, cap, legacy_purchase_classification=True)
+    lps = legacy["purchase_status"]
+    assert lps["purchasable_store_ids"] == []
+    assert sorted(lps["purchase_eligibility_unknown_store_ids"]) == [100, 101, 102]
+    assert lps["out_of_stock_store_ids"] == [103]

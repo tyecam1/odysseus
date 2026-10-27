@@ -667,3 +667,97 @@ def test_attach_combined_inputs_passes_identity_confidence():
                                  leafly_identity_confidence=0.3)
     assert records[0]["combined_rating"] == pytest.approx(blended)
     assert records[0]["combined_rating"] < 3.0  # attenuated toward seller
+
+
+def factors_anchor_of(rec_dict, star, count):
+    """Factor for a full-confidence record with the same rating value and
+    peers, used as the clamp upper bound."""
+    anchor = rec("AnchorX", leafly_rating=2.0, leafly_rating_count=5,
+                 unit_price=10.0, unit_basis="per g")
+    peer = rec("PeerX", leafly_rating=star, leafly_rating_count=count,
+               unit_price=10.0, unit_basis="per g")
+    return build_factors([anchor, peer])[1][1].rating
+
+
+def test_rating_factor_confidence_shrinks_with_identity_confidence():
+    # Canon 3 confidence-shrink: an identity-uncertain combined rating
+    # relaxes toward the neutral factor while the raw star value and its
+    # provenance stay untouched in the record.
+    from src.product_research import attach_combined_inputs
+    anchor = rec("Anchor", leafly_rating=2.0, leafly_rating_count=5,
+                 unit_price=10.0, unit_basis="per g")
+    exact_rec = rec("Exact", leafly_rating=5.0, leafly_rating_count=2000,
+                    unit_price=10.0, unit_basis="per g")
+    analogue_rec = rec("Analogue", leafly_rating=5.0, leafly_rating_count=2000,
+                       unit_price=10.0, unit_basis="per g",
+                       leafly_identity_confidence=0.3)
+    records = [anchor, exact_rec, analogue_rec]
+    attach_combined_inputs(records)
+    assert records[1]["combined_rating"] == records[2]["combined_rating"]
+    scored = sort_records(build_factors(records))
+    factors = {r["product_name"]: f for r, f, _ in scored}
+    f_exact = factors["Exact"].rating
+    f_analogue = factors["Analogue"].rating
+    assert f_exact != 1.0 and f_analogue != 1.0
+    # same star value, lower identity confidence -> deviation shrinks
+    assert abs(f_exact - 1.0) > abs(f_analogue - 1.0)
+    # zero identity confidence collapses the factor to exactly neutral
+    z = rec("Zero", leafly_rating=5.0, leafly_rating_count=2000,
+            unit_price=10.0, unit_basis="per g",
+            leafly_identity_confidence=0.0)
+    attach_combined_inputs([z])
+    # multi-peer: the zero-confidence rating sits among deviating peers and
+    # must still collapse to exactly neutral
+    peers = [rec("PeerA", leafly_rating=4.0, leafly_rating_count=50,
+                 unit_price=10.0, unit_basis="per g"),
+             rec("PeerB", leafly_rating=3.0, leafly_rating_count=30,
+                 unit_price=10.0, unit_basis="per g")]
+    fz = sort_records(build_factors([z] + peers))
+    fz_map = {r["product_name"]: f for r, f, _ in fz}
+    assert fz_map["Zero"].rating == pytest.approx(1.0)
+    assert fz_map["PeerA"].rating != pytest.approx(1.0)
+    # conflicting seller rating: the blend's combined confidence sits
+    # between the two source confidences, so the deviation shrinks
+    both = rec("Both", leafly_rating=5.0, leafly_rating_count=2000,
+               seller_rating=1.0, seller_rating_count=50,
+               leafly_identity_confidence=0.3)
+    attach_combined_inputs([both])
+    f_both = build_factors([both])[0][1].rating
+    d_both = both["combined_rating_detail"]
+    assert 0.3 < d_both["combined_identity_confidence"] < 1.0
+    assert abs(f_both - 1.0) < abs(f_exact - 1.0)
+    # a caller-supplied detail cannot push the factor confidence above 1
+    crazy = rec("Crazy", combined_rating=5.0, unit_price=10.0,
+                unit_basis="per g",
+                combined_rating_detail={"combined_identity_confidence": 2.0})
+    full = rec("Full", leafly_rating=5.0, leafly_rating_count=2000,
+               unit_price=10.0, unit_basis="per g")
+    # a lower-rated peer gives the rating midrank something to deviate from
+    peer = rec("Peer", leafly_rating=2.0, leafly_rating_count=5,
+               unit_price=10.0, unit_basis="per g")
+    attach_combined_inputs([crazy, full, peer])
+    both_c = build_factors([crazy, full, peer])
+    capped = rec("Capped", combined_rating=5.0, unit_price=10.0,
+                 unit_basis="per g",
+                 combined_rating_detail={"combined_identity_confidence": 1.0})
+    attach_combined_inputs([capped])
+    both_c = build_factors([crazy, full, peer, capped])
+    fmap = {r["product_name"]: f for r, f, _ in both_c}
+    # inflated 2.0 clamps to 1.0: identical to an explicit 1.0 and to the
+    # honest full-confidence record (factor confidence 0.8); the peer
+    # spread keeps factors off neutral so the check binds
+    assert fmap["Crazy"].rating != pytest.approx(1.0)
+    assert fmap["Crazy"].rating == pytest.approx(fmap["Capped"].rating)
+    assert fmap["Crazy"].rating == pytest.approx(fmap["Full"].rating)
+
+
+
+def test_combined_identity_confidence_is_weight_weighted():
+    _, d = combined_rating((5.0, 20), (1.0, 20),
+                           leafly_identity_confidence=0.3)
+    assert d["combined_identity_confidence"] == pytest.approx(
+        (d["weights"]["leafly"] * 0.3 + d["weights"]["seller"] * 1.0)
+        / (d["weights"]["leafly"] + d["weights"]["seller"]))
+    _, d2 = combined_rating((5.0, 20), (None, None),
+                            leafly_identity_confidence=0.3)
+    assert d2["combined_identity_confidence"] == pytest.approx(0.3)
