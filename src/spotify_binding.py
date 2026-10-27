@@ -533,12 +533,16 @@ class SpotifyProvider:
 
     def now_playing(self) -> Optional[NowPlaying]:
         status, data = self._call("GET", "/me/player", {"additional_types": "track"})   # the full player state: unlike /currently-playing it names the DEVICE
-        if status == 204 or not isinstance(data, dict) or not isinstance(data.get("item"), dict):
-            return None
+        if status == 204 or not isinstance(data, dict):
+            return None                                   # no active player at all
+        device = data.get("device") if isinstance(data.get("device"), dict) else {}
+        if not isinstance(data.get("item"), dict):
+            # an active player with no item (a paused phone, an ad, an unsupported type) still names its device and state: the read-back needs both
+            return NowPlaying(None, bool(data.get("is_playing")), device.get("id")) if device.get("id") else None
         item = data["item"]
         artists = ", ".join(str(a.get("name", "")) for a in item.get("artists") or [] if isinstance(a, dict) and a.get("name"))[:120]
         return NowPlaying(Item(str(item.get("uri", "")), str(item.get("name", ""))[:160], artists, str(item.get("type", "track"))),
-                          bool(data.get("is_playing")), (data.get("device") or {}).get("id") if isinstance(data.get("device"), dict) else None)
+                          bool(data.get("is_playing")), device.get("id"))
 
     # ---- writes (PUT/POST, always with an explicit device)
     def play(self, uri: str, device_id: str) -> None:

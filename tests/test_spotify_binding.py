@@ -336,6 +336,16 @@ def test_now_playing_parses_and_nothing_playing_is_none():
     assert [urllib.parse.urlparse(c["url"]).path for c in http.calls[-2:]] == ["/v1/me/player", "/v1/me/player"]
 
 
+def test_an_active_player_with_no_item_still_names_its_device_and_state():
+    http = FakeHttp()
+    provider, _, _ = connected(http)
+    http.push(200, {"is_playing": False, "device": {"id": "phone1"}, "item": None})
+    now = provider.now_playing()
+    assert now is not None and now.item is None and now.playing is False and now.device_id == "phone1"
+    http.push(200, {"is_playing": False, "item": None})                      # no device either: nothing to confirm against
+    assert provider.now_playing() is None
+
+
 def test_account_verification_and_wrong_account_refusal():
     http = FakeHttp()
     provider, _, _ = connected(http)
