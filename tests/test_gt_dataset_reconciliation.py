@@ -164,3 +164,16 @@ def test_ambiguous_substring_never_matches():
     assert result["research_not_listed"] == [
         {"product_name": "Hash", "classification": "not listed"}]
     assert [a["store_id"] for a in result["store_only_additions"]] == [1, 2]
+
+
+def test_not_purchasable_flag_excludes_from_purchasable_ids():
+    # in_stock=true but is_purchasable=false is NOT purchasable; a dated
+    # snapshot without the field keeps its previous behaviour.
+    research = [row("P0"), row("P1"), row("P2")]
+    store = [prod(100, "P0"),
+             dict(prod(101, "P1"), is_purchasable=False),
+             prod(102, "P2")]
+    cap = capture([100, 101, 102])
+    result = reconcile(research, store, cap)
+    assert result["purchase_status"]["purchasable_store_ids"] == [100, 102]
+    assert 101 in result["purchase_status"]["out_of_stock_store_ids"]
