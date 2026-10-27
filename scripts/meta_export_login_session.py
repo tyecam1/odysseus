@@ -231,7 +231,7 @@ def cmd_start(args: argparse.Namespace) -> int:
         proc = subprocess.Popen(
             [
                 chrome,
-                "--headless=new",
+                *([] if os.environ.get("ODYSSEUS_META_EXPORT_HEADED", "").strip().lower() in {"1", "true", "yes"} else ["--headless=new"]),
                 f"--remote-debugging-port={port}",
                 "--remote-debugging-address=127.0.0.1",
                 f"--user-data-dir={PROFILE_DIR}",
