@@ -31,4 +31,16 @@ Deploy the Misumi box change that sends `origin` FIRST, then the Odysseus releas
 - F10 the 30 s turn budget is not enforced during token-lock wait and refresh.
 
 ## Acceptance
-Done live (2026-10-26): play a precise track by artist on the laptop, pause, resume (read-back confirmed). Owed on the home host: the full matrix (ambiguous title, skip, queue, now playing, TV by name, absent device, bounded volume, repeated request id, expired token and transient failure by simulation, guest and unaddressed rejection, "play" in non-musical talk).
+
+Deployed and verified 2026-10-27: Odysseus home runtime on release `f5b032cdc05e` (#189, #190, #192, plus the unrelated #191 research fix that was on dev), health 200, previous releases retained for rollback; Misumi interface box on `cd4217877e96` (sends `origin`, `/agent` pinned to the configured upstream).
+
+Live matrix on the home runtime (in-process harness under the service account; statuses and ids only), 16 of 19 as expected:
+
+- Passed: device and now-playing reads; "play a game of chess" and a conversation mentioning a song ignored; an unaddressed command and a write with no origin refused with no provider write; an unaddressed read allowed; an unknown device named gives a clarification and no write; an ambiguous title ("Blue") asks which one; pause, resume, skip and queue; a repeated request id made exactly one provider write; volume above the safe limit refused.
+- Not as expected, and why:
+  1. "play ... on the laptop": **unavailable test condition**. The laptop's Spotify app was not open, so the device was not listed; the clarification and absence of a write is the correct behaviour.
+  2. "volume 25" and 3. the final "pause": **device/provider restriction**. Spotify answered 403 for the Pixel 8 (a phone refuses remote volume changes, and a pause when already paused). The message wrongly blamed the account plan; reworded in #192.
+  None was an implementation failure. Writes with no device go to the ACTIVE device, which was the phone; that is by design.
+- Found and fixed by this run: `now_playing` read an endpoint that never names the device, so after #189's exact-device rule every confirmation read as `done_unconfirmed` (#192 reads `/me/player`, and an active player with no item still reports its device).
+
+**Pending (not run): the post-#192 confirmation on a real player.** At the last check (2026-10-27) Spotify listed only an idle Fire TV Stick; no laptop or phone player was available, and no substitute was used. Resumption trigger: the Spotify app is open on the laptop. Then run once: record the target device id and playback state; one addressed command; expect `done` with that device and exactly one provider write; pause and resume once with `done` for each; restore the original state. Until that is recorded, "real, correctly addressed playback with target-device read-back on #192" is NOT evidenced, and the music work item stays open.
