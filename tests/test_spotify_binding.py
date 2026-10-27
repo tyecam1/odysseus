@@ -332,6 +332,8 @@ def test_now_playing_parses_and_nothing_playing_is_none():
     assert (now.item.title, now.item.artist, now.playing, now.device_id) == ("Song", "Artist", True, "dev1")
     http.push(204)
     assert provider.now_playing() is None
+    # /me/player (full state) is the only endpoint that names the device; /currently-playing never does, which made every read-back unconfirmable
+    assert [urllib.parse.urlparse(c["url"]).path for c in http.calls[-2:]] == ["/v1/me/player", "/v1/me/player"]
 
 
 def test_account_verification_and_wrong_account_refusal():

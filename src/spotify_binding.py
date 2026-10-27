@@ -532,7 +532,7 @@ class SpotifyProvider:
                 for d in rows if isinstance(d, dict) and d.get("id")]
 
     def now_playing(self) -> Optional[NowPlaying]:
-        status, data = self._call("GET", "/me/player/currently-playing", {"additional_types": "track"})
+        status, data = self._call("GET", "/me/player", {"additional_types": "track"})   # the full player state: unlike /currently-playing it names the DEVICE
         if status == 204 or not isinstance(data, dict) or not isinstance(data.get("item"), dict):
             return None
         item = data["item"]
