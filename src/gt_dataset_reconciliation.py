@@ -146,10 +146,21 @@ def reconcile(research_rows: Sequence[Mapping[str, Any]],
     pop_verified = not pop_violations
     # purchasable requires stock AND presence in the popularity capture;
     # out-of-stock store products are classified separately.
+    # purchasable additionally requires the seller's purchasability flag
+    # where the capture records it (dated snapshots may omit the field);
+    # in_stock alone is stock presence, not verified purchasability.
     in_stock_ids = {p["id"] for p in store_products if p.get("in_stock")}
+    # in-stock but explicitly not purchasable: a distinct classification,
+    # never conflated with stock status
+    not_purchasable_ids = {p["id"] for p in store_products
+                           if p.get("in_stock")
+                           and p.get("is_purchasable") is False}
+    in_stock_ids -= not_purchasable_ids
     purchase = {
         "purchasable_store_ids": sorted(in_stock_ids & pop_ids),
-        "out_of_stock_store_ids": sorted(store_ids - in_stock_ids),
+        "out_of_stock_store_ids": sorted(
+            (store_ids - in_stock_ids) - not_purchasable_ids),
+        "not_purchasable_store_ids": sorted(not_purchasable_ids),
         "purchasable_unverified_against_popularity":
             sorted(in_stock_ids - pop_ids),
     }

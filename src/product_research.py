@@ -138,9 +138,24 @@ def _midrank_factor(values: List[float], index: int, confidence: float,
 
 
 def combined_rating(leafly: Tuple[Optional[float], Optional[int]],
-                    seller: Tuple[Optional[float], Optional[int]]
+                    seller: Tuple[Optional[float], Optional[int]],
+                    leafly_identity_confidence: float = 1.0,
+                    seller_identity_confidence: float = 1.0,
                     ) -> Tuple[Optional[float], Dict[str, Any]]:
-    """Canon section 1.10: confidence/sample moderated blend; unrated != 0."""
+    """Canon section 1.10: confidence/sample moderated blend; unrated != 0.
+
+    Identity confidence is distinct from review-count reliability: it is the
+    caller's confidence that the cited source page is the same cultivar/product
+    as the retail record (canon: never substitute an unsupported Leafly
+    cultivar name as a verified rating). It scales the source's weight before
+    count moderation and never changes an unblended single-source value's
+    identity, only its blend weight. Each confidence must lie in [0, 1].
+    """
+    for name, conf in (("leafly", leafly_identity_confidence),
+                       ("seller", seller_identity_confidence)):
+        if not (isinstance(conf, (int, float)) and not isinstance(conf, bool)
+                and 0.0 <= conf <= 1.0):
+            raise ValueError(f"{name}_identity_confidence must be in [0, 1]")
     l_val, l_count = leafly
     s_val, s_count = seller
     # canon 1.10: a store average_rating of 0 with zero reviews is UNRATED
@@ -151,17 +166,22 @@ def combined_rating(leafly: Tuple[Optional[float], Optional[int]],
     detail: Dict[str, Any] = {
         "leafly_rating": l_val, "leafly_count": l_count,
         "seller_rating": s_val, "seller_count": s_count,
+        "leafly_identity_confidence": leafly_identity_confidence,
+        "seller_identity_confidence": seller_identity_confidence,
     }
     if l_val is None and s_val is None:
         return None, detail
     w_l = 0.0
     w_s = 0.0
     if l_val is not None and l_count:
-        w_l = l_count / (l_count + SHRINK_PRIOR)
+        w_l = (leafly_identity_confidence * l_count
+               / (leafly_identity_confidence * l_count + SHRINK_PRIOR))
     if s_val is not None and s_count:
-        w_s = s_count / (s_count + SHRINK_PRIOR)
+        w_s = (seller_identity_confidence * s_count
+               / (seller_identity_confidence * s_count + SHRINK_PRIOR))
     if l_val is not None and not l_count:
-        w_l = 0.5 * (1 / (1 + SHRINK_PRIOR))  # rated but count unknown: low weight
+        # rated but count unknown: low weight, scaled by identity confidence
+        w_l = 0.5 * leafly_identity_confidence / (1 + SHRINK_PRIOR)
     total = w_l + w_s
     if total <= 0:
         # a rating exists but has no defensible weight: treat as present, weak
@@ -370,7 +390,9 @@ def attach_combined_inputs(records: List[Dict[str, Any]]) -> None:
             (rec.get("leafly_rating"), rec.get("leafly_rating_count")),
             (rec.get("seller_rating"),
              rec.get("seller_rating_count",
-                     rec.get("seller_review_count"))))
+                     rec.get("seller_review_count"))),
+            rec.get("leafly_identity_confidence", 1.0),
+            rec.get("seller_identity_confidence", 1.0))
         rec["combined_rating"] = blended
         rec["combined_rating_detail"] = detail
 

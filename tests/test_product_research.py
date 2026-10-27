@@ -620,3 +620,50 @@ def test_overview_popularity_index_explicit_value_wins():
     ws = wb["Overview"]
     col = OVERVIEW_COLUMNS.index("Combined popularity index / 100") + 1
     assert ws.cell(2, col).value == 77.0
+
+
+def test_combined_rating_identity_confidence_attenuates_source_weight():
+    # Same review counts; an uncertain-identity analogue Leafly source must
+    # move the blend toward the verified seller value (canon 1.10: never
+    # substitute an unsupported Leafly cultivar name as a verified rating).
+    exact, d1 = combined_rating((4.0, 50), (2.0, 10))
+    analogue, d2 = combined_rating((4.0, 50), (2.0, 10),
+                                   leafly_identity_confidence=0.3)
+    assert analogue < exact
+    assert analogue > 2.0  # still pulled up by the (attenuated) leafly side
+    assert d2["leafly_identity_confidence"] == 0.3
+    assert d1["leafly_identity_confidence"] == 1.0
+    # full confidence reproduces the historical blend exactly
+    assert combined_rating((4.0, 50), (2.0, 10))[0] == exact
+    # single-source values are unchanged by identity confidence
+    solo, _ = combined_rating((4.0, 50), (None, None),
+                              leafly_identity_confidence=0.3)
+    assert solo == 4.0
+    # seller confidence is applied symmetrically: attenuating the seller
+    # side reduces its pull, moving the blend toward the Leafly value
+    exact_s = combined_rating((4.0, 10), (2.0, 50))[0]
+    s_att, _ = combined_rating((4.0, 10), (2.0, 50),
+                               seller_identity_confidence=0.3)
+    assert s_att > exact_s
+    # zero confidence with an unknown count removes the fallback pull
+    z, d = combined_rating((4.0, None), (2.0, 10),
+                           leafly_identity_confidence=0.0)
+    assert z == 2.0 and d["weights"]["leafly"] == 0.0
+    # confidence is bounded
+    import pytest as _pytest
+    with _pytest.raises(ValueError):
+        combined_rating((4.0, 10), (2.0, 10), leafly_identity_confidence=1.5)
+    with _pytest.raises(ValueError):
+        combined_rating((4.0, 10), (2.0, 10), seller_identity_confidence=-0.1)
+
+
+def test_attach_combined_inputs_passes_identity_confidence():
+    from src.product_research import attach_combined_inputs
+    records = [rec("Analogue", leafly_rating=5.0, leafly_rating_count=20,
+                   seller_rating=1.0, seller_rating_count=20,
+                   leafly_identity_confidence=0.3)]
+    attach_combined_inputs(records)
+    blended, _ = combined_rating((5.0, 20), (1.0, 20),
+                                 leafly_identity_confidence=0.3)
+    assert records[0]["combined_rating"] == pytest.approx(blended)
+    assert records[0]["combined_rating"] < 3.0  # attenuated toward seller
