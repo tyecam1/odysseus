@@ -27,6 +27,13 @@ param(
     # Enables the durable Misumi transcript runtime (ODYSSEUS_MISUMI_TRANSCRIPT_ENABLED). Off by default;
     # recorded in the scheduled task's arguments so the setting is visible and reversible.
     [switch]$TranscriptRuntime,
+    # Multi-deployment isolation (src/deployment_isolation.py). With -RequireIsolation the runtime refuses to start unless
+    # -DataRoot, -DeploymentId and -DeploymentDomain are given explicitly, and opposite-domain roots inherited from the
+    # parent environment are removed rather than silently reused.
+    [switch]$RequireIsolation,
+    [string]$DeploymentId = '',
+    [ValidateSet('','misumi','phd')]
+    [string]$DeploymentDomain = '',
     # Install only: also start at machine boot, with no interactive session required (startup trigger, S4U principal, start-when-available).
     # Without it the task is logon-coupled and a reboot leaves the runtime down until someone logs in.
     [switch]$BootStart,
@@ -34,6 +41,8 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# Captured at script scope: a function sees only its own bound-parameter table, never the script's.
+$DataRootExplicit = $PSBoundParameters.ContainsKey('DataRoot')
 
 if ((Split-Path -Leaf $SourceRoot) -eq 'windows') {
     $SourceRoot = (Resolve-Path (Join-Path $SourceRoot '..\..')).Path
@@ -61,6 +70,10 @@ function Assert-Configuration {
     if ($ObsidianPhDRoot -and -not (Test-Path -LiteralPath $ObsidianPhDRoot)) {
         throw "Obsidian-PhD repository not found at $ObsidianPhDRoot"
     }
+    if ($RequireIsolation) {
+        if (-not $DataRootExplicit) { throw 'RequireIsolation needs an explicit -DataRoot (no shared default)' }
+        if (-not $DeploymentId -or -not $DeploymentDomain) { throw 'RequireIsolation needs -DeploymentId and -DeploymentDomain' }
+    }
 }
 
 function Get-Listener {
@@ -87,6 +100,37 @@ function Invoke-Probe([string]$Url, [bool]$Authenticated) {
     }
 }
 
+function Set-IsolationEnvironment {
+    if ($RequireIsolation) {
+        $env:ODYSSEUS_DEPLOYMENT_ISOLATION = 'required'
+        $env:ODYSSEUS_DEPLOYMENT_ID = $DeploymentId
+        $env:ODYSSEUS_DEPLOYMENT_DOMAIN = $DeploymentDomain
+        # An empty parameter must not leave the parent's root in force: clear every root the domain does not own.
+        if ($DeploymentDomain -ne 'misumi') { foreach ($n in 'MISUMI_HOUSEHOLD_ROOT','MISUMI_SOURCE_ROOT','BBC_MISUMI_ROOT','FLAT_KNOWLEDGEBASE_ROOT','MISUMI_SEED_ORDER_ROOT','MISUMI_CANONICAL_ROOT') { Remove-Item "Env:$n" -ErrorAction SilentlyContinue } }
+        if ($DeploymentDomain -ne 'phd') { foreach ($n in 'BBC_OBSIDIAN_PHD_ROOT','OBSIDIAN_PHD_ROOT') { Remove-Item "Env:$n" -ErrorAction SilentlyContinue } }
+    } else {
+        Remove-Item Env:ODYSSEUS_DEPLOYMENT_ISOLATION -ErrorAction SilentlyContinue
+    }
+}
+
+function Invoke-IsolationPreflight {
+    # Validate BEFORE any directory, log or scheduled task is created: a refused configuration must leave no trace.
+    if (-not $RequireIsolation) { return }
+    $env:ODYSSEUS_DATA_DIR = $DataRoot
+    if ($HouseholdRoot) { $env:MISUMI_HOUSEHOLD_ROOT = [IO.Path]::GetFullPath($HouseholdRoot) }
+    if ($ObsidianPhDRoot) { $env:BBC_OBSIDIAN_PHD_ROOT = [IO.Path]::GetFullPath($ObsidianPhDRoot) }
+    Set-IsolationEnvironment
+    $env:PYTHONPATH = $SourceRoot
+    Push-Location -LiteralPath $SourceRoot
+    try {
+        & $Python -m src.deployment_isolation validate
+        $code = $LASTEXITCODE
+    } finally {
+        Pop-Location
+    }
+    if ($code -ne 0) { throw "Deployment isolation refused this configuration (exit $code); nothing was created." }
+}
+
 function Stop-Instance {
     $listener = Get-Listener
     if (-not $listener) { return }
@@ -101,7 +145,6 @@ function Stop-Instance {
 switch ($Action) {
     'Run' {
         Assert-Configuration
-        New-Item -ItemType Directory -Force -Path $DataRoot,$LogDir | Out-Null
         $env:ODYSSEUS_DATA_DIR = $DataRoot
         $env:APP_BIND = $BindHost
         $env:APP_PORT = [string]$Port
@@ -110,12 +153,15 @@ switch ($Action) {
         $env:MISUMI_REQUIRED = 'true'
         if ($HouseholdRoot) { $env:MISUMI_HOUSEHOLD_ROOT = [IO.Path]::GetFullPath($HouseholdRoot) }
         if ($ObsidianPhDRoot) { $env:BBC_OBSIDIAN_PHD_ROOT = [IO.Path]::GetFullPath($ObsidianPhDRoot) }
+        Set-IsolationEnvironment
         if ($ModelHealthUrl) { $env:MISUMI_MODEL_HEALTH_URL = $ModelHealthUrl }
         if ($InterfaceHealthUrl) { $env:MISUMI_INTERFACE_HEALTH_URL = $InterfaceHealthUrl }
         if ($ModelUrl) { $env:MISUMI_MODEL_URL = $ModelUrl }
         if ($Model) { $env:MISUMI_MODEL = $Model }
         if ($TranscriptRuntime) { $env:ODYSSEUS_MISUMI_TRANSCRIPT_ENABLED = '1' } else { Remove-Item Env:ODYSSEUS_MISUMI_TRANSCRIPT_ENABLED -ErrorAction SilentlyContinue }
         Set-Location -LiteralPath $SourceRoot
+        Invoke-IsolationPreflight
+        New-Item -ItemType Directory -Force -Path $DataRoot,$LogDir | Out-Null
         # Evidence for later diagnosis: which session this supervisor lives in (0 means non-interactive).
         "{0:o} Run wrapper started pid={1} session={2} user={3}" -f (Get-Date), $PID, (Get-Process -Id $PID).SessionId, $env:USERNAME |
             Tee-Object -FilePath $LogPath -Append | Out-Null
@@ -134,6 +180,7 @@ switch ($Action) {
     }
     'Install' {
         Assert-Configuration
+        Invoke-IsolationPreflight
         New-Item -ItemType Directory -Force -Path $DataRoot,$LogDir | Out-Null
         $scriptPath = $MyInvocation.MyCommand.Path
         $argumentParts = @(
@@ -151,6 +198,7 @@ switch ($Action) {
         if ($Model) { $argumentParts += @('-Model',('"' + $Model + '"')) }
         $argumentParts += @('-RestartDelaySeconds',[string]$RestartDelaySeconds)
         if ($TranscriptRuntime) { $argumentParts += '-TranscriptRuntime' }
+        if ($RequireIsolation) { $argumentParts += @('-RequireIsolation','-DeploymentId',('"' + $DeploymentId + '"'),'-DeploymentDomain',$DeploymentDomain) }
         $arguments = $argumentParts -join ' '
         $taskAction = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $arguments
         $logonTrigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME

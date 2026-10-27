@@ -162,6 +162,15 @@ class McpManager:
         """Connect to an MCP server via stdio, SSE, or Streamable HTTP transport."""
         try:
             if transport == "stdio":
+                from src import deployment_isolation
+                from src.builtin_mcp import is_trusted_builtin_launch
+                if deployment_isolation.shell_blocked() and not is_trusted_builtin_launch(server_id, command, args):
+                    # A custom stdio server is an arbitrary executable: refused while deployment isolation is required.
+                    logger.warning("Isolation refused stdio MCP server %s", server_id)
+                    self._connections[server_id] = {"status": "error", "name": name,
+                                                    "error": "Stdio MCP servers are disabled for this isolated deployment"}
+                    self._generation += 1
+                    return False
                 res = await self._connect_stdio(server_id, name, command, args or [], env or {})
             elif transport == "sse":
                 res = await self._connect_sse(server_id, name, url)

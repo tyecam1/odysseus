@@ -353,8 +353,15 @@ def _append_local_ollama_download_command_lines(
     lines.append('if [ -z "$ODYSSEUS_OLLAMA_PULL_CMD" ]; then echo "ERROR: Ollama not found on this server. Install Ollama or start an ollama-rocm/ollama-test container."; exit 127; fi')
 
 
+def _isolation_shell_gate():
+    """Cookbook routes spawn model-serving and SSH processes: refused while deployment isolation is required."""
+    from src import deployment_isolation
+    if deployment_isolation.shell_blocked():
+        raise HTTPException(403, "Process launching is disabled for this isolated deployment")
+
+
 def setup_cookbook_routes() -> APIRouter:
-    router = APIRouter(tags=["cookbook"])
+    router = APIRouter(tags=["cookbook"], dependencies=[Depends(_isolation_shell_gate)])
     _cookbook_state_path = Path(COOKBOOK_STATE_FILE)
     _state_get_cache = {"ts": 0.0, "mtime": 0.0, "value": None}
     _tasks_status_cache = {"ts": 0.0, "value": None}

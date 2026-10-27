@@ -125,6 +125,17 @@ _HOST_LOCAL_ROOT_VAR_RE = re.compile(r"\$\{(\w+)\}")
 
 
 def resolve_repo_path(repo_id: str) -> Optional[str]:
+    """Resolve a repo id on THIS host, refusing a path outside the deployment when isolation is required."""
+    from src import deployment_isolation
+    path = _resolve_repo_path_unconfined(repo_id)
+    if path is not None and not deployment_isolation.path_allowed(path):
+        import logging
+        logging.getLogger(__name__).warning("Isolation refused repo %r: resolves outside this deployment", repo_id)
+        return None
+    return path
+
+
+def _resolve_repo_path_unconfined(repo_id: str) -> Optional[str]:
     """Resolve a `config/repositories.yaml` repo id to a real, existing
     filesystem path on THIS host, using the same `${ROOT_VAR}/...`
     template + `~/.aoteru/config.local.json` root-var convention
