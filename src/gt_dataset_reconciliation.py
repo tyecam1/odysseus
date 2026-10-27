@@ -176,10 +176,12 @@ def reconcile(research_rows: Sequence[Mapping[str, Any]],
         # historical classification: rows where the flag was simply absent
         # keep their in-stock classification; an explicit null in a legacy
         # capture is still unknown, never verified-purchasable
+        def _present_non_boolean(q):
+            v = q.get("is_purchasable")
+            return "is_purchasable" in q and v is not True and v is not False
         eligibility_unknown_ids = {
-            p["id"] for p in store_products
-            if p.get("in_stock")
-            and p.get("is_purchasable", "absent") is None}
+            q["id"] for q in store_products
+            if q.get("in_stock") and _present_non_boolean(q)}
         in_stock_ids -= not_purchasable_ids
         in_stock_ids -= eligibility_unknown_ids
     else:

@@ -241,3 +241,9 @@ def test_numeric_and_null_flags_are_not_affirmative_booleans():
     assert ps["not_purchasable_store_ids"] == []
     assert sorted(ps["purchase_eligibility_unknown_store_ids"]) == [100, 101, 102]
     assert ps["out_of_stock_store_ids"] == [103]
+    # legacy mode: a present non-boolean flag is still never affirmative
+    legacy = reconcile(research, store, cap, legacy_purchase_classification=True)
+    lps = legacy["purchase_status"]
+    assert lps["purchasable_store_ids"] == []
+    assert sorted(lps["purchase_eligibility_unknown_store_ids"]) == [100, 101, 102]
+    assert lps["out_of_stock_store_ids"] == [103]
