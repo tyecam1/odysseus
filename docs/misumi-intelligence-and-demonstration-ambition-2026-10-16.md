@@ -51,6 +51,8 @@ Determine when multiple cheaper specialists outperform a stronger individual in 
 
 Use the existing model-role-contract evaluation owner and model registry; PR #91 is directly relevant. Progress/deadline-aware prioritisation in PR #124 selects *what* deserves work; efficiency optimisation selects *how* to execute it. Use Pareto comparisons or explicitly weighted task-specific constraints, not a dimensionally meaningless universal token score.
 
+**Evidence to date (2026-10-28):** `evals/misumi-six-eyes/from_team_eval.py` runs `src/efficiency_pareto.py` over the real -11 team evaluation (192 matched task-runs per plan; solo, team, teamfix, teamdrop; turn latency as the only recorded cost). Report: `evals/misumi-six-eyes/results/2026-10-28-team-eval-v2.md`. Where both blind judges agree, no team plan beats solo on verified quality and every team plan is slower by 0.8-1.4 s; the judges disagree on quality for all three team plans (indicative only; post-hoc conditions, same-family primary judge). Still without real matched evidence: cheap-first escalation, strong-solo-plus-verifier, a deterministic-tool plan and the optimiser, and any cost unit other than latency.
+
 ## 3. Routing intelligence
 
 Evaluate a bounded local typed classifier or equivalent semantic selector against deterministic v0.2 on immutable held-out paraphrases, ambiguous follow-ups, negation, unseen intents and safety/reserved-matter cases. Never assume Jev is installed or required: local inference is a candidate, not an automatic promotion. Keep deterministic policy, explicit fallback and a safe Aoteru route; record abstention, reasons, latency, cost and accuracy. Promoting any new learned classifier or routing contract remains governed.
