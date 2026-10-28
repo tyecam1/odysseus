@@ -345,13 +345,21 @@ def test_read_private_bytes_refuses_a_file_that_changes_identity_between_check_a
     psio.private_dir(root)
     path = root / "state.json"
     path.write_text('{"state": "scheduled"}')
-    real_stat = os.fstat
-    other = tmp_path / "other"
-    other.write_text("x")
-    other_fd = os.open(other, os.O_RDONLY)
-    try:
-        monkeypatch.setattr(psio.os, "fstat", lambda fd: real_stat(other_fd))
-        with pytest.raises(psio.PrivateStorageRefused):
-            psio.read_private_bytes(path)
-    finally:
-        os.close(other_fd)
+    real_fstat = os.fstat
+
+    def fstat_of_a_different_object(fd):
+        st = real_fstat(fd)
+        return os.stat_result((st.st_mode, st.st_ino + 1, st.st_dev, st.st_nlink, st.st_uid, st.st_gid, st.st_size,
+                               int(st.st_atime), int(st.st_mtime), int(st.st_ctime)))
+
+    class _OsWithSwappedFstat:
+        """Only private_state_io sees the swapped identity. Patching os.fstat globally also hit unrelated threads and
+        pytest internals (and a borrowed second descriptor could be closed under it), which failed intermittently in CI."""
+        fstat = staticmethod(fstat_of_a_different_object)
+
+        def __getattr__(self, name):
+            return getattr(os, name)
+
+    monkeypatch.setattr(psio, "os", _OsWithSwappedFstat())
+    with pytest.raises(psio.PrivateStorageRefused, match="changed between check and open"):
+        psio.read_private_bytes(path)
