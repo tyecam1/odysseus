@@ -361,5 +361,5 @@ def test_read_private_bytes_refuses_a_file_that_changes_identity_between_check_a
             return getattr(os, name)
 
     monkeypatch.setattr(psio, "os", _OsWithSwappedFstat())
-    with pytest.raises(psio.PrivateStorageRefused):
+    with pytest.raises(psio.PrivateStorageRefused, match="changed between check and open"):
         psio.read_private_bytes(path)
