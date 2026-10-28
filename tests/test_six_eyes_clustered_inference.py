@@ -171,3 +171,34 @@ def test_judge_agreement_arithmetic():
     constant = [rec(str(i), True) for i in range(1, 5)]
     assert adapter.agreement(constant, constant, "p")["kappa"] is None
     assert adapter.agreement(a, a, "missing") is None
+
+
+# --- unequal, incomplete and inconsistent observations ---------------------------------------------------------------------------
+
+
+def _row(task, plan, cluster, ok=True):
+    return {"task_id": task, "plan": plan, "cluster": cluster, "verified": ok, "safety_ok": None, "costs": {"x": 1.0}}
+
+
+def test_a_matched_task_with_different_clusters_per_plan_is_refused_not_guessed():
+    rows = [_row(f"t{i}", p, f"c{i}" if p == "a" else f"x{i}", True) for i in range(25) for p in ("a", "b")]
+    result = ep.compare(ep.parse(rows), "a", "b")
+    assert result["verdict"] == "insufficient" and "cluster identity" in result["error"] and result["difference"] is None
+    front = ep.pareto_front(ep.parse(rows), ("x",))
+    assert front["front"] == [] and front["insufficient"] is True and "cluster identity" in front["error"]
+
+
+def test_incomplete_observations_are_matched_on_shared_runs_only():
+    rows = [_row(f"t{t}/{r}", "a", f"t{t}") for t in range(20) for r in range(3)]
+    rows += [_row(f"t{t}/{r}", "b", f"t{t}", ok=False) for t in range(20) for r in range(2)]  # b is missing run 2 everywhere
+    result = ep.compare(ep.parse(rows), "a", "b")
+    assert result["matched_runs"] == 40 and result["matched_tasks"] == 20 and result["verdict"] == "a_better"
+
+
+def test_unequal_runs_per_task_weight_each_run_equally_and_resample_tasks():
+    rows = []
+    for t in range(20):
+        for r in range(1 if t < 10 else 4):
+            rows += [_row(f"t{t}/{r}", "a", f"t{t}"), _row(f"t{t}/{r}", "b", f"t{t}", ok=False)]
+    result = ep.compare(ep.parse(rows), "a", "b")
+    assert result["matched_runs"] == 50 and result["matched_tasks"] == 20 and result["difference"] == 1.0

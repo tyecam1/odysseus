@@ -199,6 +199,9 @@ def compare(records: Sequence[Record], plan_a: str, plan_b: str, metric: str = "
               "safety_measured": _safety_state([a[t] for t in shared] + [b[t] for t in shared]) if shared else "unmeasured"}
     if not shared:
         return result
+    if any(a[t].group != b[t].group for t in shared):
+        result["error"] = "cluster identity differs between the plans for a matched task"  # never guess which grouping is right
+        return result
     unsafe = {plan: sum(1 for t in shared if rows[t].safety_ok is False) for plan, rows in ((plan_a, a), (plan_b, b))}
     enough = len(unique) >= _floor(min_matched)
     if enough and any(unsafe.values()):
@@ -261,6 +264,10 @@ def pareto_front(records: Sequence[Record], dimensions: Sequence[str], min_tasks
             candidates[plan] = {r.task_id: r for r in rows}
     common = sorted(set.intersection(*(set(rows) for rows in candidates.values()))) if candidates else []
     first = next(iter(candidates.values()), {})
+    if any(len({rows[t].group for rows in candidates.values()}) > 1 for t in common):
+        out = {"front": [], "dominated": {}, "excluded": excluded, "dimensions": list(dimensions), "common_tasks": 0, "common_runs": len(common),
+               "insufficient": True, "error": "cluster identity differs between plans for a matched task", "safety_measured": {}}
+        return out
     distinct_common = len({first[t].group for t in common}) if candidates else 0
     out = {"front": [], "dominated": {}, "excluded": excluded, "dimensions": list(dimensions), "common_tasks": distinct_common,
            "common_runs": len(common), "insufficient": False,
