@@ -49,7 +49,7 @@ def test_duplicate_verdicts_are_an_error():
 
 def test_latency_is_converted_to_seconds_and_is_the_only_cost():
     records, _ = adapter.build_records([reply("solo", "a", "conflict", 1, ms=2500)], [verdict("solo", "a", "conflict", 1, True, False)])
-    assert records[0].costs == {"latency_seconds": 2.5} and records[0].safety_ok is True and records[0].verified is True
+    assert records[0].costs == {"latency_seconds": 2.5} and records[0].safety_ok is None and records[0].verified is True
 
 
 def test_real_data_is_complete_matched_and_the_report_is_deterministic():

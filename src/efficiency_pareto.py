@@ -16,6 +16,12 @@ This module is only the arithmetic over records someone else collected from comp
 * Resource units stay distinct (paid cost, tokens, local compute seconds, latency, human corrections); nothing is summed across
   units. Values are bounded so aggregation can never overflow into infinity.
 * The bootstrap is seeded and symmetric: swapping the two plans negates the interval and cannot change the verdict.
+* Repeated trials of one underlying task are CLUSTERED, not independent. A record may name its ``cluster`` (the underlying task);
+  records without one are their own cluster. When any cluster holds more than one trial, intervals use a paired hierarchical
+  bootstrap (resample clusters, then trials within each chosen cluster), and the evidence floor counts distinct clusters, never
+  trials. Flat resampling of repeated runs understates uncertainty (see ``evals/misumi-team/eval-v2/RESULTS.md``, "Correction").
+* Safety may be UNMEASURED (``safety_ok`` None). That is not a pass: it is never counted as a violation and never reported as
+  safe; results carry ``safety_measured`` so a reader can tell "no violations seen" from "not measured".
 * It only evidences. It cannot change a route, promote a plan or touch policy.
 """
 
@@ -24,7 +30,7 @@ from __future__ import annotations
 import math
 import random
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Sequence, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 MIN_MATCHED_TASKS = 20  # the evidence floor: a caller may raise it, never lower it
 BOOTSTRAP_RESAMPLES = 2000
@@ -42,8 +48,13 @@ class Record:
     task_id: str
     plan: str
     verified: bool            # an independent check says the outcome is correct and complete
-    safety_ok: bool           # the safety/quality floor was respected on this task
+    safety_ok: Optional[bool]  # the safety/quality floor was respected on this task; None = not measured (NOT a pass)
     costs: Dict[str, float]   # resource units, each already the TOTAL for the task (coordination, verification, rework included)
+    cluster: str = ""         # the underlying task this trial repeats; empty = the task_id is its own cluster
+
+    @property
+    def group(self) -> str:
+        return self.cluster or self.task_id
 
 
 def parse(rows: Iterable[dict]) -> List[Record]:
@@ -60,8 +71,11 @@ def parse(rows: Iterable[dict]) -> List[Record]:
         task_id, plan = raw_task.strip(), raw_plan.strip()
         if not task_id or not plan:
             raise RecordError(f"row {index}: empty task_id or plan")
-        if not isinstance(verified, bool) or not isinstance(safety_ok, bool):
-            raise RecordError(f"row {index}: verified and safety_ok must be booleans")
+        if not isinstance(verified, bool) or not (safety_ok is None or isinstance(safety_ok, bool)):
+            raise RecordError(f"row {index}: verified must be a boolean and safety_ok a boolean or None (unmeasured)")
+        cluster = row.get("cluster", "")
+        if not isinstance(cluster, str) or cluster != cluster.strip():
+            raise RecordError(f"row {index}: cluster must be a string without surrounding whitespace")
         if not isinstance(costs, dict) or not costs:
             raise RecordError(f"row {index}: costs must be a non-empty mapping")
         clean: Dict[str, float] = {}
@@ -76,7 +90,7 @@ def parse(rows: Iterable[dict]) -> List[Record]:
         if (task_id, plan) in seen:
             raise RecordError(f"row {index}: duplicate task/plan {task_id!r}/{plan!r}")
         seen.add((task_id, plan))
-        records.append(Record(task_id, plan, verified, safety_ok, clean))
+        records.append(Record(task_id, plan, verified, safety_ok, clean, cluster))
     return records
 
 
@@ -109,6 +123,38 @@ def _bootstrap(values: Sequence[float], seed: int) -> Tuple[float, float]:
     return _interval([math.fsum(values[rng.randrange(n)] for _ in range(n)) / n for _ in range(BOOTSTRAP_RESAMPLES)])
 
 
+def _clusters(pairs: Sequence[Tuple[str, float]]) -> List[List[float]]:
+    """Group (cluster, value) pairs into one list of trial values per cluster, in sorted cluster order."""
+    grouped: Dict[str, List[float]] = {}
+    for name, value in pairs:
+        grouped.setdefault(name, []).append(value)
+    return [grouped[name] for name in sorted(grouped)]
+
+
+def _cluster_bootstrap(groups: Sequence[Sequence[float]], seed: int) -> Tuple[float, float]:
+    """Interval for the mean over all trials. When every cluster has one trial this is exactly the flat bootstrap; otherwise it is
+    the hierarchical one: draw clusters with replacement, then draw each chosen cluster's trials with replacement."""
+    if all(len(g) == 1 for g in groups):
+        return _bootstrap([g[0] for g in groups], seed)
+    rng = random.Random(seed)
+    k = len(groups)
+    samples = []
+    for _ in range(BOOTSTRAP_RESAMPLES):
+        totals, count = [], 0
+        for _ in range(k):
+            trials = groups[rng.randrange(k)]
+            m = len(trials)
+            totals.append(math.fsum(trials[rng.randrange(m)] for _ in range(m)))
+            count += m
+        samples.append(math.fsum(totals) / count)
+    return _interval(samples)
+
+
+def _safety_state(rows: Sequence[Record]) -> str:
+    measured = sum(1 for r in rows if r.safety_ok is not None)
+    return "measured" if measured == len(rows) else "unmeasured" if measured == 0 else "partial"
+
+
 def summarise(records: Sequence[Record], dimensions: Sequence[str] = DEFAULT_COST_DIMENSIONS, seed: int = 1) -> Dict[str, dict]:
     """Per plan: task count, verified rate with an interval, safety violations, and the mean of each resource it reported."""
     by_plan: Dict[str, List[Record]] = {}
@@ -118,10 +164,11 @@ def summarise(records: Sequence[Record], dimensions: Sequence[str] = DEFAULT_COS
     for plan in sorted(by_plan):
         rows = by_plan[plan]
         verified = [1.0 if r.verified else 0.0 for r in rows]
+        groups = _clusters([(r.group, v) for r, v in zip(rows, verified)])
         entry = {
-            "tasks": len(rows), "verified_rate": _mean(verified),
-            "verified_interval": _bootstrap(verified, seed) if len(rows) >= 2 else None,
-            "safety_violations": sum(1 for r in rows if not r.safety_ok), "means": {},
+            "tasks": len(rows), "unique_tasks": len(groups), "verified_rate": _mean(verified),
+            "verified_interval": _cluster_bootstrap(groups, seed) if len(groups) >= 2 else None,
+            "safety_violations": sum(1 for r in rows if r.safety_ok is False), "safety_measured": _safety_state(rows), "means": {},
         }
         for unit in dimensions:
             observed = [r.costs[unit] for r in rows if unit in r.costs]
@@ -133,7 +180,11 @@ def summarise(records: Sequence[Record], dimensions: Sequence[str] = DEFAULT_COS
 
 def compare(records: Sequence[Record], plan_a: str, plan_b: str, metric: str = "verified", seed: int = 1,
             min_matched: int = MIN_MATCHED_TASKS) -> dict:
-    """Matched-task difference ``a - b`` of one metric with a seeded task-level bootstrap interval.
+    """Matched difference ``a - b`` of one metric with a seeded, cluster-aware bootstrap interval.
+
+    ``matched_tasks`` counts distinct underlying tasks (clusters) both plans ran; ``matched_runs`` counts the paired trials.
+    Only distinct tasks count toward the evidence floor. Below the floor the verdict is ``insufficient`` and the interval is
+    withheld, but an ``indicative`` entry (difference, interval, direction) is given for reading only: it never sets the verdict.
 
     ``metric`` is ``verified`` (higher is better) or a resource unit (lower is better). Verdict: ``a_better`` / ``b_better`` when the
     interval excludes zero in that direction, ``inconclusive`` when it spans zero, ``insufficient`` below the evidence floor, and
@@ -142,32 +193,40 @@ def compare(records: Sequence[Record], plan_a: str, plan_b: str, metric: str = "
     a = {r.task_id: r for r in records if r.plan == plan_a}
     b = {r.task_id: r for r in records if r.plan == plan_b}
     shared = sorted(set(a) & set(b))
-    result = {"a": plan_a, "b": plan_b, "metric": metric, "matched_tasks": len(shared), "difference": None, "interval": None,
-              "verdict": "insufficient"}
-    if len(shared) < _floor(min_matched):
+    unique = {a[t].group for t in shared}
+    result = {"a": plan_a, "b": plan_b, "metric": metric, "matched_tasks": len(unique), "matched_runs": len(shared),
+              "difference": None, "interval": None, "verdict": "insufficient", "indicative": None,
+              "safety_measured": _safety_state([a[t] for t in shared] + [b[t] for t in shared]) if shared else "unmeasured"}
+    if not shared:
         return result
-    unsafe = {plan: sum(1 for t in shared if not rows[t].safety_ok) for plan, rows in ((plan_a, a), (plan_b, b))}
-    if any(unsafe.values()):
+    unsafe = {plan: sum(1 for t in shared if rows[t].safety_ok is False) for plan, rows in ((plan_a, a), (plan_b, b))}
+    enough = len(unique) >= _floor(min_matched)
+    if enough and any(unsafe.values()):
         result.update(verdict="safety_violation", safety_violations=unsafe)
         return result
     if metric == "verified":
-        diffs = [(1.0 if a[t].verified else 0.0) - (1.0 if b[t].verified else 0.0) for t in shared]
+        diffs = [(a[t].group, (1.0 if a[t].verified else 0.0) - (1.0 if b[t].verified else 0.0)) for t in shared]
     else:
         if any(metric not in a[t].costs or metric not in b[t].costs for t in shared):
             return result  # a resource that is not reported on every matched task is not compared
-        diffs = [a[t].costs[metric] - b[t].costs[metric] for t in shared]
-    mean = _mean(diffs)
-    low, high = _bootstrap(diffs, seed)
+        diffs = [(a[t].group, a[t].costs[metric] - b[t].costs[metric]) for t in shared]
+    groups = _clusters(diffs)
+    mean = _mean([v for _, v in diffs])
+    low, high = _cluster_bootstrap(groups, seed) if len(groups) >= 2 else (float("nan"), float("nan"))
     if not all(math.isfinite(x) for x in (mean, low, high)):
         return result
-    result.update(difference=mean, interval=(low, high))
     better_when_positive = metric == "verified"
     if low > 0:
-        result["verdict"] = "a_better" if better_when_positive else "b_better"
+        direction = "a_better" if better_when_positive else "b_better"
     elif high < 0:
-        result["verdict"] = "b_better" if better_when_positive else "a_better"
+        direction = "b_better" if better_when_positive else "a_better"
     else:
-        result["verdict"] = "inconclusive"
+        direction = "inconclusive"
+    if not enough:
+        result["indicative"] = {"difference": mean, "interval": (low, high), "direction": direction,
+                                "note": f"{len(unique)} distinct task(s) is below the floor of {_floor(min_matched)}: for reading only"}
+        return result
+    result.update(difference=mean, interval=(low, high), verdict=direction)
     return result
 
 
@@ -189,19 +248,24 @@ def pareto_front(records: Sequence[Record], dimensions: Sequence[str], min_tasks
     candidates: Dict[str, Dict[str, Record]] = {}
     for plan in sorted(by_plan):
         rows = by_plan[plan]
-        violations = sum(1 for r in rows if not r.safety_ok)
+        violations = sum(1 for r in rows if r.safety_ok is False)
+        distinct = len({r.group for r in rows})
         if violations:
             excluded[plan] = f"{violations} safety-floor violation(s)"
-        elif len(rows) < floor:
-            excluded[plan] = f"only {len(rows)} task(s); fewer than the {floor} needed to be placed on the front"
+        elif distinct < floor:
+            repeats = f" ({len(rows)} runs of {distinct} distinct)" if len(rows) != distinct else ""
+            excluded[plan] = f"only {distinct} task(s){repeats}; fewer than the {floor} needed to be placed on the front"
         elif any(unit not in r.costs for r in rows for unit in dimensions):
             excluded[plan] = "did not report every chosen resource"
         else:
             candidates[plan] = {r.task_id: r for r in rows}
     common = sorted(set.intersection(*(set(rows) for rows in candidates.values()))) if candidates else []
-    out = {"front": [], "dominated": {}, "excluded": excluded, "dimensions": list(dimensions), "common_tasks": len(common),
-           "insufficient": False}
-    if len(common) < floor:
+    first = next(iter(candidates.values()), {})
+    distinct_common = len({first[t].group for t in common}) if candidates else 0
+    out = {"front": [], "dominated": {}, "excluded": excluded, "dimensions": list(dimensions), "common_tasks": distinct_common,
+           "common_runs": len(common), "insufficient": False,
+           "safety_measured": {plan: _safety_state(list(rows.values())) for plan, rows in candidates.items()}}
+    if distinct_common < floor:
         out["insufficient"] = bool(candidates)
         return out
     stats = {}
