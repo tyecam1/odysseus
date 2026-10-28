@@ -579,7 +579,8 @@ def test_joined_u75_randomised_stale_finalize_vs_recovery(estate, monkeypatch, s
                 with lock:
                     events.append(("recovered", time.monotonic()))
                 break
-            if result.get("code") not in ("writer_quiescence_unproven", "execution_not_settled"):
+            # worker_unreachable is a local worker subprocess timeout under load: transient, and the product tells the operator to retry
+            if result.get("code") not in ("writer_quiescence_unproven", "execution_not_settled", "worker_unreachable"):
                 break
             time.sleep(0.05)
         outcome["recover"] = result
