@@ -107,6 +107,15 @@ def _tool_path_roots() -> list[str]:
     may touch. Default: project data/ + system temp dirs. Extra roots
     are loaded from the ``tool_path_extra_roots`` setting.
     """
+    from src import deployment_isolation
+    try:
+        confined = deployment_isolation.confined_roots()
+    except deployment_isolation.IsolationError:
+        raise ValueError("deployment roots changed after startup; file tools are disabled")
+    if confined is not None:
+        # Isolation required: own data root and own source roots only (no /tmp, $TMPDIR or settings extras).
+        return confined
+
     roots: list[str] = []
 
     # Project data directory — the agent's primary workspace.
@@ -225,6 +234,13 @@ def _resolve_tool_path_in_workspace(workspace: str, raw_path: str) -> str:
                 raise ValueError
         except ValueError:
             raise ValueError(f"path '{raw_path}' is outside the workspace ({workspace})")
+    from src import deployment_isolation
+    try:
+        allowed = deployment_isolation.path_allowed(resolved)  # also re-verifies the roots were not swapped since startup
+    except deployment_isolation.IsolationError:
+        raise ValueError("deployment roots changed after startup; file tools are disabled")
+    if not allowed:
+        raise ValueError(f"path '{raw_path}' is outside this deployment")
     return resolved
 
 
@@ -269,6 +285,9 @@ def vet_workspace(raw: str) -> Optional[str]:
     # also covers C:\ and \\server\share without platform-specific lists.
     if os.path.dirname(resolved) == resolved:
         return None
+    from src import deployment_isolation
+    if not deployment_isolation.path_allowed(resolved):
+        return None
     return resolved
 
 
@@ -296,7 +315,7 @@ def _resolve_search_root(raw_path: str) -> str:
     raw = (raw_path or "").strip()
     ws = get_active_workspace()
     if ws:
-        return os.path.realpath(ws) if not raw else _resolve_tool_path_in_workspace(ws, raw)
+        return _resolve_tool_path_in_workspace(ws, raw or ".")
     if not raw:
         roots = _tool_path_roots()
         return roots[0] if roots else os.path.realpath(".")
@@ -692,6 +711,14 @@ async def _execute_tool_block_impl(
         }
         logger.warning("Tool policy blocked tool=%s", tool)
         return desc, result
+
+    if tool in ("bash", "python"):
+        from src import deployment_isolation
+        if deployment_isolation.shell_blocked():
+            desc = f"{tool}: BLOCKED"
+            result = {"error": f"Tool '{tool}' is unavailable while deployment isolation is required.", "exit_code": 1}
+            logger.warning("Isolation blocked tool=%s", tool)
+            return desc, result
 
     if tool in _ADMIN_TOOLS and not _owner_is_admin(owner):
         desc = f"{tool}: BLOCKED"

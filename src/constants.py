@@ -3,12 +3,16 @@
 import os
 
 from src.runtime_paths import get_app_root, get_default_data_dir
+from src.deployment_isolation import enforce_startup_or_exit
 
 APP_VERSION = "1.0.2"
 
 # Base paths
 BASE_DIR = os.path.join(get_app_root(), "")
 STATIC_DIR = os.path.join(BASE_DIR, "static")
+# Opt-in startup invariant (ODYSSEUS_DEPLOYMENT_ISOLATION=required): validates identity, data root and
+# path overrides and refuses to start before anything is created. A no-op when unset.
+ISOLATION = enforce_startup_or_exit()
 DATA_DIR = os.getenv("ODYSSEUS_DATA_DIR", get_default_data_dir())
 
 # Data file paths

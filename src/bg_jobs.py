@@ -86,6 +86,8 @@ def launch(command: str, session_id: str, cwd: Optional[str] = None,
     server restart. The process is put in its own session (setsid) so it
     outlives the request/stream that started it.
     """
+    from src import deployment_isolation
+    deployment_isolation.require_shell_allowed("background jobs")
     _JOBS_DIR.mkdir(parents=True, exist_ok=True)
     job_id = uuid.uuid4().hex[:12]
     log_path = _JOBS_DIR / f"{job_id}.log"

@@ -38,7 +38,7 @@ except ImportError as exc:
 else:
     _PTY_IMPORT_ERROR = None
 
-from fastapi import APIRouter, Request, HTTPException
+from fastapi import APIRouter, Depends, Request, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -50,9 +50,18 @@ from core.platform_compat import (
 )
 
 
+def _isolation_shell_gate():
+    from src import deployment_isolation
+    if deployment_isolation.shell_blocked():
+        raise HTTPException(403, "Shell access is disabled for this isolated deployment")
+
+
 def _require_admin(request: Request):
     """Reject non-admin callers. Shell exec is admin-only — never expose to
     regular users; that's RCE-after-signup."""
+    from src import deployment_isolation
+    if deployment_isolation.shell_blocked():
+        raise HTTPException(403, "Shell access is disabled for this isolated deployment")
     auth_manager = getattr(request.app.state, "auth_manager", None)
     if not auth_manager:
         # No auth at all — only safe in fully-trusted localhost dev mode
@@ -451,6 +460,8 @@ def _normalize_legacy_remote_tmux_exec(command: str) -> str:
 
 
 async def _create_shell(command: str, **kwargs):
+    from src import deployment_isolation
+    deployment_isolation.require_shell_allowed("shell execution")
     """Spawn a shell subprocess for `command`.
 
     POSIX: /bin/sh via create_subprocess_shell (unchanged behaviour).
@@ -856,7 +867,7 @@ async def _generate_win_detached(cmd: str, request: Request):
 
 
 def setup_shell_routes() -> APIRouter:
-    router = APIRouter(tags=["shell"])
+    router = APIRouter(tags=["shell"], dependencies=[Depends(_isolation_shell_gate)])
 
     @router.post("/api/shell/exec")
     async def shell_exec(request: Request, req: ShellExecRequest) -> Dict[str, Any]:
