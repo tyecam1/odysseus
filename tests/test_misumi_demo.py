@@ -611,3 +611,43 @@ def test_replay_never_executes_a_provider_or_a_model(client, tmp_path, monkeypat
     assert run(client, "food-stock", execution="replay").status_code == 200
     assert run(client, "food-stock", mode="developer", execution="replay").status_code == 200
     assert list(client.session_logs()) == sessions_before                 # nothing was written either
+
+
+# --- the evidence scenario ------------------------------------------------------------------------------------------------------------------
+
+
+def test_the_evidence_review_quotes_the_exact_records_and_does_not_resolve_what_the_records_cannot(client):
+    body = run(client, "evidence-anomaly").json()
+    review = body["evidence_review"]
+    assert review["kind"] == "observed" and review["complete"] is True and review["assessment"] == "unresolved"
+    texts = " | ".join(r["text"] for r in review["records"])
+    assert "quantity: 3" in texts and "bought 12 tinned tomatoes" in texts
+    assert {r["source"] for r in review["records"]} == {"household/food/stock.yaml", "household/shopping-list.md"}
+    assert all(isinstance(r["line"], int) and r["line"] > 0 for r in review["records"]) and len(review["needed"]) == 2
+    assert "evidence_review" not in run(client, "food-stock").json()          # only the scenario that has a review gets one
+
+
+def test_the_catalogues_assessment_agrees_with_the_fixture():
+    root = demo.FIXTURE
+    stock = (root / "household/food/stock.yaml").read_text(encoding="utf-8")
+    assert "name: tinned tomatoes\n    category: tinned\n    quantity: 3" in stock and "updated: 2026-10-01" in stock
+    assert "- [ ] bought 12 tinned tomatoes" in (root / "household/shopping-list.md").read_text(encoding="utf-8")   # unticked, under Need
+    assert not [f for f in demo.fixture_files() if any(w in f.lower() for w in ("receipt", "purchase", "order"))]     # the needed evidence really is absent
+
+
+def test_a_missing_expected_record_is_reported_as_unavailable_not_filled_in(client):
+    (client.household / "household" / "shopping-list.md").write_text("# nothing here\n", encoding="utf-8")
+    review = run(client, "evidence-anomaly", mode="developer").json()["evidence_review"]
+    assert review["complete"] is False and review["assessment"] == "unavailable" and review["needed"] == []
+
+
+def test_no_review_is_produced_from_a_root_that_is_not_verified_synthetic(tmp_path, monkeypatch):
+    c = _client(tmp_path, monkeypatch, guest=False)
+    body = run(c, "evidence-anomaly", mode="developer").json()
+    assert "evidence_review" not in body
+
+
+def test_a_recording_with_a_review_naming_a_foreign_source_is_rejected(client):
+    good = _good_recording(client)
+    good["evidence_review"] = {"records": [{"source": "household/finance/bank.csv", "line": 1, "text": "x"}]}
+    assert demo.validate_recording(good, "food-stock")[0] is False

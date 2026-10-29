@@ -1,0 +1,174 @@
+{
+  "execution": "live",
+  "guest_safety": null,
+  "labels": {
+    "household_data": "as configured on this instance",
+    "live": true,
+    "replayed": false,
+    "shadow_present": true,
+    "simulated_tools": false
+  },
+  "mode": "developer",
+  "observed": {
+    "binding": {
+      "backend": "http://127.0.0.1:11434/api/chat",
+      "host": null,
+      "model": "gemma4:12b",
+      "model_note": null,
+      "tools": []
+    },
+    "consultations": [],
+    "error": null,
+    "execution": {
+      "kind": "solo",
+      "outcome": "model",
+      "source": "model",
+      "why": "one model-written reply from the lead persona; no support was justified"
+    },
+    "kind": "observed",
+    "lead": {
+      "method": "routing-contract-v0.2",
+      "persona": "sanji",
+      "reasons": [
+        "pantry",
+        "stock",
+        "shopping"
+      ],
+      "router_choice": "sanji",
+      "source": "auto"
+    },
+    "measurements": {
+      "latency": {
+        "source": "request timer",
+        "status": "measured",
+        "unit": "ms",
+        "value": 7033
+      },
+      "model_calls": {
+        "reason": "not instrumented on this path; consultations recorded: 0",
+        "status": "unavailable"
+      },
+      "paid_cost": {
+        "reason": "not instrumented",
+        "status": "unavailable"
+      },
+      "retries_rework_human_correction": {
+        "reason": "not instrumented",
+        "status": "unavailable"
+      },
+      "tokens": {
+        "reason": "the model backend returns no token count to this path",
+        "status": "unavailable"
+      },
+      "tool_operations": {
+        "source": "no tool ran",
+        "status": "measured",
+        "unit": "count",
+        "value": 0
+      }
+    },
+    "recorded_at": null,
+    "sources": [],
+    "text": "I could not confirm the quantity of tomato tins currently in the pantry. Please check the stock and let me know the correct amount so I can reconcile the records.",
+    "verification": {
+      "reason": "this path records no independent verification of a model-written answer",
+      "status": "unavailable"
+    }
+  },
+  "offline_evaluations": [
+    {
+      "exists": true,
+      "headline": "8 distinct tasks: no verdict meets the 20-task floor; specialist consultation shows no established quality gain and about 1.4 s extra latency",
+      "is_this_run": false,
+      "kind": "offline_evaluation",
+      "path": "evals/misumi-six-eyes/results/2026-10-28-team-eval-v2-hierarchical.md",
+      "title": "Six Eyes on the -11 team evaluation, cluster-aware"
+    },
+    {
+      "exists": true,
+      "headline": "as frozen: production 5/8, candidate 7/8; the candidate was not promoted",
+      "is_this_run": false,
+      "kind": "offline_evaluation",
+      "path": "evals/misumi-allocation/results/2026-10-28-heldout-v1.md",
+      "title": "Allocation decision evaluation, held-out v1 (anomaly, 8 cases)"
+    }
+  ],
+  "recorded_at": "2026-10-29T01:21:23Z",
+  "request": {
+    "prompt": "The pantry stock says we have 3 tins of tomatoes but the shopping list says we bought 12 this month. Which is right?",
+    "prompt_source": "catalogue-fixed"
+  },
+  "scenario": {
+    "id": "evidence-anomaly",
+    "title": "Evidence and conflicting records"
+  },
+  "schema": "misumi-demo-inspection-v1",
+  "shadow_proposal": {
+    "kind": "shadow_proposal",
+    "live_effect": "none",
+    "note": "this is what the candidate would propose; it did not run, was not applied and holds no permission",
+    "proposal": {
+      "adequacy": {
+        "deterministic_path": "not assessed (none registered with this module)",
+        "solo_adequate": true
+      },
+      "authority": {
+        "granted": false,
+        "implied_tool": null,
+        "owner_approval_required": false,
+        "reason": "no-action-verb",
+        "required": "none"
+      },
+      "decision": "solo",
+      "eligible": [
+        {
+          "cues": [
+            "pantry",
+            "stock",
+            "shopping"
+          ],
+          "edge": false,
+          "persona": "sanji",
+          "uncertainty": "low"
+        },
+        {
+          "cues": [
+            "tomatoes"
+          ],
+          "edge": false,
+          "persona": "ginko",
+          "uncertainty": "high"
+        }
+      ],
+      "excluded": [],
+      "lead": "sanji",
+      "lead_source": "routing-contract-v0.2",
+      "limitations": [
+        "cue evidence only: a persona's routing words are not evidence of competence",
+        "expected benefit of any support is unproven (see -11 evaluation)",
+        "required authority is inferred from the request's verbs and is advisory; the runtime policy still enforces at execution"
+      ],
+      "live_effect": "none",
+      "method": "allocation-shadow-v0",
+      "overhead": {
+        "expected_extra_model_calls": 0,
+        "latency_prior": {
+          "distinct_tasks": 8,
+          "observed_mean_extra_seconds_per_team_turn": 1.4,
+          "status": "indicative"
+        }
+      },
+      "production": {
+        "decision": "solo",
+        "supports": [],
+        "supports_agree": true
+      },
+      "reasons": [
+        "no-cross-domain-check-or-named-persona"
+      ],
+      "supports": [],
+      "uncertainty": []
+    },
+    "status": "experimental; did NOT meet its pre-registered promotion criteria"
+  }
+}

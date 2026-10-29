@@ -2485,11 +2485,11 @@ def setup_misumi_routes(
         provenance = demo.provenance_stamp(ready, _demo_household_root())
         lease = demo_sessions.begin(key)
         try:
-            return await _demo_live(request, scenario, body, prompt, prompt_source, lease, provenance)
+            return await _demo_live(request, scenario, body, prompt, prompt_source, lease, provenance, ready)
         finally:
             demo_sessions.finish(lease)
 
-    async def _demo_live(request, scenario, body, prompt, prompt_source, lease, provenance):
+    async def _demo_live(request, scenario, body, prompt, prompt_source, lease, provenance, ready):
         shadow: Optional[Dict[str, Any]] = None
         with events.scoped(lease.path):
             preview = route_explain(request, MisumiRouteExplainRequest(prompt=prompt, persona="auto"))
@@ -2531,6 +2531,9 @@ def setup_misumi_routes(
                 logger.warning("demo shadow proposal unavailable: %s", type(exc).__name__)
         inspection = demo.build_inspection(scenario, mode=body.mode, execution="live", prompt=prompt, prompt_source=prompt_source,
                                            preview=preview, response=response, event=event, shadow=shadow, error=error, provenance=provenance)
+        review = demo.evidence_review(scenario, _demo_household_root()) if ready else None
+        if review is not None:
+            inspection["evidence_review"] = review
         if body.mode == "developer":
             inspection["phase_b_input"] = demo.phase_b_row(inspection)
         return inspection

@@ -1,4 +1,9 @@
 {
+  "capture": {
+    "fixture_sha256": "9c1a64144d56582770087861ae38ccb031f3b4b8d31139755f33db832e3adc56",
+    "recorder": "evals/misumi-demo/record.py",
+    "source_revision": "4ed134b53f587af5f97a3c119799284eec6775df"
+  },
   "execution": "live",
   "guest_safety": null,
   "labels": {
@@ -86,7 +91,13 @@
       "title": "Allocation decision evaluation, held-out v1 (music, 6 cases)"
     }
   ],
-  "recorded_at": "2026-10-29T01:21:24Z",
+  "provenance": {
+    "checked": "household and source roots, data directory, state stores, links, music runtime, research roots",
+    "fixture_sha256": "9c1a64144d56582770087861ae38ccb031f3b4b8d31139755f33db832e3adc56",
+    "marker": "6b5f57e8e346c4bb",
+    "synthetic_verified": true
+  },
+  "recorded_at": "2026-10-29T12:15:31Z",
   "request": {
     "prompt": "play Kind of Blue by Miles Davis on the kitchen speaker",
     "prompt_source": "catalogue-fixed"

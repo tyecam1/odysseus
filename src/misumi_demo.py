@@ -320,6 +320,9 @@ def validate_recording(data: Any, scenario_id: str) -> Tuple[bool, str]:
     sources = data["observed"].get("sources")
     if not isinstance(sources, list) or any(not isinstance(s, str) or s not in allowed for s in sources):
         return False, "recording names a source outside the synthetic fixture"
+    review = data.get("evidence_review")
+    if review is not None and (not isinstance(review, dict) or any(not isinstance(r, dict) or r.get("source") not in allowed for r in review.get("records", []))):
+        return False, "evidence review names a source outside the synthetic fixture"
     encoded = json.dumps(data, ensure_ascii=False)
     if len(encoded) > 65536:
         return False, "recording is larger than a demonstration record"
@@ -482,6 +485,35 @@ def build_inspection(scenario: Mapping[str, Any], *, mode: str, execution: str, 
     return record
 
 
+def evidence_review(scenario: Mapping[str, Any], household_root: Optional[Path]) -> Optional[Dict[str, Any]]:
+    """A deterministic review of the exact records a scenario is about: the lines are read straight from the synthetic fixture files (no model),
+    quoted with file and line, followed by the catalogue's assessment of what they do and do not establish and what evidence is missing.
+    Only files that exist in the approved fixture are read, and only ever from a root that already passed verify_synthetic."""
+    spec = scenario.get("evidence_review")
+    if not isinstance(spec, Mapping) or household_root is None:
+        return None
+    root, allowed, found = _real(household_root), fixture_files(), []
+    for item in spec.get("records", []):
+        rel = str(item.get("path", ""))
+        full = Path(root) / rel
+        if rel not in allowed or not full.is_file() or not _inside(_real(full), root):
+            continue
+        lines = full.read_text(encoding="utf-8", errors="replace").splitlines()
+        for number, text in enumerate(lines, 1):
+            if not re.search(item["match"], text, re.IGNORECASE):
+                continue
+            if item.get("after") and not any(re.search(item["after"], previous, re.IGNORECASE) for previous in lines[max(0, number - 4):number - 1]):
+                continue   # the line only counts under its item
+            found.append({"role": _clip(item.get("role"), 80), "source": rel, "line": number, "text": _clip(text.strip(), 160)})
+            break
+    complete = len(found) == len(spec.get("records", []))
+    return {"kind": "observed", "what": "the records were read directly from the household files; no model was used",
+            "records": found, "complete": complete,
+            "assessment": spec.get("assessment") if complete else "unavailable",
+            "why": spec.get("why") if complete else "an expected record was not found in the household files",
+            "needed": [str(n)[:200] for n in spec.get("needed", [])][:4] if complete else []}
+
+
 def _evaluations(scenario: Mapping[str, Any]) -> List[Dict[str, Any]]:
     return [{"kind": "offline_evaluation", "title": e["title"], "path": e["path"], "headline": e["headline"],
              "is_this_run": False, "exists": (REPO / e["path"]).is_file()} for e in scenario.get("evaluations", [])]
@@ -511,7 +543,7 @@ def load_recording(scenario_id: str) -> Optional[Dict[str, Any]]:
     return data if validate_recording(data, scenario_id)[0] else None
 
 
-_GUEST_TOP = ("schema", "mode", "execution", "labels", "scenario", "request", "observed", "guest_safety", "offline_evaluations", "shadow_proposal", "provenance")
+_GUEST_TOP = ("schema", "mode", "execution", "labels", "scenario", "request", "observed", "guest_safety", "offline_evaluations", "shadow_proposal", "provenance", "evidence_review")
 _GUEST_OBSERVED = ("kind", "recorded_at", "lead", "execution", "binding", "consultations", "verification", "sources", "text", "error", "measurements")
 _GUEST_BINDING = ("model", "backend", "host", "tools", "model_note")
 
