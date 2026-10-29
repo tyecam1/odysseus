@@ -552,6 +552,17 @@ def _backend_label(value: Any, guest: bool) -> Optional[str]:
     return text or None
 
 
+def _scrub(value: Any) -> Any:
+    """Guest-facing text never carries an endpoint-looking string: such a string is replaced, not shown."""
+    if isinstance(value, str):
+        return "[withheld: looked like a network address]" if _looks_private(value) else value
+    if isinstance(value, Mapping):
+        return {key: _scrub(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_scrub(item) for item in value]
+    return value
+
+
 def build_inspection(scenario: Mapping[str, Any], *, mode: str, execution: str, prompt: str, prompt_source: str,
                      preview: Optional[Mapping[str, Any]], response: Optional[Mapping[str, Any]], event: Optional[Mapping[str, Any]],
                      shadow: Optional[Mapping[str, Any]] = None, host: Optional[str] = None, error: Optional[str] = None,
@@ -601,6 +612,9 @@ def build_inspection(scenario: Mapping[str, Any], *, mode: str, execution: str, 
             "retries_rework_human_correction": unavailable("not instrumented"),
         },
     }
+    if guest:     # the live guest path gets the same protection as a guest replay
+        observed["binding"] = guest_binding(observed["binding"])
+        observed = _scrub(observed)
     record: Dict[str, Any] = {
         "schema": SCHEMA, "mode": mode, "execution": execution,
         "labels": {"live": live, "replayed": not live, "simulated_tools": simulated, "shadow_present": bool(shadow) and not guest,

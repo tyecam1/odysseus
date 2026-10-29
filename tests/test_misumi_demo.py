@@ -872,3 +872,10 @@ def test_deeply_nested_entities_are_treated_as_an_endpoint_attempt():
     for _ in range(40):
         text = text.replace("&", "&#38;")
     assert demo._looks_private(text)
+
+
+def test_a_live_guest_inspection_never_shows_an_endpoint_in_text_or_binding():
+    shown = demo.build_inspection({"id": "s", "title": "t"}, mode="guest", execution="live", prompt="p", prompt_source="catalogue", preview=None,
+                                  response={"text": "https://x", "source": "model"}, event={"model": "box:8080", "backend": "box:8080"})["observed"]
+    assert shown["text"] != "https://x" and "withheld" in shown["text"]
+    assert shown["binding"]["model"] is None and shown["binding"]["backend"] is None and shown["binding"]["host"] is None
