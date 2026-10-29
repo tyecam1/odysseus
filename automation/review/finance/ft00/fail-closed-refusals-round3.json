@@ -1,0 +1,57 @@
+{
+  "goal_id": "FT-00",
+  "note": "fail-closed refusals against the round-3 code",
+  "refusals": [
+    {
+      "case": "t4-dryrun",
+      "rc_expected_3": true,
+      "fail_closed": true,
+      "findings": [
+        "dry_run is not strictly true"
+      ]
+    },
+    {
+      "case": "t4-key",
+      "rc_expected_3": true,
+      "fail_closed": true,
+      "findings": [
+        "exchange.key is set \u2014 no exchange credentials are permitted in simulation-only mode"
+      ]
+    },
+    {
+      "case": "t4-futures",
+      "rc_expected_3": true,
+      "fail_closed": true,
+      "findings": [
+        "trading_mode is 'futures', only spot is permitted",
+        "pair 'BTC/USD:USD' is not a plain spot pair (no ':' derivatives)"
+      ]
+    },
+    {
+      "case": "t4-overlay",
+      "rc_expected_3": true,
+      "fail_closed": true,
+      "findings": [
+        "add_config_files is present \u2014 overlay config files bypass the verified configuration and are not permitted"
+      ]
+    },
+    {
+      "case": "t4-extra",
+      "rc_expected_3": true,
+      "fail_closed": true,
+      "findings": [
+        "extra freqtrade argument '--config' is not in the safe allowlist ['--days', '--dl-trades', '--erase', '--new-pairs-days', '--prepend', '--timerange'] (overlay flags such as --config/-c/--userdir/--strategy are never permitted)",
+        "extra freqtrade argument '/freqtrade/user_data/unsafe.json' is not in the safe allowlist ['--days', '--dl-trades', '--erase', '--new-pairs-days', '--prepend', '--timerange'] (overlay flags such as --config/-c/--userdir/--strategy are never permitted)"
+      ]
+    },
+    {
+      "case": "t4-badpair",
+      "rc_expected_3": true,
+      "fail_closed": true,
+      "findings": [
+        "--pairs entry 'BTC/USD:USD' is not a plain spot pair"
+      ]
+    }
+  ],
+  "observed_at": "2026-10-29T18:29:16Z"
+}
