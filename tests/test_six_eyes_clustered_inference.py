@@ -202,3 +202,39 @@ def test_unequal_runs_per_task_weight_each_run_equally_and_resample_tasks():
             rows += [_row(f"t{t}/{r}", "a", f"t{t}"), _row(f"t{t}/{r}", "b", f"t{t}", ok=False)]
     result = ep.compare(ep.parse(rows), "a", "b")
     assert result["matched_runs"] == 50 and result["matched_tasks"] == 20 and result["difference"] == 1.0
+
+
+# --- independent review findings (Sol, 2026-10-29) ---------------------------------------------------------------------------------
+
+
+def _safety_rows(n, a_safety, b_safety, a_ok=True, b_ok=False):
+    return ep.parse([{"task_id": f"t{i}", "plan": p, "verified": a_ok if p == "a" else b_ok,
+                      "safety_ok": (a_safety(i) if p == "a" else b_safety(i)), "costs": {"x": 1.0}} for i in range(n) for p in ("a", "b")])
+
+
+def test_a_winning_verdict_names_which_plan_had_unmeasured_safety():
+    result = ep.compare(_safety_rows(20, lambda i: None, lambda i: True), "a", "b")
+    assert result["verdict"] == "a_better" and result["safety_by_plan"] == {"a": "unmeasured", "b": "measured"}
+    assert "not fully measured for a" in result["safety_caveat"] and "not evidence of safety" in result["safety_caveat"]
+    one_gap = ep.compare(_safety_rows(20, lambda i: None if i == 0 else True, lambda i: True), "a", "b")
+    assert one_gap["safety_by_plan"]["a"] == "partial" and one_gap["safety_caveat"]
+    clean = ep.compare(_safety_rows(20, lambda i: True, lambda i: True), "a", "b")
+    assert clean["safety_caveat"] is None
+
+
+def test_the_front_carries_the_same_safety_caveat():
+    front = ep.pareto_front(_safety_rows(20, lambda i: None, lambda i: True), ("x",))
+    assert front["safety_measured"] == {"a": "unmeasured", "b": "measured"} and "not fully measured for a" in front["safety_caveat"]
+
+
+def test_a_measured_safety_failure_below_the_floor_offers_no_direction():
+    result = ep.compare(_safety_rows(19, lambda i: i != 0, lambda i: True), "a", "b")
+    assert result["verdict"] == "insufficient" and result["safety_violations"] == {"a": 1, "b": 0}
+    assert result["indicative"]["direction"] == "withheld" and result["indicative"]["interval"] is None
+
+
+def test_singleton_summaries_keep_the_callers_row_order_and_reproduce_the_old_flat_interval():
+    rows = [{"task_id": f"t{i:02d}", "plan": "a", "verified": i < 10, "safety_ok": True, "costs": {"x": 1.0}} for i in range(30)]
+    rotated = rows[5:] + rows[:5]
+    expected = ep._bootstrap([1.0 if r["verified"] else 0.0 for r in rotated], 1)
+    assert ep.summarise(ep.parse(rotated), ("x",))["a"]["verified_interval"] == expected

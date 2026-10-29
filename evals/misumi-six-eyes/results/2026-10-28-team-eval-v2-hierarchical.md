@@ -28,8 +28,8 @@ Where the two judges agree (versus `solo`, indicative):
 | plan | distinct tasks | task-runs | verified | 95% interval (hierarchical) | mean latency (s) | dropped (no verdict) |
 |---|---|---|---|---|---|---|
 | solo | 8 | 192 | 94.3% | 86.5% to 100.0% | 3.43 | 0 |
-| team | 8 | 192 | 77.1% | 64.6% to 88.5% | 4.47 | 0 |
-| teamfix | 8 | 192 | 87.5% | 72.9% to 97.9% | 4.24 | 0 |
+| team | 8 | 192 | 77.1% | 64.6% to 89.1% | 4.47 | 0 |
+| teamfix | 8 | 192 | 87.5% | 75.0% to 97.9% | 4.24 | 0 |
 | teamdrop | 8 | 192 | 95.8% | 91.1% to 99.5% | 4.84 | 0 |
 
 Paired differences versus `solo` (resampling tasks, then runs; positive verified = plan better). The evidence floor is 20 distinct tasks, so every reading below is indicative only:
@@ -49,10 +49,10 @@ Pareto front on (verified up, latency down): 0 distinct tasks (0 runs) common to
 
 | plan | distinct tasks | task-runs | verified | 95% interval (hierarchical) | mean latency (s) | dropped (no verdict) |
 |---|---|---|---|---|---|---|
-| solo | 8 | 192 | 31.8% | 21.9% to 42.2% | 3.43 | 0 |
-| team | 8 | 192 | 30.7% | 17.7% to 42.7% | 4.47 | 0 |
-| teamfix | 8 | 192 | 45.8% | 27.6% to 64.6% | 4.24 | 0 |
-| teamdrop | 8 | 192 | 41.7% | 28.1% to 57.3% | 4.84 | 0 |
+| solo | 8 | 192 | 31.8% | 22.4% to 41.7% | 3.43 | 0 |
+| team | 8 | 192 | 30.7% | 18.2% to 43.8% | 4.47 | 0 |
+| teamfix | 8 | 192 | 45.8% | 28.6% to 65.1% | 4.24 | 0 |
+| teamdrop | 8 | 192 | 41.7% | 27.6% to 57.3% | 4.84 | 0 |
 
 Paired differences versus `solo` (resampling tasks, then runs; positive verified = plan better). The evidence floor is 20 distinct tasks, so every reading below is indicative only:
 
@@ -83,7 +83,7 @@ Where the two judges agree (versus `solo`, indicative):
 |---|---|---|---|---|---|---|
 | solo | 8 | 96 | 88.5% | 72.9% to 100.0% | 3.61 | 0 |
 | team | 8 | 96 | 96.9% | 88.5% to 100.0% | 4.49 | 0 |
-| teamfix | 8 | 96 | 75.0% | 49.0% to 95.8% | 4.36 | 0 |
+| teamfix | 8 | 96 | 75.0% | 49.0% to 94.8% | 4.36 | 0 |
 | teamdrop | 8 | 96 | 92.7% | 83.3% to 100.0% | 4.72 | 0 |
 
 Paired differences versus `solo` (resampling tasks, then runs; positive verified = plan better). The evidence floor is 20 distinct tasks, so every reading below is indicative only:
@@ -104,9 +104,9 @@ Pareto front on (verified up, latency down): 0 distinct tasks (0 runs) common to
 | plan | distinct tasks | task-runs | verified | 95% interval (hierarchical) | mean latency (s) | dropped (no verdict) |
 |---|---|---|---|---|---|---|
 | solo | 8 | 96 | 17.7% | 0.0% to 41.7% | 3.61 | 0 |
-| team | 8 | 96 | 43.8% | 24.0% to 65.6% | 4.49 | 0 |
-| teamfix | 8 | 96 | 32.3% | 8.3% to 61.5% | 4.36 | 0 |
-| teamdrop | 8 | 96 | 31.2% | 7.3% to 58.3% | 4.72 | 0 |
+| team | 8 | 96 | 43.8% | 24.0% to 64.6% | 4.49 | 0 |
+| teamfix | 8 | 96 | 32.3% | 9.4% to 60.4% | 4.36 | 0 |
+| teamdrop | 8 | 96 | 31.2% | 8.3% to 58.3% | 4.72 | 0 |
 
 Paired differences versus `solo` (resampling tasks, then runs; positive verified = plan better). The evidence floor is 20 distinct tasks, so every reading below is indicative only:
 
@@ -136,7 +136,7 @@ Where the two judges agree (versus `solo`, indicative):
 | plan | distinct tasks | task-runs | verified | 95% interval (hierarchical) | mean latency (s) | dropped (no verdict) |
 |---|---|---|---|---|---|---|
 | solo | 8 | 96 | 100.0% | 100.0% to 100.0% | 3.26 | 0 |
-| team | 8 | 96 | 57.3% | 31.2% to 82.3% | 4.45 | 0 |
+| team | 8 | 96 | 57.3% | 33.3% to 82.3% | 4.45 | 0 |
 | teamfix | 8 | 96 | 100.0% | 100.0% to 100.0% | 4.11 | 0 |
 | teamdrop | 8 | 96 | 99.0% | 95.8% to 100.0% | 4.96 | 0 |
 
@@ -157,10 +157,10 @@ Pareto front on (verified up, latency down): 0 distinct tasks (0 runs) common to
 
 | plan | distinct tasks | task-runs | verified | 95% interval (hierarchical) | mean latency (s) | dropped (no verdict) |
 |---|---|---|---|---|---|---|
-| solo | 8 | 96 | 45.8% | 21.9% to 69.8% | 3.26 | 0 |
-| team | 8 | 96 | 17.7% | 3.1% to 37.5% | 4.45 | 0 |
-| teamfix | 8 | 96 | 59.4% | 38.5% to 79.2% | 4.11 | 0 |
-| teamdrop | 8 | 96 | 52.1% | 25.0% to 79.2% | 4.96 | 0 |
+| solo | 8 | 96 | 45.8% | 20.8% to 69.8% | 3.26 | 0 |
+| team | 8 | 96 | 17.7% | 3.1% to 38.5% | 4.45 | 0 |
+| teamfix | 8 | 96 | 59.4% | 38.5% to 80.2% | 4.11 | 0 |
+| teamdrop | 8 | 96 | 52.1% | 24.0% to 80.2% | 4.96 | 0 |
 
 Paired differences versus `solo` (resampling tasks, then runs; positive verified = plan better). The evidence floor is 20 distinct tasks, so every reading below is indicative only:
 

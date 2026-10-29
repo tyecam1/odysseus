@@ -124,11 +124,12 @@ def _bootstrap(values: Sequence[float], seed: int) -> Tuple[float, float]:
 
 
 def _clusters(pairs: Sequence[Tuple[str, float]]) -> List[List[float]]:
-    """Group (cluster, value) pairs into one list of trial values per cluster, in sorted cluster order."""
+    """Group (cluster, value) pairs into one list of trial values per cluster, in first-seen order (so singleton clusters keep the
+    caller's row order and reproduce the earlier flat bootstrap exactly)."""
     grouped: Dict[str, List[float]] = {}
     for name, value in pairs:
         grouped.setdefault(name, []).append(value)
-    return [grouped[name] for name in sorted(grouped)]
+    return list(grouped.values())
 
 
 def _cluster_bootstrap(groups: Sequence[Sequence[float]], seed: int) -> Tuple[float, float]:
@@ -196,7 +197,10 @@ def compare(records: Sequence[Record], plan_a: str, plan_b: str, metric: str = "
     unique = {a[t].group for t in shared}
     result = {"a": plan_a, "b": plan_b, "metric": metric, "matched_tasks": len(unique), "matched_runs": len(shared),
               "difference": None, "interval": None, "verdict": "insufficient", "indicative": None,
-              "safety_measured": _safety_state([a[t] for t in shared] + [b[t] for t in shared]) if shared else "unmeasured"}
+              "safety_measured": _safety_state([a[t] for t in shared] + [b[t] for t in shared]) if shared else "unmeasured",
+              "safety_by_plan": {plan_a: _safety_state([a[t] for t in shared]) if shared else "unmeasured",
+                                 plan_b: _safety_state([b[t] for t in shared]) if shared else "unmeasured"},
+              "safety_caveat": None}
     if not shared:
         return result
     if any(a[t].group != b[t].group for t in shared):
@@ -204,9 +208,19 @@ def compare(records: Sequence[Record], plan_a: str, plan_b: str, metric: str = "
         return result
     unsafe = {plan: sum(1 for t in shared if rows[t].safety_ok is False) for plan, rows in ((plan_a, a), (plan_b, b))}
     enough = len(unique) >= _floor(min_matched)
-    if enough and any(unsafe.values()):
-        result.update(verdict="safety_violation", safety_violations=unsafe)
+    if any(unsafe.values()):
+        # a measured safety failure is reported at any evidence level and no direction is offered, indicative or otherwise
+        result.update(safety_violations=unsafe)
+        if enough:
+            result["verdict"] = "safety_violation"
+        else:
+            result["indicative"] = {"difference": None, "interval": None, "direction": "withheld",
+                                    "note": "a safety-floor violation was measured; no direction is offered below the evidence floor"}
         return result
+    unmeasured = [plan for plan, state in result["safety_by_plan"].items() if state != "measured"]
+    if unmeasured:
+        result["safety_caveat"] = ("safety was not fully measured for " + ", ".join(unmeasured) +
+                                   ": a verdict here says nothing about safety, and the absence of a violation is not evidence of safety")
     if metric == "verified":
         diffs = [(a[t].group, (1.0 if a[t].verified else 0.0) - (1.0 if b[t].verified else 0.0)) for t in shared]
     else:
@@ -272,6 +286,8 @@ def pareto_front(records: Sequence[Record], dimensions: Sequence[str], min_tasks
     out = {"front": [], "dominated": {}, "excluded": excluded, "dimensions": list(dimensions), "common_tasks": distinct_common,
            "common_runs": len(common), "insufficient": False,
            "safety_measured": {plan: _safety_state(list(rows.values())) for plan, rows in candidates.items()}}
+    out["safety_caveat"] = ("safety was not fully measured for " + ", ".join(sorted(p for p, s in out["safety_measured"].items() if s != "measured")) +
+                            ": a place on the front says nothing about safety") if any(s != "measured" for s in out["safety_measured"].values()) else None
     if distinct_common < floor:
         out["insufficient"] = bool(candidates)
         return out

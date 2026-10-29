@@ -39,7 +39,7 @@ from src.misumi_routing_v02 import (
 )
 from src.misumi_team_formation import MAX_SUPPORT, term_positions
 
-METHOD = "allocation-shadow-v0"
+METHOD = "allocation-shadow-v0.1"  # v0.1: review fixes (removal verbs, negated cross-check, ceiling can escalate); v0 was the held-out v1 candidate
 LIVE_EFFECT = "none"
 HEAD = FALLBACK
 # Observed, not predicted: mean extra turn latency of the deployed consultation (teamdrop) versus solo in the -11 evaluation
@@ -61,7 +61,10 @@ _PRIVACY = re.compile(
 _ACTIONS = (
     ("blocked", "email_send", re.compile(r"\b(?:e-?mail|send\s+(?:an?\s+)?(?:e-?mail|message)|post\s+to)\b", re.I)),
     ("blocked", "bank_write", re.compile(r"\b(?:pay|transfer|wire|withdraw|send\s+money)\b", re.I)),
-    ("blocked", "destructive_delete", re.compile(r"\b(?:delete|erase|wipe|purge|destroy)\b", re.I)),
+    ("blocked", "destructive_delete", re.compile(
+        r"\b(?:delete|erase|wipe|purge|destroy)\b|"
+        r"\b(?:remove|trash|get\s+rid\s+of|clear\s+out)\b[^.?!]{0,60}\b(?:recordings?|transcripts?|logs?|archives?|history|voice|files?|backups?|account|data)\b",
+        re.I)),
     ("playback_control", "playback", re.compile(r"\b(?:play|pause|resume|skip|queue|put\s+on)\b", re.I)),
     ("scoped_write", "scoped_record_write", re.compile(r"\b(?:add|remember|archive|save|update|note\s+that)\b", re.I)),
 )
@@ -153,6 +156,13 @@ def propose(
         escalations.append("reserved-matter")
     if authority["required"] == "blocked":
         escalations.append(f"authority-beyond-ceiling:{authority['implied_tool']}")
+    elif authority.get("implied_tool") and callable(blocked_tools_of):
+        # The persona only CHECKS the ceiling; it never changes what is required. A lead whose policy blocks the tool needs escalation.
+        try:
+            if authority["implied_tool"] in set(blocked_tools_of(lead) or []):
+                escalations.append(f"blocked-for-lead:{authority['implied_tool']}")
+        except Exception:
+            proposal["uncertainty"].append("the persona policy could not be read, so the lead's tool ceiling was not checked")
     if escalations:
         proposal.update(decision="escalate", reasons=escalations)
         proposal["adequacy"]["solo_adequate"] = False
@@ -169,7 +179,7 @@ def propose(
     if lead != HEAD:
         pool = [p for p in pool if p in edges]
     named = {p for p in pool if term_positions(text, list(dict.fromkeys((p, names.get(p, p)))))}
-    cross_check = bool(_CROSS_CHECK.search(text))
+    cross_check = _ignore_negated(text, _CROSS_CHECK)  # "do not compare X" is not a request to cross-check
 
     off_edge = [p for p in order if p in evidence and p not in (HEAD, lead) and lead != HEAD and p not in edges
                 and (cross_check or term_positions(text, list(dict.fromkeys((p, names.get(p, p))))))]

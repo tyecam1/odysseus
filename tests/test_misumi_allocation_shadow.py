@@ -179,3 +179,38 @@ def test_runner_scores_by_the_documented_rule():
     assert run.score(case, {"decision": "team", "lead": "sanji", "supports": ["l"]}) == {"decision": True, "team_axis": True, "lead": True}
     assert run.score(case, {"decision": "team", "lead": "sanji", "supports": ["kurisu"]})["decision"] is False
     assert run.score(case, {"decision": "solo", "lead": "ginko", "supports": []}) == {"decision": False, "team_axis": False, "lead": False}
+
+
+# --- independent review findings (Sol, 2026-10-29) ---------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("prompt", [
+    "Remove all the guests voice recordings from the archive", "Get rid of the transcripts from last month", "Trash the backup files",
+])
+def test_removal_verbs_on_records_escalate_like_delete(prompt):
+    result = propose(prompt)
+    assert result["decision"] == "escalate" and result["authority"]["implied_tool"] == "destructive_delete" and result["supports"] == []
+
+
+def test_an_ordinary_removal_is_not_a_destructive_action():
+    assert shadow.required_authority("Remove the onions from the dinner list")["required"] != "blocked"
+
+
+def test_a_negated_cross_check_does_not_recruit_a_support():
+    result = propose("Do not compare the grocery bill against the pantry, just tell me the pantry stock")
+    assert result["decision"] == "solo" and result["supports"] == []
+    assert propose("Compare the grocery bill against the pantry")["decision"] == "team"
+
+
+def test_a_lead_whose_policy_blocks_the_implied_tool_escalates_without_changing_what_is_required():
+    plain = propose("Add milk to the pantry list")
+    blocked = propose("Add milk to the pantry list", blocked_tools_of=lambda persona: ["scoped_record_write"])
+    assert plain["decision"] == "solo" and blocked["decision"] == "escalate" and "blocked-for-lead:scoped_record_write" in blocked["reasons"]
+    assert plain["authority"]["required"] == blocked["authority"]["required"] == "scoped_write"
+
+
+def test_an_unreadable_policy_is_noted_and_does_not_silently_pass_or_block():
+    def boom(_):
+        raise RuntimeError("no policy")
+    result = propose("Add milk to the pantry list", blocked_tools_of=boom)
+    assert result["decision"] == "solo" and any("could not be read" in note for note in result["uncertainty"])

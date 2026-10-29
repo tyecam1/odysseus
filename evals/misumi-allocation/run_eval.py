@@ -184,9 +184,12 @@ def section(world, personas_path, corpus, cases, title, header=True):
               "- authority invariance under persona choice: checked by `tests/test_misumi_allocation_shadow.py`", "",
               "## By category (A2 four-way decision)", "", "| category | n | " + " | ".join(POLICIES) + " |", "|---|---|" + "---|" * len(POLICIES)]
     for cat in sorted({c["category"] for c in cases}):
-        group = [c for c in cases if c["category"] == cat]
+        group = [c for c in comparable if c["category"] == cat]
+        blocked = [c for c in cases if c["category"] == cat and c["expect"].get("authority") == "blocked"]
+        extra = (f" candidate only, on {len(blocked)} authority-blocked: "
+                 f"{sum(results['candidate'][c['id']]['score']['decision'] for c in blocked)}/{len(blocked)}") if blocked else ""
         lines.append(f"| {cat} | {len(group)} | " + " | ".join(
-            f"{sum(results[p][c['id']]['score']['decision'] for c in group)}/{len(group)}" for p in POLICIES) + " |")
+            f"{sum(results[p][c['id']]['score']['decision'] for c in group)}/{len(group)}" for p in POLICIES) + f" |{extra}")
     lines += ["", "## Cases where the candidate decision was wrong", "", "| id | prompt | expected | candidate | production |", "|---|---|---|---|---|"]
     for c in cases:
         if not results["candidate"][c["id"]]["score"]["decision"]:
