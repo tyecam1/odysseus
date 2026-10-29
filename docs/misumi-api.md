@@ -228,3 +228,14 @@ The interface-box server appends `/respond`. Store `ODYSSEUS_API_TOKEN` only in 
 `POST /misumi/respond` now accepts `history_mode` (`"auto"` or `"off"`), an independent control for the ordinary conversation session history. `retention_mode` continues to govern semantic memory and artifacts. When `history_mode` is omitted the historical coupling is kept so that clients which send `retention_mode: "off"` to mean "store nothing" stay private; `persist_turn: false` is always incognito. The response reports `history_persisted`.
 
 Durable, owner-scoped, idempotent microphone transcripts live under `/misumi/transcript/*` (audio ingest, text ingest, wake attachment, bounded query/export, retention policy, box day-file import). Disabled by default (`ODYSSEUS_MISUMI_TRANSCRIPT_ENABLED`) and gated per owner. See `docs/misumi-durable-transcript-runtime.md`.
+
+## Evaluation-linked demonstration (`/misumi/demo/*`)
+
+A labelled view over the existing handlers, not a second execution path or schema (`src/misumi_demo.py`). Scope `misumi:read` only.
+
+- `GET /misumi/demo/scenarios`: the catalogue (`config/misumi_demo_scenarios.json`), whether guest mode is available on this instance and why, which scenarios have recordings, and the five evidence kinds.
+- `POST /misumi/demo/run` `{scenario_id, mode: "guest"|"developer", execution: "live"|"replay", prompt?}`: runs the scenario through the same `/respond` handler (household resolution, model, consultation; persistence, learning and memory forced off) or, for music, the same `music_reply` parser and `MusicController` with a `SimulatedMusicProvider`. Returns one inspection record (`misumi-demo-inspection-v1`). Every section is labelled `observed`, `simulated`, `replay`, `offline_evaluation` or `shadow_proposal`, and every measurement is `measured` or `unavailable` with a reason (tokens, paid cost and model calls are not instrumented on this path and are reported unavailable, never estimated).
+- **Guest mode** is fail-closed: the instance must be started with `MISUMI_DEMO_GUEST=1` and a `MISUMI_HOUSEHOLD_ROOT` that carries a `.synthetic-household` marker; prompts are the catalogue's exactly; the host name, source paths, shadow proposals and evaluations are not returned. Anything else answers 409/422.
+- **Developer mode** may replace the prompt (`prompt_source: "operator-typed"`), shows the real model/backend/host, consultations, offline evaluation references and the experimental shadow allocation proposal (never executed, `live_effect: none`, labelled as having failed its promotion criteria), and a Phase B input row whose judgement fields are empty.
+- `POST /misumi/demo/reset`: only on a guest instance; recreates the simulated music state and deletes the instance's event log.
+- Replay serves a stored inspection (`evals/misumi-demo/recordings`, captured by `evals/misumi-demo/record.py`, never overwritten) labelled as a replay.

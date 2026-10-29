@@ -1,0 +1,54 @@
+#!/usr/bin/env python3
+"""Capture recordings for replay: run each catalogued scenario LIVE in developer mode against a running disposable instance and store the
+inspection exactly as returned (minus the Phase B input row), with the time it was recorded. Replay later shows it as a replay, never as live.
+
+    MISUMI_DEMO_URL=http://127.0.0.1:18431 MISUMI_DEMO_TOKEN=ody_... python evals/misumi-demo/record.py [--out DIR]
+
+Recordings are evidence: an existing file is never overwritten (delete it deliberately to re-record). The instance must be a synthetic
+household instance so nothing private can enter a recording; the host name is dropped.
+"""
+
+import argparse
+import datetime
+import json
+import os
+import sys
+import urllib.request
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+SCENARIOS = ("food-stock", "evidence-anomaly", "music-simulated")
+
+
+def call(base, token, scenario):
+    request = urllib.request.Request(base.rstrip("/") + "/misumi/demo/run", method="POST",
+                                     data=json.dumps({"scenario_id": scenario, "mode": "developer"}).encode(),
+                                     headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"})
+    with urllib.request.urlopen(request, timeout=180) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--out", type=Path, default=HERE / "recordings")
+    args = ap.parse_args(argv)
+    base, token = os.environ.get("MISUMI_DEMO_URL", ""), os.environ.get("MISUMI_DEMO_TOKEN", "")
+    if not base or not token:
+        sys.exit("set MISUMI_DEMO_URL and MISUMI_DEMO_TOKEN")
+    args.out.mkdir(parents=True, exist_ok=True)
+    for scenario in SCENARIOS:
+        target = args.out / f"{scenario}.json"
+        if target.exists():
+            print("kept existing recording", target.name)
+            continue
+        record = call(base, token, scenario)
+        record.pop("phase_b_input", None)
+        record["observed"]["binding"]["host"] = None
+        record["recorded_at"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        target.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n")
+        print("recorded", target.name, record["observed"]["execution"]["kind"])
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
