@@ -333,13 +333,32 @@ _RECORDING_KEYS = frozenset({"schema", "mode", "execution", "labels", "scenario"
                              "shadow_proposal", "provenance", "evidence_review", "capture", "recorded_at"})
 
 
-_LABEL = re.compile(r"[A-Za-z0-9 _/-]{1,48}")
-_MODEL_NAME = re.compile(r"[A-Za-z0-9_-]{1,40}(?:\.\d{1,3}){0,3}(?::(?!\d+$)[A-Za-z0-9_-]{1,24})?")   # "gemma4:12b", "llama3.1:8b"; "host:11434" and "a.example.org" are endpoints
+# Allowlists, not blacklists: a guest only ever sees a binding label the runtime itself emits. A lexical check cannot tell a host from a name,
+# so the shapes below are the ones the recorder produces; anything else makes the recording unreplayable (fail closed) until it is reviewed.
+_BACKEND = re.compile(r"household-read-only|model endpoint /(?:[A-Za-z0-9_.-]{1,40}(?:/[A-Za-z0-9_.-]{1,40}){0,3})?")
+_MODEL = re.compile(r"(?:gemma|llama|qwen|mistral|phi|gpt|deepseek|granite)[A-Za-z0-9_-]{0,30}(?:\.\d{1,3}){0,3}(?::(?!\d+$)[A-Za-z0-9_-]{1,24})?")
+_TOOL = re.compile(r"(?:music|household|records|food|research|evidence|finance|plants|cleaning)\.[a-z_*]{1,30}(?::[a-z_]{1,20})?")
+_MODEL_NOTES = frozenset({"no model was used for this answer"})
 
 
-def safe_label(value: Any, pattern: "re.Pattern[str]" = _LABEL) -> Optional[str]:
+def safe_label(value: Any, pattern: "re.Pattern[str]") -> Optional[str]:
     """A binding label shown to a guest: a short plain name, never a URL, host or port."""
     return value if isinstance(value, str) and pattern.fullmatch(value) and "//" not in value else None
+
+
+def _binding_labels_ok(binding: Mapping[str, Any]) -> bool:
+    tools = binding.get("tools", [])
+    return ((binding.get("backend") is None or safe_label(binding["backend"], _BACKEND) is not None)
+            and (binding.get("model") is None or safe_label(binding["model"], _MODEL) is not None)
+            and (binding.get("model_note") is None or binding["model_note"] in _MODEL_NOTES)
+            and isinstance(tools, list) and all(safe_label(tool, _TOOL) is not None for tool in tools))
+
+
+def guest_binding(binding: Mapping[str, Any]) -> Dict[str, Any]:
+    """The only binding fields a guest can be shown, each rebuilt from an allowlisted shape."""
+    return {"backend": safe_label(binding.get("backend"), _BACKEND), "model": safe_label(binding.get("model"), _MODEL), "host": None,
+            "model_note": binding.get("model_note") if binding.get("model_note") in _MODEL_NOTES else None,
+            "tools": [tool for tool in binding.get("tools", []) if safe_label(tool, _TOOL)] if isinstance(binding.get("tools"), list) else []}
 
 
 def validate_recording(data: Any, scenario_id: str) -> Tuple[bool, str]:
@@ -379,7 +398,7 @@ def _validate_recording(data: Any, scenario_id: str) -> Tuple[bool, str]:
         return False, "recording names a host"
     if set(data["observed"]) - set(_GUEST_OBSERVED) or set(binding) - set(_GUEST_BINDING):
         return False, "recording has fields outside the recording contract"
-    if (binding.get("backend") is not None and safe_label(binding["backend"]) is None) or (binding.get("model") is not None and safe_label(binding["model"], _MODEL_NAME) is None):
+    if not _binding_labels_ok(binding):
         return False, "recording names an endpoint"
     allowed = fixture_files()
     sources = data["observed"].get("sources")
@@ -644,11 +663,7 @@ def replay_from_recording(recording: Mapping[str, Any], *, mode: str) -> Dict[st
     out["observed"]["recorded_at"] = recording.get("recorded_at") or out["observed"].get("recorded_at")
     if mode == "guest":
         out["observed"] = {key: out["observed"][key] for key in _GUEST_OBSERVED if key in out["observed"]}
-        out["observed"]["binding"] = {key: out["observed"]["binding"][key] for key in _GUEST_BINDING if key in out["observed"]["binding"]}
-        out["observed"]["binding"]["host"] = None
-        for field, pattern in (("backend", _LABEL), ("model", _MODEL_NAME)):
-            if field in out["observed"]["binding"]:
-                out["observed"]["binding"][field] = safe_label(out["observed"]["binding"][field], pattern)
+        out["observed"]["binding"] = guest_binding(out["observed"]["binding"])
         out["observed"]["sources"] = []
         out["shadow_proposal"], out["offline_evaluations"] = None, []
         out["provenance"] = {key: out["provenance"].get(key) for key in ("synthetic_verified", "marker", "fixture_sha256")}

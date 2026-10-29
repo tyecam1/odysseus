@@ -767,6 +767,9 @@ def test_overlapping_leases_never_drop_the_newest_record_and_the_cap_holds_at_th
     ("observed", "extra", {"x": 1}), ("binding", "extra", "x"),
     ("binding", "backend", "https://model.example.org:11434/v1/chat"), ("binding", "backend", "model.example.org:11434"),
     ("binding", "model", "model.example.org:11434"), ("binding", "model", ["x"]), ("binding", "model", "model.example.org"), ("binding", "model", "model.example.org:service"),
+    ("binding", "model", "localhost"), ("binding", "model", "LOCALHOST"), ("binding", "model", "localhost:svc"), ("binding", "model", "xn--e1afmkfd"),
+    ("binding", "model", "intranet-box:svc"), ("binding", "backend", "localhost"), ("binding", "backend", "localhost/api/chat"),
+    ("binding", "model_note", "http://model.example.org:11434"), ("binding", "tools", ["model.example.org:service"]), ("binding", "tools", "x"),
     ("top", "scenario", ["x"]), ("top", "evidence_review", {"records": None}), ("top", "evidence_review", {"records": "x"}),
 ])
 def test_recording_contract_is_strict_and_fails_closed_without_raising(client, where, key, value):
@@ -821,4 +824,13 @@ def test_the_byte_cap_holds_after_trimming_not_only_the_line_cap(tmp_path):
 
 @pytest.mark.parametrize("model", ["gemma4:12b", "llama3.1:8b", "qwen3:8b", "gpt-4.1"])
 def test_ordinary_model_tags_still_pass_the_label_check(model):
-    assert demo.safe_label(model, demo._MODEL_NAME) == model
+    assert demo.safe_label(model, demo._MODEL) == model
+
+
+def test_a_guest_binding_is_rebuilt_from_allowlisted_shapes_only(client):
+    rec = _good_recording(client)
+    rec["observed"]["binding"].update(backend="localhost/api/chat", model="localhost:svc", model_note="http://model.example.org:11434",
+                                      tools=["music.search:simulation", "model.example.org:service"])
+    shown = demo.replay_from_recording(rec, mode="guest")["observed"]["binding"]
+    assert shown["backend"] is None and shown["model"] is None and shown["model_note"] is None and shown["host"] is None
+    assert shown["tools"] == ["music.search:simulation"]
