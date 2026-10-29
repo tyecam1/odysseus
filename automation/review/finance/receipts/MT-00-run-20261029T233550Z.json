@@ -1,0 +1,40 @@
+{
+  "goal_id": "MT-00",
+  "kind": "run",
+  "status": "pass",
+  "observed_at": "2026-10-29T23:35:50Z",
+  "run_id": "mt00-lab-20261029T233550Z",
+  "code_commit": "18ab75114451f54830f3bce93f03a7b3c191d648",
+  "verifier": "self-attested-executor (pending independent verification)",
+  "source_config_hash": "8fbf84a03e8eaa3d417a4853d40ed5a946f6630cf872ae6f2b4c07a5650f273c",
+  "data_snapshot_ids": [
+    "automation/review/finance/mt00/snapshot-20261029T233550Z.json"
+  ],
+  "source_access_audit_id": "automation/review/finance/mt00/run-manifest-20261029T233550Z.json",
+  "evaluation_artifacts": [
+    "automation/review/finance/mt00/digest-20261029T233550Z.md"
+  ],
+  "notes": "Live MT-00 probe on hz2-workstation (lab) against the round-5 review-fix code (commit 18ab751, probe v0.5): GDELT DOC 2.0 + HN official API + Kraken public spot candles, all public/no-auth/no-key. Sources at 20261029T233550Z: HN ok (25 records), Kraken ok (24), GDELT ok (62 records; GDELT has had 429 windows today \u2014 honest source_health per run). Round-5 fixes live in this run: hosts are canonicalised (percent-decode, lowercase, trailing dot, IDNA \u2014 UTS-46 via the idna package so fa\u00df.de maps to xn--fa-hia.de, not fass.de) so a publisher's Unicode and punycode hostname spellings count as ONE domain; a MALFORMED URL (bad IPv6 literal) yields domain unknown instead of aborting the source. URL host still takes precedence over GDELT's free-text domain metadata; redirector hosts counting as their own domains is a documented deliberate residual (resolving them would require fetching every article URL). First-seen index merge validates snapshot STRUCTURE (records must be a list of objects each with event_id and first_seen_at) and fails closed on any anomaly instead of skipping or crashing. First-seen carry-forward live-proven for text (HN 24/25 carry earlier first_seen) AND candles (Kraken 24/24). Syndication dedup on (registrable domain, normalised title); GDELT published_at stays null (seendate is retrieval time, recorded in uncertainty). Excluded by policy: x-cookies, private reddit, youtube internals, retailer scraping, paid APIs. Interpretation reserved for persona L.",
+  "artifacts": [
+    {
+      "label": "mt-probe-code",
+      "path": "repo:src/finance_mt_probe.py",
+      "sha256": "847c4de11dcc834740eef1d6749afb2cbe9c6f459e3622530883e8a0f280d154"
+    },
+    {
+      "label": "mt-run-manifest",
+      "path": "repo:automation/review/finance/mt00/run-manifest-20261029T233550Z.json",
+      "sha256": "8fbf84a03e8eaa3d417a4853d40ed5a946f6630cf872ae6f2b4c07a5650f273c"
+    },
+    {
+      "label": "mt-snapshot",
+      "path": "repo:automation/review/finance/mt00/snapshot-20261029T233550Z.json",
+      "sha256": "803d1dca6cfe4d328fb65b057e54691a4ecd3ffd8ea002136a650c16e3d999d1"
+    },
+    {
+      "label": "mt-digest",
+      "path": "repo:automation/review/finance/mt00/digest-20261029T233550Z.md",
+      "sha256": "6e3542955a7dac77965986c2bf5b5defb7ce1d7a4b9511fd24af6fbf18e7500d"
+    }
+  ]
+}
