@@ -25,6 +25,7 @@ import collections
 import hashlib
 import itertools
 import os
+import unicodedata
 import threading
 import urllib.parse
 import re
@@ -306,11 +307,13 @@ class DemoSessions:
 
 _PRIVATE_LOOKING = re.compile(
     r"(?:[A-Za-z]:\\|/home/|/Users/|/etc/|/var/|/tmp/|~/|\.ts\.net|\bBearer\s|\body_[A-Za-z0-9]{6,}|BEGIN [A-Z ]*KEY|"
-    r"[\w.+-]+@[\w-]+\.[\w.]+|\b\d{1,3}(?:\.\d{1,3}){3}\b|(?i:(?:password|passwd|secret|api[_-]?key|token)\s*[:=])|"
+    r"(?<![\w.+-])[\w.+-]+@[\w-]+\.[\w.]+|\b\d{1,3}(?:\.\d{1,3}){3}\b|(?i:(?:password|passwd|secret|api[_-]?key|token)\s*[:=])|"
     r"\bsk-[A-Za-z0-9_-]{16,}|\bgh[pousr]_[A-Za-z0-9]{20,}|\bAKIA[0-9A-Z]{16}\b|\bxox[baprs]-[A-Za-z0-9-]{10,}|\beyJ[A-Za-z0-9_-]{10,}\.|"
     r"\b[A-Za-z0-9]{40,}\b|"
     # an endpoint in any guest-visible text: URL, localhost, name:port, bracketed IPv6, or a host-like domain
-    r"(?i:://|\blocalhost\b|\b[a-z][a-z0-9_-]*:\d{2,5}\b|\[[0-9a-f:.]{2,}\]|\b(?:[a-z0-9-]+\.)+(?:com|org|net|io|ai|dev|local|lan|internal|home|test|example|arpa)\b))")
+    # (anchored at token starts so scanning stays linear on a 60 KB string)
+    r"(?i:://|\blocalhost\b|(?<![a-z0-9_-])[a-z][a-z0-9_-]*:\d{1,5}(?![a-z0-9])|\[[0-9a-f:.]{2,}\]|"
+    r"(?<![a-z0-9.-])[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:com|org|net|io|ai|dev|local|lan|internal|home|test|example|arpa)(?![a-z0-9-])))")
 
 
 def _strings(value: Any):
@@ -418,7 +421,8 @@ def _validate_recording(data: Any, scenario_id: str) -> Tuple[bool, str]:
     scanned["provenance"] = {k: v for k, v in stamp.items() if k not in ("marker", "fixture_sha256")}   # the digests are hex by design; every other field is scanned
     scanned["capture"] = {k: v for k, v in capture.items() if k not in ("fixture_sha256", "source_revision")}
     for text in _strings(scanned):
-        if _PRIVATE_LOOKING.search(text):
+        # scan the text as written and as a reader would decode it (full-width forms, percent-encoding)
+        if _PRIVATE_LOOKING.search(text) or _PRIVATE_LOOKING.search(urllib.parse.unquote(unicodedata.normalize("NFKC", text))):
             return False, "recording contains private-looking content"
     return True, "ok"
 

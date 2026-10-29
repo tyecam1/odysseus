@@ -2,6 +2,8 @@
 
 import json
 import shutil
+import unicodedata
+import urllib.parse
 from pathlib import Path
 
 import pytest
@@ -851,3 +853,18 @@ def test_an_endpoint_in_any_guest_visible_field_makes_a_recording_unreplayable(c
 @pytest.mark.parametrize("text", ["gemma4:12b answered", "llama3.1:8b", "at 10:30 on Tuesday", "3 tins, 2:1 ratio", "stock.md and pantry/eggs.md"])
 def test_ordinary_text_is_not_mistaken_for_an_endpoint(text):
     assert demo._PRIVATE_LOOKING.search(text) is None
+
+
+@pytest.mark.parametrize("text", ["a:1", "box:8", "http%3A%2F%2Fbox%3A8", "box\uff0elocal\uff1a8", "x.example.org"])
+def test_one_digit_ports_and_encoded_endpoints_are_detected(text):
+    bad = {"x": text}
+    assert any(demo._PRIVATE_LOOKING.search(urllib.parse.unquote(unicodedata.normalize("NFKC", s))) for s in demo._strings(bad)), text
+
+
+@pytest.mark.parametrize("payload", ["a." * 30000, "a" * 60000, "a-" * 30000, "a@" * 30000, "1." * 30000, ("a" * 9 + ":") * 6000])
+def test_the_private_content_scan_is_linear_on_a_recording_sized_string(payload):
+    import time
+    start = time.perf_counter()
+    demo._PRIVATE_LOOKING.search(payload)
+    demo._PRIVATE_LOOKING.search(urllib.parse.unquote(unicodedata.normalize("NFKC", payload)))
+    assert time.perf_counter() - start < 1.5
