@@ -156,6 +156,12 @@ def test_registrable_domain_normalisation():
     assert mp.registrable_domain("https://site-b.co.uk/a2") == "site-b.co.uk"
     assert mp.registrable_domain("https://sub.example.com/x") == "example.com"
     assert mp.registrable_domain("notahost") == "notahost"
+    # a port must not corrupt the host, and distinct publishers under an
+    # unlisted-in-round-1 multi-part suffix stay distinct
+    assert mp.registrable_domain("www.example.co.uk:443") == "example.co.uk"
+    assert mp.registrable_domain("a.co.kr") == "a.co.kr"
+    assert mp.registrable_domain("b.co.kr") == "b.co.kr"
+    assert mp.registrable_domain("a.co.kr") != mp.registrable_domain("b.co.kr")
 
 
 def test_mirrors_of_one_registrable_domain_are_one_story():
@@ -222,6 +228,44 @@ def test_kraken_first_seen_carried_forward():
         contract = rec.to_contract()
         assert contract["first_seen_at"] == "2026-10-29T10:00:00Z"
         assert contract["collected_at"] == "2026-10-29T16:00:00Z"
+
+
+def test_first_seen_index_survives_source_selection_gap(tmp_path: Path):
+    # a candle seen at 10:00 must keep that first_seen even when the
+    # intervening snapshot (12:00, latest.json) collected NO candles —
+    # the index merges every snapshot, not just the latest
+    candle = [{"event_id": "e-candle-1", "first_seen_at": "2026-10-29T10:00:00Z"}]
+    (tmp_path / "snapshot-20261029T100000Z.json").write_text(
+        json.dumps({"records": candle}), encoding="utf-8")
+    (tmp_path / "snapshot-20261029T120000Z.json").write_text(
+        json.dumps({"records": [
+            {"event_id": "e-hn-1", "first_seen_at": "2026-10-29T12:00:00Z"}
+        ]}), encoding="utf-8")
+    (tmp_path / "latest.json").write_text(
+        json.dumps({"records": [
+            {"event_id": "e-hn-1", "first_seen_at": "2026-10-29T12:00:00Z"}
+        ]}), encoding="utf-8")
+
+    index, previous = mp.load_first_seen_index(tmp_path)
+    assert previous is not None
+    assert index["e-candle-1"] == "2026-10-29T10:00:00Z"
+    assert index["e-hn-1"] == "2026-10-29T12:00:00Z"
+
+
+def test_first_seen_index_keeps_earliest_across_snapshots(tmp_path: Path):
+    # same event seen at 10:00 and re-recorded at 16:00: earliest wins
+    for stamp, seen in (("100000Z", "2026-10-29T10:00:00Z"),
+                        ("160000Z", "2026-10-29T16:00:00Z")):
+        (tmp_path / f"snapshot-20261029T{stamp}.json").write_text(
+            json.dumps({"records": [
+                {"event_id": "e-1", "first_seen_at": seen}
+            ]}), encoding="utf-8")
+    (tmp_path / "latest.json").write_text(
+        json.dumps({"records": [
+            {"event_id": "e-1", "first_seen_at": "2026-10-29T16:00:00Z"}
+        ]}), encoding="utf-8")
+    index, _ = mp.load_first_seen_index(tmp_path)
+    assert index["e-1"] == "2026-10-29T10:00:00Z"
 
 
 def test_first_seen_carried_forward_from_prior_snapshot(tmp_path: Path):

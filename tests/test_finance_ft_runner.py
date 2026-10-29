@@ -131,13 +131,17 @@ def test_docker_argv_uses_pinned_digest_and_workspace_only():
 
 
 def test_download_data_argv():
+    # first-class typed args travel via data_args (not the raw channel)
     argv = ft.build_docker_argv(
         "download-data", image_ref=GOOD_IMAGE,
         user_data_dir=Path("/home/agent/finance-paper/user_data"),
-        extra_args=["--timeframe", "1h", "--timerange", "20260901-"],
+        data_args=["--pairs", "BTC/USD", "ETH/USD", "--timeframe", "1h"],
+        extra_args=["--timerange", "20260901-", "--dl-trades"],
     )
     assert "download-data" in argv
     assert "--timerange" in argv and "20260901-" in argv
+    assert "--dl-trades" in argv and "--timeframe" in argv
+    assert argv.index("--pairs") < argv.index("BTC/USD")
     assert GOOD_IMAGE in argv
 
 
@@ -154,34 +158,41 @@ def test_extra_args_restricted_to_safe_allowlist():
     assert ft.validate_extra_args([]) == []
     assert ft.validate_extra_args(["--dl-trades"]) == []
     assert ft.validate_extra_args(["--timerange", "20260901-"]) == []
-    assert ft.validate_extra_args(["--timeframe", "1h"]) == []
     for overlay in (
         ["--config", "/freqtrade/user_data/unsafe.json"],
         ["-c", "/etc/ft.json"],
         ["--userdir", "/etc"],
         ["--strategy", "Evil"],
         ["--db-url", "sqlite:////tmp/x.sqlite"],
+        ["--timeframe", "1h"],  # timeframe is first-class, not a raw extra
     ):
         findings = ft.validate_extra_args(overlay)
         assert findings and overlay[0] in findings[0], overlay
     assert ft.validate_extra_args(["--timerange"])[0].endswith(
         "requires a value"
     )
+    # a flag-looking token is never consumed as a value
+    findings = ft.validate_extra_args(["--timerange", "--config=/tmp/evil"])
+    assert findings and "non-flag value" in findings[0]
 
 
-def test_build_docker_argv_refuses_overlays_and_bare_tags():
+def test_build_docker_argv_refuses_overlays_and_foreign_images():
     with pytest.raises(ValueError, match="allowlist"):
         ft.build_docker_argv(
             "download-data", image_ref=GOOD_IMAGE,
             user_data_dir=Path("/home/agent/finance-paper/user_data"),
             extra_args=["--config", "/freqtrade/user_data/unsafe.json"],
         )
-    with pytest.raises(ValueError, match="digest-pinned"):
-        ft.build_docker_argv(
-            "dry-run", image_ref="freqtradeorg/freqtrade:stable",
-            user_data_dir=Path("/home/agent/finance-paper/user_data"),
-            strategy="S",
-        )
+    for bad_image in (
+        "freqtradeorg/freqtrade:stable",  # bare tag
+        "evil/freqtrade@sha256:" + "0" * 64,  # foreign repo, valid digest
+    ):
+        with pytest.raises(ValueError, match="pinned official"):
+            ft.build_docker_argv(
+                "dry-run", image_ref=bad_image,
+                user_data_dir=Path("/home/agent/finance-paper/user_data"),
+                strategy="S",
+            )
 
 
 def test_cli_fails_closed_on_config_overlay_extra(tmp_path: Path, capsys):
@@ -189,6 +200,7 @@ def test_cli_fails_closed_on_config_overlay_extra(tmp_path: Path, capsys):
     cfg_path.write_text(json.dumps(good_config()), encoding="utf-8")
     rc = ft.main(
         ["verify-config", "--config", str(cfg_path),
+         "--user-data-dir", str(tmp_path),
          "--extra=--config", "--extra=/freqtrade/user_data/unsafe.json"]
     )
     assert rc == 3
@@ -208,7 +220,8 @@ def test_redact_config_hides_credentials():
 def test_verify_config_cli_exit_code(tmp_path: Path, capsys):
     cfg_path = tmp_path / "config-ft00.json"
     cfg_path.write_text(json.dumps(good_config()), encoding="utf-8")
-    rc = ft.main(["verify-config", "--config", str(cfg_path)])
+    rc = ft.main(["verify-config", "--config", str(cfg_path),
+                  "--user-data-dir", str(tmp_path)])
     assert rc == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is True and payload["fail_closed"] is True
@@ -218,8 +231,45 @@ def test_verify_config_cli_exit_code(tmp_path: Path, capsys):
     bad["exchange"]["key"] = "leak"
     bad_path = tmp_path / "config-bad.json"
     bad_path.write_text(json.dumps(bad), encoding="utf-8")
-    rc = ft.main(["verify-config", "--config", str(bad_path)])
+    rc = ft.main(["verify-config", "--config", str(bad_path),
+                  "--user-data-dir", str(tmp_path)])
     assert rc == 3
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is False
     assert len(payload["findings"]) >= 2
+
+
+def test_cli_fails_closed_when_config_lives_outside_workspace(
+    tmp_path: Path, capsys,
+):
+    # verified config and executed config must be the SAME file: a safe
+    # --config elsewhere must not vouch for the workspace's own config
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    cfg_path = elsewhere / "config-ft00.json"
+    cfg_path.write_text(json.dumps(good_config()), encoding="utf-8")
+    rc = ft.main(["verify-config", "--config", str(cfg_path),
+                  "--user-data-dir", str(tmp_path / "user_data")])
+    assert rc == 3
+    payload = json.loads(capsys.readouterr().out)
+    assert any("inside --user-data-dir" in f for f in payload["findings"])
+
+
+def test_cli_validates_typed_download_args(tmp_path: Path, capsys):
+    cfg_path = tmp_path / "config-ft00.json"
+    cfg_path.write_text(json.dumps(good_config()), encoding="utf-8")
+    base = ["download-data", "--config", str(cfg_path),
+            "--user-data-dir", str(tmp_path)]
+    # derivatives pair refused before docker is ever invoked
+    rc = ft.main(base + ["--pairs", "BTC/USD:USD"])
+    assert rc == 3
+    findings = json.loads(capsys.readouterr().out)["findings"]
+    assert any("spot pair" in f for f in findings)
+    rc = ft.main(base + ["--timeframe", "1x"])
+    assert rc == 3
+    findings = json.loads(capsys.readouterr().out)["findings"]
+    assert any("--timeframe" in f for f in findings)
+    rc = ft.main(base + ["--timerange", "garbage"])
+    assert rc == 3
+    findings = json.loads(capsys.readouterr().out)["findings"]
+    assert any("--timerange" in f for f in findings)

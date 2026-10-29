@@ -19,13 +19,14 @@ derives current status on every call, fail-closed:
 - a goal is **eligible** (may be worked on) when its unlock arm holds:
   root goals need a current ``operator_attestation``; dependent goals
   need every dependency satisfied;
-- anything absent, stale, hash-mismatched, malformed or verified only by
-  a corroborating (non-independent) lane is a blocker — locked, never
-  assumed good. Superseded evidence never poisons a goal: the NEWEST
-  fully-valid run receipt governs (invalidated older receipts are noted
-  only), so a goal can legitimately re-satisfy on fresh evidence after
-  the code or artifacts it cites change — and re-locks the moment that
-  fresh evidence goes stale.
+- anything absent, stale, future-dated, hash-mismatched, malformed or
+  verified only by a corroborating (non-independent) lane is a blocker —
+  locked, never assumed good. Evidence supersession is strict in BOTH
+  directions: the NEWEST run receipt governs (when it stops validating
+  the goal locks with no fallback to older runs), older receipts are
+  notes only, and a fresh run + a verification that cites one of the
+  run's own artifact hashes (dated at/after the run) can re-satisfy the
+  goal after the code or artifacts it cites change.
 
 No scheduler, no writes, no network: a pure function of (registries,
 receipts, files, clock). The HTTP adapter in
@@ -64,6 +65,11 @@ DEFAULT_POLICY: Dict[str, Any] = {
 }
 
 REQUIRED_RECEIPT_FIELDS = ("goal_id", "kind", "status", "observed_at")
+
+# A receipt dated more than this far in the FUTURE is rejected: clocks
+# drift, but a receipt that predates its own evaluation by months is
+# evidence tampering, not freshness.
+FUTURE_SKEW_MINUTES = 5
 
 
 class ReceiptError(ValueError):
@@ -176,6 +182,11 @@ def _receipt_blockers(
             f"receipt {receipt.get('_file')}: stale (observed "
             f"{receipt['observed_at']}, ttl {ttl}d)"
         )
+    elif observed > now + timedelta(minutes=FUTURE_SKEW_MINUTES):
+        blockers.append(
+            f"receipt {receipt.get('_file')}: future-dated (observed "
+            f"{receipt['observed_at']}, now {now.astimezone(timezone.utc).isoformat()})"
+        )
     if check_artifacts:
         for artifact in receipt.get("artifacts") or []:
             label = artifact.get("label")
@@ -243,33 +254,74 @@ def evaluate_goals(
 
     evaluated: List[Dict[str, Any]] = []
 
+    def _observed_at(receipt: Dict[str, Any]) -> datetime:
+        try:
+            parsed = _parse_iso(receipt["observed_at"])
+        except (KeyError, TypeError, ValueError):
+            return datetime.min.replace(tzinfo=timezone.utc)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed
+
     def own_evidence_blockers(goal_id: str) -> List[str]:
-        """Blockers in this goal's OWN run/verification receipts. The
-        NEWST fully-valid run receipt governs; invalidated older receipts
-        are noted (surfaced only while the goal stays locked) so they can
-        never permanently poison a goal that has fresher valid evidence."""
+        """Blockers in this goal's OWN run/verification receipts.
+
+        The NEWEST run receipt (by observed_at) governs — valid or not.
+        If the newest run no longer validates (stale, future-dated,
+        artifact hash mismatch), the goal is LOCKED even when an older
+        run still validates: fresh evidence cannot silently fall back to
+        a superseded result. Older receipts are notes, surfaced only
+        while the goal stays locked, so they never permanently poison a
+        goal that has fresher valid evidence."""
         notes: List[str] = []
         run_receipts = by_goal[KIND_RUN].get(goal_id) or {}
-        clean_runs: List[Dict[str, Any]] = []
-        for name, receipt in sorted(run_receipts.items()):
+        ordered = sorted(
+            run_receipts.items(),
+            key=lambda kv: (_observed_at(kv[1]), kv[0]),
+        )
+        if not ordered:
+            return [f"{goal_id}: no run receipt"]
+
+        def run_problems(name: str, receipt: Dict[str, Any]) -> List[str]:
             problems: List[str] = []
             if receipt.get("status") != "pass":
                 problems.append(f"run receipt {name} status={receipt.get('status')!r}")
             elif not receipt.get("run_id"):
                 problems.append(f"run receipt {name} has no run_id")
+            elif not receipt.get("artifacts"):
+                problems.append(f"run receipt {name} records no artifacts")
             else:
                 problems.extend(_receipt_blockers(
                     receipt, now=now, policy=policy, repo_root=repo_root,
                     check_artifacts=_artifact_check_needed(receipt),
                 ))
-            if problems:
-                notes.append(f"{goal_id}: " + "; ".join(problems))
-            else:
-                clean_runs.append(receipt)
-        if not clean_runs:
-            return notes + [f"{goal_id}: no valid run receipt"]
+            return problems
 
-        best_run = max(clean_runs, key=lambda r: _parse_iso(r["observed_at"]))
+        # Older receipts are history: their problems are noted but can
+        # neither lock nor unlock the goal. Only the NEWEST governs.
+        for name, receipt in ordered[:-1]:
+            if run_problems(name, receipt):
+                notes.append(
+                    f"{goal_id}: superseded run receipt {name} no longer "
+                    "validates (noted; newest run governs)"
+                )
+
+        newest_name, newest = ordered[-1]
+        problems = run_problems(newest_name, newest)
+        if problems:
+            notes.append(f"{goal_id}: " + "; ".join(problems))
+            # the newest run governs: when it no longer validates we do
+            # NOT fall back to an older still-valid run
+            return notes + [
+                f"{goal_id}: newest run receipt does not validate — locked"
+            ]
+        best_run = newest
+
+        run_hashes = {
+            artifact.get("sha256")
+            for artifact in best_run.get("artifacts") or []
+        }
+        run_observed = _observed_at(best_run)
 
         verifications = by_goal[KIND_INDEPENDENT_VERIFICATION].get(goal_id) or {}
         verified = None
@@ -304,6 +356,25 @@ def evaluate_goals(
                     f"verification {name} lane "
                     f"{verification.get('verifier')!r} is corroborating, "
                     "not independent"
+                )
+            # A verification cannot predate the run it claims to verify.
+            if _observed_at(verification) < run_observed:
+                problems.append(
+                    f"verification {name} predates run "
+                    f"{best_run.get('run_id')!r}"
+                )
+            # The verifier must have actually looked at the run's
+            # evidence: at least one verification artifact must reproduce
+            # a hash the run receipt cites (run_id strings are reusable;
+            # artifact hashes bind the verification to THIS run).
+            v_hashes = {
+                artifact.get("sha256")
+                for artifact in verification.get("artifacts") or []
+            }
+            if not (run_hashes & v_hashes):
+                problems.append(
+                    f"verification {name} cites none of run "
+                    f"{best_run.get('run_id')!r}'s artifact hashes"
                 )
             if problems:
                 notes.append(f"{goal_id}: " + "; ".join(problems))

@@ -106,11 +106,16 @@ _PUNCT_RE = re.compile(r"[^\w\s]")
 _MAX_TITLE_WORDS = 12
 
 # Common multi-part public suffixes where the registrable domain is the
-# last THREE labels (example.co.uk, not co.uk).
+# last THREE labels (example.co.uk, not co.uk). Not a full Public Suffix
+# List: an unlisted multi-part suffix UNDER-counts diversity (two
+# distinct publishers collapse to one label) — conservative for
+# corroboration, never an overstatement of it.
 MULTI_PART_SUFFIXES = {
     "co.uk", "org.uk", "ac.uk", "gov.uk", "com.au", "net.au", "org.au",
-    "co.jp", "ne.jp", "or.jp", "com.br", "com.mx", "com.cn", "co.nz",
-    "co.za", "co.in", "com.sg",
+    "co.jp", "ne.jp", "or.jp", "co.kr", "or.kr", "go.kr", "com.br",
+    "com.mx", "com.ar", "com.pe", "com.uy", "com.vn", "com.cn", "com.tw",
+    "com.hk", "com.sg", "com.my", "com.ph", "co.id", "co.il", "co.nz",
+    "co.za", "co.in", "com.tr", "com.ua", "com.gr", "com.pl", "co.th",
 }
 
 
@@ -175,18 +180,19 @@ def stable_event_id(source: str, source_url: str) -> str:
 
 def registrable_domain(url: str) -> str:
     """Registrable domain of a URL or bare hostname (GDELT's ``domain``
-    field is a bare host). Handles common multi-part public suffixes so
-    that m.example.co.uk and www.example.co.uk collapse to example.co.uk
-    while two different .co.uk publishers stay distinct. Not a full
-    Public Suffix List — the goal is honest syndication counting, and an
-    unmapped suffix fails safe by over-splitting (never under-counting
-    diversity)."""
+    field is a bare host, possibly with a port). Handles common
+    multi-part public suffixes so that m.example.co.uk and
+    www.example.co.uk collapse to example.co.uk while two different
+    .co.uk publishers stay distinct. Not a full Public Suffix List — see
+    MULTI_PART_SUFFIXES for the documented failure direction."""
     host = (urlparse(url).hostname or "").lower().strip(".")
     if not host:
         host = (url or "").lower().strip()
         if "://" in host:
             host = host.split("://", 1)[1]
         host = host.split("/", 1)[0].strip(".")
+    # tolerate user:pass@ and :port in bare-host input
+    host = host.split("@")[-1].split(":")[0].strip(".")
     parts = [p for p in host.split(".") if p]
     if not parts:
         return "unknown"
@@ -630,17 +636,38 @@ def render_digest_markdown(report: Dict[str, Any]) -> str:
 # --------------------------------------------------------------------------
 
 def load_first_seen_index(out_dir: Path) -> Tuple[Dict[str, str], Optional[Dict[str, Any]]]:
+    """First-seen map merged across EVERY snapshot in out_dir (earliest
+    wins), plus the latest snapshot for baseline comparison. Reading
+    only latest.json would lose first-seen times whenever a run's source
+    selection omits a source (e.g. an intervening no-Kraken run would
+    reset candle first_seen times); the full scan makes the index
+    monotone across source-selection changes."""
+    previous: Optional[Dict[str, Any]] = None
     latest = out_dir / "latest.json"
-    if not latest.exists():
-        return {}, None
-    try:
-        previous = json.loads(latest.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}, None
+    if latest.exists():
+        try:
+            previous = json.loads(latest.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            previous = None
+
+    def merge_into(index: Dict[str, str], data: Dict[str, Any]) -> None:
+        for rec in data.get("records", []):
+            event_id = rec.get("event_id")
+            first_seen = rec.get("first_seen_at")
+            if not event_id or not first_seen:
+                continue
+            current = index.get(event_id)
+            if current is None or first_seen < current:
+                index[event_id] = first_seen
+
     index: Dict[str, str] = {}
-    for rec in previous.get("records", []):
-        if rec.get("event_id") and rec.get("first_seen_at"):
-            index[rec["event_id"]] = rec["first_seen_at"]
+    for snapshot_path in sorted(out_dir.glob("snapshot-*.json")):
+        try:
+            merge_into(index, json.loads(snapshot_path.read_text(encoding="utf-8")))
+        except (OSError, json.JSONDecodeError):
+            continue
+    if previous:
+        merge_into(index, previous)
     return index, previous
 
 

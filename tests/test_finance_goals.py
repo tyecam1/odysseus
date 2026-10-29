@@ -61,14 +61,16 @@ def _receipt(goal_id, kind, *, status="pass", days_ago=0, run_id="r1",
         "verifier": verifier,
         "notes": "test",
     }
-    if kind == fg.KIND_INDEPENDENT_VERIFICATION:
-        rec["verifies"] = verifies if verifies is not None else run_id
+    if kind in (fg.KIND_RUN, fg.KIND_INDEPENDENT_VERIFICATION):
+        # both run and verification receipts must carry hash-checked
+        # artifacts; the shared default overlaps so the verification
+        # cites the run's evidence
         rec["artifacts"] = (
             artifacts if artifacts is not None
             else copy.deepcopy(POLICY_ARTIFACT)
         )
-    if artifacts is not None and kind != fg.KIND_INDEPENDENT_VERIFICATION:
-        rec["artifacts"] = artifacts
+    if kind == fg.KIND_INDEPENDENT_VERIFICATION:
+        rec["verifies"] = verifies if verifies is not None else run_id
     return rec
 
 
@@ -158,18 +160,16 @@ def test_stale_run_receipt_relocks_dependents():
 def test_artifact_hash_mismatch_relocks(tmp_path: Path):
     artifact = tmp_path / "config.json"
     artifact.write_text('{"dry_run": true}', encoding="utf-8")
-    vnote = tmp_path / "verification-note.txt"
-    vnote.write_text("reviewed\n", encoding="utf-8")
     attestation = _receipt("MT-00", fg.KIND_OPERATOR_ATTESTATION)
-    run = _receipt(
-        "MT-00", fg.KIND_RUN, run_id="run-9",
-        artifacts=[{"label": "cfg", "path": str(artifact),
-                    "sha256": fg.sha256_file(artifact)}],
-    )
+    # verification cites the SAME artifact hash: it must overlap the
+    # run's evidence to bind the verification to that exact run
+    run_artifacts = [{"label": "cfg", "path": str(artifact),
+                      "sha256": fg.sha256_file(artifact)}]
+    run = _receipt("MT-00", fg.KIND_RUN, run_id="run-9",
+                   artifacts=run_artifacts)
     verifies = _receipt(
         "MT-00", fg.KIND_INDEPENDENT_VERIFICATION, verifies="run-9",
-        artifacts=[{"label": "note", "path": str(vnote),
-                    "sha256": fg.sha256_file(vnote)}],
+        artifacts=run_artifacts,
     )
     result = fg.evaluate_goals(
         registries=[MT, FT], receipts=[attestation, run, verifies],
@@ -189,22 +189,14 @@ def test_artifact_hash_mismatch_relocks(tmp_path: Path):
 
 def test_missing_artifact_file_relocks(tmp_path: Path):
     gone = tmp_path / "gone.json"
-    vnote = tmp_path / "verification-note.txt"
-    vnote.write_text("reviewed\n", encoding="utf-8")
     attestation = _receipt("MT-00", fg.KIND_OPERATOR_ATTESTATION)
     run = _receipt(
         "MT-00", fg.KIND_RUN, run_id="run-9",
         artifacts=[{"label": "cfg", "path": str(gone), "sha256": "0" * 64}],
     )
-    verifies = _receipt(
-        "MT-00", fg.KIND_INDEPENDENT_VERIFICATION, verifies="run-9",
-        artifacts=[{"label": "note", "path": str(vnote),
-                    "sha256": fg.sha256_file(vnote)}],
-    )
-    result = fg.evaluate_goals(
-        registries=[MT, FT], receipts=[attestation, run, verifies],
-        policy=fg.load_policy(), now=NOW, repo_root=tmp_path,
-    )
+    verifies = _receipt("MT-00", fg.KIND_INDEPENDENT_VERIFICATION,
+                        verifies="run-9")
+    result = _evaluate([attestation, run, verifies])
     mt00 = _goal(result, "MT-00")
     assert mt00["satisfied"] is False
     assert any("artifact missing" in b for b in mt00["blockers"])
@@ -365,14 +357,26 @@ def test_verification_without_artifacts_cannot_satisfy(tmp_path: Path):
 
 
 def test_verification_artifacts_are_hash_checked(tmp_path: Path):
+    run_art = tmp_path / "run-evidence.json"
+    run_art.write_text('{"run": 1}', encoding="utf-8")
     vnote = tmp_path / "verification-note.txt"
     vnote.write_text("reviewed\n", encoding="utf-8")
     attestation = _receipt("MT-00", fg.KIND_OPERATOR_ATTESTATION)
-    run = _receipt("MT-00", fg.KIND_RUN, run_id="run-9")
+    run = _receipt(
+        "MT-00", fg.KIND_RUN, run_id="run-9",
+        artifacts=[{"label": "evidence", "path": str(run_art),
+                    "sha256": fg.sha256_file(run_art)}],
+    )
+    # verification cites BOTH the run's evidence (overlap) and its own
+    # note; tampering the note alone must relock
     verifies = _receipt(
         "MT-00", fg.KIND_INDEPENDENT_VERIFICATION, verifies="run-9",
-        artifacts=[{"label": "note", "path": str(vnote),
-                    "sha256": fg.sha256_file(vnote)}],
+        artifacts=[
+            {"label": "evidence", "path": str(run_art),
+             "sha256": fg.sha256_file(run_art)},
+            {"label": "note", "path": str(vnote),
+             "sha256": fg.sha256_file(vnote)},
+        ],
     )
     result = fg.evaluate_goals(
         registries=[MT, FT], receipts=[attestation, run, verifies],
@@ -419,12 +423,13 @@ def test_superseded_receipts_do_not_poison_fresh_evidence(tmp_path: Path):
     attestation = _receipt("MT-00", fg.KIND_OPERATOR_ATTESTATION,
                            name="att.json")
     old_run = _receipt(
-        "MT-00", fg.KIND_RUN, run_id="run-old", days_ago=0,
+        "MT-00", fg.KIND_RUN, run_id="run-old", days_ago=1,
         artifacts=[{"label": "code", "path": str(code),
                     "sha256": old_hash}], name="run-old.json",
     )
     old_verifies = _receipt(
         "MT-00", fg.KIND_INDEPENDENT_VERIFICATION, verifies="run-old",
+        days_ago=1,
         artifacts=[{"label": "code", "path": str(code),
                     "sha256": old_hash}], name="verify-old.json",
     )
@@ -461,4 +466,91 @@ def test_superseded_receipts_do_not_poison_fresh_evidence(tmp_path: Path):
     mt00 = _goal(result, "MT-00")
     assert mt00["satisfied"] is False
     assert any("no current independent verification of run 'run-new'" in b
+               for b in mt00["blockers"])
+
+
+def test_run_receipt_without_artifacts_cannot_satisfy():
+    attestation = _receipt("MT-00", fg.KIND_OPERATOR_ATTESTATION)
+    run = _receipt("MT-00", fg.KIND_RUN, run_id="run-9", artifacts=[])
+    verifies = _receipt("MT-00", fg.KIND_INDEPENDENT_VERIFICATION,
+                        verifies="run-9")
+    result = _evaluate([attestation, run, verifies])
+    mt00 = _goal(result, "MT-00")
+    assert mt00["satisfied"] is False
+    assert any("records no artifacts" in b for b in mt00["blockers"])
+    assert any("newest run receipt does not validate" in b
+               for b in mt00["blockers"])
+
+
+def test_verification_predating_run_cannot_satisfy():
+    attestation = _receipt("MT-00", fg.KIND_OPERATOR_ATTESTATION)
+    run = _receipt("MT-00", fg.KIND_RUN, run_id="run-9", days_ago=1)
+    early = _receipt(
+        "MT-00", fg.KIND_INDEPENDENT_VERIFICATION, run_id="v1",
+        verifies="run-9", days_ago=3,  # observed BEFORE the run
+    )
+    result = _evaluate([attestation, run, early])
+    mt00 = _goal(result, "MT-00")
+    assert mt00["satisfied"] is False
+    assert any("predates run" in b for b in mt00["blockers"])
+
+
+def test_future_dated_receipt_cannot_satisfy():
+    attestation = _receipt("MT-00", fg.KIND_OPERATOR_ATTESTATION)
+    run = _receipt("MT-00", fg.KIND_RUN, run_id="run-9", days_ago=-30)
+    verifies = _receipt("MT-00", fg.KIND_INDEPENDENT_VERIFICATION,
+                        verifies="run-9", days_ago=-30)
+    result = _evaluate([attestation, run, verifies])
+    mt00 = _goal(result, "MT-00")
+    assert mt00["satisfied"] is False
+    assert any("future-dated" in b for b in mt00["blockers"])
+
+
+def test_newest_invalid_run_locks_despite_older_valid_chain(tmp_path: Path):
+    # old chain cites a file that never changes (still valid); a NEWER
+    # run cites the code file, which then changes: the newest run
+    # invalidates and the goal MUST lock — no fallback to the old chain
+    stable = tmp_path / "stable-evidence.json"
+    stable.write_text('{"stable": true}', encoding="utf-8")
+    code = tmp_path / "probe.py"
+
+    attestation = _receipt("MT-00", fg.KIND_OPERATOR_ATTESTATION)
+    old_run = _receipt(
+        "MT-00", fg.KIND_RUN, run_id="run-old", days_ago=2,
+        artifacts=[{"label": "stable", "path": str(stable),
+                    "sha256": fg.sha256_file(stable)}], name="run-old.json",
+    )
+    old_verifies = _receipt(
+        "MT-00", fg.KIND_INDEPENDENT_VERIFICATION, verifies="run-old",
+        days_ago=2,
+        artifacts=[{"label": "stable", "path": str(stable),
+                    "sha256": fg.sha256_file(stable)}],
+        name="verify-old.json",
+    )
+    code.write_text("v1\n", encoding="utf-8")
+    new_run = _receipt(
+        "MT-00", fg.KIND_RUN, run_id="run-new", days_ago=0,
+        artifacts=[{"label": "code", "path": str(code),
+                    "sha256": fg.sha256_file(code)}], name="run-new.json",
+    )
+    receipts = [attestation, old_run, old_verifies, new_run]
+
+    result = fg.evaluate_goals(
+        registries=[MT, FT], receipts=receipts,
+        policy=fg.load_policy(), now=NOW, repo_root=tmp_path,
+    )
+    # newest run valid but unverified: locked (old chain superseded)
+    assert _goal(result, "MT-00")["satisfied"] is False
+
+    code.write_text("v2 changed\n", encoding="utf-8")
+    result = fg.evaluate_goals(
+        registries=[MT, FT], receipts=receipts,
+        policy=fg.load_policy(), now=NOW, repo_root=tmp_path,
+    )
+    mt00 = _goal(result, "MT-00")
+    # newest run now INVALID: still locked, no fallback to the old chain
+    assert mt00["satisfied"] is False
+    assert any("newest run receipt does not validate" in b
+               for b in mt00["blockers"])
+    assert any("run-new.json" in b and "hash mismatch" in b
                for b in mt00["blockers"])

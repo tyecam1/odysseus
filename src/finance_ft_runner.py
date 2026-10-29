@@ -46,6 +46,9 @@ DEFAULT_PINNED_IMAGE = (
     "9d67afb8eb5f4e1210f4fb067efcbd5e005bd4f1c27f6f3888b8b9fc7f9b5199"
 )
 DIGEST_RE = re.compile(r"^[a-z0-9./_-]+@sha256:[0-9a-f]{64}$")
+SPOT_PAIR_RE = re.compile(r"^[A-Z0-9.]+/[A-Z0-9.]+$")
+TIMEFRAME_RE = re.compile(r"^\d+[smhd]$")
+TIMERANGE_RE = re.compile(r"^\d{8}(-\d{8})?(-)?$")
 
 # Extra freqtrade arguments are restricted to this allowlist. Freqtrade
 # merges multiple --config files with later files taking precedence and
@@ -53,11 +56,10 @@ DIGEST_RE = re.compile(r"^[a-z0-9./_-]+@sha256:[0-9a-f]{64}$")
 # (and anything unrecognised) are refused: they could re-introduce
 # credentials, derivatives settings or listeners the guard just rejected.
 ALLOWED_EXTRA_FLAGS = {
-    "--dl-trades", "--erase", "--prepend", "--timeframe",
+    "--dl-trades", "--erase", "--prepend",
     "--timerange", "--days", "--new-pairs-days",
 }
-VALUE_EXTRA_FLAGS = {"--timeframe", "--timerange", "--days", "--new-pairs-days"}
-SPOT_PAIR_RE = re.compile(r"^[A-Z0-9.]+/[A-Z0-9.]+$")
+VALUE_EXTRA_FLAGS = {"--timerange", "--days", "--new-pairs-days"}
 STRATEGY_RE = re.compile(r"^[A-Za-z0-9_]+$")
 CONTAINER_NAME = "finance-ft00-dryrun"
 
@@ -98,6 +100,13 @@ def validate_extra_args(extra_args: Optional[List[str]]) -> List[str]:
         if token in VALUE_EXTRA_FLAGS:
             if i + 1 >= len(tokens):
                 findings.append(f"extra argument {token!r} requires a value")
+            elif tokens[i + 1].startswith("-"):
+                # a flag-looking token is never accepted as a value: it
+                # would smuggle a disallowed flag past the allowlist
+                findings.append(
+                    f"extra argument {token!r} requires a non-flag value "
+                    f"(got {tokens[i + 1]!r})"
+                )
             else:
                 i += 1  # consume the flag's value
         i += 1
@@ -186,6 +195,7 @@ def build_docker_argv(
     config_name: str = "config-ft00.json",
     strategy: Optional[str] = None,
     extra_args: Optional[List[str]] = None,
+    data_args: Optional[List[str]] = None,
     name: str = CONTAINER_NAME,
     detach: bool = False,
     uid_gid: Optional[str] = None,
@@ -194,15 +204,20 @@ def build_docker_argv(
     image is embedded verbatim; the user_data workspace is the only
     volume; no network publication is ever added.
 
+    ``data_args`` carries FIRST-CLASS typed download arguments (pairs /
+    timeframe / timerange, validated by the caller's regexes) and is not
+    allowlist-checked; ``extra_args`` is the raw user-supplied remainder
+    and must pass :func:`validate_extra_args`.
+
     By default the container runs with the image's own lifecycle (root →
     entrypoint chown of user_data to its internal ftuser → drop to
     ftuser): freqtrade is pip-installed under ftuser's 0700 home, so an
     explicit ``--user`` cannot reach the binary. Pass ``uid_gid``
     explicitly only with an image that supports it."""
-    if not DIGEST_RE.match(image_ref or ""):
+    if image_ref != DEFAULT_PINNED_IMAGE or not DIGEST_RE.match(image_ref):
         raise ValueError(
-            "image_ref must be digest-pinned (name@sha256:<64 hex>): "
-            f"{image_ref!r}"
+            "image_ref must be exactly the pinned official reference "
+            f"{DEFAULT_PINNED_IMAGE!r}: got {image_ref!r}"
         )
     overlay = validate_extra_args(extra_args)
     if overlay:
@@ -228,7 +243,7 @@ def build_docker_argv(
         argv += [
             "download-data", "--config", config_arg,
             "--userdir", "/freqtrade/user_data",
-        ] + list(extra_args or [])
+        ] + list(data_args or []) + list(extra_args or [])
     elif action == "dry-run":
         argv += [
             "trade", "--config", config_arg,
@@ -271,6 +286,7 @@ def dry_run_smoke(
     user_data_dir: Path,
     strategy: str,
     log_dir: Path,
+    config_name: str = "config-ft00.json",
     cycles: int = 2,
     ready_timeout_s: float = 180.0,
     ready_markers: Optional[List[str]] = None,
@@ -290,7 +306,8 @@ def dry_run_smoke(
         log_path = log_dir / f"dryrun-cycle{cycle}.log"
         argv = build_docker_argv(
             "dry-run", image_ref=image_ref, user_data_dir=user_data_dir,
-            strategy=strategy, name=name, detach=True,
+            config_name=config_name, strategy=strategy, name=name,
+            detach=True,
         )
         started = runner.run(argv, capture_output=True, text=True, timeout=120)
         if started.returncode != 0:
@@ -393,7 +410,6 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--config", required=True)
     parser.add_argument("--image", default=DEFAULT_PINNED_IMAGE)
     parser.add_argument("--user-data-dir", default="/home/agent/finance-paper/user_data")
-    parser.add_argument("--strategy")
     parser.add_argument("--log-dir", default="/home/agent/finance-paper/logs")
     parser.add_argument("--pairs", nargs="+", default=[],
                         help="download-data: spot pairs, e.g. BTC/USD ETH/USD")
@@ -420,6 +436,46 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     findings = verify_config(cfg, args.image)
     findings += validate_extra_args(args.extra)
+
+    # The VERIFIED config and the EXECUTED config must be the same file:
+    # docker loads the config from the mounted user_data workspace, so a
+    # --config anywhere else would let a safe file pass the guard while
+    # an unsafe one runs.
+    user_data = Path(args.user_data_dir)
+    try:
+        config_in_workspace = (
+            cfg_path.resolve().parent == user_data.resolve()
+        )
+    except OSError:
+        config_in_workspace = False
+    if not config_in_workspace:
+        findings.append(
+            "--config must point at a file directly inside "
+            f"--user-data-dir (verified config and executed config must "
+            f"be the same file): {cfg_path} vs {user_data}"
+        )
+
+    # First-class download arguments are typed and validated here; they
+    # travel via data_args (never the raw --extra channel).
+    data_args: List[str] = []
+    for pair in args.pairs:
+        if not SPOT_PAIR_RE.match(pair):
+            findings.append(f"--pairs entry {pair!r} is not a plain spot pair")
+    if args.pairs:
+        data_args += ["--pairs"] + list(args.pairs)
+    if args.timeframe:
+        if not TIMEFRAME_RE.match(args.timeframe):
+            findings.append(
+                f"--timeframe {args.timeframe!r} is not <n><s|m|h|d>"
+            )
+        data_args += ["--timeframe", args.timeframe]
+    if args.timerange:
+        if not TIMERANGE_RE.match(args.timerange):
+            findings.append(
+                f"--timerange {args.timerange!r} is not YYYYMMDD[-YYYYMMDD][-]"
+            )
+        data_args += ["--timerange", args.timerange]
+
     if findings:
         print(json.dumps(
             {
@@ -430,8 +486,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             }, indent=2))
         return 3
 
-    strategy = args.strategy or cfg.get("strategy")
-    user_data = Path(args.user_data_dir)
+    strategy = cfg.get("strategy")
+    config_name = cfg_path.name
     log_dir = Path(args.log_dir)
 
     if args.action == "verify-config":
@@ -447,24 +503,19 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.action == "version":
         result = run_command(
             build_docker_argv("version", image_ref=args.image,
-                              user_data_dir=user_data),
+                              user_data_dir=user_data,
+                              config_name=config_name),
             timeout_s=120, log_path=log_dir / "version.log",
         )
         print(json.dumps(result, indent=2))
         return 0 if result["returncode"] == 0 else 4
 
     if args.action == "download-data":
-        data_args: List[str] = list(args.extra)
-        if args.pairs:
-            data_args += ["--pairs"] + list(args.pairs)
-        if args.timeframe:
-            data_args += ["--timeframe", args.timeframe]
-        if args.timerange:
-            data_args += ["--timerange", args.timerange]
         result = run_command(
             build_docker_argv(
                 "download-data", image_ref=args.image, user_data_dir=user_data,
-                extra_args=data_args,
+                config_name=config_name, data_args=data_args,
+                extra_args=list(args.extra),
             ),
             timeout_s=1800, log_path=log_dir / "download-data.log",
         )
@@ -474,7 +525,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.action == "dry-run-smoke":
         result = dry_run_smoke(
             image_ref=args.image, user_data_dir=user_data,
-            strategy=strategy or "", log_dir=log_dir, cycles=args.cycles,
+            strategy=strategy or "", log_dir=log_dir,
+            config_name=config_name, cycles=args.cycles,
         )
         print(json.dumps(result, indent=2))
         return 0 if result.get("ok") else 5
