@@ -13,9 +13,10 @@ dependencies = []
 # Deliberately zero third-party dependencies — aoteru.py itself stays
 # stdlib-only (verified by tests/test_laptop_client.py's AST import
 # audit); this file only turns that one existing script into something
-# `pipx install` can put on PATH as an `aoteru` command, it does not
+# `pipx install` can put on PATH as `am` (with `aoteru` retained), it does not
 # change what the script is allowed to import.
 [project.scripts]
+am = "aoteru:main"
 aoteru = "aoteru:main"
 
 [tool.setuptools]
