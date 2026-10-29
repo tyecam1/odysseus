@@ -1,4 +1,28 @@
-# aoteru laptop thin client (Workstream B)
+# AM: Aoteru access and Odysseus estate client
+
+`am` is the short operator command. It exposes two deliberately different actions:
+
+- **Conversation:** `am "What's on the shopping list?"` or `am chat "Dinner?" --persona sanji` calls `POST /misumi/respond` and requires a scoped `misumi:execute` token.
+- **Governed execution:** `am ask "Analyse this repository" --repo odysseus --capability code-strong` calls `POST /api/estate/run` and requires `estate:execute`. Implementation remains subject to existing lease gates.
+
+**Identity:** Aoteru is the head conversational persona; Misumi is the household knowledge/policy domain and its specialist personas; Odysseus is the transport, execution and routing backend. The `am` command is a client, not another router or knowledge authority.
+
+Install with `pipx install "git+https://github.com/tyecam1/odysseus.git@dev#subdirectory=companion/laptop_client"`, or update an existing installation with `pipx install --force "git+https://github.com/tyecam1/odysseus.git@dev#subdirectory=companion/laptop_client"`. The original `aoteru` command remains a fully functional compatibility alias. Existing configuration and credentials remain at `~/.aoteru/client.json` without migration.
+
+Example:
+
+```sh
+am config set --url http://<private-backend-host>:<port> --token <scoped-token>
+am status
+am "What is on the shopping list?"
+am chat "Suggest dinner from stock" --persona sanji
+am chat "What did we decide?" --json
+am ask "Review work items" --repo odysseus --capability local-fast
+```
+
+The first and second operation need different scopes. Create a token with the least privileges needed; when both are needed, combine `misumi:execute` and `estate:execute` on a single appropriately scoped token, adding `estate:read` for routing/status. Never paste real tokens into source code, shell history shared with others, or the repository.
+
+## Existing thin-client installation and operational notes
 
 A single stdlib-only Python file (`aoteru.py`) that lets a laptop with **no
 Odysseus checkout** talk to a running Odysseus backend (today: the lab
@@ -72,7 +96,7 @@ this session's Linux shell cannot run or verify.
 ### 3. Configure it
 
 ```
-aoteru config set --url http://<backend-tailnet-name>:<port> --token ody_...
+am config set --url http://<backend-tailnet-name>:<port> --token ody_...
 ```
 
 (single-file fallback: `python aoteru.py config set ...`, same flags)
@@ -84,7 +108,7 @@ script again.
 ### 4. Smoke test
 
 ```
-aoteru status
+am status
 ```
 
 Expect `backend: reachable, status=healthy` and a list of eligible hosts.
@@ -95,13 +119,13 @@ docs/aoteru-cold-reboot-checklist.md if it's the lab host.
 ## Everyday use
 
 ```
-aoteru route --capability local-fast              # dry-run: what would this route to?
-aoteru ask "summarise the last 3 commits" --capability local-fast
-aoteru ask "refactor X" --capability code-strong --allow-paid   # opt in to paid escalation
-aoteru park-status                                 # estate-wide active park-lease view
-aoteru park <repo-id> --branch main                # acquire a lease on the backend host for a registered repo
-aoteru heartbeat <repo-id>                          # renew the backend host's lease for a repo
-aoteru release <repo-id>                            # release the backend host's lease for a repo
+am route --capability local-fast              # dry-run: what would this route to?
+am ask "summarise the last 3 commits" --capability local-fast
+am ask "refactor X" --capability code-strong --allow-paid   # opt in to paid escalation
+am park-status                                 # estate-wide active park-lease view
+am park <repo-id> --branch main                # acquire a lease on the backend host for a registered repo
+am heartbeat <repo-id>                          # renew the backend host's lease for a repo
+am release <repo-id>                            # release the backend host's lease for a repo
 ```
 
 (single-file fallback: prefix each with `python `, e.g. `python aoteru.py route ...`)
