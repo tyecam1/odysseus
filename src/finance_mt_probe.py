@@ -43,8 +43,13 @@ from urllib import request as urllib_request
 from urllib.error import HTTPError, URLError
 from urllib.parse import unquote, urlparse
 
+try:  # UTS-46 IDNA (correct ß→xn--fa-hia mapping); stdlib fallback below
+    import idna as _idna
+except ImportError:  # pragma: no cover - dependency absent
+    _idna = None
+
 PROBE_NAME = "finance-mt-probe"
-PROBE_VERSION = "0.4"
+PROBE_VERSION = "0.5"
 USER_AGENT = (
     f"{PROBE_NAME}/{PROBE_VERSION} (odysseus finance MT-00; "
     "household research, read-only public APIs; github.com/tyecam1)"
@@ -182,7 +187,10 @@ def _canonical_host(host: str) -> str:
     """Canonical hostname form: percent-decoded, lowercased, trailing
     dot stripped, and non-ASCII labels IDNA-encoded — so ``bücher.de``,
     ``BÜCHER.de.`` and ``xn--bcher-kva.de`` all collapse to one
-    publisher instead of counting as two domains."""
+    publisher instead of counting as two domains. Uses UTS-46 IDNA
+    (the ``idna`` package) when available so that ``faß.de`` maps to
+    its true punycode form ``xn--fa-hia.de``; the stdlib codec (IDNA
+    2003, which maps ß→ss) is only a fallback."""
     host = (host or "").strip()
     try:
         host = unquote(host)
@@ -191,7 +199,10 @@ def _canonical_host(host: str) -> str:
     host = host.lower().strip().rstrip(".")
     if host and not host.isascii():
         try:
-            host = host.encode("idna").decode("ascii")
+            if _idna is not None:
+                host = _idna.encode(host, uts46=True).decode("ascii")
+            else:
+                host = host.encode("idna").decode("ascii")
         except Exception:
             pass  # odd unicode input: fall through on the raw form
     return host
@@ -204,9 +215,11 @@ def registrable_domain(url: str) -> str:
     www.example.co.uk collapse to example.co.uk while two different
     .co.uk publishers stay distinct, and canonicalises the host (case,
     trailing dot, percent-encoding, IDN/punycode) so one publisher's
-    Unicode and ASCII hostname spellings count as ONE domain. Not a
-    full Public Suffix List — see MULTI_PART_SUFFIXES for the documented
-    failure direction.
+    Unicode and ASCII hostname spellings count as ONE domain. NEVER
+    raises: a malformed URL (e.g. ``https://[bad/path``) yields
+    ``"unknown"`` instead of aborting collection of the whole source.
+    Not a full Public Suffix List — see MULTI_PART_SUFFIXES for the
+    documented failure direction.
 
     Known residual (documented, deliberate): redirector/launcher hosts
     (e.g. news.google.com → publisher) still count as their own domains;
@@ -214,7 +227,10 @@ def registrable_domain(url: str) -> str:
     probe does not do. Diversity counts may therefore overstate when a
     story is syndicated via redirector links — interpretation stays with
     persona L."""
-    host = _canonical_host(urlparse(url).hostname or "")
+    try:
+        host = _canonical_host(urlparse(url).hostname or "")
+    except ValueError:
+        host = ""  # malformed URL (bad IPv6 literal etc.) — no host
     if not host:
         host = (url or "").strip()
         if "://" in host:
@@ -222,6 +238,10 @@ def registrable_domain(url: str) -> str:
         host = host.split("/", 1)[0]
     # tolerate user:pass@ and :port in bare-host input
     host = _canonical_host(host.split("@")[-1].split(":")[0])
+    if not re.fullmatch(r"[a-z0-9.-]+", host or ""):
+        # brackets (IPv6 literals), spaces or other junk are not a
+        # registrable hostname — one bad URL must not abort the source
+        return "unknown"
     parts = [p for p in host.split(".") if p]
     if not parts:
         return "unknown"
@@ -726,6 +746,16 @@ def load_first_seen_index(out_dir: Path) -> Tuple[Dict[str, str], Optional[Dict[
                     f"evidence snapshot {name}: record #{i} has no "
                     "first_seen_at"
                 )
+            try:
+                # content, not just shape: a bogus timestamp would flow
+                # into reports as a false first-seen time, and would
+                # break the lexicographic ISO ordering the merge relies on
+                datetime.strptime(first_seen, "%Y-%m-%dT%H:%M:%SZ")
+            except ValueError:
+                raise ValueError(
+                    f"evidence snapshot {name}: record #{i} first_seen_at "
+                    f"{first_seen!r} is not an ISO-8601 Z timestamp"
+                ) from None
             current = index.get(event_id)
             if current is None or first_seen < current:
                 index[event_id] = first_seen

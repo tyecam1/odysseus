@@ -806,3 +806,86 @@ def test_unknown_goal_id_locks_every_goal():
     assert any("MT-99" in entry for entry in result["ledger_unattributable"])
     for goal in result["goals"]:
         assert goal["satisfied"] is False
+
+
+# --- round-6 review findings: ill-typed receipts LOCK, never crash ---
+
+
+def test_ill_typed_goal_id_locks_every_goal():
+    # a list/dict goal_id used to raise TypeError and take the whole
+    # /goals response down; it must lock like any other unattributable
+    # receipt instead
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        poisoned = _receipt("MT-00", fg.KIND_RUN, run_id="run-x",
+                            name="illtyped-goal.json")
+        poisoned["goal_id"] = ["MT-00"]
+        (tmp_path / "illtyped-goal.json").write_text(
+            json.dumps(poisoned), encoding="utf-8")
+        loaded = fg.load_receipts(tmp_path)
+        assert any(r["_file"] == "illtyped-goal.json" for r in loaded)
+        result = fg.evaluate_goals(
+            registries=[MT, FT],
+            receipts=_satisfying_mt00_receipts() + loaded,
+            policy=fg.load_policy(), now=NOW,
+        )
+        assert result["ledger_unattributable"]
+        for goal in result["goals"]:
+            assert goal["satisfied"] is False
+
+
+def test_ill_typed_kind_locks_only_that_goal():
+    mt_poisoned = _receipt("MT-00", ["run"], run_id="run-x",
+                           name="illtyped-kind.json")
+    mt_poisoned["kind"] = ["run"]
+    ft_receipts = [
+        _receipt("FT-00", fg.KIND_OPERATOR_ATTESTATION),
+        _receipt("FT-00", fg.KIND_RUN, run_id="ft-run-9", days_ago=1),
+        _receipt("FT-00", fg.KIND_INDEPENDENT_VERIFICATION,
+                 run_id="v9", verifies="ft-run-9"),
+    ]
+    result = _evaluate(_satisfying_mt00_receipts() + [mt_poisoned]
+                       + ft_receipts)
+    assert _goal(result, "MT-00")["satisfied"] is False
+    assert any("unusable kind" in b for b in _goal(result, "MT-00")["blockers"])
+    assert _goal(result, "FT-00")["satisfied"] is True
+
+
+def test_ill_typed_status_is_invalid_at_load_and_locks_that_goal():
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        poisoned = _receipt("MT-00", fg.KIND_RUN, run_id="run-x",
+                            name="illtyped-status.json")
+        poisoned["status"] = ["pass"]
+        (tmp_path / "illtyped-status.json").write_text(
+            json.dumps(poisoned), encoding="utf-8")
+        loaded = fg.load_receipts(tmp_path)
+        rec = next(r for r in loaded if r["_file"] == "illtyped-status.json")
+        assert rec.get("_invalid")
+        ft_receipts = [
+            _receipt("FT-00", fg.KIND_OPERATOR_ATTESTATION),
+            _receipt("FT-00", fg.KIND_RUN, run_id="ft-run-9", days_ago=1),
+            _receipt("FT-00", fg.KIND_INDEPENDENT_VERIFICATION,
+                     run_id="v9", verifies="ft-run-9"),
+        ]
+        result = fg.evaluate_goals(
+            registries=[MT, FT],
+            receipts=_satisfying_mt00_receipts() + [rec] + ft_receipts,
+            policy=fg.load_policy(), now=NOW,
+        )
+        assert _goal(result, "MT-00")["satisfied"] is False
+        assert _goal(result, "FT-00")["satisfied"] is True
+
+
+def test_artifacts_not_objects_is_invalid_at_load():
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        poisoned = _receipt("MT-00", fg.KIND_RUN, run_id="run-x",
+                            name="illtyped-artifacts.json")
+        poisoned["artifacts"] = ["bad"]
+        (tmp_path / "illtyped-artifacts.json").write_text(
+            json.dumps(poisoned), encoding="utf-8")
+        loaded = fg.load_receipts(tmp_path)
+        rec = next(r for r in loaded
+                   if r["_file"] == "illtyped-artifacts.json")
+        assert "artifacts" in (rec.get("_invalid") or "")

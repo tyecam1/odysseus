@@ -147,11 +147,28 @@ def load_receipts(directory: Path = DEFAULT_RECEIPTS_DIR) -> List[Dict[str, Any]
         # ledger key downstream, and a spoofed one could collide with (and
         # silently overwrite) another receipt's bucket entry
         data["_file"] = path.name
-        missing = [f for f in REQUIRED_RECEIPT_FIELDS if not data.get(f)]
+        # ill-TYPED values poison the same way missing ones do: a list
+        # goal_id/kind/status would otherwise raise mid-derivation and
+        # take the whole /goals response down instead of locking
+        missing = [
+            f for f in REQUIRED_RECEIPT_FIELDS
+            if not isinstance(data.get(f), str) or not data.get(f, "").strip()
+        ]
+        problems: List[str] = []
         if missing:
-            data["_invalid"] = f"missing fields: {missing}"
+            problems.append(f"missing/ill-typed fields: {missing}")
         elif data["status"] not in VALID_STATUSES:
-            data["_invalid"] = f"status {data['status']!r} not in {sorted(VALID_STATUSES)}"
+            problems.append(
+                f"status {data['status']!r} not in {sorted(VALID_STATUSES)}"
+            )
+        artifacts = data.get("artifacts")
+        if artifacts is not None and (
+            not isinstance(artifacts, list)
+            or any(not isinstance(a, dict) for a in artifacts)
+        ):
+            problems.append("artifacts must be a list of objects")
+        if problems:
+            data["_invalid"] = "; ".join(problems)
         receipts.append(data)
     return receipts
 
@@ -198,6 +215,11 @@ def _receipt_blockers(
         )
     if check_artifacts:
         for artifact in receipt.get("artifacts") or []:
+            if not isinstance(artifact, dict):
+                blockers.append(
+                    f"receipt {receipt.get('_file')}: malformed artifact entry"
+                )
+                continue
             label = artifact.get("label")
             recorded = artifact.get("sha256")
             art_path = artifact.get("path")
@@ -262,12 +284,13 @@ def evaluate_goals(
     for receipt in receipts:
         file_name = receipt.get("_file") or "?"
         raw_goal = receipt.get("goal_id")
-        goal_id = raw_goal.strip() if isinstance(raw_goal, str) else raw_goal
+        goal_id = raw_goal.strip() if isinstance(raw_goal, str) else None
         kind = receipt.get("kind")
         invalid_reason = receipt.get("_invalid")
-        if not goal_id:
+        if goal_id is None or not goal_id:
             # cannot be attributed to any goal at all (unparseable JSON,
-            # missing OR EMPTY goal_id): poisons the whole ledger
+            # missing, EMPTY or ill-typed goal_id): poisons the whole
+            # ledger
             global_invalid.append(
                 f"{file_name} ({invalid_reason or 'no usable goal_id'})"
             )
@@ -280,10 +303,10 @@ def evaluate_goals(
                 f"{file_name} (names unknown goal {goal_id!r})"
             )
             continue
-        if not kind or kind not in by_goal or invalid_reason:
+        if not isinstance(kind, str) or kind not in by_goal or invalid_reason:
             # attributed to a KNOWN goal but malformed (bad status,
-            # missing fields) or of unknown/missing kind: locks that
-            # goal specifically
+            # missing/ill-typed fields) or of unknown/missing/ill-typed
+            # kind: locks that goal specifically
             malformed_by_goal.setdefault(goal_id, []).append(
                 f"{file_name} ("
                 + (invalid_reason or f"unusable kind {kind!r}")

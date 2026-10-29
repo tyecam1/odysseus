@@ -483,3 +483,38 @@ def test_snapshot_record_missing_identity_fails_closed(tmp_path):
         encoding="utf-8")
     with pytest.raises(ValueError):
         mp.load_first_seen_index(tmp_path)
+
+
+# --- round-6 review findings: UTS-46 IDN, malformed URLs, timestamp
+# --- content in history
+
+
+def test_idna_esszett_collapses_to_punycode():
+    # stdlib IDNA 2003 maps ß->ss, which would keep faß.de and its
+    # punycode spelling xn--fa-hia.de as TWO domains; UTS-46 does not
+    idna = pytest.importorskip("idna")
+    assert idna is not None
+    a = mp.registrable_domain("https://faß.de/story")
+    b = mp.registrable_domain("https://xn--fa-hia.de/story")
+    assert a == b == "xn--fa-hia.de"
+    # and it must NOT merge the genuinely distinct fass.de
+    assert mp.registrable_domain("https://fass.de/x") == "fass.de"
+    assert mp.registrable_domain("https://fass.de/x") != a
+
+
+def test_malformed_url_yields_unknown_domain_not_crash():
+    # one malformed article URL (bad IPv6 literal) must not abort the
+    # whole source collection
+    assert mp.registrable_domain("https://[bad/path") == "unknown"
+    assert mp.registrable_domain("") == "unknown"
+
+
+def test_first_seen_at_content_must_parse(tmp_path):
+    # a structurally valid record carrying a bogus timestamp would flow
+    # into reports as a false first-seen and break ISO ordering
+    (tmp_path / "latest.json").write_text(
+        json.dumps({"records": [
+            {"event_id": "e1", "first_seen_at": "not-a-date"},
+        ]}), encoding="utf-8")
+    with pytest.raises(ValueError):
+        mp.load_first_seen_index(tmp_path)

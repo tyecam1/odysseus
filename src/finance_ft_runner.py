@@ -44,7 +44,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 RUNNER_NAME = "finance-ft-runner"
-RUNNER_VERSION = "0.1"
+RUNNER_VERSION = "0.2"
 
 # Official image pinned by digest (tag ``stable`` resolved 2026-10-29,
 # image created 2026-09-29, Python 3.14.7 / CCXT 4.5.84). The guard
@@ -61,6 +61,9 @@ DIGEST_RE = re.compile(r"^[a-z0-9./_-]+@sha256:[0-9a-f]{64}$")
 SPOT_PAIR_RE = re.compile(r"^[A-Z0-9.]+/[A-Z0-9.]+$")
 TIMEFRAME_RE = re.compile(r"^\d+[smhd]$")
 TIMERANGE_RE = re.compile(r"^\d{8}(-\d{8})?(-)?$")
+STRATEGY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+CONFIG_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 # Extra freqtrade arguments are restricted to this allowlist. Freqtrade
 # merges multiple --config files with later files taking precedence and
@@ -282,6 +285,7 @@ def build_docker_argv(
     name: str = CONTAINER_NAME,
     detach: bool = False,
     uid_gid: Optional[str] = None,
+    config_sha256: Optional[str] = None,
 ) -> List[str]:
     """Construct the docker command for a supported action. The pinned
     image is embedded verbatim; the user_data workspace is the only
@@ -292,6 +296,12 @@ def build_docker_argv(
     the builder does not trust the caller to have validated them;
     ``extra_args`` is the raw user-supplied remainder and must pass
     :func:`validate_extra_args`.
+
+    When ``config_sha256`` (a full sha256 of the snapshot's bytes) is
+    given for a config-executing action, the container entrypoint
+    becomes ``/bin/sh -c '<checksum check> && exec "$@"'``: freqtrade
+    runs only if the config file it is about to read still hashes to
+    the verified digest, closing the post-check host-side swap window.
 
     By default the container runs with the image's own lifecycle (root →
     entrypoint chown of user_data to its internal ftuser → drop to
@@ -309,7 +319,32 @@ def build_docker_argv(
     data_findings = validate_data_args(data_args)
     if data_findings:
         raise ValueError("; ".join(data_findings))
+    if strategy is not None and not STRATEGY_RE.match(strategy):
+        # strategy is config-controlled text; it reaches docker argv and
+        # (in the hash-bound form) a shell script — only identifiers pass
+        raise ValueError(f"strategy {strategy!r} is not a plain identifier")
+    if not CONFIG_NAME_RE.match(config_name):
+        raise ValueError(f"config_name {config_name!r} has unsafe characters")
+
     volume = f"{user_data_dir.resolve()}:/freqtrade/user_data"
+    config_arg = f"/freqtrade/user_data/{config_name}"
+    cmd_args: List[str]
+    if action == "version":
+        cmd_args = ["--version"]
+    elif action == "download-data":
+        cmd_args = [
+            "download-data", "--config", config_arg,
+            "--userdir", "/freqtrade/user_data",
+        ] + list(data_args or []) + list(extra_args or [])
+    elif action == "dry-run":
+        cmd_args = [
+            "trade", "--config", config_arg,
+            "--userdir", "/freqtrade/user_data",
+            "--dry-run", "--strategy", strategy or "",
+        ] + list(extra_args or [])
+    else:
+        raise ValueError(f"unknown action {action!r}")
+
     # Foreground commands self-clean with --rm; a detached smoke run must
     # NOT use --rm, so a crash leaves the container's logs inspectable
     # until we remove it explicitly after capturing evidence.
@@ -321,24 +356,34 @@ def build_docker_argv(
         argv += ["--user", uid_gid]
     if detach:
         argv.append("-d")
-    argv.append(image_ref)
 
-    config_arg = f"/freqtrade/user_data/{config_name}"
-    if action == "version":
-        argv += ["--version"]
-    elif action == "download-data":
-        argv += [
-            "download-data", "--config", config_arg,
-            "--userdir", "/freqtrade/user_data",
-        ] + list(data_args or []) + list(extra_args or [])
-    elif action == "dry-run":
-        argv += [
-            "trade", "--config", config_arg,
-            "--userdir", "/freqtrade/user_data",
-            "--dry-run", "--strategy", strategy or "",
-        ] + list(extra_args or [])
+    if config_sha256 is not None:
+        # Bind the config bytes INSIDE the container, at open time: the
+        # entrypoint verifies the snapshot's sha256 and only then execs
+        # freqtrade. This closes the last host-side window — anything
+        # swapped on the host after the runner's own checks fails the
+        # container-side checksum instead of executing. Freqtrade args
+        # travel as positional parameters ("$@"), never through the
+        # shell string, so no token of them can inject.
+        if action not in ("download-data", "dry-run"):
+            raise ValueError(
+                "config_sha256 binding applies only to config-executing "
+                "actions"
+            )
+        if not SHA256_RE.match(config_sha256):
+            raise ValueError("config_sha256 must be a full sha256 hex digest")
+        script = (
+            f"printf '%s  %s\\n' {config_sha256} {config_arg} "
+            '| sha256sum -c --status - && exec "$@"'
+        )
+        # "$@" expands to the params AFTER argv0, so the full command —
+        # the freqtrade binary AND its subcommand — must be positional
+        # params; argv0 itself is never executed
+        argv += ["--entrypoint", "/bin/sh", image_ref, "-c", script,
+                 "sh", "freqtrade"] + cmd_args
     else:
-        raise ValueError(f"unknown action {action!r}")
+        argv.append(image_ref)
+        argv += cmd_args
     return argv
 
 
@@ -374,6 +419,7 @@ def dry_run_smoke(
     strategy: str,
     log_dir: Path,
     config_name: str = "config-ft00.json",
+    config_sha256: Optional[str] = None,
     cycles: int = 2,
     ready_timeout_s: float = 180.0,
     ready_markers: Optional[List[str]] = None,
@@ -394,7 +440,7 @@ def dry_run_smoke(
         argv = build_docker_argv(
             "dry-run", image_ref=image_ref, user_data_dir=user_data_dir,
             config_name=config_name, strategy=strategy, name=name,
-            detach=True,
+            detach=True, config_sha256=config_sha256,
         )
         started = runner.run(argv, capture_output=True, text=True, timeout=120)
         if started.returncode != 0:
@@ -523,6 +569,29 @@ def _assert_snapshot_regular(target: Path) -> None:
         )
 
 
+def _assert_snapshot_fresh(target: Path, original: Path) -> None:
+    """The snapshot must be an inode the runner itself just created: a
+    HARDLINK to the original config passes the regular-file and byte
+    checks while sharing its inode, so an in-place edit of the original
+    would silently change the "snapshot" too. nlink must be exactly 1
+    and the inode must differ from the original's."""
+    st = os.lstat(target)
+    if st.st_nlink != 1:
+        raise ConfigUnsafeError(
+            f"verified-config snapshot {target.name} has {st.st_nlink} "
+            "hard links — refusing to execute it"
+        )
+    try:
+        ost = os.lstat(original)
+    except OSError:
+        return
+    if (st.st_dev, st.st_ino) == (ost.st_dev, ost.st_ino):
+        raise ConfigUnsafeError(
+            f"verified-config snapshot {target.name} aliases the "
+            "original config file (same inode) — refusing to execute it"
+        )
+
+
 def materialise_verified_config(
     cfg_path: Path, user_data: Path, cfg: Dict[str, Any],
     verified_raw: bytes,
@@ -536,18 +605,21 @@ def materialise_verified_config(
     exact bytes of the single read the guard parsed — captured by the
     caller at verification time — and the file's CURRENT bytes must
     still equal them (byte comparison; parsed equality would let JSON
-    ``true`` stand in for ``1``). The executed file is then
-    ``.verified-<sha12>.json`` — a REGULAR file whose name encodes the
-    sha256 of exactly those bytes, re-read from the host after writing
-    and asserted byte-for-byte. A pre-existing symlink or unexpected
-    file at the content-addressed path is rejected rather than followed
-    or overwritten. Raises ConfigUnsafeError on any mismatch (fail
-    closed).
+    ``true`` stand in for ``1``).
+
+    The snapshot is ALWAYS a FRESH inode: a pre-existing entry at the
+    content-addressed path (hardlink to the mutable original, symlink,
+    stale bytes) is removed first, then the file is created with
+    O_CREAT|O_EXCL (and O_NOFOLLOW where available). Afterwards the
+    snapshot must be a regular file with nlink == 1 whose inode differs
+    from the original's, and whose bytes re-read from the host equal the
+    verified bytes exactly. Raises ConfigUnsafeError on any mismatch
+    (fail closed).
 
     When the invoking user cannot write the workspace directly (the
     freqtrade container re-chowns it to its internal uid on every run),
     the write is delegated to a one-shot pinned-image container; the
-    bytes are still re-read from the host and asserted afterwards."""
+    inode/nlink/byte assertions still run against the host file."""
     raw = Path(cfg_path).read_bytes()
     if raw != verified_raw:
         raise ConfigUnsafeError(
@@ -557,23 +629,24 @@ def materialise_verified_config(
     digest = hashlib.sha256(raw).hexdigest()[:12]
     target = Path(user_data) / f".verified-{digest}.json"
     if os.path.lexists(target):
-        # a pre-existing entry at the content-addressed path must not be
-        # followed (symlink → mutable original) or silently overwritten
-        if target.is_symlink() or not target.is_file():
+        # never accept a pre-existing inode (a hardlink to the original
+        # passes lstat + byte checks while aliasing a mutable file);
+        # clear it and create fresh below
+        remove_snapshot_best_effort(Path(user_data), target.name)
+        if os.path.lexists(target):
             raise ConfigUnsafeError(
                 f"verified-config snapshot path {target.name} exists and "
-                "is not a regular file (symlink?) — refusing to write"
+                "could not be cleared (symlink/hardlink/stale file) — "
+                "refusing to write"
             )
-        if target.read_bytes() != raw:
-            raise ConfigUnsafeError(
-                f"verified-config snapshot path {target.name} exists with "
-                "different bytes — refusing to overwrite"
-            )
-        # idempotent re-run: the verified bytes are already materialised
-        _assert_snapshot_regular(target)
-        return target
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
     try:
-        target.write_bytes(raw)
+        fd = os.open(
+            target,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow, 0o644,
+        )
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(raw)
     except PermissionError:
         proc = subprocess.run(
             build_snapshot_write_argv(Path(user_data), target.name),
@@ -585,8 +658,14 @@ def materialise_verified_config(
                 "write not permitted and pinned-image delegation failed): "
                 + proc.stderr.decode("utf-8", errors="replace")[-300:]
             )
+    except FileExistsError:
+        raise ConfigUnsafeError(
+            f"verified-config snapshot path {target.name} appeared "
+            "between the clear and the create — refusing to write"
+        ) from None
     try:
         _assert_snapshot_regular(target)
+        _assert_snapshot_fresh(target, Path(cfg_path))
         reread = target.read_bytes()
         if reread != raw:
             # byte-exact: not parsed-object equality (which would accept
@@ -781,6 +860,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     "download-data", image_ref=args.image,
                     user_data_dir=user_data, config_name=config_name,
                     data_args=data_args, extra_args=list(args.extra),
+                    config_sha256=hashlib.sha256(verified_raw).hexdigest(),
                 ),
                 timeout_s=1800, log_path=log_dir / "download-data.log",
             )
@@ -792,6 +872,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 image_ref=args.image, user_data_dir=user_data,
                 strategy=strategy or "", log_dir=log_dir,
                 config_name=config_name, cycles=args.cycles,
+                config_sha256=hashlib.sha256(verified_raw).hexdigest(),
             )
             print(json.dumps(result, indent=2))
             return 0 if result.get("ok") else 5

@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -395,10 +396,11 @@ def _write_config(path, cfg):
     return path
 
 
-def test_materialise_rejects_preexisting_symlink_at_snapshot_path(
-        tmp_path):
+def test_planted_symlink_at_snapshot_path_is_cleared_not_followed(tmp_path):
     # a symlink planted at the content-addressed name would make the
-    # executed config follow the still-mutable original: refuse it
+    # executed config follow the still-mutable original: it is REMOVED
+    # and replaced by a fresh regular file of the verified bytes — the
+    # planted link itself is never executed
     cfg = good_config()
     src = _write_config(tmp_path / "config-ft00.json", cfg)
     workspace = tmp_path / "user_data"
@@ -409,20 +411,50 @@ def test_materialise_rejects_preexisting_symlink_at_snapshot_path(
         link.symlink_to(src)
     except OSError as exc:  # pragma: no cover - platform without symlinks
         pytest.skip(f"cannot create symlinks here: {exc}")
-    with pytest.raises(ft.ConfigUnsafeError):
-        ft.materialise_verified_config(src, workspace, cfg,
-                                      src.read_bytes())
+    target = ft.materialise_verified_config(src, workspace, cfg,
+                                            src.read_bytes())
+    assert not target.is_symlink()
+    assert target.is_file()
+    assert target.read_bytes() == src.read_bytes()
 
 
-def test_materialise_rejects_preexisting_different_bytes(tmp_path):
-    # an unexpected non-symlink file at the snapshot path is refused
-    # too: the runner never overwrites files it did not just verify
+def test_planted_hardlink_at_snapshot_path_is_neutralised(tmp_path):
+    # a HARDLINK to the original passes lstat + byte checks while
+    # sharing the original's inode (an in-place edit of the original
+    # would change the "snapshot"); materialise must create a FRESH
+    # inode with nlink == 1 instead of accepting it
     cfg = good_config()
     src = _write_config(tmp_path / "config-ft00.json", cfg)
     workspace = tmp_path / "user_data"
     workspace.mkdir()
     digest = hashlib.sha256(src.read_bytes()).hexdigest()[:12]
-    (workspace / f".verified-{digest}.json").write_text("{}", encoding="utf-8")
+    planted = workspace / f".verified-{digest}.json"
+    try:
+        os.link(src, planted)
+    except OSError as exc:  # pragma: no cover - platform without hardlinks
+        pytest.skip(f"cannot create hardlinks here: {exc}")
+    target = ft.materialise_verified_config(src, workspace, cfg,
+                                            src.read_bytes())
+    assert target == planted
+    assert os.lstat(target).st_nlink == 1
+    assert (os.lstat(target).st_dev, os.lstat(target).st_ino) != (
+        os.lstat(src).st_dev, os.lstat(src).st_ino)
+    assert os.lstat(src).st_nlink == 1  # original no longer aliased either
+    assert target.read_bytes() == src.read_bytes()
+
+
+def test_unclearable_preexisting_snapshot_refuses(tmp_path, monkeypatch):
+    # if the pre-existing entry cannot be removed (permissions, mount
+    # oddity), materialise fails closed instead of reusing it
+    cfg = good_config()
+    src = _write_config(tmp_path / "config-ft00.json", cfg)
+    workspace = tmp_path / "user_data"
+    workspace.mkdir()
+    digest = hashlib.sha256(src.read_bytes()).hexdigest()[:12]
+    planted = workspace / f".verified-{digest}.json"
+    planted.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(
+        ft, "remove_snapshot_best_effort", lambda *a, **k: None)
     with pytest.raises(ft.ConfigUnsafeError):
         ft.materialise_verified_config(src, workspace, cfg,
                                       src.read_bytes())
@@ -462,3 +494,65 @@ def test_materialise_catches_true_vs_one_source_swap(tmp_path):
         ft.materialise_verified_config(
             src, workspace, cfg,
             b'{"dry_run": true, "trading_mode": "spot"}')
+
+
+# --- round-6: container-side config binding + argv grammar guards ---
+
+
+def test_docker_argv_binds_config_sha_inside_container():
+    # with a full sha256 the container entrypoint becomes a checksum
+    # preflight: freqtrade runs only if the config file STILL hashes to
+    # the verified digest at open time, and freqtrade's own arguments
+    # travel as positional parameters, never inside the shell string
+    sha = "a" * 64
+    argv = ft.build_docker_argv(
+        "dry-run", image_ref=GOOD_IMAGE,
+        user_data_dir=Path("/home/agent/finance-paper/user_data"),
+        strategy="SMACrossBaseline",
+        config_name=".verified-f330b591b66a.json",
+        config_sha256=sha, detach=True,
+    )
+    assert argv[argv.index("--entrypoint") + 1] == "/bin/sh"
+    script = argv[argv.index("-c") + 1]
+    # argv0 is a placeholder; the EXECUTED command is "$@" = freqtrade
+    # <subcommand> ... (exec "$@" never runs argv0 itself)
+    assert argv[argv.index("-c") + 2] == "sh"
+    assert argv[argv.index("-c") + 3] == "freqtrade"
+    assert ("printf '%s  %s" + "\\n' " + sha + " ") in script
+    assert "sha256sum -c --status -" in script
+    assert 'exec "$@"' in script
+    # the config path appears in the script; strategy and subcommand do
+    # NOT (they are positional args, immune to injection)
+    assert "/freqtrade/user_data/.verified-f330b591b66a.json" in script
+    assert "SMACrossBaseline" not in script
+    assert "trade" not in script.replace("freqtrade", "")
+    assert argv[argv.index("-c") + 4] == "trade"
+    assert "SMACrossBaseline" in argv
+
+
+def test_docker_argv_sha_binding_rejects_bad_inputs():
+    with pytest.raises(ValueError):
+        ft.build_docker_argv(
+            "version", image_ref=GOOD_IMAGE,
+            user_data_dir=Path("/w"), config_sha256="a" * 64,
+        )  # version does not execute the config
+    with pytest.raises(ValueError):
+        ft.build_docker_argv(
+            "download-data", image_ref=GOOD_IMAGE,
+            user_data_dir=Path("/w"), config_sha256="short",
+        )  # not a full digest
+
+
+def test_strategy_and_config_name_grammar_guarded():
+    # config-controlled text reaches docker argv (and the hash-bound
+    # shell prelude); only plain identifiers / safe names pass
+    with pytest.raises(ValueError):
+        ft.build_docker_argv(
+            "dry-run", image_ref=GOOD_IMAGE, user_data_dir=Path("/w"),
+            strategy="x; touch /tmp/pwn",
+        )
+    with pytest.raises(ValueError):
+        ft.build_docker_argv(
+            "dry-run", image_ref=GOOD_IMAGE, user_data_dir=Path("/w"),
+            config_name="a b.json",
+        )
