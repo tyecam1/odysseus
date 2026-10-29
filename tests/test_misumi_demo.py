@@ -73,6 +73,7 @@ def _client(tmp_path, monkeypatch, **kw):
     client = TestClient(app)
     client.data_root, client.household = data_root, household
     client.session_logs = lambda: sorted((data_root / "demo-sessions").glob("*.jsonl")) if (data_root / "demo-sessions").is_dir() else []
+    client.sessions_dir = data_root / "demo-sessions"
     return client
 
 
@@ -279,15 +280,128 @@ def test_demonstration_events_never_reach_the_operational_log(client):
     assert log.read_bytes() == before and client.session_logs()
 
 
-def test_sessions_are_bounded_and_the_evicted_sessions_files_go_with_them(tmp_path):
+def _touch(sessions, owner, name, line="x\n"):
+    lease = sessions.begin(sessions.key(owner, name))
+    lease.path.parent.mkdir(parents=True, exist_ok=True)
+    lease.path.write_text(line, encoding="utf-8")
+    return lease
+
+
+def test_every_session_not_only_music_is_bounded_and_the_evicted_sessions_files_go_with_them(tmp_path):
     sessions = demo.DemoSessions(tmp_path / "s", limit=2)
-    for name in ("a", "b", "c"):
-        key = sessions.key("o", name)
-        sessions.log_path(key).parent.mkdir(parents=True, exist_ok=True)
-        sessions.log_path(key).write_text("x\n", encoding="utf-8")
-        sessions.music(key)
-    assert not sessions.log_path(sessions.key("o", "a")).exists() and sessions.log_path(sessions.key("o", "c")).exists()
-    assert demo.DemoSessions(tmp_path / "s").directory.is_dir() and not list((tmp_path / "s").glob("*.jsonl"))   # a restart drops stale state
+    for name in ("a", "b", "c", "d"):
+        sessions.finish(_touch(sessions, "o", name))
+    names = {p.name.split("-")[0] for p in sessions.session_files()}
+    assert names == {sessions.key("o", "c"), sessions.key("o", "d")}          # the two oldest idle sessions went, with their files
+    assert len(sessions.session_files()) == 2
+
+
+def test_a_restart_removes_only_stale_session_files(tmp_path):
+    folder = tmp_path / "s"
+    folder.mkdir()
+    (folder / "old-1.jsonl").write_text("x", encoding="utf-8")
+    (folder / "keep.txt").write_text("x", encoding="utf-8")
+    outside = tmp_path / "events.jsonl"
+    outside.write_text("operational", encoding="utf-8")
+    demo.DemoSessions(folder)
+    assert not (folder / "old-1.jsonl").exists() and (folder / "keep.txt").exists() and outside.read_text() == "operational"
+
+
+def test_a_reset_while_a_run_is_active_leaves_no_residue_and_does_not_disturb_the_next_run(tmp_path):
+    sessions = demo.DemoSessions(tmp_path / "s")
+    key = sessions.key("o", "a")
+    running = sessions.begin(key)
+    running.path.parent.mkdir(parents=True, exist_ok=True)
+    running.path.write_text("before\n", encoding="utf-8")
+    assert sessions.reset(key) == 1
+    running.path.write_text("written by the in-flight run after the reset\n", encoding="utf-8")   # what an emit() after reset would do
+    fresh = sessions.begin(key)
+    assert fresh.path != running.path and fresh.generation != running.generation
+    fresh.path.write_text("next\n", encoding="utf-8")
+    sessions.finish(running)
+    assert not running.path.exists() and fresh.path.read_text() == "next\n"
+    sessions.finish(fresh)
+
+
+def test_an_active_session_is_never_evicted_and_a_late_finish_cannot_delete_a_newer_sessions_log(tmp_path):
+    sessions = demo.DemoSessions(tmp_path / "s", limit=1)
+    old = _touch(sessions, "o", "a")                       # active
+    busy = _touch(sessions, "o", "b")                      # the count is now past the limit, but both are active, so neither is evicted
+    assert old.path.exists() and busy.path.exists()
+    sessions.finish(old)                                   # "a" is now idle and is the oldest: evicted with its file
+    assert not old.path.exists() and busy.path.exists()
+    again = _touch(sessions, "o", "a")                     # the same session id returns as a NEW session with its own file
+    assert again.path != old.path
+    sessions.finish(old)                                   # a duplicate/late finish of the evicted run
+    assert again.path.exists() and busy.path.exists()
+    sessions.finish(again)
+    sessions.finish(busy)
+
+
+def test_the_music_runtime_is_per_generation_and_a_stale_run_never_shares_state(tmp_path):
+    sessions = demo.DemoSessions(tmp_path / "s")
+    key = sessions.key("o", "a")
+    first = sessions.begin(key)
+    runtime = first.runtime()
+    assert first.runtime() is runtime
+    sessions.reset(key)
+    assert first.runtime() is not runtime and sessions.begin(key).runtime() is not runtime
+    other = sessions.begin(sessions.key("o", "b")).runtime()
+    assert other is not runtime
+
+
+def test_events_are_attributed_to_their_own_session_under_concurrent_async_and_threaded_execution(tmp_path):
+    import asyncio
+    from src.misumi_observability import MisumiEventLog
+
+    shared = tmp_path / "operational.jsonl"
+    shared.write_text('{"event": "request", "request_id": "op"}\n', encoding="utf-8")
+    log = MisumiEventLog(shared)
+    logs = {name: tmp_path / f"{name}.jsonl" for name in ("a", "b", "c")}
+
+    async def one(name, count):
+        with log.scoped(logs[name]):
+            for i in range(count):
+                log.emit({"request_id": f"{name}{i}", "outcome": "x"})
+                await asyncio.sleep(0)
+                await asyncio.to_thread(log.emit, {"request_id": f"{name}t{i}", "outcome": "x"})   # a worker thread inherits the scope
+            seen = {e["request_id"] for e in log.recent(100)}
+            assert all(r.startswith(name) for r in seen), seen
+        return seen
+
+    async def main():
+        return await asyncio.gather(one("a", 15), one("b", 15), one("c", 15))
+
+    asyncio.run(main())
+    for name, path in logs.items():
+        rows = [json.loads(line)["request_id"] for line in path.read_text(encoding="utf-8").splitlines()]
+        assert len(rows) == 30 and all(r.startswith(name) for r in rows)
+    assert shared.read_text(encoding="utf-8") == '{"event": "request", "request_id": "op"}\n'     # the shared log is neither written nor read by scoped code
+    log.emit({"request_id": "after", "outcome": "x"})
+    assert "after" in shared.read_text(encoding="utf-8")                                           # and the scope ends with the context
+
+
+def test_concurrent_requests_through_the_real_handler_keep_sessions_apart_and_survive_a_reset_mid_flight(client):
+    from concurrent.futures import ThreadPoolExecutor
+
+    log = _write_operational_log(client)
+    before = log.read_bytes()
+
+    def work(i):
+        name = f"s{i % 4}"
+        return name, run(client, "food-stock", session_id=name).status_code
+
+    with ThreadPoolExecutor(8) as pool:
+        results = list(pool.map(work, range(24)))
+        resets = [pool.submit(client.post, "/misumi/demo/reset?session_id=s1") for _ in range(3)]
+        for f in resets:
+            assert f.result().status_code == 200
+    assert all(code == 200 for _, code in results)
+    assert log.read_bytes() == before
+    for path in client.session_logs():
+        ids = {json.loads(line)["request_id"] for line in path.read_text(encoding="utf-8").splitlines()}
+        assert ids                                                                                   # no empty/orphan file is left behind
+    assert len(client.session_logs()) <= 4
 
 
 # --- developer authority is enforced by the backend --------------------------------------------------------------------------------------
@@ -374,6 +488,7 @@ def _good_recording(client):
     live.pop("phase_b_input")
     live["observed"]["binding"]["host"] = None   # evals/misumi-demo/record.py drops the host before saving
     live["recorded_at"] = "2026-10-28T00:00:00Z"
+    live["capture"] = {"recorder": "evals/misumi-demo/record.py", "source_revision": "a" * 40, "fixture_sha256": demo.fixture_digest()}
     return live
 
 
@@ -389,6 +504,12 @@ def test_recording_validation_accepts_a_genuine_recording_and_rejects_malformed_
     assert not bad(lambda d: d.pop("provenance"))                                            # no provenance
     assert not bad(lambda d: d["provenance"].update(synthetic_verified=False))               # instance was not verified synthetic
     assert not bad(lambda d: d["provenance"].update(marker="0" * 16))                        # provenance for some other root
+    assert not bad(lambda d: d["provenance"].update(fixture_sha256="0" * 64))                # a household whose content is not the approved fixture
+    assert not bad(lambda d: d["provenance"].update(fixture_sha256=None))
+    assert not bad(lambda d: d.pop("capture"))                                               # not produced by the recording workflow
+    assert not bad(lambda d: d["capture"].update(source_revision="HEAD"))
+    assert not bad(lambda d: d["capture"].update(recorder="by hand"))
+    assert not bad(lambda d: d["capture"].update(fixture_sha256="0" * 64))
     assert not bad(lambda d: d.update(mode="guest"))
     assert not bad(lambda d: d["observed"]["binding"].update(host="lab-box"))
     assert not bad(lambda d: d["observed"].update(sources=["household/real-bank-statement.csv"]))   # a source the fixture does not contain
@@ -438,3 +559,55 @@ def test_a_consultation_never_claims_it_improved_the_result():
     support = record["observed"]["consultations"][0]
     assert support["improved_the_result"]["status"] == "unavailable" and support["latency_ms"]["value"] == 900
     assert record["observed"]["execution"]["kind"] == "collaborative"
+
+
+# --- digest and replay allowlist ---------------------------------------------------------------------------------------------------------
+
+
+def test_the_live_provenance_stamp_carries_the_content_digest_of_the_household_actually_served(client):
+    stamp = run(client, "food-stock", mode="developer").json()["provenance"]
+    assert stamp["fixture_sha256"] == demo.fixture_digest() and len(stamp["fixture_sha256"]) == 64      # the test household is a copy of the fixture
+    (client.household / "household" / "extra.md").write_text("one more file", encoding="utf-8")        # any change to the served tree changes the digest
+    changed = run(client, "food-stock", mode="developer").json()["provenance"]
+    assert changed["synthetic_verified"] is True and changed["fixture_sha256"] != demo.fixture_digest()
+    assert demo.provenance_stamp(False, client.household)["fixture_sha256"] is None
+
+
+def test_guest_replay_is_rebuilt_from_an_allowlist_and_never_exposes_developer_only_fields(client, tmp_path, monkeypatch):
+    rec = _good_recording(client)
+    rec["phase_b_input"] = {"judgement": "should never appear"}
+    rec["internal_debug"] = {"note": "developer only"}
+    rec["observed"]["debug_trace"] = ["developer only"]
+    rec["observed"]["binding"]["admin"] = "developer only"
+    rec["shadow_proposal"] = {"kind": "shadow_proposal", "proposal": {"decision": "team"}}
+    rec["offline_evaluations"] = [{"title": "x"}]
+    folder = tmp_path / "recordings"
+    folder.mkdir()
+    (folder / "food-stock.json").write_text(json.dumps(rec), encoding="utf-8")
+    monkeypatch.setattr(demo, "RECORDINGS_DIR", folder)
+    guest = run(client, "food-stock", execution="replay").json()
+    text = json.dumps(guest)
+    for secret in ("should never appear", "developer only", "internal_debug", "debug_trace", "phase_b_input", "source_revision"):
+        assert secret not in text, secret
+    assert guest["shadow_proposal"] is None and guest["offline_evaluations"] == [] and guest["observed"]["sources"] == []
+    assert guest["observed"]["kind"] == "replay" and guest["labels"]["replayed"] is True and guest["labels"]["live"] is False
+    dev = run(client, "food-stock", mode="developer", execution="replay").json()
+    assert dev["shadow_proposal"] is not None and "phase_b_input" not in dev and dev["observed"]["kind"] == "replay"
+
+
+def test_replay_never_executes_a_provider_or_a_model(client, tmp_path, monkeypatch):
+    rec = _good_recording(client)
+    folder = tmp_path / "recordings"
+    folder.mkdir()
+    (folder / "food-stock.json").write_text(json.dumps(rec), encoding="utf-8")
+    monkeypatch.setattr(demo, "RECORDINGS_DIR", folder)
+
+    def boom(*a, **k):
+        raise AssertionError("replay must not execute anything")
+
+    monkeypatch.setattr(misumi_routes, "music_reply", boom)
+    monkeypatch.setattr(misumi_routes, "route_explain", boom, raising=False)
+    sessions_before = list(client.session_logs())
+    assert run(client, "food-stock", execution="replay").status_code == 200
+    assert run(client, "food-stock", mode="developer", execution="replay").status_code == 200
+    assert list(client.session_logs()) == sessions_before                 # nothing was written either
