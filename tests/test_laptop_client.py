@@ -755,11 +755,13 @@ def test_sync_writes_skill_md(client, monkeypatch, tmp_path):
     skill_path = fake_home / ".claude" / "skills" / "aoteru-estate-routing" / "SKILL.md"
     assert skill_path.exists()
     content = skill_path.read_text()
-    assert "aoteru preflight" in content
-    assert "aoteru auto" in content
-    assert "aoteru lab" in content
-    assert "aoteru home" in content
-    assert "aoteru where" in content
+    assert "am preflight" in content
+    assert "am auto" in content
+    assert "am lab" in content
+    assert "am home" in content
+    assert "am where" in content
+    assert "am chat" in content
+    assert "misumi:execute" in content
 
 
 def test_park_status_lists_active_leases(client, monkeypatch, capsys):
