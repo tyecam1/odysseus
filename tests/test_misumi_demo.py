@@ -37,6 +37,12 @@ def _env(tmp_path, monkeypatch, guest=True, marker=True):
     (seed / "docs" / "core" / "misumi-seed-order-v0.1.md").write_text("seed", encoding="utf-8")
     (seed / "config").mkdir()
     (seed / "config" / "personas.yaml").write_text(PERSONAS, encoding="utf-8")
+    (seed / demo.SYNTHETIC_MARKER).write_text("synthetic", encoding="utf-8")
+    data_root.mkdir(parents=True, exist_ok=True)
+    (data_root / demo.SYNTHETIC_MARKER).write_text("synthetic", encoding="utf-8")
+    for var in ("FLAT_KNOWLEDGEBASE_ROOT", "MISUMI_SOURCE_ROOT", "BBC_MISUMI_ROOT", "MISUMI_CANONICAL_ROOT", "BBC_OBSIDIAN_PHD_ROOT", "OBSIDIAN_PHD_ROOT"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("ODYSSEUS_DATA_DIR", str(data_root))
     monkeypatch.setenv("MISUMI_HOUSEHOLD_ROOT", str(household))
     monkeypatch.setenv("MISUMI_SEED_ORDER_ROOT", str(seed))
     monkeypatch.setenv("MISUMI_ROUTING_STATE_ROOT", str(data_root / "routing"))
@@ -54,9 +60,19 @@ def _env(tmp_path, monkeypatch, guest=True, marker=True):
 def _client(tmp_path, monkeypatch, **kw):
     data_root, household = _env(tmp_path, monkeypatch, **kw)
     app = FastAPI()
+
+    @app.middleware("http")
+    async def _token(request, call_next):  # stands in for the API-token middleware: header x-test-scopes = "a,b" means a token with those scopes
+        scopes = request.headers.get("x-test-scopes")
+        if scopes is not None:
+            request.state.api_token, request.state.api_token_scopes = True, [s for s in scopes.split(",") if s]
+            request.state.api_token_owner = request.headers.get("x-test-owner", "kiosk")
+        return await call_next(request)
+
     app.include_router(setup_misumi_routes(SkillsManager(str(data_root))))
     client = TestClient(app)
     client.data_root, client.household = data_root, household
+    client.session_logs = lambda: sorted((data_root / "demo-sessions").glob("*.jsonl")) if (data_root / "demo-sessions").is_dir() else []
     return client
 
 
@@ -65,8 +81,11 @@ def client(tmp_path, monkeypatch):
     return _client(tmp_path, monkeypatch)
 
 
-def run(client, scenario, mode="guest", **extra):
-    return client.post("/misumi/demo/run", json={"scenario_id": scenario, "mode": mode, **extra})
+def run(client, scenario, mode="guest", scopes=None, owner=None, **extra):
+    headers = {} if scopes is None else {"x-test-scopes": scopes}
+    if owner:
+        headers["x-test-owner"] = owner
+    return client.post("/misumi/demo/run", json={"scenario_id": scenario, "mode": mode, **extra}, headers=headers)
 
 
 # --- catalogue and guards --------------------------------------------------------------------------------------------------------
@@ -117,7 +136,7 @@ def test_guest_food_scenario_is_answered_from_the_synthetic_pantry_and_is_labell
     assert "1 litre" in obs["text"] and "milk" in obs["text"].lower()
     assert body["labels"] == {"live": True, "replayed": False, "simulated_tools": False, "shadow_present": False, "household_data": "synthetic"}
     assert obs["binding"]["host"] is None and obs["sources"] == []
-    assert body["shadow_proposal"] is None and body["offline_evaluations"] == [] and body["guest_safety"]["persisted"] is False
+    assert body["shadow_proposal"] is None and body["offline_evaluations"] == [] and body["guest_safety"]["learning_and_memory"] == "not written"
     assert str(tmp_path) not in json.dumps(body)
 
 
@@ -151,8 +170,9 @@ def test_evidence_scenario_runs_and_reports_the_truth_even_without_a_model(clien
 
 def test_the_displayed_decision_agrees_with_the_logged_event(client):
     body = run(client, "food-stock").json()
-    events = [json.loads(line) for line in (client.data_root / "events.jsonl").read_text(encoding="utf-8").splitlines()]
-    event = events[-1]
+    assert not (client.data_root / "events.jsonl").exists()   # the shared operational log is not written by a demonstration
+    (log,) = client.session_logs()
+    event = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()][-1]
     assert event["persona"] == body["observed"]["lead"]["persona"] and event["outcome"] == body["observed"]["execution"]["outcome"]
     assert body["observed"]["measurements"]["latency"]["value"] == event["latency_ms"]
 
@@ -195,9 +215,7 @@ def test_developer_mode_may_replace_the_prompt_and_says_so(client):
 
 
 def test_a_recording_is_replayed_as_a_replay_and_never_as_live(client, tmp_path, monkeypatch):
-    live = run(client, "food-stock", mode="developer").json()
-    live.pop("phase_b_input")
-    live["recorded_at"] = "2026-10-28T00:00:00Z"
+    live = _good_recording(client)
     folder = tmp_path / "recordings"
     folder.mkdir()
     (folder / "food-stock.json").write_text(json.dumps(live), encoding="utf-8")
@@ -208,7 +226,7 @@ def test_a_recording_is_replayed_as_a_replay_and_never_as_live(client, tmp_path,
     assert dev["observed"]["text"] == live["observed"]["text"] and "phase_b_input" not in dev
     guest = run(client, "food-stock", execution="replay").json()
     assert guest["observed"]["kind"] == "replay" and guest["observed"]["binding"]["host"] is None and guest["observed"]["sources"] == []
-    assert guest["shadow_proposal"] is None and guest["offline_evaluations"] == [] and guest["guest_safety"]["persisted"] is False
+    assert guest["shadow_proposal"] is None and guest["offline_evaluations"] == [] and guest["guest_safety"]["learning_and_memory"] == "not written"
     assert live["observed"]["kind"] == "observed"                         # the recording itself is untouched by replaying it
     assert run(client, "music-simulated", execution="replay").status_code == 404  # no recording: never fabricated
     assert run(client, "food-stock", mode="developer", execution="replay", prompt="Something else").status_code == 404
@@ -217,17 +235,187 @@ def test_a_recording_is_replayed_as_a_replay_and_never_as_live(client, tmp_path,
 # --- reset ----------------------------------------------------------------------------------------------------------------------------
 
 
-def test_reset_clears_guest_state_and_refuses_a_non_guest_instance(client, tmp_path, monkeypatch):
-    run(client, "music-simulated", mode="developer")
-    assert "Kind of Blue" in run(client, "music-simulated", mode="developer", prompt="what's playing").json()["observed"]["text"]
-    assert (client.data_root / "events.jsonl").is_file()
-    result = client.post("/misumi/demo/reset").json()
-    assert result["reset"] is True and result["events_cleared"] >= 2 and result["persisted_guest_state"] == "none"
-    assert not (client.data_root / "events.jsonl").exists()
-    after = run(client, "music-simulated", mode="developer", prompt="what's playing").json()["observed"]["text"]
-    assert "Kind of Blue" not in after
+def _write_operational_log(client):
+    log = client.data_root / "events.jsonl"
+    log.write_text('{"event": "request", "request_id": "operational-1", "outcome": "grounded"}\n', encoding="utf-8")
+    return log
+
+
+def test_reset_clears_only_this_demonstration_session_and_never_the_operational_log(client, tmp_path, monkeypatch):
+    log = _write_operational_log(client)
+    before = log.read_bytes()
+    run(client, "music-simulated", mode="developer", prompt="play Kind of Blue", session_id="a")
+    run(client, "music-simulated", mode="developer", prompt="play Pastel Blues", session_id="b")
+    assert len(client.session_logs()) == 2
+    assert "Kind of Blue" in run(client, "music-simulated", mode="developer", prompt="what's playing", session_id="a").json()["observed"]["text"]
+    result = client.post("/misumi/demo/reset?session_id=a").json()
+    assert result["reset"] is True and result["session_events_cleared"] >= 2 and result["shared_operational_log"] == "untouched"
+    assert log.read_bytes() == before                                       # unrelated operational events survive
+    assert len(client.session_logs()) == 1                                   # session b's own log survives
+    assert "Kind of Blue" not in run(client, "music-simulated", mode="developer", prompt="what's playing", session_id="a").json()["observed"]["text"]
+    assert "Pastel Blues" in run(client, "music-simulated", mode="developer", prompt="what's playing", session_id="b").json()["observed"]["text"]
     other = _client(tmp_path / "other", monkeypatch, guest=False) if (tmp_path / "other").mkdir() is None else None
     assert other.post("/misumi/demo/reset").status_code == 409
+
+
+def test_concurrent_guest_sessions_cannot_observe_or_change_each_others_playback(client):
+    run(client, "music-simulated", mode="developer", prompt="play Kind of Blue", session_id="alice")
+    alone = run(client, "music-simulated", mode="developer", prompt="what's playing", session_id="bob").json()["observed"]["text"]
+    assert "Kind of Blue" not in alone
+    run(client, "music-simulated", mode="developer", prompt="pause", session_id="bob")
+    assert "Kind of Blue" in run(client, "music-simulated", mode="developer", prompt="what's playing", session_id="alice").json()["observed"]["text"]
+    # the same session id under a different caller is a different session
+    assert "Kind of Blue" not in run(client, "music-simulated", mode="developer", prompt="what's playing", session_id="alice",
+                                     scopes="misumi:read,misumi:execute", owner="someone-else").json()["observed"]["text"]
+    assert client.post("/misumi/demo/reset?session_id=alice").status_code == 200
+    assert "Kind of Blue" not in run(client, "music-simulated", mode="developer", prompt="what's playing", session_id="alice").json()["observed"]["text"]
+
+
+def test_demonstration_events_never_reach_the_operational_log(client):
+    log = _write_operational_log(client)
+    before = log.read_bytes()
+    run(client, "food-stock")
+    run(client, "music-simulated")
+    assert log.read_bytes() == before and client.session_logs()
+
+
+def test_sessions_are_bounded_and_the_evicted_sessions_files_go_with_them(tmp_path):
+    sessions = demo.DemoSessions(tmp_path / "s", limit=2)
+    for name in ("a", "b", "c"):
+        key = sessions.key("o", name)
+        sessions.log_path(key).parent.mkdir(parents=True, exist_ok=True)
+        sessions.log_path(key).write_text("x\n", encoding="utf-8")
+        sessions.music(key)
+    assert not sessions.log_path(sessions.key("o", "a")).exists() and sessions.log_path(sessions.key("o", "c")).exists()
+    assert demo.DemoSessions(tmp_path / "s").directory.is_dir() and not list((tmp_path / "s").glob("*.jsonl"))   # a restart drops stale state
+
+
+# --- developer authority is enforced by the backend --------------------------------------------------------------------------------------
+
+
+READ_ONLY = "misumi:read"
+DEVELOPER = "misumi:read,misumi:execute"
+
+
+def test_a_read_only_token_gets_guest_functionality_only(client):
+    assert run(client, "food-stock", scopes=READ_ONLY).status_code == 200
+    assert run(client, "food-stock", mode="developer", scopes=READ_ONLY).status_code == 403
+    assert run(client, "food-stock", mode="guest", scopes=READ_ONLY, prompt="anything").status_code == 403   # a custom prompt needs the scope even in guest mode
+    assert run(client, "food-stock", mode="developer", execution="replay", scopes=READ_ONLY).status_code == 403
+    listing = client.get("/misumi/demo/scenarios", headers={"x-test-scopes": READ_ONLY}).json()
+    assert listing["modes"]["developer"]["available"] is False and "misumi:execute" in listing["modes"]["developer"]["reason"]
+    assert client.get("/misumi/demo/scenarios", headers={"x-test-scopes": DEVELOPER}).json()["modes"]["developer"]["available"] is True
+
+
+def test_an_execute_token_may_use_developer_mode_and_a_token_without_misumi_scope_may_not_run_anything(client):
+    body = run(client, "food-stock", mode="developer", scopes=DEVELOPER).json()
+    assert body["mode"] == "developer" and body["provenance"]["synthetic_verified"] is True
+    assert run(client, "food-stock", scopes="calendar").status_code == 403
+
+
+# --- synthetic provenance across every reachable root ----------------------------------------------------------------------------------
+
+
+def _guest_reason(client):
+    return client.get("/misumi/demo/scenarios").json()["modes"]["guest"]
+
+
+def test_guest_mode_is_refused_when_any_other_source_root_could_reach_real_content(tmp_path, monkeypatch):
+    c = _client(tmp_path, monkeypatch)
+    real = tmp_path / "real-household"
+    real.mkdir()
+    for var in ("FLAT_KNOWLEDGEBASE_ROOT", "MISUMI_SOURCE_ROOT", "MISUMI_CANONICAL_ROOT"):
+        monkeypatch.setenv(var, str(real))
+        assert _guest_reason(c)["available"] is False and var in _guest_reason(c)["reason"]
+        assert run(c, "food-stock").status_code == 409
+        monkeypatch.delenv(var)
+    assert _guest_reason(c)["available"] is True
+    monkeypatch.setenv("BBC_OBSIDIAN_PHD_ROOT", str(real))
+    assert _guest_reason(c)["available"] is False and "research" in _guest_reason(c)["reason"]
+
+
+def test_guest_mode_needs_an_explicit_marked_data_directory_and_isolated_state_stores(tmp_path, monkeypatch):
+    c = _client(tmp_path, monkeypatch)
+    monkeypatch.delenv("MISUMI_ROUTING_STATE_ROOT")
+    assert "MISUMI_ROUTING_STATE_ROOT" in _guest_reason(c)["reason"]
+    monkeypatch.setenv("MISUMI_ROUTING_STATE_ROOT", str(tmp_path / "elsewhere"))
+    assert "outside the synthetic data directory" in _guest_reason(c)["reason"]   # a state store outside the synthetic data directory is refused
+    monkeypatch.setenv("MISUMI_ROUTING_STATE_ROOT", str(c.data_root / "routing"))
+    assert _guest_reason(c)["available"] is True
+    monkeypatch.setenv("MISUMI_EVENT_LOG", str(tmp_path / "elsewhere" / "events.jsonl"))
+    assert "MISUMI_EVENT_LOG is outside" in _guest_reason(c)["reason"]
+    monkeypatch.setenv("MISUMI_EVENT_LOG", str(c.data_root / "events.jsonl"))
+    (c.data_root / demo.SYNTHETIC_MARKER).unlink()
+    assert "marked synthetic" in _guest_reason(c)["reason"]
+    (c.data_root / demo.SYNTHETIC_MARKER).write_text("synthetic", encoding="utf-8")
+    monkeypatch.delenv("ODYSSEUS_DATA_DIR")
+    assert "ODYSSEUS_DATA_DIR" in _guest_reason(c)["reason"]
+    monkeypatch.setenv("ODYSSEUS_DATA_DIR", str(c.data_root))
+    monkeypatch.setenv("MISUMI_MUSIC", "1")
+    assert "MISUMI_MUSIC=0" in _guest_reason(c)["reason"]
+
+
+def test_guest_mode_is_refused_when_a_link_inside_the_household_leaves_it(tmp_path, monkeypatch):
+    c = _client(tmp_path, monkeypatch)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("private", encoding="utf-8")
+    try:
+        (c.household / "household" / "leak.txt").symlink_to(outside)
+    except OSError:
+        pytest.skip("symlinks unavailable")
+    assert "link" in _guest_reason(c)["reason"] and run(c, "food-stock").status_code == 409
+
+
+# --- recordings: only verified synthetic recordings are replayable ---------------------------------------------------------------------
+
+
+def _good_recording(client):
+    live = run(client, "food-stock", mode="developer").json()
+    live.pop("phase_b_input")
+    live["observed"]["binding"]["host"] = None   # evals/misumi-demo/record.py drops the host before saving
+    live["recorded_at"] = "2026-10-28T00:00:00Z"
+    return live
+
+
+def test_recording_validation_accepts_a_genuine_recording_and_rejects_malformed_mislabelled_and_private_looking_ones(client):
+    good = _good_recording(client)
+    assert demo.validate_recording(good, "food-stock") == (True, "ok")
+    def bad(mutate):
+        copy = json.loads(json.dumps(good))
+        mutate(copy)
+        return demo.validate_recording(copy, "food-stock")[0]
+    assert demo.validate_recording("not a dict", "food-stock")[0] is False
+    assert demo.validate_recording(good, "evidence-anomaly")[0] is False                       # labelled for another scenario
+    assert not bad(lambda d: d.pop("provenance"))                                            # no provenance
+    assert not bad(lambda d: d["provenance"].update(synthetic_verified=False))               # instance was not verified synthetic
+    assert not bad(lambda d: d["provenance"].update(marker="0" * 16))                        # provenance for some other root
+    assert not bad(lambda d: d.update(mode="guest"))
+    assert not bad(lambda d: d["observed"]["binding"].update(host="lab-box"))
+    assert not bad(lambda d: d["observed"].update(sources=["household/real-bank-statement.csv"]))   # a source the fixture does not contain
+    assert not bad(lambda d: d["observed"].update(text="see /home/tye/Documents/phd/notes.md"))
+    assert not bad(lambda d: d["observed"].update(text="mail me at someone@example.org"))
+    assert not bad(lambda d: d["observed"].update(text="host dmem.tail171792.ts.net"))
+    assert not bad(lambda d: d["observed"].update(text="Authorization: Bearer ody_abcdef123456"))
+    assert not bad(lambda d: d["observed"].update(text="reachable at 100.105.34.37"))
+    assert not bad(lambda d: d["request"].update(prompt=r"C:\Users\Tye\Documents"))
+
+
+def test_a_private_looking_or_unstamped_recording_is_never_offered_for_replay(client, tmp_path, monkeypatch):
+    good = _good_recording(client)
+    folder = tmp_path / "recordings"
+    folder.mkdir()
+    monkeypatch.setattr(demo, "RECORDINGS_DIR", folder)
+    leaky = json.loads(json.dumps(good))
+    leaky["observed"]["text"] = "from /home/tye/private.md"
+    (folder / "food-stock.json").write_text(json.dumps(leaky), encoding="utf-8")
+    assert client.get("/misumi/demo/scenarios").json()["replays"] == []
+    assert run(client, "food-stock", execution="replay").status_code == 404
+    (folder / "food-stock.json").write_text("{not json", encoding="utf-8")
+    assert run(client, "food-stock", execution="replay").status_code == 404
+    unstamped = json.loads(json.dumps(good))
+    unstamped.pop("provenance")
+    (folder / "food-stock.json").write_text(json.dumps(unstamped), encoding="utf-8")
+    assert run(client, "food-stock", execution="replay").status_code == 404
 
 
 # --- projection arithmetic ------------------------------------------------------------------------------------------------------------

@@ -16,6 +16,9 @@ import sys
 import urllib.request
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from src import misumi_demo  # noqa: E402  (the same validator the replay path uses)
+
 HERE = Path(__file__).resolve().parent
 SCENARIOS = ("food-stock", "evidence-anomaly", "music-simulated")
 
@@ -28,6 +31,15 @@ def call(base, token, scenario):
         return json.loads(response.read().decode("utf-8"))
 
 
+def verified_synthetic(base, token):
+    """The instance must report verified synthetic provenance (guest-ready roots) and the marker of the shipped fixture."""
+    request = urllib.request.Request(base.rstrip("/") + "/misumi/demo/scenarios", headers={"Authorization": "Bearer " + token})
+    with urllib.request.urlopen(request, timeout=30) as response:
+        listing = json.loads(response.read().decode("utf-8"))
+    stamp = listing.get("provenance") or {}
+    return bool(stamp.get("synthetic_verified")) and stamp.get("marker") == misumi_demo.marker_fingerprint() and bool(listing["modes"]["guest"]["available"])
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", type=Path, default=HERE / "recordings")
@@ -35,6 +47,8 @@ def main(argv=None):
     base, token = os.environ.get("MISUMI_DEMO_URL", ""), os.environ.get("MISUMI_DEMO_TOKEN", "")
     if not base or not token:
         sys.exit("set MISUMI_DEMO_URL and MISUMI_DEMO_TOKEN")
+    if not verified_synthetic(base, token):
+        sys.exit("refusing to record: the instance does not report verified synthetic provenance")
     args.out.mkdir(parents=True, exist_ok=True)
     for scenario in SCENARIOS:
         target = args.out / f"{scenario}.json"
@@ -45,6 +59,9 @@ def main(argv=None):
         record.pop("phase_b_input", None)
         record["observed"]["binding"]["host"] = None
         record["recorded_at"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        ok, reason = misumi_demo.validate_recording(record, scenario)
+        if not ok:
+            sys.exit(f"refusing to save {scenario}: {reason}")
         target.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n")
         print("recorded", target.name, record["observed"]["execution"]["kind"])
     return 0
