@@ -24,6 +24,7 @@ import json
 import collections
 import hashlib
 import itertools
+import html
 import os
 import unicodedata
 import threading
@@ -312,18 +313,22 @@ _PRIVATE_LOOKING = re.compile(
     r"\b[A-Za-z0-9]{40,}\b|"
     # an endpoint in any guest-visible text: URL, localhost, name:port, bracketed IPv6, or a host-like domain
     # (anchored at token starts so scanning stays linear on a 60 KB string)
-    r"(?i:://|\blocalhost\b|(?<![a-z0-9_-])(?!\d{4}-\d{2}-\d{2}t\d{2}:)(?=[a-z0-9_-]*[a-z_-])[a-z0-9][a-z0-9_-]*:\d{1,5}(?![a-z0-9])|\[[0-9a-f:.]{2,}\]|"
+    r"(?i:://|\blocalhost\b|(?<![a-z0-9_.-])(?!\d{4}-\d{2}-\d{2}t\d{2}:)(?=[a-z0-9_.-]*[a-z_-])[a-z0-9_][a-z0-9_.-]*:\d+(?![a-z0-9])|\[[0-9a-f:.]{2,}\]|(?<![a-z0-9_])(?:[0-9a-f]{0,4}:){1,7}:[0-9a-f]{0,4}(?![a-z0-9_])|"
     r"(?<![a-z0-9.-])[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:com|org|net|io|ai|dev|local|lan|internal|home|test|example|arpa)(?![a-z0-9-])))")
 
 
+_COLON_LIKE = str.maketrans({"\u2236": ":", "\ua789": ":", "\u0589": ":"})
+
+
 def _decoded(text: str) -> str:
-    """The text as a reader would decode it: NFKC (full-width forms), invisible format characters removed, percent-decoding to a fixed point."""
-    text = "".join(ch for ch in unicodedata.normalize("NFKC", text) if unicodedata.category(ch) != "Cf")
-    for _ in range(8):
-        decoded = urllib.parse.unquote(text)
-        if decoded == text:
+    """The text as a reader would decode it. Every transform (NFKC for full-width forms, removal of invisible format characters, colon look-alikes,
+    HTML entities, percent-decoding) is applied in one loop to a fixed point, because each can expose input for another."""
+    for _ in range(32):
+        step = "".join(ch for ch in unicodedata.normalize("NFKC", text) if unicodedata.category(ch) != "Cf").translate(_COLON_LIKE)
+        step = urllib.parse.unquote(html.unescape(step))
+        if step == text:
             break
-        text = decoded
+        text = step
     return text
 
 
