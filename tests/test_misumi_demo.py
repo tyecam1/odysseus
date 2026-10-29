@@ -766,7 +766,7 @@ def test_overlapping_leases_never_drop_the_newest_record_and_the_cap_holds_at_th
     ("capture", "attempts", -1), ("capture", "attempts", float("nan")), ("capture", "attempts", True), ("capture", "attempts", 4), ("capture", "attempts", "MISSING"),
     ("observed", "extra", {"x": 1}), ("binding", "extra", "x"),
     ("binding", "backend", "https://model.example.org:11434/v1/chat"), ("binding", "backend", "model.example.org:11434"),
-    ("binding", "model", "model.example.org:11434"), ("binding", "model", ["x"]),
+    ("binding", "model", "model.example.org:11434"), ("binding", "model", ["x"]), ("binding", "model", "model.example.org"), ("binding", "model", "model.example.org:service"),
     ("top", "scenario", ["x"]), ("top", "evidence_review", {"records": None}), ("top", "evidence_review", {"records": "x"}),
 ])
 def test_recording_contract_is_strict_and_fails_closed_without_raising(client, where, key, value):
@@ -794,3 +794,31 @@ def test_a_recording_with_duplicate_json_keys_is_not_loaded(client, tmp_path, mo
     (tmp_path / "food-stock.json").write_text(text, encoding="utf-8")
     monkeypatch.setattr(demo, "RECORDINGS_DIR", tmp_path)
     assert demo.load_recording("food-stock") is None
+
+
+def test_a_reset_between_leases_does_not_leave_the_new_generation_untrimmed(tmp_path):
+    sessions = demo.DemoSessions(tmp_path / "s")
+    key = sessions.key("o", "a")
+    old = sessions.begin(key)
+    sessions.reset(key)
+    new = sessions.begin(key)
+    new.path.parent.mkdir(parents=True, exist_ok=True)
+    new.path.write_text("".join(f'{{"n":{i}}}\n' for i in range(52)), encoding="utf-8")
+    sessions.finish(new)
+    sessions.finish(old)
+    assert len(new.path.read_text(encoding="utf-8").splitlines()) == demo.MAX_SESSION_LOG_LINES
+
+
+def test_the_byte_cap_holds_after_trimming_not_only_the_line_cap(tmp_path):
+    sessions = demo.DemoSessions(tmp_path / "s")
+    lease = sessions.begin(sessions.key("o", "a"))
+    lease.path.parent.mkdir(parents=True, exist_ok=True)
+    lease.path.write_text("".join(json.dumps({"n": i, "pad": "x" * 1000}) + "\n" for i in range(51)), encoding="utf-8")
+    sessions.finish(lease)
+    assert lease.path.stat().st_size <= demo.MAX_SESSION_LOG_BYTES
+    assert json.loads(lease.path.read_text(encoding="utf-8").splitlines()[-1])["n"] == 50
+
+
+@pytest.mark.parametrize("model", ["gemma4:12b", "llama3.1:8b", "qwen3:8b", "gpt-4.1"])
+def test_ordinary_model_tags_still_pass_the_label_check(model):
+    assert demo.safe_label(model, demo._MODEL_NAME) == model

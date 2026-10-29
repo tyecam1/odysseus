@@ -229,6 +229,7 @@ class DemoSessions:
         self._entries: "collections.OrderedDict[str, _Entry]" = collections.OrderedDict()
         self._lock = threading.Lock()
         self._counter = itertools.count(1)
+        self._writers: Dict[Path, int] = {}     # live leases per log file
         if self.directory.is_dir():
             for stale in self.directory.glob("*.jsonl"):
                 stale.unlink()
@@ -255,8 +256,10 @@ class DemoSessions:
             entry = self._entries.pop(key, None) or _Entry(next(self._counter))
             self._entries[key] = entry
             entry.active += 1
+            path = self._path(key, entry.generation)
+            self._writers[path] = self._writers.get(path, 0) + 1
             self._evict()
-            return DemoLease(self, key, entry, entry.generation, self._path(key, entry.generation))
+            return DemoLease(self, key, entry, entry.generation, path)
 
     def _trim(self, path: Path) -> None:
         """A session's log keeps only its most recent records (bounded storage); the shared operational log is never trimmed."""
@@ -264,15 +267,22 @@ class DemoSessions:
             if path.is_file() and path.stat().st_size > 0:
                 lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
                 if len(lines) > MAX_SESSION_LOG_LINES or path.stat().st_size > MAX_SESSION_LOG_BYTES:
+                    kept = lines[-MAX_SESSION_LOG_LINES:]
+                    while kept and sum(len(line.encode("utf-8")) + 1 for line in kept) > MAX_SESSION_LOG_BYTES:
+                        kept.pop(0)
                     tmp = path.with_name(path.name + ".tmp")
-                    tmp.write_text("\n".join(lines[-MAX_SESSION_LOG_LINES:]) + "\n", encoding="utf-8", newline="\n")
+                    tmp.write_text("".join(line + "\n" for line in kept), encoding="utf-8", newline="\n")
                     os.replace(tmp, path)
         except OSError:
             pass
 
     def finish(self, lease: DemoLease) -> None:
         with self._lock:
-            if lease.entry.active <= 1:    # other live leases of this session may still be appending: a read-modify-write now could drop their records
+            left = self._writers.get(lease.path, 1) - 1      # another live lease may still be appending to this file: a read-modify-write now could drop its records
+            if left > 0:
+                self._writers[lease.path] = left
+            else:
+                self._writers.pop(lease.path, None)
                 self._trim(lease.path)
             lease.entry.active = max(0, lease.entry.active - 1)
             if lease.entry.gone or lease.entry.generation != lease.generation:
@@ -324,7 +334,7 @@ _RECORDING_KEYS = frozenset({"schema", "mode", "execution", "labels", "scenario"
 
 
 _LABEL = re.compile(r"[A-Za-z0-9 _/-]{1,48}")
-_MODEL_NAME = re.compile(r"[A-Za-z0-9_.-]{1,40}(?::(?!\d+$)[A-Za-z0-9_.-]{1,24})?")   # "gemma4:12b" is a model tag; "host:11434" is an endpoint
+_MODEL_NAME = re.compile(r"[A-Za-z0-9_-]{1,40}(?:\.\d{1,3}){0,3}(?::(?!\d+$)[A-Za-z0-9_-]{1,24})?")   # "gemma4:12b", "llama3.1:8b"; "host:11434" and "a.example.org" are endpoints
 
 
 def safe_label(value: Any, pattern: "re.Pattern[str]" = _LABEL) -> Optional[str]:
