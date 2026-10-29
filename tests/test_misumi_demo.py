@@ -834,3 +834,20 @@ def test_a_guest_binding_is_rebuilt_from_allowlisted_shapes_only(client):
     shown = demo.replay_from_recording(rec, mode="guest")["observed"]["binding"]
     assert shown["backend"] is None and shown["model"] is None and shown["model_note"] is None and shown["host"] is None
     assert shown["tools"] == ["music.search:simulation"]
+
+
+_ENDPOINT_TEXTS = ["http://model.example.org:11434/api/chat", "localhost:11434", "[::1]:11434", "see model.example.org for details", "box.lan",
+                   "intranet-box:8080", "HTTPS://X"]
+
+
+@pytest.mark.parametrize("text", _ENDPOINT_TEXTS)
+@pytest.mark.parametrize("where", ["text", "error", "lead", "verification", "consultations", "measurements"])
+def test_an_endpoint_in_any_guest_visible_field_makes_a_recording_unreplayable(client, where, text):
+    bad = _good_recording(client)
+    bad["observed"][where] = {"note": text} if where in ("lead", "verification", "measurements") else ([{"note": text}] if where == "consultations" else text)
+    assert demo.validate_recording(bad, "food-stock") == (False, "recording contains private-looking content"), (where, text)
+
+
+@pytest.mark.parametrize("text", ["gemma4:12b answered", "llama3.1:8b", "at 10:30 on Tuesday", "3 tins, 2:1 ratio", "stock.md and pantry/eggs.md"])
+def test_ordinary_text_is_not_mistaken_for_an_endpoint(text):
+    assert demo._PRIVATE_LOOKING.search(text) is None

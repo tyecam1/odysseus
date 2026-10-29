@@ -308,7 +308,9 @@ _PRIVATE_LOOKING = re.compile(
     r"(?:[A-Za-z]:\\|/home/|/Users/|/etc/|/var/|/tmp/|~/|\.ts\.net|\bBearer\s|\body_[A-Za-z0-9]{6,}|BEGIN [A-Z ]*KEY|"
     r"[\w.+-]+@[\w-]+\.[\w.]+|\b\d{1,3}(?:\.\d{1,3}){3}\b|(?i:(?:password|passwd|secret|api[_-]?key|token)\s*[:=])|"
     r"\bsk-[A-Za-z0-9_-]{16,}|\bgh[pousr]_[A-Za-z0-9]{20,}|\bAKIA[0-9A-Z]{16}\b|\bxox[baprs]-[A-Za-z0-9-]{10,}|\beyJ[A-Za-z0-9_-]{10,}\.|"
-    r"\b[A-Za-z0-9]{40,}\b)")
+    r"\b[A-Za-z0-9]{40,}\b|"
+    # an endpoint in any guest-visible text: URL, localhost, name:port, bracketed IPv6, or a host-like domain
+    r"(?i:://|\blocalhost\b|\b[a-z][a-z0-9_-]*:\d{2,5}\b|\[[0-9a-f:.]{2,}\]|\b(?:[a-z0-9-]+\.)+(?:com|org|net|io|ai|dev|local|lan|internal|home|test|example|arpa)\b))")
 
 
 def _strings(value: Any):
