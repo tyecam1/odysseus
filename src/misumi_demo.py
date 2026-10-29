@@ -313,7 +313,7 @@ _PRIVATE_LOOKING = re.compile(
     r"\b[A-Za-z0-9]{40,}\b|"
     # an endpoint in any guest-visible text: URL, localhost, name:port, bracketed IPv6, or a host-like domain
     # (anchored at token starts so scanning stays linear on a 60 KB string)
-    r"(?i:://|\blocalhost\b|\[[0-9a-f:.]{2,}\]|(?<![a-z0-9_])(?:[0-9a-f]{0,4}:){1,7}:[0-9a-f]{0,4}(?![a-z0-9_])))")
+    r"(?i:://|(?<![\w:/.])//[^\s/]|(?<![\w\\])\\\\[^\s\\]|\blocalhost\b|\[[0-9a-f:.]{2,}\]|(?<![a-z0-9_])(?:[0-9a-f]{0,4}:){1,7}:[0-9a-f]{0,4}(?![a-z0-9_])))")
 
 
 _COLON_LIKE = str.maketrans({"\u2236": ":", "\ua789": ":", "\u0589": ":"})
