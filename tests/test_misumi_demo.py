@@ -853,16 +853,22 @@ def test_ordinary_text_is_not_mistaken_for_an_endpoint(text):
     assert demo._PRIVATE_LOOKING.search(text) is None
 
 
-@pytest.mark.parametrize("text", ["a:1", "box:8", "1a:1", "a.:1", "_a:1", "::1", "1::1", "host:123456", "a%EF%BC%9A1", "a%E2%80%8B%3A1", "a%25252525252525253A1", "a&colon;1", "a&#58;1", "a\u2236 1".replace(" ", ""), "a%253A1", "a%25253A1", "a\u200b:1", "http%3A%2F%2Fbox%3A8", "box\uff0elocal\uff1a8", "x.example.org"])
+@pytest.mark.parametrize("text", ["a:1", "box:8", "1a:1", "a.:1", "_a:1", "::1", "1::1", "host:123456", "a%EF%BC%9A1", "a%E2%80%8B%3A1", "a%25252525252525253A1", "a&colon;1", "a&#58;1", "\u00e9:1", "\u00e9.test:1", "\u00e9.test", "a\u2236 1".replace(" ", ""), "a%253A1", "a%25253A1", "a\u200b:1", "http%3A%2F%2Fbox%3A8", "box\uff0elocal\uff1a8", "x.example.org"])
 def test_one_digit_ports_and_encoded_endpoints_are_detected(text):
     bad = {"x": text}
-    assert any(demo._PRIVATE_LOOKING.search(demo._decoded(s)) for s in demo._strings(bad)), text
+    assert any(demo._looks_private(s) for s in demo._strings(bad)), text
 
 
 @pytest.mark.parametrize("payload", ["a." * 30000, "a" * 60000, "a-" * 30000, "a@" * 30000, "1." * 30000, ("a" * 9 + ":") * 6000])
 def test_the_private_content_scan_is_linear_on_a_recording_sized_string(payload):
     import time
     start = time.perf_counter()
-    demo._PRIVATE_LOOKING.search(payload)
-    demo._PRIVATE_LOOKING.search(demo._decoded(payload))
+    demo._looks_private(payload)
     assert time.perf_counter() - start < 1.5
+
+
+def test_deeply_nested_entities_are_treated_as_an_endpoint_attempt():
+    text = "a&#58;1"
+    for _ in range(40):
+        text = text.replace("&", "&#38;")
+    assert demo._looks_private(text)

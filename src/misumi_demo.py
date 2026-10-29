@@ -313,8 +313,8 @@ _PRIVATE_LOOKING = re.compile(
     r"\b[A-Za-z0-9]{40,}\b|"
     # an endpoint in any guest-visible text: URL, localhost, name:port, bracketed IPv6, or a host-like domain
     # (anchored at token starts so scanning stays linear on a 60 KB string)
-    r"(?i:://|\blocalhost\b|(?<![a-z0-9_.-])(?!\d{4}-\d{2}-\d{2}t\d{2}:)(?=[a-z0-9_.-]*[a-z_-])[a-z0-9_][a-z0-9_.-]*:\d+(?![a-z0-9])|\[[0-9a-f:.]{2,}\]|(?<![a-z0-9_])(?:[0-9a-f]{0,4}:){1,7}:[0-9a-f]{0,4}(?![a-z0-9_])|"
-    r"(?<![a-z0-9.-])[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:com|org|net|io|ai|dev|local|lan|internal|home|test|example|arpa)(?![a-z0-9-])))")
+    r"(?i:://|\blocalhost\b|(?<![\w.-])(?!\d{4}-\d{2}-\d{2}t\d{2}:)(?=[\w.-]*[^\W\d]|[\w.-]*-)\w[\w.-]*:\d+(?!\w)|\[[0-9a-f:.]{2,}\]|(?<![a-z0-9_])(?:[0-9a-f]{0,4}:){1,7}:[0-9a-f]{0,4}(?![a-z0-9_])|"
+    r"(?<![\w.-])[\w-]+(?:\.[\w-]+)*\.(?:com|org|net|io|ai|dev|local|lan|internal|home|test|example|arpa)(?![\w-])))")
 
 
 _COLON_LIKE = str.maketrans({"\u2236": ":", "\ua789": ":", "\u0589": ":"})
@@ -327,9 +327,16 @@ def _decoded(text: str) -> str:
         step = "".join(ch for ch in unicodedata.normalize("NFKC", text) if unicodedata.category(ch) != "Cf").translate(_COLON_LIKE)
         step = urllib.parse.unquote(html.unescape(step))
         if step == text:
-            break
+            return text
         text = step
-    return text
+    return None                      # still changing after 32 rounds: nobody writes ordinary text this way
+
+
+def _looks_private(text: str) -> bool:
+    if _PRIVATE_LOOKING.search(text):
+        return True
+    decoded = _decoded(text)
+    return decoded is None or _PRIVATE_LOOKING.search(decoded) is not None
 
 
 def _strings(value: Any):
@@ -438,7 +445,7 @@ def _validate_recording(data: Any, scenario_id: str) -> Tuple[bool, str]:
     scanned["capture"] = {k: v for k, v in capture.items() if k not in ("fixture_sha256", "source_revision")}
     for text in _strings(scanned):
         # scan the text as written and as a reader would decode it (full-width forms, percent-encoding)
-        if _PRIVATE_LOOKING.search(text) or _PRIVATE_LOOKING.search(_decoded(text)):
+        if _looks_private(text):
             return False, "recording contains private-looking content"
     return True, "ok"
 
