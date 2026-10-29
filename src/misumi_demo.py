@@ -21,7 +21,10 @@ catalogue prompts only, a household root that carries the synthetic marker, no p
 from __future__ import annotations
 
 import json
+import collections
+import hashlib
 import os
+import threading
 import re
 import socket
 import tempfile
@@ -31,6 +34,8 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 from src.music_capability import Device, Item, MusicController, SimulatedMusicProvider
 from src.music_runtime import MusicRuntime
 
+from src.deployment_isolation import DOMAIN_ROOT_VARS, WRITABLE_VARS
+
 SCHEMA = "misumi-demo-inspection-v1"
 KINDS = ("observed", "simulated", "replay", "offline_evaluation", "shadow_proposal")
 MODES = ("guest", "developer")
@@ -38,6 +43,7 @@ EXECUTIONS = ("live", "replay")
 SYNTHETIC_MARKER = ".synthetic-household"
 GUEST_ENV = "MISUMI_DEMO_GUEST"
 REPO = Path(__file__).resolve().parent.parent
+FIXTURE = REPO / "evals" / "misumi-demo" / "synthetic-household"
 SCENARIOS_FILE = REPO / "config" / "misumi_demo_scenarios.json"
 RECORDINGS_DIR = REPO / "evals" / "misumi-demo" / "recordings"
 MAX_TEXT = 1200
@@ -59,16 +65,181 @@ def public_scenario(item: Mapping[str, Any]) -> Dict[str, Any]:
     return {key: item[key] for key in ("id", "title", "summary", "prompt", "expect_lead", "simulated_tools") if key in item}
 
 
+GUEST_SAFETY = {
+    "conversation_history": "not stored", "learning_and_memory": "not written", "real_tool_provider": False, "microphone": "disabled",
+    "private_data": "none (every reachable root verified synthetic)",
+    "telemetry": "one operational event record per run is written to this session's own demonstration log until reset, eviction or restart; "
+                 "the shared operational event log is not touched",
+}
+STATE_VARS = ("MISUMI_ROUTING_STATE_ROOT", "MISUMI_PERSONA_STATE_ROOT", "MISUMI_DIALOGUE_STATE_ROOT")
+DATA_VAR = "ODYSSEUS_DATA_DIR"
+_SCAN_LIMIT = 5000
+
+
+def _real(path: Any) -> str:
+    return os.path.normcase(os.path.realpath(os.path.expanduser(str(path))))
+
+
+def _inside(path: str, root: str) -> bool:
+    try:
+        return os.path.commonpath([path, root]) == root
+    except ValueError:  # different drives
+        return False
+
+
+def _marked(real_dir: str) -> bool:
+    marker = Path(real_dir) / SYNTHETIC_MARKER
+    return marker.is_file() and not marker.is_symlink() and marker.stat().st_size <= 1024
+
+
+def marker_fingerprint() -> str:
+    """Short hash of the shipped synthetic-household marker; a recording must carry it to be replayable."""
+    try:
+        return hashlib.sha256((FIXTURE / SYNTHETIC_MARKER).read_bytes()).hexdigest()[:16]
+    except OSError:
+        return ""
+
+
+def verify_synthetic(household_root: Optional[Path], environ: Optional[Mapping[str, str]] = None) -> Tuple[bool, str]:
+    """Every root this instance can read or write must be synthetic: the household and any other configured source root, the data
+    directory and the state stores. Diagnostics name variables, never paths."""
+    env = os.environ if environ is None else environ
+    if household_root is None or not Path(household_root).is_dir():
+        return False, "guest mode needs a configured synthetic household root"
+    root = _real(household_root)
+    if not _marked(root):
+        return False, f"the household root is not marked synthetic (no {SYNTHETIC_MARKER}); refusing to serve a guest from it"
+    for var in DOMAIN_ROOT_VARS["misumi"]:
+        value = str(env.get(var, "")).strip()
+        if value and not (_inside(_real(value), root) or _marked(_real(value))):
+            return False, f"{var} reaches content that is not marked synthetic"
+    for var in DOMAIN_ROOT_VARS["phd"]:
+        if str(env.get(var, "")).strip():
+            return False, f"{var} is set; a guest instance must not be able to reach research content"
+    data = str(env.get(DATA_VAR, "")).strip()
+    if not data or not Path(data).is_dir() or not _marked(_real(data)):
+        return False, f"{DATA_VAR} must name an explicit data directory marked synthetic"
+    data_real = _real(data)
+    for var in STATE_VARS:
+        if not str(env.get(var, "")).strip():
+            return False, f"{var} must be set so no operational state store is shared"
+    for var in WRITABLE_VARS:
+        value = str(env.get(var, "")).strip()
+        if value and not _inside(_real(value), data_real):
+            return False, f"{var} is outside the synthetic data directory"
+    if str(env.get("MISUMI_MUSIC", "1")).strip() != "0":
+        return False, "MISUMI_MUSIC=0 is required: the real music runtime must be off on a guest instance"
+    seen = 0
+    for folder, names, files in os.walk(root, followlinks=False):
+        for name in names + files:
+            seen += 1
+            full = os.path.join(folder, name)
+            if seen > _SCAN_LIMIT:
+                return False, "the synthetic household is larger than a demonstration fixture"
+            if os.path.islink(full) and not _inside(_real(full), root):
+                return False, "a link inside the household root leaves it"
+    return True, "synthetic household, data directory and state stores verified"
+
+
 def guest_ready(household_root: Optional[Path], environ: Optional[Mapping[str, str]] = None) -> Tuple[bool, str]:
-    """Guest mode runs only on an instance explicitly started for it whose household root is visibly synthetic."""
+    """Guest mode runs only on an instance explicitly started for it, and only after verify_synthetic passes on the effective roots."""
     env = os.environ if environ is None else environ
     if str(env.get(GUEST_ENV, "")).strip() != "1":
         return False, f"guest mode is off on this instance ({GUEST_ENV}=1 is not set)"
-    if household_root is None or not Path(household_root).is_dir():
-        return False, "guest mode needs a configured synthetic household root"
-    if not (Path(household_root) / SYNTHETIC_MARKER).is_file():
-        return False, f"the household root is not marked synthetic (no {SYNTHETIC_MARKER}); refusing to serve a guest from it"
-    return True, "synthetic household root"
+    return verify_synthetic(household_root, env)
+
+
+def provenance_stamp(verified: bool) -> Dict[str, Any]:
+    return {"synthetic_verified": bool(verified), "marker": marker_fingerprint(),
+            "checked": "household and source roots, data directory, state stores, links, music runtime, research roots"}
+
+
+class DemoSessions:
+    """Per-session demonstration state: a simulated music runtime and an event log file, both keyed by (caller, session id).
+
+    Nothing here is shared with the operational event log or any household/session store. Reset removes exactly one session's state;
+    the oldest session is evicted past ``limit``; files left by an earlier process are removed at start-up (only this directory).
+    """
+
+    def __init__(self, directory: Path, limit: int = 32) -> None:
+        self.directory, self.limit = Path(directory), limit
+        self._music: "collections.OrderedDict[str, SimulatedMusicRuntime]" = collections.OrderedDict()
+        self._lock = threading.Lock()
+        if self.directory.is_dir():
+            for stale in self.directory.glob("*.jsonl"):
+                stale.unlink()
+
+    @staticmethod
+    def key(owner: Optional[str], session_id: Optional[str]) -> str:
+        return hashlib.sha256(f"{owner or ''}\0{session_id or 'default'}".encode("utf-8")).hexdigest()[:24]
+
+    def log_path(self, key: str) -> Path:
+        return self.directory / f"{key}.jsonl"
+
+    def music(self, key: str) -> "SimulatedMusicRuntime":
+        with self._lock:
+            runtime = self._music.pop(key, None) or SimulatedMusicRuntime()
+            self._music[key] = runtime
+            while len(self._music) > self.limit:
+                old, _ = self._music.popitem(last=False)
+                self.log_path(old).unlink(missing_ok=True)
+            return runtime
+
+    def reset(self, key: str) -> int:
+        with self._lock:
+            self._music.pop(key, None)
+            path = self.log_path(key)
+            cleared = len(path.read_text(encoding="utf-8", errors="replace").splitlines()) if path.is_file() else 0
+            path.unlink(missing_ok=True)
+            return cleared
+
+
+_PRIVATE_LOOKING = re.compile(
+    r"(?:[A-Za-z]:\\|/home/|/Users/|/etc/|/var/|/tmp/|~/|\.ts\.net|\bBearer\s|\body_[A-Za-z0-9]{6,}|BEGIN [A-Z ]*KEY|"
+    r"[\w.+-]+@[\w-]+\.[\w.]+|\b\d{1,3}(?:\.\d{1,3}){3}\b|(?i:password\s*[:=]))")
+
+
+def _strings(value: Any):
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, Mapping):
+        for key, item in value.items():
+            yield str(key)
+            yield from _strings(item)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            yield from _strings(item)
+
+
+def fixture_files() -> frozenset:
+    return frozenset(p.relative_to(FIXTURE).as_posix() for p in FIXTURE.rglob("*") if p.is_file() and p.name != SYNTHETIC_MARKER)
+
+
+def validate_recording(data: Any, scenario_id: str) -> Tuple[bool, str]:
+    """A recording is replayable only if it is a developer live inspection of this scenario, carries the synthetic provenance stamp for the
+    shipped fixture, names only sources that exist in that fixture, and contains nothing that looks like a host, path, address or credential."""
+    if not (isinstance(data, dict) and data.get("schema") == SCHEMA and isinstance(data.get("observed"), dict)
+            and (data.get("scenario") or {}).get("id") == scenario_id and isinstance(data.get("request"), dict)
+            and isinstance((data["observed"].get("binding")), dict) and isinstance(data.get("labels"), dict)):
+        return False, "malformed recording"
+    if data.get("mode") != "developer" or data.get("execution") != "live" or data["labels"].get("live") is not True:
+        return False, "not a live developer inspection"
+    stamp = data.get("provenance")
+    if not (isinstance(stamp, dict) and stamp.get("synthetic_verified") is True and stamp.get("marker") and stamp.get("marker") == marker_fingerprint()):
+        return False, "no verified synthetic provenance for the shipped fixture"
+    if data["observed"]["binding"].get("host") is not None:
+        return False, "recording names a host"
+    allowed = fixture_files()
+    sources = data["observed"].get("sources")
+    if not isinstance(sources, list) or any(not isinstance(s, str) or s not in allowed for s in sources):
+        return False, "recording names a source outside the synthetic fixture"
+    encoded = json.dumps(data, ensure_ascii=False)
+    if len(encoded) > 65536:
+        return False, "recording is larger than a demonstration record"
+    for text in _strings(data):
+        if _PRIVATE_LOOKING.search(text):
+            return False, "recording contains private-looking content"
+    return True, "ok"
 
 
 class _DemoProvider(SimulatedMusicProvider):
@@ -159,7 +330,7 @@ def _consultations(response: Mapping[str, Any]) -> List[Dict[str, Any]]:
 def build_inspection(scenario: Mapping[str, Any], *, mode: str, execution: str, prompt: str, prompt_source: str,
                      preview: Optional[Mapping[str, Any]], response: Optional[Mapping[str, Any]], event: Optional[Mapping[str, Any]],
                      shadow: Optional[Mapping[str, Any]] = None, host: Optional[str] = None, error: Optional[str] = None,
-                     recorded_at: Optional[str] = None) -> Dict[str, Any]:
+                     recorded_at: Optional[str] = None, provenance: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
     """One inspection record. ``preview`` is the route-explain result, ``response`` the /respond (or music) response, ``event`` its logged event."""
     if mode not in MODES or execution not in EXECUTIONS:
         raise ValueError("unknown mode or execution")
@@ -211,8 +382,9 @@ def build_inspection(scenario: Mapping[str, Any], *, mode: str, execution: str, 
                    "household_data": "synthetic" if guest else "as configured on this instance"},
         "scenario": {"id": scenario["id"], "title": scenario["title"]},
         "request": {"prompt": _clip(prompt, 400), "prompt_source": prompt_source},
+        "provenance": dict(provenance) if provenance else provenance_stamp(False),
         "observed": observed,
-        "guest_safety": {"persisted": False, "real_tool_provider": False, "microphone": "disabled", "private_data": "none (synthetic root)"} if guest else None,
+        "guest_safety": dict(GUEST_SAFETY) if guest else None,
         "offline_evaluations": [] if guest else _evaluations(scenario),
         "shadow_proposal": None if (guest or not shadow) else {
             "kind": "shadow_proposal", "live_effect": "none", "status": "experimental; did NOT meet its pre-registered promotion criteria",
@@ -242,15 +414,14 @@ def phase_b_row(record: Mapping[str, Any]) -> Dict[str, Any]:
 
 
 def load_recording(scenario_id: str) -> Optional[Dict[str, Any]]:
-    """A recording is a developer-mode inspection captured from a real live run (see evals/misumi-demo/record.py), never edited or overwritten."""
+    """A recording is a developer-mode inspection captured from a real live run (see evals/misumi-demo/record.py), never edited or overwritten.
+    Only a recording that passes validate_recording is ever replayed."""
     path = RECORDINGS_DIR / f"{scenario_id}.json"
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    ok = (isinstance(data, dict) and data.get("schema") == SCHEMA and isinstance(data.get("observed"), dict)
-          and (data.get("scenario") or {}).get("id") == scenario_id and isinstance(data.get("request"), dict))
-    return data if ok else None
+    return data if validate_recording(data, scenario_id)[0] else None
 
 
 def replay_from_recording(recording: Mapping[str, Any], *, mode: str) -> Dict[str, Any]:
@@ -266,5 +437,5 @@ def replay_from_recording(recording: Mapping[str, Any], *, mode: str) -> Dict[st
         out["observed"]["sources"] = []
         out["shadow_proposal"], out["offline_evaluations"] = None, []
         out["labels"].update(shadow_present=False, household_data="synthetic")
-        out["guest_safety"] = {"persisted": False, "real_tool_provider": False, "microphone": "disabled", "private_data": "none (synthetic root)"}
+        out["guest_safety"] = dict(GUEST_SAFETY)
     return out

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import json
 import os
 import threading
@@ -21,10 +23,23 @@ EVENT_FIELDS = (
 )
 
 
+# A demonstration run writes to its own session log instead of the shared operational log (see src/misumi_demo.py).
+_SCOPED_PATH: "contextvars.ContextVar[Optional[Path]]" = contextvars.ContextVar("misumi_event_log_scope", default=None)
+
+
 class MisumiEventLog:
     def __init__(self, path: Optional[str | Path] = None):
         self.path = Path(path or os.getenv("MISUMI_EVENT_LOG") or Path(DATA_DIR) / "misumi" / "events.jsonl")
         self._lock = threading.Lock()
+
+    @contextlib.contextmanager
+    def scoped(self, path: str | Path):
+        """Within this context (and tasks/threads it starts) emit() and recent() use ``path``; the shared log is neither read nor written."""
+        token = _SCOPED_PATH.set(Path(path))
+        try:
+            yield
+        finally:
+            _SCOPED_PATH.reset(token)
 
     @staticmethod
     def request_id() -> str:
@@ -33,17 +48,19 @@ class MisumiEventLog:
     def emit(self, event: Dict[str, object]) -> Dict[str, object]:
         record = {field: event.get(field) for field in EVENT_FIELDS}
         record.update({"timestamp": time.time(), "event": event.get("event") or "request"})
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        target = _SCOPED_PATH.get() or self.path
+        target.parent.mkdir(parents=True, exist_ok=True)
         line = json.dumps(record, ensure_ascii=False, sort_keys=True)
         with self._lock:
-            with self.path.open("a", encoding="utf-8") as handle:
+            with target.open("a", encoding="utf-8") as handle:
                 handle.write(line + "\n")
         return record
 
     def recent(self, limit: int = 50) -> List[Dict[str, object]]:
-        if not self.path.is_file():
+        target = _SCOPED_PATH.get() or self.path
+        if not target.is_file():
             return []
-        lines = self.path.read_text(encoding="utf-8", errors="replace").splitlines()
+        lines = target.read_text(encoding="utf-8", errors="replace").splitlines()
         result = []
         for line in lines[-max(1, min(int(limit), 500)):]:
             try:
