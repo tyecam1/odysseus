@@ -14,6 +14,7 @@ import json
 import os
 import subprocess
 import sys
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -22,6 +23,7 @@ from src import misumi_demo  # noqa: E402  (the same validator the replay path u
 
 HERE = Path(__file__).resolve().parent
 SCENARIOS = ("food-stock", "evidence-anomaly", "music-simulated")
+MAX_ATTEMPTS = 3   # a reasoning model sometimes returns an empty reply; retry before recording a degraded run
 
 
 def call(base, token, scenario):
@@ -69,10 +71,18 @@ def main(argv=None):
         if target.exists():
             print("kept existing recording", target.name)
             continue
-        record = call(base, token, scenario)
+        attempts = 0
+        while True:
+            attempts += 1
+            record = call(base, token, scenario)
+            if record["observed"]["execution"]["kind"] != "degraded" or attempts >= MAX_ATTEMPTS:
+                break   # every attempt is a real run; the number is recorded, and a still-degraded result is saved as degraded, never replaced
         record.pop("phase_b_input", None)
         record["observed"]["binding"]["host"] = None
-        record["capture"] = {"recorder": "evals/misumi-demo/record.py", "source_revision": revision, "fixture_sha256": misumi_demo.fixture_digest()}
+        backend = record["observed"]["binding"].get("backend")
+        if isinstance(backend, str) and "://" in backend:   # a model endpoint's host and port are withheld, like the machine name
+            record["observed"]["binding"]["backend"] = "model endpoint " + urllib.parse.urlparse(backend).path
+        record["capture"] = {"recorder": "evals/misumi-demo/record.py", "source_revision": revision, "fixture_sha256": misumi_demo.fixture_digest(), "attempts": attempts}
         record["recorded_at"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         ok, reason = misumi_demo.validate_recording(record, scenario)
         if not ok:
