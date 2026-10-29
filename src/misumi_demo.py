@@ -24,7 +24,9 @@ import json
 import collections
 import hashlib
 import itertools
+import html
 import os
+import unicodedata
 import threading
 import urllib.parse
 import re
@@ -229,6 +231,7 @@ class DemoSessions:
         self._entries: "collections.OrderedDict[str, _Entry]" = collections.OrderedDict()
         self._lock = threading.Lock()
         self._counter = itertools.count(1)
+        self._writers: Dict[Path, int] = {}     # live leases per log file
         if self.directory.is_dir():
             for stale in self.directory.glob("*.jsonl"):
                 stale.unlink()
@@ -255,8 +258,10 @@ class DemoSessions:
             entry = self._entries.pop(key, None) or _Entry(next(self._counter))
             self._entries[key] = entry
             entry.active += 1
+            path = self._path(key, entry.generation)
+            self._writers[path] = self._writers.get(path, 0) + 1
             self._evict()
-            return DemoLease(self, key, entry, entry.generation, self._path(key, entry.generation))
+            return DemoLease(self, key, entry, entry.generation, path)
 
     def _trim(self, path: Path) -> None:
         """A session's log keeps only its most recent records (bounded storage); the shared operational log is never trimmed."""
@@ -264,13 +269,23 @@ class DemoSessions:
             if path.is_file() and path.stat().st_size > 0:
                 lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
                 if len(lines) > MAX_SESSION_LOG_LINES or path.stat().st_size > MAX_SESSION_LOG_BYTES:
-                    path.write_text("\n".join(lines[-MAX_SESSION_LOG_LINES:]) + "\n", encoding="utf-8", newline="\n")
+                    kept = lines[-MAX_SESSION_LOG_LINES:]
+                    while kept and sum(len(line.encode("utf-8")) + 1 for line in kept) > MAX_SESSION_LOG_BYTES:
+                        kept.pop(0)
+                    tmp = path.with_name(path.name + ".tmp")
+                    tmp.write_text("".join(line + "\n" for line in kept), encoding="utf-8", newline="\n")
+                    os.replace(tmp, path)
         except OSError:
             pass
 
     def finish(self, lease: DemoLease) -> None:
         with self._lock:
-            self._trim(lease.path)
+            left = self._writers.get(lease.path, 1) - 1      # another live lease may still be appending to this file: a read-modify-write now could drop its records
+            if left > 0:
+                self._writers[lease.path] = left
+            else:
+                self._writers.pop(lease.path, None)
+                self._trim(lease.path)
             lease.entry.active = max(0, lease.entry.active - 1)
             if lease.entry.gone or lease.entry.generation != lease.generation:
                 lease.path.unlink(missing_ok=True)
@@ -293,9 +308,44 @@ class DemoSessions:
 
 _PRIVATE_LOOKING = re.compile(
     r"(?:[A-Za-z]:\\|/home/|/Users/|/etc/|/var/|/tmp/|~/|\.ts\.net|\bBearer\s|\body_[A-Za-z0-9]{6,}|BEGIN [A-Z ]*KEY|"
-    r"[\w.+-]+@[\w-]+\.[\w.]+|\b\d{1,3}(?:\.\d{1,3}){3}\b|(?i:(?:password|passwd|secret|api[_-]?key|token)\s*[:=])|"
+    r"(?<![\w.+-])[\w.+-]+@[\w-]+\.[\w.]+|\b\d{1,3}(?:\.\d{1,3}){3}\b|(?i:(?:password|passwd|secret|api[_-]?key|token)\s*[:=])|"
     r"\bsk-[A-Za-z0-9_-]{16,}|\bgh[pousr]_[A-Za-z0-9]{20,}|\bAKIA[0-9A-Z]{16}\b|\bxox[baprs]-[A-Za-z0-9-]{10,}|\beyJ[A-Za-z0-9_-]{10,}\.|"
-    r"\b[A-Za-z0-9]{40,}\b)")
+    r"\b[A-Za-z0-9]{40,}\b|"
+    # an endpoint in any guest-visible text: URL, localhost, name:port, bracketed IPv6, or a host-like domain
+    # (anchored at token starts so scanning stays linear on a 60 KB string)
+    r"(?i:://|(?<![\w:/.])//[^\s/]|(?<![\w\\])\\\\[^\s\\]|\blocalhost\b|\[[0-9a-f:.]{2,}\]|(?<![a-z0-9_])(?:[0-9a-f]{0,4}:){1,7}:[0-9a-f]{0,4}(?![a-z0-9_])))")
+
+
+_COLON_LIKE = str.maketrans({"\u2236": ":", "\ua789": ":", "\u0589": ":"})
+
+
+# Host:port and host-like names, in any script. A label is any run of characters that is not whitespace or a prose/URL delimiter (so combining marks,
+# CJK, Devanagari etc. count); anchored at token starts so scanning stays linear on a 60 KB string.
+_LBL = r"[^\s:;,!?()<>\[\]{}\x22\x27/\\|@#$%^&*+=~`]"
+_LBL_NOT_NUM = r"[^\d.\s:;,!?()<>\[\]{}\x22\x27/\\|@#$%^&*+=~`]"
+_LBL_NO_DOT = r"[^.\s:;,!?()<>\[\]{}\x22\x27/\\|@#$%^&*+=~`]"
+_ENDPOINT = re.compile(
+    r"(?i:(?<!" + _LBL + r")(?!\d{4}-\d{2}-\d{2}t\d{2}:)(?=[\d.]*" + _LBL_NOT_NUM + r")" + _LBL + r"+:\d+(?!\w)"      # host:port (not 10:30, not an ISO time)
+    r"|(?<!" + _LBL + r")" + _LBL_NO_DOT + r"+(?:\." + _LBL_NO_DOT + r"+)*\.(?:com|org|net|io|ai|dev|local|lan|internal|home|test|example|arpa)(?!" + _LBL_NO_DOT + r"))")
+
+
+def _decoded(text: str) -> str:
+    """The text as a reader would decode it. Every transform (NFKC for full-width forms, removal of invisible format characters, colon look-alikes,
+    HTML entities, percent-decoding) is applied in one loop to a fixed point, because each can expose input for another."""
+    for _ in range(32):
+        step = "".join(ch for ch in unicodedata.normalize("NFKC", text) if unicodedata.category(ch) != "Cf").translate(_COLON_LIKE)
+        step = urllib.parse.unquote(html.unescape(step))
+        if step == text:
+            return text
+        text = step
+    return None                      # still changing after 32 rounds: nobody writes ordinary text this way
+
+
+def _looks_private(text: str) -> bool:
+    if _PRIVATE_LOOKING.search(text) or _ENDPOINT.search(text):
+        return True
+    decoded = _decoded(text)
+    return decoded is None or _PRIVATE_LOOKING.search(decoded) is not None or _ENDPOINT.search(decoded) is not None
 
 
 def _strings(value: Any):
@@ -320,11 +370,47 @@ _RECORDING_KEYS = frozenset({"schema", "mode", "execution", "labels", "scenario"
                              "shadow_proposal", "provenance", "evidence_review", "capture", "recorded_at"})
 
 
+# Allowlists, not blacklists: a guest only ever sees a binding label the runtime itself emits. A lexical check cannot tell a host from a name,
+# so the shapes below are the ones the recorder produces; anything else makes the recording unreplayable (fail closed) until it is reviewed.
+_BACKEND = re.compile(r"household-read-only|model endpoint /(?:[A-Za-z0-9_.-]{1,40}(?:/[A-Za-z0-9_.-]{1,40}){0,3})?")
+_MODEL = re.compile(r"(?:gemma|llama|qwen|mistral|phi|gpt|deepseek|granite)[A-Za-z0-9_-]{0,30}(?:\.\d{1,3}){0,3}(?::(?!\d+$)[A-Za-z0-9_-]{1,24})?")
+_TOOL = re.compile(r"(?:music|household|records|food|research|evidence|finance|plants|cleaning)\.[a-z_*]{1,30}(?::[a-z_]{1,20})?")
+_MODEL_NOTES = frozenset({"no model was used for this answer"})
+
+
+def safe_label(value: Any, pattern: "re.Pattern[str]") -> Optional[str]:
+    """A binding label shown to a guest: a short plain name, never a URL, host or port."""
+    return value if isinstance(value, str) and pattern.fullmatch(value) and "//" not in value else None
+
+
+def _binding_labels_ok(binding: Mapping[str, Any]) -> bool:
+    tools = binding.get("tools", [])
+    return ((binding.get("backend") is None or safe_label(binding["backend"], _BACKEND) is not None)
+            and (binding.get("model") is None or safe_label(binding["model"], _MODEL) is not None)
+            and (binding.get("model_note") is None or binding["model_note"] in _MODEL_NOTES)
+            and isinstance(tools, list) and all(safe_label(tool, _TOOL) is not None for tool in tools))
+
+
+def guest_binding(binding: Mapping[str, Any]) -> Dict[str, Any]:
+    """The only binding fields a guest can be shown, each rebuilt from an allowlisted shape."""
+    return {"backend": safe_label(binding.get("backend"), _BACKEND), "model": safe_label(binding.get("model"), _MODEL), "host": None,
+            "model_note": binding.get("model_note") if binding.get("model_note") in _MODEL_NOTES else None,
+            "tools": [tool for tool in binding.get("tools", []) if safe_label(tool, _TOOL)] if isinstance(binding.get("tools"), list) else []}
+
+
 def validate_recording(data: Any, scenario_id: str) -> Tuple[bool, str]:
+    """Fail closed: any shape the checks below did not anticipate is a rejection, never an exception."""
+    try:
+        return _validate_recording(data, scenario_id)
+    except (TypeError, AttributeError, KeyError, ValueError, RecursionError):
+        return False, "malformed recording"
+
+
+def _validate_recording(data: Any, scenario_id: str) -> Tuple[bool, str]:
     """A recording is replayable only if it is a developer live inspection of this scenario, carries the synthetic provenance stamp for the
     shipped fixture, names only sources that exist in that fixture, and contains nothing that looks like a host, path, address or credential."""
     if not (isinstance(data, dict) and data.get("schema") == SCHEMA and isinstance(data.get("observed"), dict)
-            and (data.get("scenario") or {}).get("id") == scenario_id and isinstance(data.get("request"), dict)
+            and isinstance(data.get("scenario"), dict) and data["scenario"].get("id") == scenario_id and isinstance(data.get("request"), dict)
             and isinstance((data["observed"].get("binding")), dict) and isinstance(data.get("labels"), dict)):
         return False, "malformed recording"
     if data.get("mode") != "developer" or data.get("execution") != "live" or data["labels"].get("live") is not True:
@@ -335,18 +421,28 @@ def validate_recording(data: Any, scenario_id: str) -> Tuple[bool, str]:
     approved = fixture_digest()
     if not approved or stamp.get("fixture_sha256") != approved:
         return False, "the household the recording was captured from is not the approved synthetic fixture (content digest differs)"
+    if not (isinstance(stamp.get("checked"), str) and stamp["checked"].strip()):
+        return False, "provenance lacks its check record"
     capture = data.get("capture")
+    attempts = capture.get("attempts") if isinstance(capture, dict) else None
+    if not (isinstance(attempts, int) and not isinstance(attempts, bool) and 1 <= attempts <= 3):
+        return False, "no capture record from the recording workflow (fixture digest, recorder, source revision)"
     if not (isinstance(capture, dict) and capture.get("fixture_sha256") == approved and capture.get("recorder") == "evals/misumi-demo/record.py"
             and re.fullmatch(r"[0-9a-f]{40}", str(capture.get("source_revision", "")))):
         return False, "no capture record from the recording workflow (fixture digest, recorder, source revision)"
-    if data["observed"]["binding"].get("host") is not None:
+    binding = data["observed"]["binding"]
+    if binding.get("host") is not None:
         return False, "recording names a host"
+    if set(data["observed"]) - set(_GUEST_OBSERVED) or set(binding) - set(_GUEST_BINDING):
+        return False, "recording has fields outside the recording contract"
+    if not _binding_labels_ok(binding):
+        return False, "recording names an endpoint"
     allowed = fixture_files()
     sources = data["observed"].get("sources")
     if not isinstance(sources, list) or any(not isinstance(s, str) or s not in allowed for s in sources):
         return False, "recording names a source outside the synthetic fixture"
     review = data.get("evidence_review")
-    if review is not None and (not isinstance(review, dict) or any(not isinstance(r, dict) or r.get("source") not in allowed for r in review.get("records", []))):
+    if review is not None and (not isinstance(review, dict) or not isinstance(review.get("records", []), list) or any(not isinstance(r, dict) or r.get("source") not in allowed for r in review.get("records", []))):
         return False, "evidence review names a source outside the synthetic fixture"
     encoded = json.dumps(data, ensure_ascii=False)
     if len(encoded) > 65536:
@@ -357,7 +453,8 @@ def validate_recording(data: Any, scenario_id: str) -> Tuple[bool, str]:
     scanned["provenance"] = {k: v for k, v in stamp.items() if k not in ("marker", "fixture_sha256")}   # the digests are hex by design; every other field is scanned
     scanned["capture"] = {k: v for k, v in capture.items() if k not in ("fixture_sha256", "source_revision")}
     for text in _strings(scanned):
-        if _PRIVATE_LOOKING.search(text):
+        # scan the text as written and as a reader would decode it (full-width forms, percent-encoding)
+        if _looks_private(text):
             return False, "recording contains private-looking content"
     return True, "ok"
 
@@ -455,6 +552,17 @@ def _backend_label(value: Any, guest: bool) -> Optional[str]:
     return text or None
 
 
+def _scrub(value: Any) -> Any:
+    """Guest-facing text never carries an endpoint-looking string: such a string is replaced, not shown."""
+    if isinstance(value, str):
+        return "[withheld: looked like a network address]" if _looks_private(value) else value
+    if isinstance(value, Mapping):
+        return {key: _scrub(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_scrub(item) for item in value]
+    return value
+
+
 def build_inspection(scenario: Mapping[str, Any], *, mode: str, execution: str, prompt: str, prompt_source: str,
                      preview: Optional[Mapping[str, Any]], response: Optional[Mapping[str, Any]], event: Optional[Mapping[str, Any]],
                      shadow: Optional[Mapping[str, Any]] = None, host: Optional[str] = None, error: Optional[str] = None,
@@ -504,6 +612,9 @@ def build_inspection(scenario: Mapping[str, Any], *, mode: str, execution: str, 
             "retries_rework_human_correction": unavailable("not instrumented"),
         },
     }
+    if guest:     # the live guest path gets the same protection as a guest replay
+        observed["binding"] = guest_binding(observed["binding"])
+        observed = _scrub(observed)
     record: Dict[str, Any] = {
         "schema": SCHEMA, "mode": mode, "execution": execution,
         "labels": {"live": live, "replayed": not live, "simulated_tools": simulated, "shadow_present": bool(shadow) and not guest,
@@ -570,12 +681,19 @@ def phase_b_row(record: Mapping[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _no_duplicate_keys(pairs):
+    keys = [key for key, _ in pairs]
+    if len(keys) != len(set(keys)):
+        raise ValueError("duplicate key in recording")
+    return dict(pairs)
+
+
 def load_recording(scenario_id: str) -> Optional[Dict[str, Any]]:
     """A recording is a developer-mode inspection captured from a real live run (see evals/misumi-demo/record.py), never edited or overwritten.
     Only a recording that passes validate_recording is ever replayed."""
     path = RECORDINGS_DIR / f"{scenario_id}.json"
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=_no_duplicate_keys)
     except (OSError, ValueError):
         return None
     return data if validate_recording(data, scenario_id)[0] else None
@@ -597,8 +715,7 @@ def replay_from_recording(recording: Mapping[str, Any], *, mode: str) -> Dict[st
     out["observed"]["recorded_at"] = recording.get("recorded_at") or out["observed"].get("recorded_at")
     if mode == "guest":
         out["observed"] = {key: out["observed"][key] for key in _GUEST_OBSERVED if key in out["observed"]}
-        out["observed"]["binding"] = {key: out["observed"]["binding"][key] for key in _GUEST_BINDING if key in out["observed"]["binding"]}
-        out["observed"]["binding"]["host"] = None
+        out["observed"]["binding"] = guest_binding(out["observed"]["binding"])
         out["observed"]["sources"] = []
         out["shadow_proposal"], out["offline_evaluations"] = None, []
         out["provenance"] = {key: out["provenance"].get(key) for key in ("synthetic_verified", "marker", "fixture_sha256")}
