@@ -343,7 +343,7 @@ def cmd_chat(args: argparse.Namespace) -> int:
     prompt = _resolve_objective_text(args.prompt, args.objective_file, label="prompt")
     result = _request(
         cfg, "POST", "/misumi/respond",
-        {"prompt": prompt, "persona": args.persona},
+        {"prompt": prompt, "persona": args.persona, "session_id": args.session},
         timeout=args.timeout,
     )
     if result["status"] in (401, 403):
@@ -602,6 +602,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="read chat text from a UTF-8 file")
     p_chat.add_argument("--persona", default="auto",
                         help="auto for ratified routing, or explicitly select a persona")
+    p_chat.add_argument("--session", default="am-cli",
+                        help="conversation session key; default am-cli (owner-scoped)")
     p_chat.add_argument("--timeout", type=float, default=60.0)
     p_chat.add_argument("--json", action="store_true",
                         help="print the full response including sources and routing provenance")
