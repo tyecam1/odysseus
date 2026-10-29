@@ -17,10 +17,11 @@ am status
 am "What is on the shopping list?"
 am chat "Suggest dinner from stock" --persona sanji
 am chat "What did we decide?" --json
+am chat "Continue this thread" --session am-cli
 am ask "Review work items" --repo odysseus --capability local-fast
 ```
 
-The first and second operation need different scopes. Create a token with the least privileges needed; when both are needed, combine `misumi:execute` and `estate:execute` on a single appropriately scoped token, adding `estate:read` for routing/status. Never paste real tokens into source code, shell history shared with others, or the repository.
+Conversation requests use the stable, owner-scoped `am-cli` session by default so separate CLI invocations can share a thread; use `--session NAME` to isolate one. The first and second operation need different scopes. Create a token with the least privileges needed; when both are needed, combine `misumi:execute` and `estate:execute` on a single appropriately scoped token, adding `estate:read` for routing/status. Never paste real tokens into source code, shell history shared with others, or the repository.
 
 ## Existing thin-client installation and operational notes
 
