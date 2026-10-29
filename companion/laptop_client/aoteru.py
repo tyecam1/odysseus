@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""aoteru — laptop thin-client controller for an Odysseus/Aoteru estate
+"""am (legacy: aoteru) — laptop thin-client controller for an Odysseus/Aoteru estate
 (Workstream B, docs/aoteru-long-horizon-autonomous-convergence.agent-task.md).
 
 Deliberately a SINGLE FILE using only the Python standard library — no pip
@@ -11,7 +11,9 @@ its existing REST surface (routes/estate_routing_routes.py,
 runs and used immediately.
 
     aoteru config set --url http://<lab-tailnet-name>:7001 --token ody_...
-    aoteru status
+    am status
+    am "What is on the shopping list?"  # conversational
+    am chat "Dinner from stock?" --persona sanji
     aoteru preflight "refactor the router" --repo odysseus
     aoteru route --capability code-fast
     aoteru ask "summarise the last 3 commits" --capability local-fast
@@ -123,7 +125,7 @@ def _request(cfg: dict, method: str, path: str, body: dict | None = None, timeou
     url = (cfg.get("url") or "").rstrip("/")
     if not url:
         raise SystemExit(
-            "no backend configured — run: aoteru config set --url http://<host>:<port> --token ody_..."
+            "no backend configured — run: am config set --url http://<host>:<port> --token ody_..."
         )
     token = cfg.get("token")
     data = json.dumps(body).encode("utf-8") if body is not None else None
@@ -335,6 +337,30 @@ def cmd_release(args: argparse.Namespace) -> int:
     return 0 if result["status"] == 200 else 1
 
 
+def cmd_chat(args: argparse.Namespace) -> int:
+    """Talk to the Misumi assistant, not the estate execution router."""
+    cfg = _load_config()
+    prompt = _resolve_objective_text(args.prompt, args.objective_file, label="prompt")
+    result = _request(
+        cfg, "POST", "/misumi/respond",
+        {"prompt": prompt, "persona": args.persona, "session_id": args.session},
+        timeout=args.timeout,
+    )
+    if result["status"] in (401, 403):
+        print("denied: chat needs a token with misumi:execute scope; "
+              "estate:execute alone does not grant access")
+        return 1
+    if args.json or result["status"] != 200:
+        print(json.dumps(result["body"], indent=2))
+    else:
+        answer = result["body"].get("text")
+        if not isinstance(answer, str):
+            print(json.dumps(result["body"], indent=2))
+            return 1
+        print(answer)
+    return 0 if result["status"] == 200 else 1
+
+
 def cmd_ask(args: argparse.Namespace) -> int:
     cfg = _load_config()
     objective = _resolve_objective_text(args.objective, args.objective_file)
@@ -408,47 +434,31 @@ def _estate_routing_skill_md() -> str:
     return (
         "---\n"
         "name: aoteru-estate-routing\n"
-        "description: Route a task to an Aoteru estate worker (lab/home) "
-        "via `aoteru auto|lab|home \"<task>\"`, preflight substantial work, or list active sessions "
-        "via `aoteru where`. Use when the user wants work executed on a "
-        "specific estate machine instead of locally — works from any "
-        "repo/session on this laptop, no local Odysseus checkout needed.\n"
+        "description: Talk to Aoteru using am chat, or preflight and execute "
+        "estate work through am ask, auto, lab, or home.\n"
         "---\n\n"
-        "Checkout-free wrapper over the laptop's `aoteru` client "
-        "(companion/laptop_client/aoteru.py, pipx-installed as `aoteru`) "
-        "— never a second router or authority. It only talks to the "
-        "estate's Odysseus backend over HTTP; never hardcode a hostname, "
-        "path, repo map, model name, or credential here — always resolve "
-        "through the live `aoteru` command's own output.\n\n"
-        "- `aoteru preflight \"<task>\" [--repo <id>]` — obtain live "
-        "host/Codex/alias evidence and the required delegation lane before work starts.\n"
-        "- `aoteru auto \"<task>\" [--repo <id>] [--capability <alias>]` "
-        "— resolve the best available host from live estate state and "
-        "execute.\n"
-        "- `aoteru lab \"<task>\" [...]` — force routing to the lab "
-        "worker; fails truthfully (does not silently fall back elsewhere) "
-        "if lab isn't eligible.\n"
-        "- `aoteru home \"<task>\" [...]` — force routing to the home "
-        "worker; fails truthfully when home is unavailable or not yet "
-        "eligible (e.g. not benchmark-qualified) — report that plainly, "
-        "never invent a result.\n"
-        "- `aoteru where` — list active logical estate sessions.\n\n"
-        "This executes via the estate's model-routing backend "
-        "(LLM completion against a resolved local/paid model), not a "
-        "native interactive Claude Code session launched on that remote "
-        "host — that separate remote-dispatch feature does not exist on "
-        "the backend yet; say so plainly if a task genuinely needs it "
-        "rather than treating this as equivalent.\n\n"
-        "Read the JSON the command prints. On `\"ok\": false` or a "
-        "nonzero exit, report the exact error — do not retry silently and "
-        "do not fabricate a successful outcome.\n\n"
-        "Never re-run ask/lab/home to observe an execution; use "
-        "`aoteru execution <id> --wait 60` (GET only — it cannot start another run).\n\n"
-        "Once inside a resolved repo/worktree, that repo's own "
-        "CLAUDE.md/AGENTS.md and rules take precedence over this skill's "
-        "own convenience.\n"
+        "This user-scoped Claude skill calls the existing Odysseus backend "
+        "through the checkout-free am client. The old aoteru command "
+        "remains a compatibility alias. It is not a second router or "
+        "source of knowledge.\n\n"
+        "- am chat <question> or am <question>: converse with Aoteru. "
+        "Uses the ratified automatic Misumi persona router, requires "
+        "misumi:execute. Add --persona <id> for a specialist.\n"
+        "- am chat <question> --json: inspect sources and provenance.\n"
+        "- am preflight <task> [--repo <id>]: fetch live delegation evidence "
+        "before substantive execution, needs estate:read.\n"
+        "- am ask <objective> [--repo <id>]: execute a governed estate task "
+        "with estate:execute. This is not a casual conversation.\n"
+        "- am auto|lab|home <task>: select or force an eligible host, "
+        "failing honestly if the forced host is ineligible.\n"
+        "- am where: inspect logical estate sessions.\n"
+        "- am execution <id> --wait 60: observe without resubmission.\n\n"
+        "Do not hardcode addresses, secrets, host eligibility, models, "
+        "or repo paths. Never retry an execution to inspect its outcome. "
+        "Estate execution returns model-route results, not an interactive "
+        "remote Claude Code session. Existing leases, scopes, approvals, "
+        "and repository CLAUDE.md or AGENTS.md remain authoritative.\n"
     )
-
 
 def cmd_execution(args: argparse.Namespace) -> int:
     """Observe a durable execution (GET /api/estate/run/{id}?wait=N). GET
@@ -518,7 +528,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="aoteru", description=__doc__.split("\n\n")[0])
+    parser = argparse.ArgumentParser(prog="am", description=__doc__.split("\n\n")[0])
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_config = sub.add_parser("config", help="view/set backend URL and token")
@@ -585,6 +595,19 @@ def build_parser() -> argparse.ArgumentParser:
     p_resolve.add_argument("--lease", required=True)
     p_resolve.add_argument("--host", required=True)
 
+    p_chat = sub.add_parser("chat", help="talk to Misumi/Aoteru, not the estate execution router")
+    p_chat.add_argument("prompt", nargs="?", default=None,
+                        help="free-text query; use - for UTF-8 stdin")
+    p_chat.add_argument("--objective-file", default=None,
+                        help="read chat text from a UTF-8 file")
+    p_chat.add_argument("--persona", default="auto",
+                        help="auto for ratified routing, or explicitly select a persona")
+    p_chat.add_argument("--session", default="am-cli",
+                        help="conversation session key; default am-cli (owner-scoped)")
+    p_chat.add_argument("--timeout", type=float, default=60.0)
+    p_chat.add_argument("--json", action="store_true",
+                        help="print the full response including sources and routing provenance")
+
     p_ask = sub.add_parser("ask", help="route and execute an objective")
     p_ask.add_argument(
         "objective", nargs="?", default=None,
@@ -637,13 +660,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
-    args = parser.parse_args(argv)
     handlers = {
         "config": cmd_config,
         "status": cmd_status,
         "route": cmd_route,
         "preflight": cmd_preflight,
         "ask": cmd_ask,
+        "chat": cmd_chat,
         "park-status": cmd_park_status,
         "park": cmd_park,
         "heartbeat": cmd_heartbeat,
@@ -658,6 +681,14 @@ def main(argv: list[str] | None = None) -> int:
         "where": cmd_where,
         "sync": cmd_sync,
     }
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if not argv:
+        parser.print_help()
+        return 0
+    # Plain text means conversation. Named subcommands retain their old semantics.
+    if argv[0] not in handlers and not argv[0].startswith("-"):
+        argv.insert(0, "chat")
+    args = parser.parse_args(argv)
     return handlers[args.command](args)
 
 
