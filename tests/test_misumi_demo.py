@@ -2,8 +2,6 @@
 
 import json
 import shutil
-import unicodedata
-import urllib.parse
 from pathlib import Path
 
 import pytest
@@ -850,15 +848,15 @@ def test_an_endpoint_in_any_guest_visible_field_makes_a_recording_unreplayable(c
     assert demo.validate_recording(bad, "food-stock") == (False, "recording contains private-looking content"), (where, text)
 
 
-@pytest.mark.parametrize("text", ["gemma4:12b answered", "llama3.1:8b", "at 10:30 on Tuesday", "3 tins, 2:1 ratio", "stock.md and pantry/eggs.md"])
+@pytest.mark.parametrize("text", ["gemma4:12b answered", "llama3.1:8b", "at 10:30 on Tuesday", "2026-10-29T12:19:59Z", "recorded 2026-10-28T00:00:00Z", "10:30:45", "2:1 and 12:30", "3 tins, 2:1 ratio", "stock.md and pantry/eggs.md"])
 def test_ordinary_text_is_not_mistaken_for_an_endpoint(text):
     assert demo._PRIVATE_LOOKING.search(text) is None
 
 
-@pytest.mark.parametrize("text", ["a:1", "box:8", "http%3A%2F%2Fbox%3A8", "box\uff0elocal\uff1a8", "x.example.org"])
+@pytest.mark.parametrize("text", ["a:1", "box:8", "1a:1", "a%253A1", "a%25253A1", "a\u200b:1", "http%3A%2F%2Fbox%3A8", "box\uff0elocal\uff1a8", "x.example.org"])
 def test_one_digit_ports_and_encoded_endpoints_are_detected(text):
     bad = {"x": text}
-    assert any(demo._PRIVATE_LOOKING.search(urllib.parse.unquote(unicodedata.normalize("NFKC", s))) for s in demo._strings(bad)), text
+    assert any(demo._PRIVATE_LOOKING.search(demo._decoded(s)) for s in demo._strings(bad)), text
 
 
 @pytest.mark.parametrize("payload", ["a." * 30000, "a" * 60000, "a-" * 30000, "a@" * 30000, "1." * 30000, ("a" * 9 + ":") * 6000])
@@ -866,5 +864,5 @@ def test_the_private_content_scan_is_linear_on_a_recording_sized_string(payload)
     import time
     start = time.perf_counter()
     demo._PRIVATE_LOOKING.search(payload)
-    demo._PRIVATE_LOOKING.search(urllib.parse.unquote(unicodedata.normalize("NFKC", payload)))
+    demo._PRIVATE_LOOKING.search(demo._decoded(payload))
     assert time.perf_counter() - start < 1.5

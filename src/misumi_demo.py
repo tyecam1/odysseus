@@ -312,8 +312,19 @@ _PRIVATE_LOOKING = re.compile(
     r"\b[A-Za-z0-9]{40,}\b|"
     # an endpoint in any guest-visible text: URL, localhost, name:port, bracketed IPv6, or a host-like domain
     # (anchored at token starts so scanning stays linear on a 60 KB string)
-    r"(?i:://|\blocalhost\b|(?<![a-z0-9_-])[a-z][a-z0-9_-]*:\d{1,5}(?![a-z0-9])|\[[0-9a-f:.]{2,}\]|"
+    r"(?i:://|\blocalhost\b|(?<![a-z0-9_-])(?!\d{4}-\d{2}-\d{2}t\d{2}:)(?=[a-z0-9_-]*[a-z_-])[a-z0-9][a-z0-9_-]*:\d{1,5}(?![a-z0-9])|\[[0-9a-f:.]{2,}\]|"
     r"(?<![a-z0-9.-])[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:com|org|net|io|ai|dev|local|lan|internal|home|test|example|arpa)(?![a-z0-9-])))")
+
+
+def _decoded(text: str) -> str:
+    """The text as a reader would decode it: NFKC (full-width forms), invisible format characters removed, percent-decoding to a fixed point."""
+    text = "".join(ch for ch in unicodedata.normalize("NFKC", text) if unicodedata.category(ch) != "Cf")
+    for _ in range(8):
+        decoded = urllib.parse.unquote(text)
+        if decoded == text:
+            break
+        text = decoded
+    return text
 
 
 def _strings(value: Any):
@@ -422,7 +433,7 @@ def _validate_recording(data: Any, scenario_id: str) -> Tuple[bool, str]:
     scanned["capture"] = {k: v for k, v in capture.items() if k not in ("fixture_sha256", "source_revision")}
     for text in _strings(scanned):
         # scan the text as written and as a reader would decode it (full-width forms, percent-encoding)
-        if _PRIVATE_LOOKING.search(text) or _PRIVATE_LOOKING.search(urllib.parse.unquote(unicodedata.normalize("NFKC", text))):
+        if _PRIVATE_LOOKING.search(text) or _PRIVATE_LOOKING.search(_decoded(text)):
             return False, "recording contains private-looking content"
     return True, "ok"
 
