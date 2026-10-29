@@ -21,7 +21,11 @@ derives current status on every call, fail-closed:
   need every dependency satisfied;
 - anything absent, stale, hash-mismatched, malformed or verified only by
   a corroborating (non-independent) lane is a blocker — locked, never
-  assumed good.
+  assumed good. Superseded evidence never poisons a goal: the NEWEST
+  fully-valid run receipt governs (invalidated older receipts are noted
+  only), so a goal can legitimately re-satisfy on fresh evidence after
+  the code or artifacts it cites change — and re-locks the moment that
+  fresh evidence goes stale.
 
 No scheduler, no writes, no network: a pure function of (registries,
 receipts, files, clock). The HTTP adapter in
@@ -240,85 +244,78 @@ def evaluate_goals(
     evaluated: List[Dict[str, Any]] = []
 
     def own_evidence_blockers(goal_id: str) -> List[str]:
-        """Blockers in this goal's OWN run/verification receipts."""
-        blockers: List[str] = []
+        """Blockers in this goal's OWN run/verification receipts. The
+        NEWST fully-valid run receipt governs; invalidated older receipts
+        are noted (surfaced only while the goal stays locked) so they can
+        never permanently poison a goal that has fresher valid evidence."""
+        notes: List[str] = []
         run_receipts = by_goal[KIND_RUN].get(goal_id) or {}
-        best_run: Optional[Dict[str, Any]] = None
+        clean_runs: List[Dict[str, Any]] = []
         for name, receipt in sorted(run_receipts.items()):
+            problems: List[str] = []
             if receipt.get("status") != "pass":
-                blockers.append(
-                    f"{goal_id}: receipt {name} status={receipt.get('status')!r}"
-                )
-                continue
-            if not receipt.get("run_id"):
-                blockers.append(f"{goal_id}: receipt {name} has no run_id")
-                continue
-            receipt_blockers = _receipt_blockers(
-                receipt, now=now, policy=policy, repo_root=repo_root,
-                check_artifacts=_artifact_check_needed(receipt),
-            )
-            if receipt_blockers:
-                blockers.extend(f"{goal_id}: {b}" for b in receipt_blockers)
-            elif best_run is None:
-                best_run = receipt
-        if best_run is None:
-            return blockers or [f"{goal_id}: no run receipt"]
+                problems.append(f"run receipt {name} status={receipt.get('status')!r}")
+            elif not receipt.get("run_id"):
+                problems.append(f"run receipt {name} has no run_id")
+            else:
+                problems.extend(_receipt_blockers(
+                    receipt, now=now, policy=policy, repo_root=repo_root,
+                    check_artifacts=_artifact_check_needed(receipt),
+                ))
+            if problems:
+                notes.append(f"{goal_id}: " + "; ".join(problems))
+            else:
+                clean_runs.append(receipt)
+        if not clean_runs:
+            return notes + [f"{goal_id}: no valid run receipt"]
+
+        best_run = max(clean_runs, key=lambda r: _parse_iso(r["observed_at"]))
 
         verifications = by_goal[KIND_INDEPENDENT_VERIFICATION].get(goal_id) or {}
         verified = None
         for name, verification in sorted(verifications.items()):
-            v_blockers = _receipt_blockers(
+            problems = list(_receipt_blockers(
                 verification, now=now, policy=policy, repo_root=repo_root,
                 check_artifacts=_artifact_check_needed(verification),
-            )
-            if v_blockers:
-                blockers.extend(
-                    f"{goal_id}: verification {name}: {b}" for b in v_blockers
-                )
-                continue
+            ))
             if verification.get("status") != "pass":
-                blockers.append(
-                    f"{goal_id}: verification {name} "
-                    f"status={verification.get('status')!r}"
+                problems.append(
+                    f"verification {name} status={verification.get('status')!r}"
                 )
-                continue
             if not verification.get("verifies"):
-                blockers.append(
-                    f"{goal_id}: verification {name} names no run id"
-                )
-                continue
-            if verification.get("verifies") != best_run.get("run_id"):
-                blockers.append(
-                    f"{goal_id}: verification {name} names run "
+                problems.append(f"verification {name} names no run id")
+            elif verification.get("verifies") != best_run.get("run_id"):
+                problems.append(
+                    f"verification {name} names run "
                     f"{verification.get('verifies')!r}, not "
                     f"{best_run.get('run_id')!r}"
                 )
-                continue
             if not verification.get("artifacts"):
-                blockers.append(
-                    f"{goal_id}: verification {name} records no artifacts"
+                problems.append(
+                    f"verification {name} records no artifacts"
                 )
-                continue
             # EXACT identity match against the accepted independent lanes.
             # A substring match would let e.g. "glm-codex" ride on "codex"
             # and discharge a gate a corroborating lane must never open.
             if verification.get("verifier") not in policy.get(
                 "independent_verifiers", []
             ):
-                blockers.append(
-                    f"{goal_id}: verification lane "
+                problems.append(
+                    f"verification {name} lane "
                     f"{verification.get('verifier')!r} is corroborating, "
                     "not independent"
                 )
-                continue
-            verified = verification
-            break
+            if problems:
+                notes.append(f"{goal_id}: " + "; ".join(problems))
+            else:
+                verified = verification
+                break
         if verified is None:
-            blockers.append(
+            return notes + [
                 f"{goal_id}: no current independent verification of run "
                 f"{best_run.get('run_id')!r}"
-            )
-        return blockers
+            ]
+        return []
 
     satisfaction_cache: Dict[str, Tuple[bool, List[str]]] = {}
 

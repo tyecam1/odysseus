@@ -406,3 +406,59 @@ def test_own_evidence_cannot_satisfy_goal_with_locked_deps():
     assert any("dependency FT-02 not satisfied" in b for b in mt04["blockers"])
     # and its OWN evidence raised no blocker — the lock is purely the deps
     assert not any(b.startswith("MT-04: ") for b in mt04["blockers"])
+
+
+def test_superseded_receipts_do_not_poison_fresh_evidence(tmp_path: Path):
+    # the real re-verification flow: code changes -> old run receipt's
+    # artifact hashes mismatch -> fresh run + fresh verification naming
+    # the NEW run id must re-satisfy; the stale receipts are notes only
+    code = tmp_path / "probe.py"
+    code.write_text("v1\n", encoding="utf-8")
+    old_hash = fg.sha256_file(code)
+
+    attestation = _receipt("MT-00", fg.KIND_OPERATOR_ATTESTATION,
+                           name="att.json")
+    old_run = _receipt(
+        "MT-00", fg.KIND_RUN, run_id="run-old", days_ago=0,
+        artifacts=[{"label": "code", "path": str(code),
+                    "sha256": old_hash}], name="run-old.json",
+    )
+    old_verifies = _receipt(
+        "MT-00", fg.KIND_INDEPENDENT_VERIFICATION, verifies="run-old",
+        artifacts=[{"label": "code", "path": str(code),
+                    "sha256": old_hash}], name="verify-old.json",
+    )
+    # code changes on disk: both old receipts now mismatch
+    code.write_text("v2 fixed\n", encoding="utf-8")
+    new_hash = fg.sha256_file(code)
+
+    new_run = _receipt(
+        "MT-00", fg.KIND_RUN, run_id="run-new",
+        artifacts=[{"label": "code", "path": str(code),
+                    "sha256": new_hash}], name="run-new.json",
+    )
+    new_verifies = _receipt(
+        "MT-00", fg.KIND_INDEPENDENT_VERIFICATION, verifies="run-new",
+        artifacts=[{"label": "code", "path": str(code),
+                    "sha256": new_hash}], name="verify-new.json",
+    )
+    result = fg.evaluate_goals(
+        registries=[MT, FT],
+        receipts=[attestation, old_run, old_verifies, new_run, new_verifies],
+        policy=fg.load_policy(), now=NOW, repo_root=tmp_path,
+    )
+    mt00 = _goal(result, "MT-00")
+    assert mt00["satisfied"] is True
+    assert mt00["blockers"] == []
+
+    # but fresh evidence alone, without a verification naming the NEW
+    # run, re-locks: the old verification names run-old
+    result = fg.evaluate_goals(
+        registries=[MT, FT],
+        receipts=[attestation, old_run, old_verifies, new_run],
+        policy=fg.load_policy(), now=NOW, repo_root=tmp_path,
+    )
+    mt00 = _goal(result, "MT-00")
+    assert mt00["satisfied"] is False
+    assert any("no current independent verification of run 'run-new'" in b
+               for b in mt00["blockers"])
