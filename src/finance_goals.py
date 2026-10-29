@@ -1,0 +1,371 @@
+"""Deterministic finance goal-lock evaluator (MT-xx / FT-xx).
+
+Task cards ``finance-market-media-intelligence-2026-10-29.md`` and
+``finance-paper-trading-goals-2026-10-29.md``; canonical goal registries
+live in ``tyecam1/misumi@main:config/finance-*-goals.json`` and are
+mirrored read-only into ``config/finance-goals/`` for the runtime.
+
+The registries are durable DEFINITIONS, not runtime state. This module
+derives current status on every call, fail-closed:
+
+- a goal is **satisfied** only while it has a ``run`` receipt with
+  status=pass, inside its TTL, whose recorded artifact hashes still match
+  the live files, AND a current ``independent_verification`` receipt from
+  an accepted independent verifier naming that exact run;
+- a goal is **eligible** (may be worked on) when its unlock arm holds:
+  root goals need a current ``operator_attestation``; dependent goals
+  need every dependency satisfied;
+- anything absent, stale, hash-mismatched, malformed or verified only by
+  a corroborating (non-independent) lane is a blocker — locked, never
+  assumed good.
+
+No scheduler, no writes, no network: a pure function of (registries,
+receipts, files, clock). The HTTP adapter in
+``routes/finance_goals_routes.py`` exposes it read-only.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_REGISTRIES_DIR = REPO_ROOT / "config" / "finance-goals"
+DEFAULT_RECEIPTS_DIR = REPO_ROOT / "automation" / "review" / "finance" / "receipts"
+DEFAULT_POLICY_PATH = DEFAULT_REGISTRIES_DIR / "runtime-evaluation.json"
+
+KIND_RUN = "run"
+KIND_OPERATOR_ATTESTATION = "operator_attestation"
+KIND_INDEPENDENT_VERIFICATION = "independent_verification"
+VALID_STATUSES = {"pass", "fail", "insufficient"}
+
+DEFAULT_POLICY: Dict[str, Any] = {
+    "receipt_ttl_days": {
+        KIND_RUN: 7,
+        KIND_OPERATOR_ATTESTATION: 365,
+        KIND_INDEPENDENT_VERIFICATION: 30,
+    },
+    # Accepted independent verifier identities (standing rules: GLM lanes
+    # are corroborating only; Sol-class Codex or the human owner are the
+    # independent lanes that can discharge a gate).
+    "independent_verifiers": ["codex", "sol", "human:tye"],
+    "goal_ttl_overrides": {},
+}
+
+REQUIRED_RECEIPT_FIELDS = ("goal_id", "kind", "status", "observed_at")
+
+
+class ReceiptError(ValueError):
+    """A receipt file is malformed — recorded as a blocker, never fatal."""
+
+
+def _parse_iso(value: str) -> datetime:
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(65536), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def sha256_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def load_policy(path: Path = DEFAULT_POLICY_PATH) -> Dict[str, Any]:
+    policy = json.loads(json.dumps(DEFAULT_POLICY))
+    if path.exists():
+        try:
+            override = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return policy
+        for key in ("receipt_ttl_days", "independent_verifiers"):
+            if isinstance(override.get(key), dict):
+                policy[key].update(override[key])
+            elif isinstance(override.get(key), list):
+                policy[key] = override[key]
+        if isinstance(override.get("goal_ttl_overrides"), dict):
+            policy["goal_ttl_overrides"].update(override["goal_ttl_overrides"])
+    return policy
+
+
+def load_registries(directory: Path = DEFAULT_REGISTRIES_DIR) -> List[Dict[str, Any]]:
+    registries = []
+    for path in sorted(directory.glob("finance-*-goals.json")):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            registries.append(
+                {"file": path.name, "program_id": path.stem, "error": str(exc),
+                 "goals": []}
+            )
+            continue
+        data["_file"] = path.name
+        data["_sha256"] = sha256_file(path)
+        registries.append(data)
+    return registries
+
+
+def load_receipts(directory: Path = DEFAULT_RECEIPTS_DIR) -> List[Dict[str, Any]]:
+    receipts: List[Dict[str, Any]] = []
+    if not directory.exists():
+        return receipts
+    for path in sorted(directory.glob("*.json")):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            receipts.append(
+                {"_file": path.name, "_invalid": f"unparseable: {exc}"}
+            )
+            continue
+        if not isinstance(data, dict):
+            receipts.append({"_file": path.name, "_invalid": "not an object"})
+            continue
+        data.setdefault("_file", path.name)
+        missing = [f for f in REQUIRED_RECEIPT_FIELDS if not data.get(f)]
+        if missing:
+            data["_invalid"] = f"missing fields: {missing}"
+        elif data["status"] not in VALID_STATUSES:
+            data["_invalid"] = f"status {data['status']!r} not in {sorted(VALID_STATUSES)}"
+        receipts.append(data)
+    return receipts
+
+
+def _ttl_days(receipt: Dict[str, Any], policy: Dict[str, Any]) -> Optional[int]:
+    goal_overrides = policy.get("goal_ttl_overrides") or {}
+    per_goal = (goal_overrides.get(receipt.get("goal_id")) or {}).get(receipt["kind"])
+    if isinstance(per_goal, int):
+        return per_goal
+    return (policy.get("receipt_ttl_days") or {}).get(receipt["kind"])
+
+
+def _receipt_blockers(
+    receipt: Dict[str, Any], *, now: datetime, policy: Dict[str, Any],
+    repo_root: Path, check_artifacts: bool,
+) -> List[str]:
+    if receipt.get("_invalid"):
+        return [f"receipt {receipt.get('_file')}: {receipt['_invalid']}"]
+    blockers: List[str] = []
+    try:
+        observed = _parse_iso(receipt["observed_at"])
+    except (TypeError, ValueError):
+        return [f"receipt {receipt.get('_file')}: observed_at not ISO-8601"]
+    if observed.tzinfo is None:
+        observed = observed.replace(tzinfo=timezone.utc)
+    ttl = _ttl_days(receipt, policy)
+    if ttl is None:
+        blockers.append(
+            f"receipt {receipt.get('_file')}: unknown kind {receipt['kind']!r}"
+        )
+    elif now > observed + timedelta(days=ttl):
+        blockers.append(
+            f"receipt {receipt.get('_file')}: stale (observed "
+            f"{receipt['observed_at']}, ttl {ttl}d)"
+        )
+    if check_artifacts:
+        for artifact in receipt.get("artifacts") or []:
+            label = artifact.get("label")
+            recorded = artifact.get("sha256")
+            art_path = artifact.get("path")
+            if not label or not recorded or not art_path:
+                blockers.append(
+                    f"receipt {receipt.get('_file')}: malformed artifact entry"
+                )
+                continue
+            path = (
+                repo_root / art_path[5:]
+                if art_path.startswith("repo:")
+                else Path(art_path)
+            )
+            if not path.exists():
+                blockers.append(
+                    f"receipt {receipt.get('_file')}: artifact missing: {art_path}"
+                )
+            elif sha256_file(path) != recorded:
+                blockers.append(
+                    f"receipt {receipt.get('_file')}: artifact hash mismatch "
+                    f"({label})"
+                )
+    return blockers
+
+
+def _artifact_check_needed(receipt: Dict[str, Any]) -> bool:
+    return receipt.get("kind") in (KIND_RUN, KIND_INDEPENDENT_VERIFICATION)
+
+
+def evaluate_goals(
+    *,
+    registries: Optional[List[Dict[str, Any]]] = None,
+    receipts: Optional[List[Dict[str, Any]]] = None,
+    policy: Optional[Dict[str, Any]] = None,
+    now: Optional[datetime] = None,
+    repo_root: Path = REPO_ROOT,
+) -> Dict[str, Any]:
+    registries = registries if registries is not None else load_registries()
+    receipts = receipts if receipts is not None else load_receipts()
+    policy = policy if policy is not None else load_policy()
+    now = now or datetime.now(timezone.utc)
+
+    goals: Dict[str, Dict[str, Any]] = {}
+    program_of: Dict[str, str] = {}
+    for registry in registries:
+        for goal in registry.get("goals") or []:
+            goals[goal["id"]] = {**goal, "_program": registry.get("program_id")}
+            program_of[goal["id"]] = registry.get("program_id") or "?"
+
+    by_goal: Dict[str, Dict[str, Dict[str, Dict[str, Any]]]] = {
+        KIND_RUN: {},
+        KIND_OPERATOR_ATTESTATION: {},
+        KIND_INDEPENDENT_VERIFICATION: {},
+    }
+    for receipt in receipts:
+        goal_id = receipt.get("goal_id")
+        kind = receipt.get("kind")
+        if goal_id is None or kind is None:
+            continue
+        by_goal.setdefault(kind, {}).setdefault(goal_id, {})[
+            receipt.get("_file") or "?"
+        ] = receipt
+
+    evaluated: List[Dict[str, Any]] = []
+
+    def goal_blockers(goal_id: str, seen: Optional[set] = None) -> List[str]:
+        """Satisfaction blockers for goal_id (recursion-safe on cycles)."""
+        seen = seen or set()
+        if goal_id in seen:
+            return [f"{goal_id}: dependency cycle"]
+        seen.add(goal_id)
+        if goal_id not in goals:
+            return [f"{goal_id}: unknown dependency goal"]
+
+        blockers: List[str] = []
+        run_receipts = by_goal[KIND_RUN].get(goal_id) or {}
+        best_run: Optional[Dict[str, Any]] = None
+        for name, receipt in sorted(run_receipts.items()):
+            if receipt.get("status") != "pass":
+                blockers.append(
+                    f"{goal_id}: receipt {name} status={receipt.get('status')!r}"
+                )
+                continue
+            receipt_blockers = _receipt_blockers(
+                receipt, now=now, policy=policy, repo_root=repo_root,
+                check_artifacts=_artifact_check_needed(receipt),
+            )
+            if receipt_blockers:
+                blockers.extend(f"{goal_id}: {b}" for b in receipt_blockers)
+            elif best_run is None:
+                best_run = receipt
+        if best_run is None:
+            return blockers or [f"{goal_id}: no run receipt"]
+
+        verifications = by_goal[KIND_INDEPENDENT_VERIFICATION].get(goal_id) or {}
+        verified = None
+        for name, verification in sorted(verifications.items()):
+            v_blockers = _receipt_blockers(
+                verification, now=now, policy=policy, repo_root=repo_root,
+                check_artifacts=False,
+            )
+            if v_blockers:
+                blockers.extend(
+                    f"{goal_id}: verification {name}: {b}" for b in v_blockers
+                )
+                continue
+            if verification.get("verifies") != best_run.get("run_id"):
+                blockers.append(
+                    f"{goal_id}: verification {name} names run "
+                    f"{verification.get('verifies')!r}, not "
+                    f"{best_run.get('run_id')!r}"
+                )
+                continue
+            verifier = str(verification.get("verifier") or "").lower()
+            if not any(v in verifier for v in policy.get("independent_verifiers", [])):
+                blockers.append(
+                    f"{goal_id}: verification lane "
+                    f"{verification.get('verifier')!r} is corroborating, "
+                    "not independent"
+                )
+                continue
+            verified = verification
+            break
+        if verified is None:
+            blockers.append(
+                f"{goal_id}: no current independent verification of run "
+                f"{best_run.get('run_id')!r}"
+            )
+        return blockers
+
+    for goal_id, goal in goals.items():
+        own_blockers = goal_blockers(goal_id)
+        satisfied = not own_blockers
+        blockers: List[str] = list(own_blockers)
+
+        eligible = True
+        if goal.get("depends_on"):
+            for dep in goal["depends_on"]:
+                if dep not in goals:
+                    eligible = False
+                    blockers.append(f"dependency {dep}: unknown goal id")
+                else:
+                    dep_blockers = goal_blockers(dep)
+                    if dep_blockers:
+                        eligible = False
+                        blockers.extend(dep_blockers)
+        else:
+            attestations = by_goal[KIND_OPERATOR_ATTESTATION].get(goal_id) or {}
+            current_attestation = None
+            for name, attestation in sorted(attestations.items()):
+                a_blockers = _receipt_blockers(
+                    attestation, now=now, policy=policy, repo_root=repo_root,
+                    check_artifacts=False,
+                )
+                if a_blockers:
+                    blockers.extend(
+                        f"{goal_id}: attestation {name}: {b}" for b in a_blockers
+                    )
+                    continue
+                if attestation.get("status") == "pass":
+                    current_attestation = attestation
+                    break
+            if current_attestation is None:
+                eligible = False
+                blockers.append(
+                    f"{goal_id}: no current operator authorisation attestation"
+                )
+
+        evaluated.append(
+            {
+                "id": goal_id,
+                "title": goal.get("title"),
+                "program_id": goal.get("_program"),
+                "depends_on": goal.get("depends_on") or [],
+                "satisfied": satisfied,
+                "eligible": eligible,
+                "blockers": blockers,
+            }
+        )
+
+    return {
+        "ok": True,
+        "evaluated_at": now.astimezone(timezone.utc).isoformat(),
+        "policy": {
+            "receipt_ttl_days": policy.get("receipt_ttl_days"),
+            "independent_verifiers": policy.get("independent_verifiers"),
+        },
+        "programs": [
+            {
+                "program_id": r.get("program_id"),
+                "file": r.get("_file") or r.get("file"),
+                "sha256": r.get("_sha256"),
+                "canonical_source": r.get("owner_repository"),
+                "error": r.get("error"),
+            }
+            for r in registries
+        ],
+        "goals": evaluated,
+    }

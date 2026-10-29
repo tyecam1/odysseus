@@ -1,0 +1,54 @@
+{
+    "max_open_trades": 2,
+    "stake_currency": "USD",
+    "stake_amount": 200,
+    "tradable_balance_ratio": 0.99,
+    "fiat_display_currency": "USD",
+    "dry_run": true,
+    "dry_run_wallet": 1000,
+    "cancel_open_orders_on_exit": false,
+    "trading_mode": "spot",
+    "margin_enabled": false,
+    "stoploss_on_exchange": false,
+    "bot_name": "finance_ft00_dryrun",
+    "initial_state": "running",
+    "force_entry_enable": false,
+    "internals": {
+        "process_throttle_secs": 15
+    },
+    "exchange": {
+        "name": "kraken",
+        "key": "",
+        "secret": "",
+        "ccxt_config": {
+            "enableRateLimit": true
+        },
+        "ccxt_async_config": {},
+        "pair_whitelist": [
+            "BTC/USD",
+            "ETH/USD"
+        ],
+        "pair_blacklist": []
+    },
+    "pairlists": [
+        {
+            "method": "StaticPairList"
+        }
+    ],
+    "entry_pricing": {
+        "price_side": "other",
+        "use_order_book": true,
+        "order_book_top": 1
+    },
+    "exit_pricing": {
+        "price_side": "other",
+        "use_order_book": true,
+        "order_book_top": 1
+    },
+    "telegram": {
+        "enabled": false,
+        "token": "",
+        "chat_id": ""
+    },
+    "strategy": "SMACrossBaseline"
+}

@@ -700,6 +700,9 @@ from routes.leafly_research_routes import setup_leafly_research_routes
 app.include_router(setup_search_routes(config))
 app.include_router(setup_leafly_research_routes())
 
+from routes.finance_goals_routes import setup_finance_goals_routes
+app.include_router(setup_finance_goals_routes())
+
 # Presets
 from routes.preset_routes import setup_preset_routes
 app.include_router(setup_preset_routes(preset_manager))

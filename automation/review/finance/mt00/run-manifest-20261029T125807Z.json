@@ -1,0 +1,53 @@
+{
+  "probe": "finance-mt-probe",
+  "probe_version": "0.1",
+  "generated_at": "2026-10-29T12:58:07Z",
+  "code_sha256": "75982bb2bc369b272ac6cdd43d5146bb339f0560ee8db774a4bc0576fa86e13e",
+  "params": {
+    "sources": [
+      "gdelt-doc-2.0",
+      "hackernews-official",
+      "kraken-public-spot"
+    ],
+    "gdelt_query": "bitcoin",
+    "max_records": 75,
+    "hn_top": 25,
+    "kraken_pair": "BTCUSD",
+    "kraken_interval": 60,
+    "kraken_candles": 24,
+    "retries": 2
+  },
+  "snapshot": "snapshot-20261029T125807Z.json",
+  "snapshot_sha256": "0e0c197654732ec075389dd5293611e08fe296573d0e7c42d8b0394743fef1a8",
+  "digest": "digest-20261029T125807Z.md",
+  "digest_sha256": "87fd201795224514480827cd849bc7cd090085722f02ad36b22e89aedd9c3b8d",
+  "source_status": [
+    {
+      "source": "gdelt-doc-2.0",
+      "status": "ok",
+      "records": 75,
+      "http_status": 200,
+      "retries": 1,
+      "deduped_exact": 0,
+      "error": null
+    },
+    {
+      "source": "hackernews-official",
+      "status": "ok",
+      "records": 25,
+      "http_status": 200,
+      "retries": 0,
+      "deduped_exact": 0,
+      "error": null
+    },
+    {
+      "source": "kraken-public-spot",
+      "status": "ok",
+      "records": 24,
+      "http_status": 200,
+      "retries": 0,
+      "deduped_exact": 0,
+      "error": null
+    }
+  ]
+}
