@@ -13,7 +13,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from core.middleware import require_admin
@@ -25,6 +25,9 @@ from src.misumi_household import (
 from src.misumi_memory import MisumiMemory
 from src.music_runtime import MUSIC_PERSONA, MusicRuntime, music_reply
 from src.misumi_observability import MisumiEventLog
+from src import misumi_demo as demo
+from src.misumi_household import configured_household_root as _demo_household_root
+from src.misumi_persona_routing import load_personas as _demo_load_personas
 from src.misumi_advisory import Advisory, advisory_instruction, parse_advisory
 from src.misumi_persona_routing import resolve_auto_lead
 from src.misumi_ratification_dialogue import (
@@ -135,6 +138,14 @@ class MisumiRespondRequest(BaseModel):
 class MisumiRouteExplainRequest(BaseModel):
     prompt: str = Field(default="", max_length=4000)
     persona: str = "auto"   # "auto" (the stateless base lead route) or a persona id the caller selected
+
+
+class MisumiDemoRunRequest(BaseModel):
+    scenario_id: str = Field(min_length=1, max_length=60, pattern=r"^[a-z0-9-]+$")
+    mode: Literal["guest", "developer"] = "guest"
+    execution: Literal["live", "replay"] = "live"
+    prompt: Optional[str] = Field(default=None, max_length=400)   # developer mode only; guest mode runs catalogue prompts exactly
+    session_id: Optional[str] = Field(default=None, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")   # one demonstration session; None = the caller's default
 
 
 class MisumiTaskRequest(BaseModel):
@@ -2416,6 +2427,131 @@ def setup_misumi_routes(
                 "handoff_ids": handoff_ids,
             })
         return response
+
+    # --- Evaluation-linked demonstration: a labelled view over THIS handler (see src/misumi_demo.py). ---
+    # Each demonstration session has its own event log file and its own simulated music runtime; the shared operational log is never used.
+    demo_sessions = demo.DemoSessions(events.path.parent / "demo-sessions")
+
+    def _demo_may_develop(request: Request) -> bool:
+        try:
+            _require_api_scope(request, "misumi:execute")
+            return True
+        except HTTPException:
+            return False
+
+    @router.get("/demo/scenarios")
+    def demo_scenarios(request: Request):
+        _require_api_scope(request, "misumi:read")
+        ready, reason = demo.guest_ready(_demo_household_root())
+        may_develop = _demo_may_develop(request)
+        return {
+            "schema": demo.SCHEMA,
+            "scenarios": [demo.public_scenario(item) for item in demo.load_scenarios()],
+            "modes": {
+                "guest": {"available": ready, "reason": reason, "prompts": "catalogue only", "persistence": demo.GUEST_SAFETY["telemetry"]},
+                "developer": {"available": may_develop, "reason": "" if may_develop else "needs the misumi:execute scope",
+                              "prompts": "catalogue; the prompt may be replaced", "persistence": demo.GUEST_SAFETY["telemetry"]},
+            },
+            "provenance": demo.provenance_stamp(ready, _demo_household_root()),
+            "replays": [item["id"] for item in demo.load_scenarios() if demo.load_recording(item["id"]) is not None],
+            "evidence_kinds": list(demo.KINDS),
+        }
+
+    @router.post("/demo/run")
+    async def demo_run(request: Request, body: MisumiDemoRunRequest):
+        _require_api_scope(request, "misumi:read")
+        if body.mode == "developer" or body.prompt is not None:
+            # Developer functionality (custom prompts, shadow proposal, source paths, Phase B rows) is enforced here, not in the interface.
+            _require_api_scope(request, "misumi:execute")
+        scenario = next((item for item in demo.load_scenarios() if item["id"] == body.scenario_id), None)
+        if scenario is None:
+            raise HTTPException(404, "unknown scenario")
+        ready, reason = demo.guest_ready(_demo_household_root())
+        if body.mode == "guest":
+            if body.prompt is not None:
+                raise HTTPException(422, "guest mode runs catalogue prompts only")
+            if not ready:
+                raise HTTPException(409, reason)
+        prompt = scenario["prompt"] if body.prompt is None else body.prompt.strip()
+        if not prompt:
+            raise HTTPException(422, "prompt is required")
+        prompt_source = "catalogue-fixed" if prompt == scenario["prompt"] else "operator-typed"
+        if body.execution == "replay":
+            recording = demo.load_recording(scenario["id"])
+            if recording is None or recording["request"].get("prompt") != prompt[:400]:
+                raise HTTPException(404, "no recording of this scenario and prompt")
+            return demo.replay_from_recording(recording, mode=body.mode)
+        if not body.session_id or body.session_id == "default":
+            raise HTTPException(422, "session_id is required for a live demonstration run")
+        key = demo.DemoSessions.key(_owner(request), body.session_id)
+        provenance = demo.provenance_stamp(ready, _demo_household_root())
+        lease = demo_sessions.begin(key)
+        try:
+            return await _demo_live(request, scenario, body, prompt, prompt_source, lease, provenance, ready)
+        finally:
+            demo_sessions.finish(lease)
+
+    async def _demo_live(request, scenario, body, prompt, prompt_source, lease, provenance, ready):
+        shadow: Optional[Dict[str, Any]] = None
+        with events.scoped(lease.path):
+            preview = route_explain(request, MisumiRouteExplainRequest(prompt=prompt, persona="auto"))
+            error = None
+            if scenario["kind"] == "music":
+                rid = events.request_id()
+                began = time.monotonic()
+                lead = preview["lead"]["persona"]
+                def _music_turn():
+                    with lease.music_lock:
+                        return music_reply(lease.runtime(), strip_addressee(prompt), lead, rid, True, "typed")
+
+                turn = await asyncio.to_thread(_music_turn)
+                if turn is None:
+                    response = {"text": "That was not recognised as a music command.", "source": "degraded", "persona": lead,
+                                "persona_source": "auto", "request_id": rid, "sources": [], "routing": preview["lead"]}
+                    outcome = "music:not-a-command"
+                else:
+                    response = {"text": turn["text"], "source": "music", "persona": MUSIC_PERSONA, "persona_source": "auto", "request_id": rid,
+                                "sources": [], "routing": preview["lead"],
+                                "music": {"status": turn["status"], "capability": "music.*", "provider": "simulation", "simulated": True}}
+                    outcome = "music:" + str(turn["status"])
+                events.emit({"request_id": rid, "persona": response["persona"], "persona_source": "auto", "routing": preview["lead"],
+                             "selected_tools": ["music.*:simulation"], "files_read": [], "files_changed": [], "model": None, "backend": None,
+                             "latency_ms": int((time.monotonic() - began) * 1000), "outcome": outcome, "approval_mode": "none"})
+            else:
+                # Nothing is learned, captured or written to memory; the one event record goes to this session's own log.
+                response = await respond(request, MisumiRespondRequest(prompt=prompt, persona="auto", persist_turn=False,
+                                                                       retention_mode="off", history_mode="off"))
+            event = next((item for item in reversed(events.recent(200)) if item.get("request_id") == response.get("request_id")), None)
+        if body.mode == "developer":
+            try:
+                from src.misumi_allocation_shadow import propose
+
+                personas = _demo_load_personas()
+                if personas:
+                    shadow = propose(prompt, personas, policy_order=list(load_persona_policy()), production_plan=preview["team"])
+            except Exception as exc:  # the experimental view must never break the demonstration
+                logger.warning("demo shadow proposal unavailable: %s", type(exc).__name__)
+        inspection = demo.build_inspection(scenario, mode=body.mode, execution="live", prompt=prompt, prompt_source=prompt_source,
+                                           preview=preview, response=response, event=event, shadow=shadow, error=error, provenance=provenance)
+        review = demo.evidence_review(scenario, _demo_household_root()) if ready else None
+        if review is not None:
+            inspection["evidence_review"] = review
+        if body.mode == "developer":
+            inspection["phase_b_input"] = demo.phase_b_row(inspection)
+        return inspection
+
+    @router.post("/demo/reset")
+    def demo_reset(request: Request, session_id: Optional[str] = Query(default=None, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")):
+        """Clear one demonstration session: its simulated playback and its own event log. Nothing else is read, changed or deleted."""
+        _require_api_scope(request, "misumi:read")
+        ready, reason = demo.guest_ready(_demo_household_root())
+        if not ready:
+            raise HTTPException(409, reason)
+        if not session_id or session_id == "default":
+            raise HTTPException(422, "session_id is required to reset a demonstration session")
+        cleared = demo_sessions.reset(demo.DemoSessions.key(_owner(request), session_id))
+        return {"reset": True, "session_events_cleared": cleared, "simulated_music": "fresh", "scope": "this demonstration session only",
+                "shared_operational_log": "untouched"}
 
     @router.post("/task")
     async def task(request: Request, body: MisumiTaskRequest):

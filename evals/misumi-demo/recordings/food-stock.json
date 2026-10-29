@@ -1,0 +1,171 @@
+{
+  "capture": {
+    "attempts": 1,
+    "fixture_sha256": "9c1a64144d56582770087861ae38ccb031f3b4b8d31139755f33db832e3adc56",
+    "recorder": "evals/misumi-demo/record.py",
+    "source_revision": "7ee0ff9ab9b7306b1fb27acfa81cfe47d3a28f37"
+  },
+  "execution": "live",
+  "guest_safety": null,
+  "labels": {
+    "household_data": "as configured on this instance",
+    "live": true,
+    "replayed": false,
+    "shadow_present": true,
+    "simulated_tools": false
+  },
+  "mode": "developer",
+  "observed": {
+    "binding": {
+      "backend": "household-read-only",
+      "host": null,
+      "model": null,
+      "model_note": "no model was used for this answer",
+      "tools": []
+    },
+    "consultations": [],
+    "error": null,
+    "execution": {
+      "kind": "deterministic",
+      "outcome": "grounded",
+      "source": "household-read-only",
+      "why": "answered from an exact synthetic household record, without a model"
+    },
+    "kind": "observed",
+    "lead": {
+      "method": "routing-contract-v0.2",
+      "persona": "sanji",
+      "reasons": [
+        "milk",
+        "pantry"
+      ],
+      "router_choice": "sanji",
+      "source": "auto"
+    },
+    "measurements": {
+      "latency": {
+        "source": "request timer",
+        "status": "measured",
+        "unit": "ms",
+        "value": 14
+      },
+      "model_calls": {
+        "reason": "not instrumented on this path; consultations recorded: 0",
+        "status": "unavailable"
+      },
+      "paid_cost": {
+        "reason": "not instrumented",
+        "status": "unavailable"
+      },
+      "retries_rework_human_correction": {
+        "reason": "not instrumented",
+        "status": "unavailable"
+      },
+      "tokens": {
+        "reason": "the model backend returns no token count to this path",
+        "status": "unavailable"
+      },
+      "tool_operations": {
+        "source": "no tool ran",
+        "status": "measured",
+        "unit": "count",
+        "value": 0
+      }
+    },
+    "recorded_at": null,
+    "sources": [
+      "household/food/stock.yaml"
+    ],
+    "text": "From household/food/stock.yaml line 10 (milk): name: \"milk\"; category: \"fresh\"; quantity: \"1 litre\"; expiry: \"2026-10-12\"",
+    "verification": {
+      "records": 1,
+      "status": "grounded",
+      "what": "answer taken from exact household records"
+    }
+  },
+  "offline_evaluations": [
+    {
+      "exists": true,
+      "headline": "production 5/6, candidate 5/6; the candidate was not promoted",
+      "is_this_run": false,
+      "kind": "offline_evaluation",
+      "path": "evals/misumi-allocation/results/2026-10-28-heldout-v1.md",
+      "title": "Allocation decision evaluation, held-out v1 (stock_food, 6 cases)"
+    }
+  ],
+  "provenance": {
+    "checked": "household and source roots, data directory, state stores, links, music runtime, research roots",
+    "fixture_sha256": "9c1a64144d56582770087861ae38ccb031f3b4b8d31139755f33db832e3adc56",
+    "marker": "6b5f57e8e346c4bb",
+    "synthetic_verified": true
+  },
+  "recorded_at": "2026-10-29T12:19:52Z",
+  "request": {
+    "prompt": "How much milk is left in the pantry?",
+    "prompt_source": "catalogue-fixed"
+  },
+  "scenario": {
+    "id": "food-stock",
+    "title": "Household stock and food"
+  },
+  "schema": "misumi-demo-inspection-v1",
+  "shadow_proposal": {
+    "kind": "shadow_proposal",
+    "live_effect": "none",
+    "note": "this is what the candidate would propose; it did not run, was not applied and holds no permission",
+    "proposal": {
+      "adequacy": {
+        "deterministic_path": "not assessed (none registered with this module)",
+        "solo_adequate": true
+      },
+      "authority": {
+        "granted": false,
+        "implied_tool": null,
+        "owner_approval_required": false,
+        "reason": "no-action-verb",
+        "required": "none"
+      },
+      "decision": "solo",
+      "eligible": [
+        {
+          "cues": [
+            "milk",
+            "pantry"
+          ],
+          "edge": false,
+          "persona": "sanji",
+          "uncertainty": "low"
+        }
+      ],
+      "excluded": [],
+      "lead": "sanji",
+      "lead_source": "routing-contract-v0.2",
+      "limitations": [
+        "cue evidence only: a persona's routing words are not evidence of competence",
+        "expected benefit of any support is unproven (see -11 evaluation)",
+        "required authority is inferred from the request's verbs and is advisory; the runtime policy still enforces at execution"
+      ],
+      "live_effect": "none",
+      "method": "allocation-shadow-v0",
+      "overhead": {
+        "expected_extra_model_calls": 0,
+        "latency_prior": {
+          "distinct_tasks": 8,
+          "observed_mean_extra_seconds_per_team_turn": 1.4,
+          "status": "indicative"
+        }
+      },
+      "production": {
+        "decision": "solo",
+        "supports": [],
+        "supports_agree": true
+      },
+      "reasons": [
+        "single-domain"
+      ],
+      "supports": [],
+      "uncertainty": []
+    },
+    "status": "experimental; did NOT meet its pre-registered promotion criteria"
+  }
+}

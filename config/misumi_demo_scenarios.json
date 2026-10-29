@@ -1,0 +1,81 @@
+{
+  "version": 1,
+  "scenarios": [
+    {
+      "id": "food-stock",
+      "title": "Household stock and food",
+      "summary": "A stock question answered from the synthetic pantry record, without a model.",
+      "kind": "respond",
+      "prompt": "How much milk is left in the pantry?",
+      "expect_lead": "sanji",
+      "simulated_tools": [],
+      "evaluations": [
+        {
+          "title": "Allocation decision evaluation, held-out v1 (stock_food, 6 cases)",
+          "path": "evals/misumi-allocation/results/2026-10-28-heldout-v1.md",
+          "headline": "production 5/6, candidate 5/6; the candidate was not promoted"
+        }
+      ]
+    },
+    {
+      "id": "evidence-anomaly",
+      "title": "Evidence and conflicting records",
+      "summary": "Two synthetic records seem to disagree about one item. The lead answers under the household stock guard (usually 'could not confirm'); a separate record review quotes both records, says the discrepancy is unresolved, and lists the evidence that would settle it.",
+      "kind": "respond",
+      "prompt": "The pantry stock says we have 3 tins of tomatoes but the shopping list says we bought 12 this month. Which is right?",
+      "expect_lead": "sanji",
+      "simulated_tools": [],
+      "evaluations": [
+        {
+          "title": "Six Eyes on the -11 team evaluation, cluster-aware",
+          "path": "evals/misumi-six-eyes/results/2026-10-28-team-eval-v2-hierarchical.md",
+          "headline": "8 distinct tasks: no verdict meets the 20-task floor; specialist consultation shows no established quality gain and about 1.4 s extra latency"
+        },
+        {
+          "title": "Allocation decision evaluation, held-out v1 (anomaly, 8 cases)",
+          "path": "evals/misumi-allocation/results/2026-10-28-heldout-v1.md",
+          "headline": "as frozen: production 5/8, candidate 7/8; the candidate was not promoted"
+        }
+      ],
+      "evidence_review": {
+        "records": [
+          {
+            "path": "household/food/stock.yaml",
+            "match": "^\\s*quantity:\\s*3\\s*$",
+            "after": "name:\\s*tinned tomatoes",
+            "role": "pantry stock record (file dated 2026-10-01)"
+          },
+          {
+            "path": "household/shopping-list.md",
+            "match": "bought 12 tinned tomatoes",
+            "role": "shopping-list line, an unticked item under 'Need'"
+          }
+        ],
+        "assessment": "unresolved",
+        "why": "the two records are not measuring the same thing: the pantry line is a count as of 2026-10-01; the list line is an unticked 'Need' entry with no purchase date. Neither establishes the number of tins in the house today, and neither contradicts the other outright.",
+        "needed": [
+          "a dated purchase record (receipt or order) for the tinned tomatoes, to say whether 12 were actually bought and when",
+          "a physical count of the tins now, to compare with the 2026-10-01 stock line"
+        ]
+      }
+    },
+    {
+      "id": "music-simulated",
+      "title": "Music selection and device control (simulated)",
+      "summary": "Jin interprets a music request and a device name; a simulated provider answers. No real playback or account is involved.",
+      "kind": "music",
+      "prompt": "play Kind of Blue by Miles Davis on the kitchen speaker",
+      "expect_lead": "jin",
+      "simulated_tools": [
+        "music.* via SimulatedMusicProvider"
+      ],
+      "evaluations": [
+        {
+          "title": "Allocation decision evaluation, held-out v1 (music, 6 cases)",
+          "path": "evals/misumi-allocation/results/2026-10-28-heldout-v1.md",
+          "headline": "all policies 6/6 on selection-versus-playback decisions; the candidate was not promoted"
+        }
+      ]
+    }
+  ]
+}
