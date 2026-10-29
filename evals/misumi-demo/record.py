@@ -12,6 +12,7 @@ import argparse
 import datetime
 import json
 import os
+import subprocess
 import sys
 import urllib.request
 from pathlib import Path
@@ -37,7 +38,19 @@ def verified_synthetic(base, token):
     with urllib.request.urlopen(request, timeout=30) as response:
         listing = json.loads(response.read().decode("utf-8"))
     stamp = listing.get("provenance") or {}
-    return bool(stamp.get("synthetic_verified")) and stamp.get("marker") == misumi_demo.marker_fingerprint() and bool(listing["modes"]["guest"]["available"])
+    return (bool(stamp.get("synthetic_verified")) and stamp.get("marker") == misumi_demo.marker_fingerprint()
+            and stamp.get("fixture_sha256") == misumi_demo.fixture_digest() and bool(listing["modes"]["guest"]["available"]))
+
+
+def source_revision():
+    """The commit of THIS checkout (the code that defines the scenarios and the fixture); refused when the tree is not at a clean commit."""
+    root = Path(__file__).resolve().parents[2]
+    head = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
+    dirty = subprocess.run(["git", "-C", str(root), "status", "--porcelain", "--", "src", "routes", "config", "evals/misumi-demo/synthetic-household"],
+                           capture_output=True, text=True, check=True).stdout.strip()
+    if dirty:
+        sys.exit("refusing to record from a checkout with uncommitted changes to the demonstration code or fixture")
+    return head
 
 
 def main(argv=None):
@@ -49,6 +62,7 @@ def main(argv=None):
         sys.exit("set MISUMI_DEMO_URL and MISUMI_DEMO_TOKEN")
     if not verified_synthetic(base, token):
         sys.exit("refusing to record: the instance does not report verified synthetic provenance")
+    revision = source_revision()
     args.out.mkdir(parents=True, exist_ok=True)
     for scenario in SCENARIOS:
         target = args.out / f"{scenario}.json"
@@ -58,6 +72,7 @@ def main(argv=None):
         record = call(base, token, scenario)
         record.pop("phase_b_input", None)
         record["observed"]["binding"]["host"] = None
+        record["capture"] = {"recorder": "evals/misumi-demo/record.py", "source_revision": revision, "fixture_sha256": misumi_demo.fixture_digest()}
         record["recorded_at"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         ok, reason = misumi_demo.validate_recording(record, scenario)
         if not ok:

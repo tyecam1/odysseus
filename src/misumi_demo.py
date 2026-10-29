@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import collections
 import hashlib
+import itertools
 import os
 import threading
 import re
@@ -149,22 +150,79 @@ def guest_ready(household_root: Optional[Path], environ: Optional[Mapping[str, s
     return verify_synthetic(household_root, env)
 
 
-def provenance_stamp(verified: bool) -> Dict[str, Any]:
-    return {"synthetic_verified": bool(verified), "marker": marker_fingerprint(),
+def tree_digest(root: Path) -> str:
+    """Content digest of a directory tree: every regular file's relative path, size and sha256, in sorted order. Links are not followed."""
+    outer = hashlib.sha256()
+    entries = []
+    for folder, names, files in os.walk(str(root), followlinks=False):
+        names.sort()
+        for name in files:
+            full = Path(folder) / name
+            if full.is_symlink() or not full.is_file():
+                continue
+            entries.append((full.relative_to(root).as_posix(), full))
+            if len(entries) > _SCAN_LIMIT:
+                return ""
+    for rel, full in sorted(entries):
+        outer.update(f"{rel}\0{full.stat().st_size}\0{hashlib.sha256(full.read_bytes()).hexdigest()}\n".encode("utf-8"))
+    return outer.hexdigest()
+
+
+def fixture_digest() -> str:
+    """The digest of the approved synthetic fixture shipped in this repository."""
+    return tree_digest(FIXTURE) if FIXTURE.is_dir() else ""
+
+
+def provenance_stamp(verified: bool, household_root: Optional[Path] = None) -> Dict[str, Any]:
+    """What this instance can attest about itself: the root checks passed, the marker, and the content digest of the household root it is
+    serving. This is evidence from a trusted capture workflow, not proof against deliberately constructed data and not an OS sandbox."""
+    digest = tree_digest(Path(household_root)) if verified and household_root is not None else None
+    return {"synthetic_verified": bool(verified), "marker": marker_fingerprint(), "fixture_sha256": digest or None,
             "checked": "household and source roots, data directory, state stores, links, music runtime, research roots"}
 
 
-class DemoSessions:
-    """Per-session demonstration state: a simulated music runtime and an event log file, both keyed by (caller, session id).
+class _Entry:
+    __slots__ = ("generation", "music", "active", "gone", "music_lock")
 
-    Nothing here is shared with the operational event log or any household/session store. Reset removes exactly one session's state;
-    the oldest session is evicted past ``limit``; files left by an earlier process are removed at start-up (only this directory).
+    def __init__(self, generation: int) -> None:
+        self.generation, self.music, self.active, self.gone = generation, None, 0, False
+        self.music_lock = threading.Lock()   # one music command at a time within a session
+
+
+class DemoLease:
+    """One run's hold on a session: the event file it writes (named for the session generation it began in) and, for music, the session's runtime.
+    After the run, ``DemoSessions.finish`` removes the file if a reset or eviction happened meanwhile, so neither can leave residue behind."""
+
+    def __init__(self, sessions: "DemoSessions", key: str, entry: _Entry, generation: int, path: Path) -> None:
+        self.sessions, self.key, self.entry, self.generation, self.path = sessions, key, entry, generation, path
+
+    @property
+    def music_lock(self) -> threading.Lock:
+        return self.entry.music_lock
+
+    def runtime(self) -> "SimulatedMusicRuntime":
+        with self.sessions._lock:
+            if self.entry.generation == self.generation and not self.entry.gone:
+                if self.entry.music is None:
+                    self.entry.music = SimulatedMusicRuntime()
+                return self.entry.music
+        return SimulatedMusicRuntime()   # the session was reset or evicted mid-run: this run gets a private throwaway, never shared state
+
+
+class DemoSessions:
+    """Per-session demonstration state keyed by (caller, session id): an event log file and a simulated music runtime.
+
+    Every run takes a lease (``begin``) and returns it (``finish``). Nothing here is shared with the operational event log or any household or
+    session store. Reset gives the session a new generation, so only its own files go and an in-flight run's later writes are removed when it
+    ends. At most ``limit`` sessions exist; the least recently used idle one is evicted with its files. Files left by an earlier process are
+    removed at start-up (this directory only).
     """
 
     def __init__(self, directory: Path, limit: int = 32) -> None:
         self.directory, self.limit = Path(directory), limit
-        self._music: "collections.OrderedDict[str, SimulatedMusicRuntime]" = collections.OrderedDict()
+        self._entries: "collections.OrderedDict[str, _Entry]" = collections.OrderedDict()
         self._lock = threading.Lock()
+        self._counter = itertools.count(1)
         if self.directory.is_dir():
             for stale in self.directory.glob("*.jsonl"):
                 stale.unlink()
@@ -173,25 +231,47 @@ class DemoSessions:
     def key(owner: Optional[str], session_id: Optional[str]) -> str:
         return hashlib.sha256(f"{owner or ''}\0{session_id or 'default'}".encode("utf-8")).hexdigest()[:24]
 
-    def log_path(self, key: str) -> Path:
-        return self.directory / f"{key}.jsonl"
+    def _path(self, key: str, generation: int) -> Path:
+        return self.directory / f"{key}-{generation}.jsonl"
 
-    def music(self, key: str) -> "SimulatedMusicRuntime":
+    def _evict(self) -> None:
+        for key in list(self._entries):
+            if len(self._entries) <= self.limit:
+                return
+            entry = self._entries[key]
+            if entry.active == 0:
+                del self._entries[key]
+                entry.gone = True
+                self._path(key, entry.generation).unlink(missing_ok=True)
+
+    def begin(self, key: str) -> DemoLease:
         with self._lock:
-            runtime = self._music.pop(key, None) or SimulatedMusicRuntime()
-            self._music[key] = runtime
-            while len(self._music) > self.limit:
-                old, _ = self._music.popitem(last=False)
-                self.log_path(old).unlink(missing_ok=True)
-            return runtime
+            entry = self._entries.pop(key, None) or _Entry(next(self._counter))
+            self._entries[key] = entry
+            entry.active += 1
+            self._evict()
+            return DemoLease(self, key, entry, entry.generation, self._path(key, entry.generation))
+
+    def finish(self, lease: DemoLease) -> None:
+        with self._lock:
+            lease.entry.active = max(0, lease.entry.active - 1)
+            if lease.entry.gone or lease.entry.generation != lease.generation:
+                lease.path.unlink(missing_ok=True)
+            self._evict()
 
     def reset(self, key: str) -> int:
         with self._lock:
-            self._music.pop(key, None)
-            path = self.log_path(key)
-            cleared = len(path.read_text(encoding="utf-8", errors="replace").splitlines()) if path.is_file() else 0
-            path.unlink(missing_ok=True)
+            entry = self._entries.get(key)
+            if entry is None:
+                return 0
+            old = self._path(key, entry.generation)
+            cleared = len(old.read_text(encoding="utf-8", errors="replace").splitlines()) if old.is_file() else 0
+            old.unlink(missing_ok=True)
+            entry.generation, entry.music = next(self._counter), None
             return cleared
+
+    def session_files(self) -> List[Path]:
+        return sorted(self.directory.glob("*.jsonl")) if self.directory.is_dir() else []
 
 
 _PRIVATE_LOOKING = re.compile(
@@ -227,6 +307,13 @@ def validate_recording(data: Any, scenario_id: str) -> Tuple[bool, str]:
     stamp = data.get("provenance")
     if not (isinstance(stamp, dict) and stamp.get("synthetic_verified") is True and stamp.get("marker") and stamp.get("marker") == marker_fingerprint()):
         return False, "no verified synthetic provenance for the shipped fixture"
+    approved = fixture_digest()
+    if not approved or stamp.get("fixture_sha256") != approved:
+        return False, "the household the recording was captured from is not the approved synthetic fixture (content digest differs)"
+    capture = data.get("capture")
+    if not (isinstance(capture, dict) and capture.get("fixture_sha256") == approved and capture.get("recorder") == "evals/misumi-demo/record.py"
+            and re.fullmatch(r"[0-9a-f]{40}", str(capture.get("source_revision", "")))):
+        return False, "no capture record from the recording workflow (fixture digest, recorder, source revision)"
     if data["observed"]["binding"].get("host") is not None:
         return False, "recording names a host"
     allowed = fixture_files()
@@ -424,18 +511,27 @@ def load_recording(scenario_id: str) -> Optional[Dict[str, Any]]:
     return data if validate_recording(data, scenario_id)[0] else None
 
 
+_GUEST_TOP = ("schema", "mode", "execution", "labels", "scenario", "request", "observed", "guest_safety", "offline_evaluations", "shadow_proposal", "provenance")
+_GUEST_OBSERVED = ("kind", "recorded_at", "lead", "execution", "binding", "consultations", "verification", "sources", "text", "error", "measurements")
+_GUEST_BINDING = ("model", "backend", "host", "tools", "model_note")
+
+
 def replay_from_recording(recording: Mapping[str, Any], *, mode: str) -> Dict[str, Any]:
-    """Re-present a recording AS a replay: never live, never re-executed. Guest mode drops the developer-only parts exactly as a live guest run does."""
-    out = json.loads(json.dumps(recording))
+    """Re-present a recording AS a replay: never live, never re-executed, no provider or model called. A guest replay is rebuilt from an allowlist
+    of fields, so a developer-only or unexpected field in a recording cannot reach a guest."""
+    full = json.loads(json.dumps(recording))
+    out = {key: full[key] for key in _GUEST_TOP if key in full}
     out["execution"], out["mode"] = "replay", mode
-    out.pop("phase_b_input", None)
     out["labels"].update(live=False, replayed=True, household_data="synthetic (as recorded on a synthetic instance)")
     out["observed"]["kind"] = "replay"
     out["observed"]["recorded_at"] = recording.get("recorded_at") or out["observed"].get("recorded_at")
     if mode == "guest":
+        out["observed"] = {key: out["observed"][key] for key in _GUEST_OBSERVED if key in out["observed"]}
+        out["observed"]["binding"] = {key: out["observed"]["binding"][key] for key in _GUEST_BINDING if key in out["observed"]["binding"]}
         out["observed"]["binding"]["host"] = None
         out["observed"]["sources"] = []
         out["shadow_proposal"], out["offline_evaluations"] = None, []
+        out["provenance"] = {key: out["provenance"].get(key) for key in ("synthetic_verified", "marker", "fixture_sha256")}
         out["labels"].update(shadow_present=False, household_data="synthetic")
         out["guest_safety"] = dict(GUEST_SAFETY)
     return out

@@ -2452,7 +2452,7 @@ def setup_misumi_routes(
                 "developer": {"available": may_develop, "reason": "" if may_develop else "needs the misumi:execute scope",
                               "prompts": "catalogue; the prompt may be replaced", "persistence": demo.GUEST_SAFETY["telemetry"]},
             },
-            "provenance": demo.provenance_stamp(ready),
+            "provenance": demo.provenance_stamp(ready, _demo_household_root()),
             "replays": [item["id"] for item in demo.load_scenarios() if demo.load_recording(item["id"]) is not None],
             "evidence_kinds": list(demo.KINDS),
         }
@@ -2476,22 +2476,33 @@ def setup_misumi_routes(
         if not prompt:
             raise HTTPException(422, "prompt is required")
         prompt_source = "catalogue-fixed" if prompt == scenario["prompt"] else "operator-typed"
-        shadow: Optional[Dict[str, Any]] = None
         if body.execution == "replay":
             recording = demo.load_recording(scenario["id"])
             if recording is None or recording["request"].get("prompt") != prompt[:400]:
                 raise HTTPException(404, "no recording of this scenario and prompt")
             return demo.replay_from_recording(recording, mode=body.mode)
         key = demo.DemoSessions.key(_owner(request), body.session_id)
-        provenance = demo.provenance_stamp(ready)
-        with events.scoped(demo_sessions.log_path(key)):
+        provenance = demo.provenance_stamp(ready, _demo_household_root())
+        lease = demo_sessions.begin(key)
+        try:
+            return await _demo_live(request, scenario, body, prompt, prompt_source, lease, provenance)
+        finally:
+            demo_sessions.finish(lease)
+
+    async def _demo_live(request, scenario, body, prompt, prompt_source, lease, provenance):
+        shadow: Optional[Dict[str, Any]] = None
+        with events.scoped(lease.path):
             preview = route_explain(request, MisumiRouteExplainRequest(prompt=prompt, persona="auto"))
             error = None
             if scenario["kind"] == "music":
                 rid = events.request_id()
                 began = time.monotonic()
                 lead = preview["lead"]["persona"]
-                turn = await asyncio.to_thread(music_reply, demo_sessions.music(key), strip_addressee(prompt), lead, rid, True, "typed")
+                def _music_turn():
+                    with lease.music_lock:
+                        return music_reply(lease.runtime(), strip_addressee(prompt), lead, rid, True, "typed")
+
+                turn = await asyncio.to_thread(_music_turn)
                 if turn is None:
                     response = {"text": "That was not recognised as a music command.", "source": "degraded", "persona": lead,
                                 "persona_source": "auto", "request_id": rid, "sources": [], "routing": preview["lead"]}
