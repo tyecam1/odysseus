@@ -489,7 +489,7 @@ def _good_recording(client):
     live.pop("phase_b_input")
     live["observed"]["binding"]["host"] = None   # evals/misumi-demo/record.py drops the host before saving
     live["recorded_at"] = "2026-10-28T00:00:00Z"
-    live["capture"] = {"recorder": "evals/misumi-demo/record.py", "source_revision": "a" * 40, "fixture_sha256": demo.fixture_digest()}
+    live["capture"] = {"recorder": "evals/misumi-demo/record.py", "source_revision": "a" * 40, "fixture_sha256": demo.fixture_digest(), "attempts": 1}
     return live
 
 
@@ -745,3 +745,52 @@ def test_provenance_and_capture_are_validated_field_by_field_and_carry_no_extra_
         bad = json.loads(json.dumps(good))
         bad[where][key] = "token: abc123"
         assert demo.validate_recording(bad, "food-stock")[0] is False, (where, key)
+
+
+def test_overlapping_leases_never_drop_the_newest_record_and_the_cap_holds_at_the_end(tmp_path):
+    sessions = demo.DemoSessions(tmp_path / "s")
+    key = sessions.key("o", "a")
+    first, second = sessions.begin(key), sessions.begin(key)
+    first.path.parent.mkdir(parents=True, exist_ok=True)
+    first.path.write_text("".join(f'{{"n":{i}}}\n' for i in range(51)), encoding="utf-8")
+    sessions.finish(first)                                   # second is still appending: no trim may run now
+    with first.path.open("a", encoding="utf-8") as fh:
+        fh.write('{"n":51}\n')
+    sessions.finish(second)
+    lines = first.path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == demo.MAX_SESSION_LOG_LINES and json.loads(lines[-1])["n"] == 51
+
+
+@pytest.mark.parametrize("where,key,value", [
+    ("provenance", "checked", None), ("provenance", "checked", ""), ("provenance", "checked", 7), ("provenance", "checked", "MISSING"),
+    ("capture", "attempts", -1), ("capture", "attempts", float("nan")), ("capture", "attempts", True), ("capture", "attempts", 4), ("capture", "attempts", "MISSING"),
+    ("observed", "extra", {"x": 1}), ("binding", "extra", "x"),
+    ("binding", "backend", "https://model.example.org:11434/v1/chat"), ("binding", "backend", "model.example.org:11434"),
+    ("binding", "model", "model.example.org:11434"), ("binding", "model", ["x"]),
+    ("top", "scenario", ["x"]), ("top", "evidence_review", {"records": None}), ("top", "evidence_review", {"records": "x"}),
+])
+def test_recording_contract_is_strict_and_fails_closed_without_raising(client, where, key, value):
+    bad = json.loads(json.dumps(_good_recording(client), allow_nan=True))
+    target = {"top": bad, "binding": bad["observed"]["binding"]}.get(where) or bad[where]
+    if value == "MISSING":
+        target.pop(key)
+    else:
+        target[key] = value
+    assert demo.validate_recording(bad, "food-stock")[0] is False, (where, key, value)
+
+
+def test_a_guest_replay_never_shows_an_endpoint_even_if_a_recording_carried_one(client):
+    rec = _good_recording(client)
+    rec["observed"]["binding"]["backend"] = "https://model.example.org:11434/v1/chat"
+    rec["observed"]["binding"]["model"] = "model.example.org:11434"
+    guest = demo.replay_from_recording(rec, mode="guest")
+    assert guest["observed"]["binding"]["backend"] is None and guest["observed"]["binding"]["model"] is None
+    assert "example.org" not in json.dumps(guest)
+
+
+def test_a_recording_with_duplicate_json_keys_is_not_loaded(client, tmp_path, monkeypatch):
+    good = _good_recording(client)
+    text = json.dumps(good)[:-1] + ', "mode": "guest"}'
+    (tmp_path / "food-stock.json").write_text(text, encoding="utf-8")
+    monkeypatch.setattr(demo, "RECORDINGS_DIR", tmp_path)
+    assert demo.load_recording("food-stock") is None

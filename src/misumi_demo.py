@@ -264,13 +264,16 @@ class DemoSessions:
             if path.is_file() and path.stat().st_size > 0:
                 lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
                 if len(lines) > MAX_SESSION_LOG_LINES or path.stat().st_size > MAX_SESSION_LOG_BYTES:
-                    path.write_text("\n".join(lines[-MAX_SESSION_LOG_LINES:]) + "\n", encoding="utf-8", newline="\n")
+                    tmp = path.with_name(path.name + ".tmp")
+                    tmp.write_text("\n".join(lines[-MAX_SESSION_LOG_LINES:]) + "\n", encoding="utf-8", newline="\n")
+                    os.replace(tmp, path)
         except OSError:
             pass
 
     def finish(self, lease: DemoLease) -> None:
         with self._lock:
-            self._trim(lease.path)
+            if lease.entry.active <= 1:    # other live leases of this session may still be appending: a read-modify-write now could drop their records
+                self._trim(lease.path)
             lease.entry.active = max(0, lease.entry.active - 1)
             if lease.entry.gone or lease.entry.generation != lease.generation:
                 lease.path.unlink(missing_ok=True)
@@ -320,11 +323,28 @@ _RECORDING_KEYS = frozenset({"schema", "mode", "execution", "labels", "scenario"
                              "shadow_proposal", "provenance", "evidence_review", "capture", "recorded_at"})
 
 
+_LABEL = re.compile(r"[A-Za-z0-9 _/-]{1,48}")
+_MODEL_NAME = re.compile(r"[A-Za-z0-9_.-]{1,40}(?::(?!\d+$)[A-Za-z0-9_.-]{1,24})?")   # "gemma4:12b" is a model tag; "host:11434" is an endpoint
+
+
+def safe_label(value: Any, pattern: "re.Pattern[str]" = _LABEL) -> Optional[str]:
+    """A binding label shown to a guest: a short plain name, never a URL, host or port."""
+    return value if isinstance(value, str) and pattern.fullmatch(value) and "//" not in value else None
+
+
 def validate_recording(data: Any, scenario_id: str) -> Tuple[bool, str]:
+    """Fail closed: any shape the checks below did not anticipate is a rejection, never an exception."""
+    try:
+        return _validate_recording(data, scenario_id)
+    except (TypeError, AttributeError, KeyError, ValueError, RecursionError):
+        return False, "malformed recording"
+
+
+def _validate_recording(data: Any, scenario_id: str) -> Tuple[bool, str]:
     """A recording is replayable only if it is a developer live inspection of this scenario, carries the synthetic provenance stamp for the
     shipped fixture, names only sources that exist in that fixture, and contains nothing that looks like a host, path, address or credential."""
     if not (isinstance(data, dict) and data.get("schema") == SCHEMA and isinstance(data.get("observed"), dict)
-            and (data.get("scenario") or {}).get("id") == scenario_id and isinstance(data.get("request"), dict)
+            and isinstance(data.get("scenario"), dict) and data["scenario"].get("id") == scenario_id and isinstance(data.get("request"), dict)
             and isinstance((data["observed"].get("binding")), dict) and isinstance(data.get("labels"), dict)):
         return False, "malformed recording"
     if data.get("mode") != "developer" or data.get("execution") != "live" or data["labels"].get("live") is not True:
@@ -335,18 +355,28 @@ def validate_recording(data: Any, scenario_id: str) -> Tuple[bool, str]:
     approved = fixture_digest()
     if not approved or stamp.get("fixture_sha256") != approved:
         return False, "the household the recording was captured from is not the approved synthetic fixture (content digest differs)"
+    if not (isinstance(stamp.get("checked"), str) and stamp["checked"].strip()):
+        return False, "provenance lacks its check record"
     capture = data.get("capture")
+    attempts = capture.get("attempts") if isinstance(capture, dict) else None
+    if not (isinstance(attempts, int) and not isinstance(attempts, bool) and 1 <= attempts <= 3):
+        return False, "no capture record from the recording workflow (fixture digest, recorder, source revision)"
     if not (isinstance(capture, dict) and capture.get("fixture_sha256") == approved and capture.get("recorder") == "evals/misumi-demo/record.py"
             and re.fullmatch(r"[0-9a-f]{40}", str(capture.get("source_revision", "")))):
         return False, "no capture record from the recording workflow (fixture digest, recorder, source revision)"
-    if data["observed"]["binding"].get("host") is not None:
+    binding = data["observed"]["binding"]
+    if binding.get("host") is not None:
         return False, "recording names a host"
+    if set(data["observed"]) - set(_GUEST_OBSERVED) or set(binding) - set(_GUEST_BINDING):
+        return False, "recording has fields outside the recording contract"
+    if (binding.get("backend") is not None and safe_label(binding["backend"]) is None) or (binding.get("model") is not None and safe_label(binding["model"], _MODEL_NAME) is None):
+        return False, "recording names an endpoint"
     allowed = fixture_files()
     sources = data["observed"].get("sources")
     if not isinstance(sources, list) or any(not isinstance(s, str) or s not in allowed for s in sources):
         return False, "recording names a source outside the synthetic fixture"
     review = data.get("evidence_review")
-    if review is not None and (not isinstance(review, dict) or any(not isinstance(r, dict) or r.get("source") not in allowed for r in review.get("records", []))):
+    if review is not None and (not isinstance(review, dict) or not isinstance(review.get("records", []), list) or any(not isinstance(r, dict) or r.get("source") not in allowed for r in review.get("records", []))):
         return False, "evidence review names a source outside the synthetic fixture"
     encoded = json.dumps(data, ensure_ascii=False)
     if len(encoded) > 65536:
@@ -570,12 +600,19 @@ def phase_b_row(record: Mapping[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _no_duplicate_keys(pairs):
+    keys = [key for key, _ in pairs]
+    if len(keys) != len(set(keys)):
+        raise ValueError("duplicate key in recording")
+    return dict(pairs)
+
+
 def load_recording(scenario_id: str) -> Optional[Dict[str, Any]]:
     """A recording is a developer-mode inspection captured from a real live run (see evals/misumi-demo/record.py), never edited or overwritten.
     Only a recording that passes validate_recording is ever replayed."""
     path = RECORDINGS_DIR / f"{scenario_id}.json"
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=_no_duplicate_keys)
     except (OSError, ValueError):
         return None
     return data if validate_recording(data, scenario_id)[0] else None
@@ -599,6 +636,9 @@ def replay_from_recording(recording: Mapping[str, Any], *, mode: str) -> Dict[st
         out["observed"] = {key: out["observed"][key] for key in _GUEST_OBSERVED if key in out["observed"]}
         out["observed"]["binding"] = {key: out["observed"]["binding"][key] for key in _GUEST_BINDING if key in out["observed"]["binding"]}
         out["observed"]["binding"]["host"] = None
+        for field, pattern in (("backend", _LABEL), ("model", _MODEL_NAME)):
+            if field in out["observed"]["binding"]:
+                out["observed"]["binding"][field] = safe_label(out["observed"]["binding"][field], pattern)
         out["observed"]["sources"] = []
         out["shadow_proposal"], out["offline_evaluations"] = None, []
         out["provenance"] = {key: out["provenance"].get(key) for key in ("synthetic_verified", "marker", "fixture_sha256")}
