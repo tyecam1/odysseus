@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import json
+import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -706,3 +707,102 @@ def test_future_dated_receipt_recovers_when_clock_catches_up():
     mt00 = _goal(later, "MT-00")
     assert mt00["satisfied"] is True
     assert mt00["blockers"] == []
+
+
+# --- round-5 review findings: classification cannot drop or mis-scope ---
+
+
+def _satisfying_mt00_receipts(**overrides):
+    attestation = _receipt("MT-00", fg.KIND_OPERATOR_ATTESTATION)
+    run = _receipt("MT-00", fg.KIND_RUN, run_id="run-9", days_ago=1)
+    verifies = _receipt("MT-00", fg.KIND_INDEPENDENT_VERIFICATION,
+                        run_id="v1", verifies="run-9")
+    return [attestation, run, verifies]
+
+
+def test_spoofed_file_field_cannot_shadow_a_newer_failed_run():
+    # A receipt dict carrying its own "_file" must never control its
+    # ledger key: a newer status=fail receipt spoofing another file's
+    # name could otherwise be overwritten by the valid one and vanish.
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        good = _receipt("MT-00", fg.KIND_RUN, run_id="run-9", days_ago=2,
+                        name="b-valid.json")
+        newer_fail = _receipt("MT-00", fg.KIND_RUN, status="fail",
+                              run_id="run-10", days_ago=1,
+                              name="a-newer-fail.json")
+        # the poisoned file claims the valid receipt's file name
+        newer_fail["_file"] = "b-valid.json"
+        (tmp_path / "b-valid.json").write_text(
+            json.dumps(good), encoding="utf-8")
+        (tmp_path / "a-newer-fail.json").write_text(
+            json.dumps(newer_fail), encoding="utf-8")
+        loaded = fg.load_receipts(tmp_path)
+        names = sorted(r["_file"] for r in loaded)
+        assert names == ["a-newer-fail.json", "b-valid.json"]
+        attestation = _receipt("MT-00", fg.KIND_OPERATOR_ATTESTATION)
+        verifies = _receipt("MT-00", fg.KIND_INDEPENDENT_VERIFICATION,
+                            run_id="v1", verifies="run-9")
+        result = fg.evaluate_goals(
+            registries=[MT, FT],
+            receipts=loaded + [attestation, verifies],
+            policy=fg.load_policy(), now=NOW,
+        )
+        # the newer FAILED run governs: the goal must NOT be satisfied,
+        # and the failure must surface under the failed run's REAL file
+        # name (a-newer-fail.json), never shadowed by the spoofed one
+        mt00 = _goal(result, "MT-00")
+        assert mt00["satisfied"] is False
+        assert any(
+            "a-newer-fail.json" in b and "status='fail'" in b
+            for b in mt00["blockers"]
+        )
+        assert not any(
+            "b-valid.json" in b and "status='fail'" in b
+            for b in mt00["blockers"]
+        )
+
+
+def test_empty_goal_id_locks_every_goal():
+    # "" is NOT an attribution: the receipt lands in the global
+    # unattributable bucket, and no goal stays satisfied behind it
+    poisoned = _receipt("", fg.KIND_RUN, run_id="run-x", days_ago=0)
+    result = _evaluate(_satisfying_mt00_receipts() + [poisoned])
+    assert result["ledger_unattributable"], "empty goal_id must surface"
+    for goal in result["goals"]:
+        assert goal["satisfied"] is False
+
+
+def test_missing_kind_locks_only_that_goal():
+    # a receipt naming MT-00 but carrying no kind is MT-00's problem:
+    # FT-00 (independently satisfied) must not be dragged into the lock
+    mt_poisoned = {
+        "_file": "mt-nokind.json",
+        "goal_id": "MT-00",
+        "status": "pass",
+        "observed_at": NOW.isoformat(),
+        "run_id": "run-x",
+        "notes": "test",
+    }
+    ft_receipts = [
+        _receipt("FT-00", fg.KIND_OPERATOR_ATTESTATION),
+        _receipt("FT-00", fg.KIND_RUN, run_id="ft-run-9", days_ago=1),
+        _receipt("FT-00", fg.KIND_INDEPENDENT_VERIFICATION,
+                 run_id="v9", verifies="ft-run-9"),
+    ]
+    result = _evaluate(_satisfying_mt00_receipts() + [mt_poisoned]
+                       + ft_receipts)
+    assert _goal(result, "MT-00")["satisfied"] is False
+    assert any("malformed" in b for b in _goal(result, "MT-00")["blockers"])
+    assert _goal(result, "FT-00")["satisfied"] is True
+
+
+def test_unknown_goal_id_locks_every_goal():
+    # naming a goal no registry knows can neither be isolated to that
+    # goal nor safely ignored — it locks the whole ledger
+    poisoned = _receipt("MT-99", fg.KIND_RUN, run_id="run-x")
+    result = _evaluate(_satisfying_mt00_receipts() + [poisoned])
+    assert result["ledger_unattributable"]
+    assert any("MT-99" in entry for entry in result["ledger_unattributable"])
+    for goal in result["goals"]:
+        assert goal["satisfied"] is False

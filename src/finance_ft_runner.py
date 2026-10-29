@@ -34,7 +34,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
+import stat
 import subprocess
 import sys
 import time
@@ -509,28 +511,67 @@ def build_snapshot_rm_argv(user_data_dir: Path, name: str) -> List[str]:
     ]
 
 
+def _assert_snapshot_regular(target: Path) -> None:
+    """The snapshot must be a REGULAR file, not a symlink: docker would
+    otherwise follow the link at container start and execute whatever it
+    points at — e.g. the still-mutable original config."""
+    st = os.lstat(target)
+    if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+        raise ConfigUnsafeError(
+            f"verified-config snapshot {target.name} is not a regular "
+            "file (symlink?) — refusing to execute it"
+        )
+
+
 def materialise_verified_config(
     cfg_path: Path, user_data: Path, cfg: Dict[str, Any],
+    verified_raw: bytes,
 ) -> Path:
     """Snapshot the VERIFIED config bytes to a content-addressed file
     directly inside the workspace and return its path.
 
     Closes the verify→execute TOCTOU window: the guard verifies content
     loaded from ``cfg_path``, but docker later loads whatever bytes are
-    at that path when the container starts. After this call the executed
-    file is ``.verified-<sha12>.json`` — its name encodes the sha256 of
-    the bytes the guard verified, and the round-trip assert re-reads and
-    re-parses them, so a post-verification swap of the original file can
-    no longer change what executes. Raises ConfigUnsafeError on any
-    mismatch (fail closed).
+    at that path when the container starts. ``verified_raw`` MUST be the
+    exact bytes of the single read the guard parsed — captured by the
+    caller at verification time — and the file's CURRENT bytes must
+    still equal them (byte comparison; parsed equality would let JSON
+    ``true`` stand in for ``1``). The executed file is then
+    ``.verified-<sha12>.json`` — a REGULAR file whose name encodes the
+    sha256 of exactly those bytes, re-read from the host after writing
+    and asserted byte-for-byte. A pre-existing symlink or unexpected
+    file at the content-addressed path is rejected rather than followed
+    or overwritten. Raises ConfigUnsafeError on any mismatch (fail
+    closed).
 
     When the invoking user cannot write the workspace directly (the
     freqtrade container re-chowns it to its internal uid on every run),
     the write is delegated to a one-shot pinned-image container; the
     bytes are still re-read from the host and asserted afterwards."""
     raw = Path(cfg_path).read_bytes()
+    if raw != verified_raw:
+        raise ConfigUnsafeError(
+            "the config file changed between guard verification and "
+            "snapshot materialisation — refusing to execute it"
+        )
     digest = hashlib.sha256(raw).hexdigest()[:12]
     target = Path(user_data) / f".verified-{digest}.json"
+    if os.path.lexists(target):
+        # a pre-existing entry at the content-addressed path must not be
+        # followed (symlink → mutable original) or silently overwritten
+        if target.is_symlink() or not target.is_file():
+            raise ConfigUnsafeError(
+                f"verified-config snapshot path {target.name} exists and "
+                "is not a regular file (symlink?) — refusing to write"
+            )
+        if target.read_bytes() != raw:
+            raise ConfigUnsafeError(
+                f"verified-config snapshot path {target.name} exists with "
+                "different bytes — refusing to overwrite"
+            )
+        # idempotent re-run: the verified bytes are already materialised
+        _assert_snapshot_regular(target)
+        return target
     try:
         target.write_bytes(raw)
     except PermissionError:
@@ -545,15 +586,20 @@ def materialise_verified_config(
                 + proc.stderr.decode("utf-8", errors="replace")[-300:]
             )
     try:
+        _assert_snapshot_regular(target)
         reread = target.read_bytes()
-        if hashlib.sha256(reread).hexdigest()[:12] != digest:
+        if reread != raw:
+            # byte-exact: not parsed-object equality (which would accept
+            # true↔1 swaps) and not a truncated-hash comparison
             raise ConfigUnsafeError(
-                f"verified-config round-trip hash mismatch for {target}"
+                f"verified-config round-trip mismatch for {target}: "
+                "snapshotted bytes differ from the verified bytes"
             )
-        if json.loads(reread.decode("utf-8")) != cfg:
+        reparsed = json.loads(raw.decode("utf-8"))
+        if reparsed != cfg:
             raise ConfigUnsafeError(
-                "verified-config round-trip mismatch: snapshotted bytes do "
-                "not parse as the config the guard verified"
+                "verified bytes do not parse as the config the guard "
+                "verified — refusing to execute"
             )
     except Exception:
         remove_snapshot_best_effort(Path(user_data), target.name)
@@ -603,8 +649,13 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     cfg_path = Path(args.config)
     try:
-        cfg = load_config(cfg_path)
-    except (OSError, json.JSONDecodeError) as exc:
+        # ONE read: the parsed config and its exact bytes must come from
+        # the same read, so the verified-bytes binding enforced later by
+        # materialise_verified_config is sound (a second read would
+        # reopen a swap window between parse and capture)
+        verified_raw = cfg_path.read_bytes()
+        cfg = json.loads(verified_raw.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         print(json.dumps({"ok": False, "error": f"config unreadable: {exc}"}, indent=2))
         return 2
 
@@ -692,7 +743,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     # window first: docker loads a content-addressed snapshot of the
     # verified bytes, not the mutable original path.
     try:
-        verified_path = materialise_verified_config(cfg_path, user_data, cfg)
+        verified_path = materialise_verified_config(
+            cfg_path, user_data, cfg, verified_raw)
     except (OSError, ConfigUnsafeError) as exc:
         print(json.dumps(
             {
@@ -702,6 +754,26 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 3
     try:
         config_name = verified_path.name
+        try:
+            # re-assert immediately before handing the path to docker: the
+            # snapshot must still be a regular file whose bytes hash to
+            # the digest encoded in its content-addressed name
+            _assert_snapshot_regular(verified_path)
+            snap_digest = hashlib.sha256(
+                verified_path.read_bytes()
+            ).hexdigest()[:12]
+            if snap_digest != config_name[len(".verified-"):-len(".json")]:
+                raise ConfigUnsafeError(
+                    "verified-config snapshot no longer matches its "
+                    "content-addressed name — refusing to execute it"
+                )
+        except (OSError, ConfigUnsafeError) as exc:
+            print(json.dumps(
+                {
+                    "ok": False, "action": args.action, "fail_closed": True,
+                    "findings": [f"verified config snapshot invalid: {exc}"],
+                }, indent=2))
+            return 3
 
         if args.action == "download-data":
             result = run_command(

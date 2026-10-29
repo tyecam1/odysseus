@@ -143,7 +143,10 @@ def load_receipts(directory: Path = DEFAULT_RECEIPTS_DIR) -> List[Dict[str, Any]
         if not isinstance(data, dict):
             receipts.append({"_file": path.name, "_invalid": "not an object"})
             continue
-        data.setdefault("_file", path.name)
+        # NEVER trust a receipt-supplied _file: the real file name is the
+        # ledger key downstream, and a spoofed one could collide with (and
+        # silently overwrite) another receipt's bucket entry
+        data["_file"] = path.name
         missing = [f for f in REQUIRED_RECEIPT_FIELDS if not data.get(f)]
         if missing:
             data["_invalid"] = f"missing fields: {missing}"
@@ -258,22 +261,32 @@ def evaluate_goals(
     global_invalid: List[str] = []
     for receipt in receipts:
         file_name = receipt.get("_file") or "?"
-        goal_id = receipt.get("goal_id")
+        raw_goal = receipt.get("goal_id")
+        goal_id = raw_goal.strip() if isinstance(raw_goal, str) else raw_goal
         kind = receipt.get("kind")
         invalid_reason = receipt.get("_invalid")
-        if goal_id is None or kind is None:
-            # cannot be attributed to a goal at all (unparseable JSON,
-            # missing goal_id/kind): poisons the whole ledger
+        if not goal_id:
+            # cannot be attributed to any goal at all (unparseable JSON,
+            # missing OR EMPTY goal_id): poisons the whole ledger
             global_invalid.append(
-                f"{file_name} ({invalid_reason or 'no goal_id/kind attribution'})"
+                f"{file_name} ({invalid_reason or 'no usable goal_id'})"
             )
             continue
-        if kind not in by_goal or invalid_reason:
-            # attributed to a goal but malformed (bad status, missing
-            # fields) or of unknown kind: locks that goal specifically
+        if goal_id not in goals:
+            # names a goal no loaded registry knows: it can neither be
+            # isolated to that goal nor safely ignored (the entry would
+            # vanish from the derivation) — lock everything
+            global_invalid.append(
+                f"{file_name} (names unknown goal {goal_id!r})"
+            )
+            continue
+        if not kind or kind not in by_goal or invalid_reason:
+            # attributed to a KNOWN goal but malformed (bad status,
+            # missing fields) or of unknown/missing kind: locks that
+            # goal specifically
             malformed_by_goal.setdefault(goal_id, []).append(
                 f"{file_name} ("
-                + (invalid_reason or f"unknown kind {kind!r}")
+                + (invalid_reason or f"unusable kind {kind!r}")
                 + ")"
             )
             continue

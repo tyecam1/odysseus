@@ -41,10 +41,10 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib import request as urllib_request
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 PROBE_NAME = "finance-mt-probe"
-PROBE_VERSION = "0.3"
+PROBE_VERSION = "0.4"
 USER_AGENT = (
     f"{PROBE_NAME}/{PROBE_VERSION} (odysseus finance MT-00; "
     "household research, read-only public APIs; github.com/tyecam1)"
@@ -178,21 +178,50 @@ def stable_event_id(source: str, source_url: str) -> str:
     return digest[:16]
 
 
+def _canonical_host(host: str) -> str:
+    """Canonical hostname form: percent-decoded, lowercased, trailing
+    dot stripped, and non-ASCII labels IDNA-encoded — so ``bücher.de``,
+    ``BÜCHER.de.`` and ``xn--bcher-kva.de`` all collapse to one
+    publisher instead of counting as two domains."""
+    host = (host or "").strip()
+    try:
+        host = unquote(host)
+    except Exception:
+        pass  # keep the raw form; still canonicalised below
+    host = host.lower().strip().rstrip(".")
+    if host and not host.isascii():
+        try:
+            host = host.encode("idna").decode("ascii")
+        except Exception:
+            pass  # odd unicode input: fall through on the raw form
+    return host
+
+
 def registrable_domain(url: str) -> str:
     """Registrable domain of a URL or bare hostname (GDELT's ``domain``
     field is a bare host, possibly with a port). Handles common
     multi-part public suffixes so that m.example.co.uk and
     www.example.co.uk collapse to example.co.uk while two different
-    .co.uk publishers stay distinct. Not a full Public Suffix List — see
-    MULTI_PART_SUFFIXES for the documented failure direction."""
-    host = (urlparse(url).hostname or "").lower().strip(".")
+    .co.uk publishers stay distinct, and canonicalises the host (case,
+    trailing dot, percent-encoding, IDN/punycode) so one publisher's
+    Unicode and ASCII hostname spellings count as ONE domain. Not a
+    full Public Suffix List — see MULTI_PART_SUFFIXES for the documented
+    failure direction.
+
+    Known residual (documented, deliberate): redirector/launcher hosts
+    (e.g. news.google.com → publisher) still count as their own domains;
+    resolving them would require fetching every article URL, which this
+    probe does not do. Diversity counts may therefore overstate when a
+    story is syndicated via redirector links — interpretation stays with
+    persona L."""
+    host = _canonical_host(urlparse(url).hostname or "")
     if not host:
-        host = (url or "").lower().strip()
+        host = (url or "").strip()
         if "://" in host:
             host = host.split("://", 1)[1]
-        host = host.split("/", 1)[0].strip(".")
+        host = host.split("/", 1)[0]
     # tolerate user:pass@ and :port in bare-host input
-    host = host.split("@")[-1].split(":")[0].strip(".")
+    host = _canonical_host(host.split("@")[-1].split(":")[0])
     parts = [p for p in host.split(".") if p]
     if not parts:
         return "unknown"
@@ -670,21 +699,42 @@ def load_first_seen_index(out_dir: Path) -> Tuple[Dict[str, str], Optional[Dict[
     if latest.exists():
         previous = _load_snapshot_json(latest)
 
-    def merge_into(index: Dict[str, str], data: Dict[str, Any]) -> None:
-        for rec in data.get("records", []):
+    def merge_into(index: Dict[str, str], data: Dict[str, Any], name: str) -> None:
+        # Structural validation: a snapshot whose records are missing,
+        # not a list, or contain non-object / identity-less entries is a
+        # LOST-EVIDENCE event exactly like a corrupt file — skipping it
+        # (or crashing on it) would silently drop or destroy first-seen
+        # history, so it fails closed with a ValueError.
+        records = data.get("records")
+        if not isinstance(records, list):
+            raise ValueError(
+                f"evidence snapshot {name} has no records list"
+            )
+        for i, rec in enumerate(records):
+            if not isinstance(rec, dict):
+                raise ValueError(
+                    f"evidence snapshot {name}: record #{i} is not an object"
+                )
             event_id = rec.get("event_id")
             first_seen = rec.get("first_seen_at")
-            if not event_id or not first_seen:
-                continue
+            if not isinstance(event_id, str) or not event_id:
+                raise ValueError(
+                    f"evidence snapshot {name}: record #{i} has no event_id"
+                )
+            if not isinstance(first_seen, str) or not first_seen:
+                raise ValueError(
+                    f"evidence snapshot {name}: record #{i} has no "
+                    "first_seen_at"
+                )
             current = index.get(event_id)
             if current is None or first_seen < current:
                 index[event_id] = first_seen
 
     index: Dict[str, str] = {}
     for snapshot_path in sorted(out_dir.glob("snapshot-*.json")):
-        merge_into(index, _load_snapshot_json(snapshot_path))
+        merge_into(index, _load_snapshot_json(snapshot_path), snapshot_path.name)
     if previous:
-        merge_into(index, previous)
+        merge_into(index, previous, "latest.json")
     return index, previous
 
 

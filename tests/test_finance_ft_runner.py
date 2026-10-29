@@ -328,11 +328,13 @@ def test_materialise_verified_config_closes_verify_execute_gap(tmp_path: Path):
     cfg = good_config()
     cfg_path = tmp_path / "config-ft00.json"
     cfg_path.write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
-    snap = ft.materialise_verified_config(cfg_path, tmp_path, cfg)
+    verified_raw = cfg_path.read_bytes()
+    snap = ft.materialise_verified_config(cfg_path, tmp_path, cfg,
+                                          verified_raw)
     assert snap.parent == tmp_path  # directly inside the workspace
-    digest = hashlib.sha256(cfg_path.read_bytes()).hexdigest()[:12]
+    digest = hashlib.sha256(verified_raw).hexdigest()[:12]
     assert snap.name == f".verified-{digest}.json"
-    assert snap.read_bytes() == cfg_path.read_bytes()
+    assert snap.read_bytes() == verified_raw
     # post-verification tamper of the ORIGINAL: the snapshot still
     # carries the verified bytes and the argv still names the snapshot
     cfg_path.write_text(json.dumps({**cfg, "dry_run": False}),
@@ -343,10 +345,16 @@ def test_materialise_verified_config_closes_verify_execute_gap(tmp_path: Path):
         strategy="SMACrossBaseline", config_name=snap.name,
     )
     assert f"/freqtrade/user_data/{snap.name}" in argv
-    # idempotent: re-materialising the same verified bytes reuses the
-    # same content address
-    again = ft.materialise_verified_config(cfg_path, tmp_path,
-                                           json.loads(cfg_path.read_text()))
+    # re-materialising while the guard's verified bytes still bind is
+    # idempotent (same content address); a CHANGED file under the same
+    # claim is refused instead of silently executing new bytes
+    with pytest.raises(ft.ConfigUnsafeError):
+        ft.materialise_verified_config(cfg_path, tmp_path, cfg,
+                                       verified_raw)
+    # a fresh verification of the new bytes snapshots to a new address
+    new_raw = cfg_path.read_bytes()
+    again = ft.materialise_verified_config(
+        cfg_path, tmp_path, json.loads(new_raw.decode("utf-8")), new_raw)
     assert again.name != snap.name  # different verified content -> new address
     assert json.loads(again.read_text())["dry_run"] is False
 
@@ -376,3 +384,81 @@ def test_snapshot_delegation_argv_uses_pinned_image_and_workspace_only():
         "docker", "run", GOOD_IMAGE, "/bin/rm",
         "/freqtrade/user_data/.verified-abc.json") or ":" in a
         for a in rm_argv)
+
+
+# --- round-5 review findings: snapshot must be a regular file of the
+# --- EXACT verified bytes (symlinks and parsed-equality tricks fail closed)
+
+
+def _write_config(path, cfg):
+    path.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+    return path
+
+
+def test_materialise_rejects_preexisting_symlink_at_snapshot_path(
+        tmp_path):
+    # a symlink planted at the content-addressed name would make the
+    # executed config follow the still-mutable original: refuse it
+    cfg = good_config()
+    src = _write_config(tmp_path / "config-ft00.json", cfg)
+    workspace = tmp_path / "user_data"
+    workspace.mkdir()
+    digest = hashlib.sha256(src.read_bytes()).hexdigest()[:12]
+    link = workspace / f".verified-{digest}.json"
+    try:
+        link.symlink_to(src)
+    except OSError as exc:  # pragma: no cover - platform without symlinks
+        pytest.skip(f"cannot create symlinks here: {exc}")
+    with pytest.raises(ft.ConfigUnsafeError):
+        ft.materialise_verified_config(src, workspace, cfg,
+                                      src.read_bytes())
+
+
+def test_materialise_rejects_preexisting_different_bytes(tmp_path):
+    # an unexpected non-symlink file at the snapshot path is refused
+    # too: the runner never overwrites files it did not just verify
+    cfg = good_config()
+    src = _write_config(tmp_path / "config-ft00.json", cfg)
+    workspace = tmp_path / "user_data"
+    workspace.mkdir()
+    digest = hashlib.sha256(src.read_bytes()).hexdigest()[:12]
+    (workspace / f".verified-{digest}.json").write_text("{}", encoding="utf-8")
+    with pytest.raises(ft.ConfigUnsafeError):
+        ft.materialise_verified_config(src, workspace, cfg,
+                                      src.read_bytes())
+
+
+def test_materialise_round_trip_is_byte_exact(tmp_path):
+    cfg = good_config()
+    src = _write_config(tmp_path / "config-ft00.json", cfg)
+    workspace = tmp_path / "user_data"
+    workspace.mkdir()
+    target = ft.materialise_verified_config(src, workspace, cfg,
+                                            src.read_bytes())
+    # BYTE equality with the verified source, not parsed equality
+    assert target.read_bytes() == src.read_bytes()
+    assert not target.is_symlink()
+    # idempotent: re-materialising the same bytes is fine
+    again = ft.materialise_verified_config(src, workspace, cfg,
+                                           src.read_bytes())
+    assert again == target
+
+
+def test_materialise_catches_true_vs_one_source_swap(tmp_path):
+    # parsed-object equality thinks JSON true == 1; byte equality does
+    # not. A source file swapped between verification and materialisation
+    # to bytes that parse "equal" must still be refused.
+    workspace = tmp_path / "user_data"
+    workspace.mkdir()
+    cfg = {"dry_run": True, "trading_mode": "spot"}
+    src = tmp_path / "config-ft00.json"
+    src.write_text('{"dry_run": true, "trading_mode": "spot"}',
+                   encoding="utf-8")
+    # the guard parsed `cfg` from the true-form bytes; the file on disk
+    # is then swapped to the 1-form (json.loads-equal, byte-different)
+    src.write_text('{"dry_run": 1, "trading_mode": "spot"}',
+                   encoding="utf-8")
+    with pytest.raises(ft.ConfigUnsafeError):
+        ft.materialise_verified_config(
+            src, workspace, cfg,
+            b'{"dry_run": true, "trading_mode": "spot"}')

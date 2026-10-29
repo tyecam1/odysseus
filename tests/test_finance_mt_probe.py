@@ -438,3 +438,48 @@ def test_run_probe_refuses_to_run_over_corrupt_history(
     assert payload["ok"] is False
     assert payload["fail_closed"] is True
     assert "unreadable history" in payload["error"]
+
+
+# --- round-5 review findings: IDN hosts collapse; corrupt record
+# --- STRUCTURE fails closed instead of resetting or crashing
+
+
+def test_idn_host_spellings_are_one_domain():
+    # bücher.de, BÜCHER.de. and xn--bcher-kva.de are ONE publisher
+    a = mp.registrable_domain("https://bücher.de/story/a")
+    b = mp.registrable_domain("https://xn--bcher-kva.de/story/a")
+    c = mp.registrable_domain("https://BÜCHER.de./story/a")
+    d = mp.registrable_domain("bücher.de")
+    assert a == b == c == d == "xn--bcher-kva.de"
+
+
+def test_percent_encoded_host_decodes_before_domain_extraction():
+    a = mp.registrable_domain("https://b%C3%BCcher.de/x")
+    assert a == "xn--bcher-kva.de"
+
+
+def test_snapshot_records_not_a_list_fails_closed(tmp_path):
+    # {"records": ["not-an-object"]} used to escape as AttributeError;
+    # it must surface as the fail-closed ValueError instead
+    (tmp_path / "latest.json").write_text(
+        json.dumps({"records": ["not-an-object"]}), encoding="utf-8")
+    with pytest.raises(ValueError):
+        mp.load_first_seen_index(tmp_path)
+
+
+def test_snapshot_missing_records_list_fails_closed(tmp_path):
+    # an object without a records list used to merge as empty history,
+    # silently losing every first-seen entry the snapshot carried
+    (tmp_path / "latest.json").write_text(
+        json.dumps({"generated_at": "2026-10-29T00:00:00Z"}),
+        encoding="utf-8")
+    with pytest.raises(ValueError):
+        mp.load_first_seen_index(tmp_path)
+
+
+def test_snapshot_record_missing_identity_fails_closed(tmp_path):
+    (tmp_path / "latest.json").write_text(
+        json.dumps({"records": [{"first_seen_at": "2026-10-29T00:00:00Z"}]}),
+        encoding="utf-8")
+    with pytest.raises(ValueError):
+        mp.load_first_seen_index(tmp_path)
