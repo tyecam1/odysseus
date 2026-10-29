@@ -182,7 +182,7 @@ class BBCRuntime:
     def persona_projections(self) -> list[PersonaProjection]:
         try:
             adapter = self.adapters.get("misumi-homebase")
-        except KeyError:
+        except (KeyError, PermissionError):
             return []
         provider = getattr(adapter, "personas", None)
         return list(provider()) if callable(provider) else []
@@ -342,6 +342,8 @@ class BBCRuntime:
 
     def refresh_repository(self, repository_id: str, *, actor: str = "system") -> RepositorySnapshot:
         """Explicitly ingest one live snapshot into the canonical event ledger."""
+        from src.runtime_profile import require_joint
+        require_joint()
 
         snapshot = self.adapters.get(repository_id).snapshot()
         snapshot = snapshot.__class__(
@@ -372,6 +374,8 @@ class BBCRuntime:
         actor: str,
         caller_grants: set[str] | frozenset[str],
     ) -> Dict[str, Any]:
+        from src.runtime_profile import require_inspection
+        require_inspection(capability_id, inputs)
         target = str(inputs.get("repository_id") or "runtime")[:160]
         input_digest = content_hash(inputs)
         try:
@@ -544,6 +548,8 @@ class BBCRuntime:
         path: list[str],
         duration_ms: int,
     ) -> NavigationTransaction:
+        from src.runtime_profile import require_joint
+        require_joint()
         route = validate_room_path(origin, destination, path)
         existing_location = self.store.get_entity("persona_location", persona_id)
         if existing_location and existing_location.get("room_id") != origin:
@@ -597,6 +603,8 @@ class BBCRuntime:
         interruption_reason: str | None = None,
     ) -> NavigationTransaction:
         """Apply one retry-safe navigation command as a single database commit."""
+        from src.runtime_profile import require_joint
+        require_joint()
 
         target_state = NavigationTransactionState(state)
         if target_state == NavigationTransactionState.planned:
@@ -862,6 +870,8 @@ class BBCRuntime:
         max_visitors: int = 2,
         caller_grants: set[str] | frozenset[str] = frozenset(),
     ) -> RoomConference:
+        from src.runtime_profile import require_joint
+        require_joint()
         if room_id not in {room.id for room in self._ship.rooms}:
             raise ValueError("room conference must use an authored room")
         if self.ship().active_room_id != room_id:
@@ -1059,6 +1069,8 @@ class BBCRuntime:
         expected_version: int,
         failure_reason: str | None = None,
     ) -> RoomConference:
+        from src.runtime_profile import require_joint
+        require_joint()
         target_state = RoomConferenceState(state)
         if target_state == RoomConferenceState.planned:
             raise ValueError("room conference cannot transition back to planned")
@@ -1093,16 +1105,24 @@ def build_runtime(
     app_root: str | Path,
     registry: UniversalRegistry | None = None,
 ) -> BBCRuntime:
+    from src.runtime_profile import runtime_profile
+    profile = runtime_profile()
+    if profile.reader and Path(data_dir).resolve() != profile.data_root:
+        raise PermissionError("state unavailable in reader profile")
     data_root = Path(data_dir) / "bbc"
     store = BBCStateStore(data_root / "v1.db")
     adapters = RepositoryAdapterRegistry.from_environment(odysseus_root=app_root)
     capabilities = build_capability_registry(adapters)
-    registry = registry or build_universal_registry(
-        app_root=app_root,
-        data_dir=data_dir,
-        capabilities=capabilities,
-    )
-    if registry.capabilities is None:
+    from src.runtime_profile import is_reader
+    if not is_reader():
+        registry = registry or build_universal_registry(
+            app_root=app_root,
+            data_dir=data_dir,
+            capabilities=capabilities,
+        )
+    else:
+        registry = None
+    if registry is not None and registry.capabilities is None:
         registry.capabilities = capabilities
     return BBCRuntime(
         store=store,

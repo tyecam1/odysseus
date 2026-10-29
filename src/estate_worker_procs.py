@@ -38,6 +38,8 @@ def _proc_stat_fields(pid: int) -> Optional[tuple[str, int, int]]:
     fixed order, i.e. rest[19] once state=rest[0]. starttime is what
     makes PID-reuse detection possible: two different process instances
     that happen to share a pid can never share a starttime."""
+    from src.runtime_profile import require_joint
+    require_joint()
     try:
         with open(f"/proc/{pid}/stat", "r") as f:
             raw = f.read()
@@ -48,6 +50,8 @@ def _proc_stat_fields(pid: int) -> Optional[tuple[str, int, int]]:
 
 
 def _proc_ppid(pid: int) -> Optional[int]:
+    from src.runtime_profile import require_joint
+    require_joint()
     fields = _proc_stat_fields(pid)
     return fields[1] if fields else None
 
@@ -66,6 +70,8 @@ def _proc_is_live_nonzombie(pid: int, expected_starttime: Optional[int] = None) 
     original target already exited and this pid number has since been
     reused by an unrelated process; that unrelated process is not what
     the caller is waiting on."""
+    from src.runtime_profile import require_joint
+    require_joint()
     fields = _proc_stat_fields(pid)
     if fields is None:
         return False
@@ -86,6 +92,8 @@ def _process_tree_pids(root_pid: int) -> dict[int, int]:
     {pid: starttime} rather than a bare list so a caller can later
     detect pid reuse (a killed pid's number reassigned to an unrelated
     process before cleanup gets to it) rather than trusting pid alone."""
+    from src.runtime_profile import require_joint
+    require_joint()
     import os as _os
     children: dict[int, list[int]] = {}
     try:
@@ -131,6 +139,8 @@ def _kill_process_tree(root_pid: int, process_group_id: int, *, reap_timeout: fl
     reused by an unrelated process is never signalled or reported as
     "still alive" -- the unrelated occupant is left alone either way.
     """
+    from src.runtime_profile import require_joint
+    require_joint()
     import os as _os
     import signal as _signal
     import time as _time
@@ -183,6 +193,8 @@ def _win_configure_kernel32(kernel32) -> None:
     kind of defect that only shows up as a rare, unreproducible handle
     mismatch in the field. Idempotent: safe to call on every access,
     real ctypes function pointers cache the assigned types."""
+    from src.runtime_profile import require_joint
+    require_joint()
     from ctypes import wintypes
     import ctypes
 
@@ -206,6 +218,8 @@ def _win_creation_time(handle) -> Optional[int]:
     handle -- the pid-reuse-safety anchor `is_alive`/`kill_tree` compare
     against, same role `/proc/<pid>/stat`'s starttime field plays on
     Linux."""
+    from src.runtime_profile import require_joint
+    require_joint()
     import ctypes
     from ctypes import wintypes
 
@@ -222,6 +236,8 @@ def _win_creation_time(handle) -> Optional[int]:
 
 
 def _win_open_process(pid: int):
+    from src.runtime_profile import require_joint
+    require_joint()
     import ctypes
 
     kernel32 = ctypes.windll.kernel32
@@ -233,6 +249,8 @@ def _win_open_process(pid: int):
 def spawn_detached(argv: list[str], cwd: str, log_path: str) -> dict[str, int]:
     """Start one detached process (Windows or Linux) and return its PID
     identity."""
+    from src.runtime_profile import require_joint
+    require_joint()
     if os.name == "nt":
         path = Path(log_path)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -281,6 +299,8 @@ def is_alive(handle: dict) -> bool:
     """Return true only while the same, non-zombie/non-exited process is
     present, matched by creation time so a reused pid is never mistaken
     for the original."""
+    from src.runtime_profile import require_joint
+    require_joint()
     try:
         pid = int(handle["pid"])
         create_time = int(handle["create_time"])
@@ -327,6 +347,8 @@ def kill_tree(handle: dict) -> dict:
     have this gap -- it signals via `os.kill`/`os.killpg` directly and
     re-verifies every pid's starttime both before signalling and after,
     with no external tool in between."""
+    from src.runtime_profile import require_joint
+    require_joint()
     try:
         pid = int(handle["pid"])
     except (KeyError, TypeError, ValueError):
@@ -362,6 +384,8 @@ _RUNNER_ENV_KEYS = ("HOME", "PATH", "LANG", "LC_ALL", "USER", "LOGNAME", "CODEX_
 
 
 def _user_manager_env() -> dict:
+    from src.runtime_profile import require_joint
+    require_joint()
     env = dict(os.environ)
     if hasattr(os, "getuid"):
         env.setdefault("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
@@ -371,6 +395,8 @@ def _user_manager_env() -> dict:
 def own_cgroup() -> Optional[str]:
     """This process's cgroup v2 path (`/proc/self/cgroup` `0::<path>`), or
     None when unavailable (non-Linux, cgroup v1 only)."""
+    from src.runtime_profile import require_joint
+    require_joint()
     try:
         for line in Path("/proc/self/cgroup").read_text(encoding="utf-8").splitlines():
             if line.startswith("0::"):
@@ -383,6 +409,8 @@ def own_cgroup() -> Optional[str]:
 def cgroup_is_dedicated(cgroup: Optional[str], unit: Optional[str]) -> bool:
     """True only for the runner's own dedicated `<unit>` cgroup -- never the
     root cgroup or any shared slice (plan S6.12)."""
+    from src.runtime_profile import require_joint
+    require_joint()
     if not cgroup or not unit or not unit.startswith("aoteru-") or not unit.endswith(".service"):
         return False
     return cgroup.rstrip("/").endswith("/" + unit)
@@ -398,6 +426,8 @@ def spawn_runner_unit(argv: list[str], cwd: str, log_path: str, unit: str) -> di
 
     Windows has no job-object implementation yet, so there is no runner
     unit there; callers must gate on `runner_units_supported()` first."""
+    from src.runtime_profile import require_joint
+    require_joint()
     if os.name == "nt":
         raise ProcessLayerError("executor_unavailable", "runner units are not implemented on Windows (S6.12)")
     if not unit.startswith("aoteru-"):
@@ -434,6 +464,8 @@ def runner_units_supported(timeout: float = 30.0) -> tuple[bool, str]:
     """Per-process probe (S6.12): a transient user unit must start and report
     its own dedicated `aoteru-probe-*.service` cgroup. Cached for the life
     of this (per-call) worker process."""
+    from src.runtime_profile import require_joint
+    require_joint()
     if "result" in _RUNNER_UNITS_PROBE:
         return _RUNNER_UNITS_PROBE["result"]
     if os.name == "nt":
@@ -466,6 +498,8 @@ def tree_quiescent(handle: Optional[dict]) -> Optional[bool]:
     `setsid`'d descendant still counts). False while populated. None when
     it cannot be proven -- no recorded/dedicated cgroup, unreadable
     cgroupfs, or Windows. Callers treat None exactly like False."""
+    from src.runtime_profile import require_joint
+    require_joint()
     if os.name == "nt" or not isinstance(handle, dict):
         return None
     cgroup, unit = handle.get("cgroup"), handle.get("unit")
@@ -490,6 +524,8 @@ def tree_quiescent(handle: Optional[dict]) -> Optional[bool]:
 
 def kill_unit(unit: Optional[str]) -> dict:
     """SIGKILL every process in a runner unit's cgroup (all descendants)."""
+    from src.runtime_profile import require_joint
+    require_joint()
     if os.name == "nt" or not unit:
         return {"ok": False, "detail": "no runner unit"}
     try:
@@ -512,6 +548,8 @@ def run_in_unit(argv: list[str], cwd: str, unit: str, *, timeout: float = 60.0,
     stop, so every descendant (an fsmonitor daemon, a filter process) is
     gone when this returns. Linux only; callers gate on
     runner_units_supported()."""
+    from src.runtime_profile import require_joint
+    require_joint()
     if os.name == "nt":
         raise ProcessLayerError("executor_unavailable", "runner units are not implemented on Windows (S6.12)")
     command = [
@@ -547,6 +585,8 @@ def run_in_unit(argv: list[str], cwd: str, unit: str, *, timeout: float = 60.0,
 
 
 def _app_slice() -> str:
+    from src.runtime_profile import require_joint
+    require_joint()
     uid = os.getuid() if hasattr(os, "getuid") else 0
     return f"/user.slice/user-{uid}.slice/user@{uid}.service/app.slice"
 
@@ -556,6 +596,8 @@ def verify_units_quiescent(scope: Optional[str] = None, timeout: float = 15.0) -
     adjudication finding 1): a timed-out verification that could not be
     proven stopped keeps every later verification and closure fail-closed
     until it is gone. None when systemd cannot be asked."""
+    from src.runtime_profile import require_joint
+    require_joint()
     if os.name == "nt":
         return None
     try:

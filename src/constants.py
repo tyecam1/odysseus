@@ -3,6 +3,10 @@
 import os
 
 from src.runtime_paths import get_app_root, get_default_data_dir
+from src.runtime_profile import runtime_profile
+
+# Also protect non-server core DB/constants imports before any mkdir or migration.
+RUNTIME_PROFILE = runtime_profile()
 
 APP_VERSION = "1.0.2"
 
@@ -10,6 +14,8 @@ APP_VERSION = "1.0.2"
 BASE_DIR = os.path.join(get_app_root(), "")
 STATIC_DIR = os.path.join(BASE_DIR, "static")
 DATA_DIR = os.getenv("ODYSSEUS_DATA_DIR", get_default_data_dir())
+if RUNTIME_PROFILE.reader:
+    DATA_DIR = str(RUNTIME_PROFILE.data_root)
 
 # Data file paths
 # Single source of truth: every persisted file/dir lives under DATA_DIR, which

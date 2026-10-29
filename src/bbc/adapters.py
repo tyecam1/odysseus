@@ -246,6 +246,11 @@ class ReadOnlyRepositoryAdapter(ABC):
     adapter_name: str
 
     def __init__(self, root: str | Path | None, *, strict: bool = True):
+        from src.runtime_profile import is_reader, require_repository, runtime_profile
+        if root and is_reader():
+            require_repository(self.repository_id)
+            if Path(root).resolve() != runtime_profile().source_root:
+                raise PermissionError("source unavailable in reader profile")
         self._configured = bool(root)
         self._configuration_error: str | None = None
         self.root = Path(root).expanduser().resolve() if root else None
@@ -293,11 +298,17 @@ class ReadOnlyRepositoryAdapter(ABC):
             raise FileNotFoundError(f"{self.repository_id} is not configured")
         raw = str(relative_path or "").replace("\\", "/").strip().lstrip("/")
         if not raw or any(part in {"", ".", ".."} or part.startswith(".") for part in raw.split("/")):
+            from src.runtime_profile import is_reader
+            if is_reader():
+                raise PermissionError("source unavailable in reader profile")
             raise ValueError("empty, hidden, and traversal paths are not readable")
         path = (self.root / raw).resolve()
         try:
             path.relative_to(self.root)
         except ValueError as exc:
+            from src.runtime_profile import is_reader
+            if is_reader():
+                raise PermissionError("source unavailable in reader profile") from exc
             raise ValueError("path escapes configured repository") from exc
         if path.suffix.lower() not in READABLE_SUFFIXES:
             raise ValueError("unsupported repository file type")
@@ -322,6 +333,12 @@ class ReadOnlyRepositoryAdapter(ABC):
     def source_files(self) -> Iterable[Path]:
         raise NotImplementedError
 
+    def _confined_sources(self, paths: Iterable[Path]) -> tuple[Path, ...]:
+        from src.runtime_profile import is_reader
+        if not is_reader():
+            return tuple(paths)
+        return tuple(path for path in paths if self.root is not None and path.resolve().is_relative_to(self.root))
+
     @abstractmethod
     def snapshot(self) -> RepositorySnapshot:
         raise NotImplementedError
@@ -333,6 +350,9 @@ class ReadOnlyRepositoryAdapter(ABC):
         try:
             return resolved.relative_to(self.root).as_posix()
         except ValueError as exc:
+            from src.runtime_profile import is_reader
+            if is_reader():
+                raise PermissionError("source unavailable in reader profile") from exc
             raise ValueError("source path escapes configured repository") from exc
 
     def _read_source(self, path: Path) -> str:
@@ -871,7 +891,7 @@ class HomeBaseRepositoryAdapter(ReadOnlyRepositoryAdapter):
         if self.root is None:
             return ()
         task_root = self.root / "agent-tasks"
-        return tuple(sorted(path for path in task_root.rglob("*.md") if path.is_file() and path.name != ".gitkeep")) if task_root.is_dir() else ()
+        return self._confined_sources(sorted(path for path in task_root.rglob("*.md") if path.is_file() and path.name != ".gitkeep")) if task_root.is_dir() else ()
 
     def snapshot(self) -> RepositorySnapshot:
         nodes = [
@@ -899,7 +919,7 @@ class ObsidianPhDRepositoryAdapter(ReadOnlyRepositoryAdapter):
             return ()
         selected = []
         backlog = inbox / "backlog.md"
-        if backlog.is_file():
+        if backlog.is_file() and self._confined_sources((backlog,)):
             selected.append(backlog)
         for path in inbox.rglob("*.md"):
             if path == backlog or any(part.startswith(".") for part in path.relative_to(self.root).parts):
@@ -1053,6 +1073,15 @@ class RepositoryAdapterRegistry:
 
     @classmethod
     def from_environment(cls, *, odysseus_root: str | Path) -> "RepositoryAdapterRegistry":
+        from src.runtime_profile import runtime_profile
+        profile = runtime_profile()
+        if profile.reader:
+            # Keep the three published identities; no automatic control-plane/foreign fallback.
+            return cls((
+                OdysseusRepositoryAdapter(None),
+                HomeBaseRepositoryAdapter(profile.source_root if profile.repository_id == "misumi-homebase" else None),
+                ObsidianPhDRepositoryAdapter(profile.source_root if profile.repository_id == "obsidian-phd" else None),
+            ))
         def configured(*names: str) -> Optional[str]:
             for name in names:
                 value = (os.getenv(name) or "").strip()
@@ -1070,6 +1099,8 @@ class RepositoryAdapterRegistry:
         return tuple(sorted(self._adapters))
 
     def get(self, repository_id: str) -> ReadOnlyRepositoryAdapter:
+        from src.runtime_profile import require_repository
+        require_repository(repository_id)
         try:
             return self._adapters[repository_id]
         except KeyError as exc:

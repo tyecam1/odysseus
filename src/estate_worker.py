@@ -59,6 +59,8 @@ def _selftest_spawn_delay(payload: dict) -> None:
     spawn, read from the operator's sentinel file (JSON `{"spawn_delay_s":
     N}`) and honoured only for the `noop-sleep` kind while the sentinel
     exists. Never affects codex-write."""
+    from src.runtime_profile import require_joint
+    require_joint()
     if payload.get("kind") != "noop-sleep" or not _selftest_enabled():
         return
     try:
@@ -79,6 +81,8 @@ def _selftest_enabled() -> bool:
     every one of those, is created and removed by hand by the operator
     (never by any routing code path), and only ever gates `noop-sleep` —
     never `codex-write`, which has its own, unrelated authority checks."""
+    from src.runtime_profile import require_joint
+    require_joint()
     return _WORKER_SELFTEST_SENTINEL_PATH.is_file()
 
 
@@ -89,10 +93,14 @@ class WorkerError(RuntimeError):
 
 
 def _utcnow() -> str:
+    from src.runtime_profile import require_joint
+    require_joint()
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _json_read(path: Path) -> dict:
+    from src.runtime_profile import require_joint
+    require_joint()
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
@@ -101,6 +109,8 @@ def _json_read(path: Path) -> dict:
 
 
 def _json_write(path: Path, value: dict) -> None:
+    from src.runtime_profile import require_joint
+    require_joint()
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}-{uuid.uuid4().hex}")
     try:
@@ -122,12 +132,16 @@ def _detached_spawn_verified() -> bool:
     the sshd job (docs/aoteru-home-worker-setup.md step 7), so there the
     flag file is the only evidence -- written once, manually, by that
     live survival check, never by any code path that routes work."""
+    from src.runtime_profile import require_joint
+    require_joint()
     if os.name != "nt":
         return True
     return bool(_json_read(_WORKER_CAPABILITIES_PATH).get("detached_spawn_verified"))
 
 
 def _spool_path(execution_id: str) -> Path:
+    from src.runtime_profile import require_joint
+    require_joint()
     if not isinstance(execution_id, str) or not _EXECUTION_ID_RE.fullmatch(execution_id):
         raise WorkerError("bad_request", "execution_id contains unsupported characters")
     return _SPOOL_ROOT / execution_id
@@ -139,6 +153,8 @@ def _gc_spools() -> None:
     a write spool only 7 days after the control plane's spool.release; a
     self-test spool 7 days after it became terminal and quiescent. Deletes
     only stale decide_once temp files, which were never decisions."""
+    from src.runtime_profile import require_joint
+    require_joint()
     try:
         entries = list(_SPOOL_ROOT.iterdir())
     except OSError:
@@ -157,6 +173,8 @@ def _gc_spools() -> None:
 
 
 def _compact_if_due(spool: Path) -> None:
+    from src.runtime_profile import require_joint
+    require_joint()
     files = _spool_files(spool)
     claim = read_decision(files["claim"])
     if claim is None or claim.get("kind") != "start":
@@ -191,6 +209,8 @@ def _compact_if_due(spool: Path) -> None:
 
 def machine_fingerprint() -> str:
     """Return the non-secret, shortened machine-id digest."""
+    from src.runtime_profile import require_joint
+    require_joint()
     machine_id = ""
     if os.name == "nt":
         try:
@@ -211,6 +231,8 @@ def machine_fingerprint() -> str:
 
 
 def _worker_version() -> str:
+    from src.runtime_profile import require_joint
+    require_joint()
     root = Path(estate_router._CONFIG_DIR).parent
     try:
         result = subprocess.run(
@@ -226,6 +248,8 @@ def _worker_version() -> str:
 
 
 def attestation(nonce: str) -> dict:
+    from src.runtime_profile import require_joint
+    require_joint()
     return {
         "host_id": estate_router.current_host_id(),
         "hostname": socket.gethostname(),
@@ -239,6 +263,8 @@ def attestation(nonce: str) -> dict:
 
 
 def _success_response(request: dict, proof: dict, result: dict) -> dict:
+    from src.runtime_profile import require_joint
+    require_joint()
     return {
         "protocol": PROTOCOL,
         "request_id": request["request_id"],
@@ -251,6 +277,8 @@ def _success_response(request: dict, proof: dict, result: dict) -> dict:
 
 def handle(request: dict) -> dict:
     """Validate, attest, identity-check and dispatch one worker request."""
+    from src.runtime_profile import require_joint
+    require_joint()
     _gc_spools()
     request_for_error = request if isinstance(request, dict) else {"request_id": None, "nonce": ""}
     nonce = request_for_error.get("nonce") if isinstance(request_for_error.get("nonce"), str) else ""
@@ -293,6 +321,8 @@ def handle(request: dict) -> dict:
 
 
 def _ollama_inventory() -> tuple[bool, list[dict], str | None]:
+    from src.runtime_profile import require_joint
+    require_joint()
     try:
         req = urllib.request.Request(
             f"{_OLLAMA_BASE}/api/tags",
@@ -311,6 +341,8 @@ def _ollama_inventory() -> tuple[bool, list[dict], str | None]:
 
 
 def _in_flight_execution_ids() -> list[str]:
+    from src.runtime_profile import require_joint
+    require_joint()
     try:
         entries = list(_SPOOL_ROOT.iterdir())
     except OSError:
@@ -328,6 +360,8 @@ def _in_flight_execution_ids() -> list[str]:
 
 
 def _verb_health(payload: dict) -> dict:
+    from src.runtime_profile import require_joint
+    require_joint()
     if payload:
         raise WorkerError("bad_request", "health payload must be empty")
     reachable, _models, ollama_error = _ollama_inventory()
@@ -349,6 +383,8 @@ def _verb_health(payload: dict) -> dict:
 
 
 def _run_git(path: str, args: list[str], *, timeout: int = 60) -> subprocess.CompletedProcess:
+    from src.runtime_profile import require_joint
+    require_joint()
     try:
         return subprocess.run(
             ["git", "-C", path, *args],
@@ -361,6 +397,8 @@ def _run_git(path: str, args: list[str], *, timeout: int = 60) -> subprocess.Com
 
 
 def _probe_repo(repo_id: str) -> dict:
+    from src.runtime_profile import require_joint
+    require_joint()
     path = estate_router.resolve_repo_path(repo_id)
     if path is None:
         return {"resolved": False, "path": None, "head_sha": None, "branch": None, "clean": False}
@@ -378,6 +416,8 @@ def _probe_repo(repo_id: str) -> dict:
 
 
 def _verb_inventory(payload: dict) -> dict:
+    from src.runtime_profile import require_joint
+    require_joint()
     models_of_interest = payload.get("models_of_interest", [])
     if set(payload) - {"models_of_interest"}:
         raise WorkerError("bad_request", "inventory payload has unknown fields")
@@ -421,11 +461,15 @@ def _verb_inventory(payload: dict) -> dict:
 
 
 def _write_prerequisites_ok() -> bool:
+    from src.runtime_profile import require_joint
+    require_joint()
     prerequisites = _write_prerequisites()
     return prerequisites["decision_fs"] and prerequisites["runner_units"]
 
 
 def _verb_repo_probe(payload: dict) -> dict:
+    from src.runtime_profile import require_joint
+    require_joint()
     repo_id = payload.get("repo_id")
     if set(payload) != {"repo_id"} or not isinstance(repo_id, str) or not repo_id:
         raise WorkerError("bad_request", "repo.probe requires repo_id")
@@ -433,6 +477,8 @@ def _verb_repo_probe(payload: dict) -> dict:
 
 
 def _timeout(payload: dict, default: float) -> float:
+    from src.runtime_profile import require_joint
+    require_joint()
     value = payload.get("timeout_s", default)
     if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
         raise WorkerError("bad_request", "timeout_s must be a positive number")
@@ -440,6 +486,8 @@ def _timeout(payload: dict, default: float) -> float:
 
 
 def _verb_execute(payload: dict) -> dict:
+    from src.runtime_profile import require_joint
+    require_joint()
     kind = payload.get("kind")
     objective = payload.get("objective")
     if not isinstance(objective, (str, list)):
@@ -478,6 +526,8 @@ def _worktree_verification(repo_id: Any, worktree_path: Any, branch: Any) -> dic
     may launch (fsmonitor, filters) can outlive the call (6c adjudication
     finding 2); elsewhere it runs in-process (Windows write verbs are
     refused anyway)."""
+    from src.runtime_profile import require_joint
+    require_joint()
     if not all(isinstance(value, str) and value for value in (repo_id, worktree_path, branch)):
         raise WorkerError("bad_request", "worktree verification requires repo_id, worktree_path and branch")
     if _remaining(1.0) <= 0:
@@ -551,11 +601,15 @@ _BUDGET_MARGIN_S = 5.0
 
 def _remaining(cap: float) -> float:
     """Seconds left in the verb's budget, capped at `cap`."""
+    from src.runtime_profile import require_joint
+    require_joint()
     end = _BUDGET["end"]
     return cap if end is None else max(0.0, min(cap, end - time.monotonic()))
 
 
 def _budget_exhausted(reason: str):
+    from src.runtime_profile import require_joint
+    require_joint()
     return WorkerError("executor_unavailable", f"verification budget exhausted ({reason}); retryable")
 # Bounds are consistent by construction (gate round 9): a verify unit runs
 # at most VERIFY_UNIT_TIMEOUT_S, then run_in_unit stops it and proves its
@@ -573,12 +627,16 @@ VERIFY_CALL_DEADLINE_S = 60.0
 def _verify_scope(worktree_path: str) -> str:
     """Verify units are named per worktree path (gate round 7 finding 3), so
     a late or unproven verification only delays work on that same path."""
+    from src.runtime_profile import require_joint
+    require_joint()
     return hashlib.sha256(str(Path(worktree_path).resolve()).encode("utf-8")).hexdigest()[:16]
 
 
 def _run_verify() -> int:
     """Body of an `aoteru-verify-*` unit: read the request on stdin, verify
     in-process (git side processes disabled), print one JSON line."""
+    from src.runtime_profile import require_joint
+    require_joint()
     _IN_VERIFY_UNIT["value"] = True
     _disable_git_side_processes(_SPOOL_ROOT)
     try:
@@ -593,6 +651,8 @@ def _run_verify() -> int:
 
 
 def _worktree_verification_local(repo_id: str, worktree_path: str, branch: str) -> dict:
+    from src.runtime_profile import require_joint
+    require_joint()
     if worktree_ops.is_live_checkout_path(repo_id, worktree_path):
         return {"ok": False, "path": str(Path(worktree_path).resolve()), "reason": "refusing the live checkout"}
     verified = worktree_ops.verify_worktree(repo_id, worktree_path, branch)
@@ -612,6 +672,8 @@ def _worktree_verification_local(repo_id: str, worktree_path: str, branch: str) 
 
 
 def _verb_worktree_verify(payload: dict) -> dict:
+    from src.runtime_profile import require_joint
+    require_joint()
     return _worktree_verification(payload.get("repo_id"), payload.get("worktree_path"), payload.get("branch"))
 
 
@@ -632,6 +694,8 @@ def _fsync_dir(path: Path) -> None:
     """Durably persist a directory's entries. Windows has no directory
     fsync through Python -- decision crash-durability there is unproven
     (plan B13), and Windows write verbs are refused anyway (S6.12)."""
+    from src.runtime_profile import require_joint
+    require_joint()
     if os.name == "nt":
         return
     fd = os.open(str(path), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
@@ -644,6 +708,8 @@ def _fsync_dir(path: Path) -> None:
 def _anchor_for(path: Path) -> Path:
     """The fixed durability anchor of a decision path: the parent of the
     root (spool / prepare) it lives under."""
+    from src.runtime_profile import require_joint
+    require_joint()
     path = Path(path)
     for root in (_SPOOL_ROOT, _PREPARE_ROOT):
         try:
@@ -658,6 +724,8 @@ def _ensure_durable_dir(directory: Path) -> None:
     """S6.11 directory durability: from the anchor down, mkdir each
     component and fsync its parent -- always, whether or not this caller
     created it, since a concurrent creator may not have fsynced yet."""
+    from src.runtime_profile import require_joint
+    require_joint()
     directory = Path(directory)
     anchor = _anchor_for(directory)
     anchor.mkdir(parents=True, exist_ok=True)
@@ -672,6 +740,8 @@ def _ensure_durable_dir(directory: Path) -> None:
 
 def _fsync_chain(directory: Path) -> None:
     """fsync `directory` and every ancestor up to (and including) its anchor."""
+    from src.runtime_profile import require_joint
+    require_joint()
     directory = Path(directory)
     anchor = _anchor_for(directory)
     current = directory
@@ -683,6 +753,8 @@ def _fsync_chain(directory: Path) -> None:
 
 
 def _load_decision(target: Path) -> dict:
+    from src.runtime_profile import require_joint
+    require_joint()
     try:
         value = json.loads(target.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
@@ -701,6 +773,8 @@ def decide_once(target: Path, content: dict) -> tuple[bool, dict]:
     return only after their own fsync, so nobody acts on an undurable
     decision. Decision files are never overwritten, renamed over or
     deleted."""
+    from src.runtime_profile import require_joint
+    require_joint()
     target = Path(target)
     directory = target.parent
     _ensure_durable_dir(directory)
@@ -729,6 +803,8 @@ def read_decision(target: Path) -> dict | None:
     after this reader has itself fsynced its directory chain. An absent
     decision is returned as None and must never be acted on directly --
     any action on absence is itself a `decide_once`."""
+    from src.runtime_profile import require_joint
+    require_joint()
     target = Path(target)
     if not target.exists():
         return None
@@ -738,6 +814,8 @@ def read_decision(target: Path) -> dict | None:
 
 
 def _decision_fs_supported(root: Path) -> tuple[bool, str]:
+    from src.runtime_profile import require_joint
+    require_joint()
     key = str(root)
     if key in _DECISION_FS_PROBED:
         return _DECISION_FS_PROBED[key]
@@ -764,6 +842,8 @@ def _decision_fs_supported(root: Path) -> tuple[bool, str]:
 
 
 def _write_prerequisites() -> dict:
+    from src.runtime_profile import require_joint
+    require_joint()
     decision_ok, decision_detail = _decision_fs_supported(_SPOOL_ROOT)
     prepare_ok, prepare_detail = _decision_fs_supported(_PREPARE_ROOT)
     units_ok, units_detail = estate_worker_procs.runner_units_supported()
@@ -777,12 +857,16 @@ def _write_prerequisites() -> dict:
 def _require_write_prerequisites() -> None:
     """Every write verb refuses BEFORE any claim unless both the decision
     filesystem (S6.11) and runner units (S6.12) are proven. No fallback."""
+    from src.runtime_profile import require_joint
+    require_joint()
     prerequisites = _write_prerequisites()
     if not (prerequisites["decision_fs"] and prerequisites["runner_units"]):
         raise WorkerError("executor_unavailable", prerequisites["detail"])
 
 
 def _age_seconds(iso_value: Any) -> float | None:
+    from src.runtime_profile import require_joint
+    require_joint()
     if not isinstance(iso_value, str):
         return None
     try:
@@ -793,6 +877,8 @@ def _age_seconds(iso_value: Any) -> float | None:
 
 
 def _git_env_dir(record: Path) -> Path:
+    from src.runtime_profile import require_joint
+    require_joint()
     hooks = record / ".no-hooks"      # dot-prefixed: can never be an execution/lease id
     hooks.mkdir(parents=True, exist_ok=True)
     return hooks
@@ -802,6 +888,8 @@ def _disable_git_side_processes(record: Path) -> None:
     """Defence in depth (S6.10): no hooks, no fsmonitor daemon, no
     auto-gc/maintenance for every git child of this process. The unit's
     cgroup stays the proof of quiescence."""
+    from src.runtime_profile import require_joint
+    require_joint()
     pairs = [("core.hooksPath", str(_git_env_dir(record))), ("gc.auto", "0"), ("maintenance.auto", "false"),
              ("core.fsmonitor", "false")]
     # Verification and probes are strictly read-only: no optional locks, so
@@ -815,11 +903,15 @@ def _disable_git_side_processes(record: Path) -> None:
 
 
 def _runner_argv(flag: str, *args: str) -> list[str]:
+    from src.runtime_profile import require_joint
+    require_joint()
     root = str(Path(get_app_root()).resolve())
     return [sys.executable, "-m", "src.estate_worker", "--root", root, flag, *args]
 
 
 def _launch_runner(flag: str, args: list[str], *, unit: str, log_path: Path) -> dict:
+    from src.runtime_profile import require_joint
+    require_joint()
     return estate_worker_procs.spawn_runner_unit(
         _runner_argv(flag, *args), str(Path(get_app_root()).resolve()), str(log_path), unit,
     )
@@ -827,6 +919,8 @@ def _launch_runner(flag: str, args: list[str], *, unit: str, log_path: Path) -> 
 
 def _runner_self_check(unit: str) -> tuple[dict | None, str | None]:
     """A runner may execute only inside its own dedicated unit cgroup."""
+    from src.runtime_profile import require_joint
+    require_joint()
     cgroup = estate_worker_procs.own_cgroup()
     if not estate_worker_procs.cgroup_is_dedicated(cgroup, unit):
         return None, f"runner is not inside its dedicated unit {unit} (cgroup {cgroup!r})"
@@ -838,6 +932,8 @@ def _runner_self_check(unit: str) -> tuple[dict | None, str | None]:
 
 
 def _unit_quiescent(run_decision: dict | None) -> bool | None:
+    from src.runtime_profile import require_joint
+    require_joint()
     if not isinstance(run_decision, dict):
         return None
     if run_decision.get("decision") == "abort":
@@ -850,6 +946,8 @@ def _unit_quiescent(run_decision: dict | None) -> bool | None:
 # ---------------------------------------------------------------------
 
 def _spool_files(spool: Path) -> dict:
+    from src.runtime_profile import require_joint
+    require_joint()
     return {
         "claim": spool / "claim.json", "run": spool / "run.json", "state": spool / "state.json",
         "result": spool / "result.json", "released": spool / "released.json",
@@ -859,6 +957,8 @@ def _spool_files(spool: Path) -> dict:
 
 def _attempts(spool: Path, kind: str) -> list[tuple[int, dict, dict | None]]:
     """Recorded attempts (finalize|push) as (n, attempt, run_decision)."""
+    from src.runtime_profile import require_joint
+    require_joint()
     directory = spool / kind
     out = []
     if not directory.is_dir():
@@ -875,11 +975,15 @@ def _attempts(spool: Path, kind: str) -> list[tuple[int, dict, dict | None]]:
 
 
 def _abort_run(run_path: Path, by: str, reason: str) -> dict:
+    from src.runtime_profile import require_joint
+    require_joint()
     _won, decided = decide_once(run_path, {"decision": "abort", "by": by, "reason": reason, "at": _utcnow()})
     return decided
 
 
 def _maybe_abort_stale_start(spool: Path, claim: dict) -> None:
+    from src.runtime_profile import require_joint
+    require_joint()
     files = _spool_files(spool)
     if claim.get("kind") != "start" or files["run"].exists():
         return
@@ -894,6 +998,8 @@ def _execution_aggregate(spool: Path, *, fence_unstarted: bool) -> tuple[bool | 
     excluded; they never touch the worktree). With `fence_unstarted`, an
     attempt/writer with no run decision is fenced (abort won) first --
     otherwise it counts as not proven."""
+    from src.runtime_profile import require_joint
+    require_joint()
     files = _spool_files(spool)
     units = []
     claim = read_decision(files["claim"])
@@ -926,6 +1032,8 @@ def _execution_aggregate(spool: Path, *, fence_unstarted: bool) -> tuple[bool | 
 def _execution_view(spool: Path) -> dict:
     """Derived state (S6.6): computed only from decision files plus
     quiescence, never from an overwritable field."""
+    from src.runtime_profile import require_joint
+    require_joint()
     files = _spool_files(spool)
     claim = read_decision(files["claim"])
     base = {"handle": None, "spawned": False, "started_at": None, "finished_at": None,
@@ -983,6 +1091,8 @@ def _latest_finalize_result(spool: Path) -> dict | None:
     """The newest quiescent finalize attempt's recorded result -- what the
     control plane reads after closure to record `finalized` idempotently
     (6c finding 1), even when the finalize response itself was lost."""
+    from src.runtime_profile import require_joint
+    require_joint()
     for number, _attempt, run in reversed(_attempts(spool, "finalize")):
         if run is None or run.get("decision") != "execute" or _unit_quiescent(run) is not True:
             continue
@@ -993,6 +1103,8 @@ def _latest_finalize_result(spool: Path) -> dict | None:
 
 
 def _start_answer(spool: Path, *, reused: bool) -> dict:
+    from src.runtime_profile import require_joint
+    require_joint()
     view = _execution_view(spool)
     accepted = view["state"] not in ("unknown", "fenced", "tombstone", "start_failed")
     if reused and view["state"] == "starting":
@@ -1007,6 +1119,8 @@ def _start_answer(spool: Path, *, reused: bool) -> dict:
 
 
 def _validate_start(payload: dict) -> None:
+    from src.runtime_profile import require_joint
+    require_joint()
     kind = payload.get("kind")
     if kind == "noop-sleep":
         if not _selftest_enabled():
@@ -1036,6 +1150,8 @@ def _validate_start(payload: dict) -> None:
 
 
 def _verb_start(payload: dict) -> dict:
+    from src.runtime_profile import require_joint
+    require_joint()
     execution_id = payload.get("execution_id")
     spool = _spool_path(execution_id)
     files = _spool_files(spool)
@@ -1078,6 +1194,8 @@ def _verb_start(payload: dict) -> dict:
 
 
 def _verb_status(payload: dict) -> dict:
+    from src.runtime_profile import require_joint
+    require_joint()
     execution_id = payload.get("execution_id")
     if set(payload) - {"execution_id", "fence", "close"}:
         raise WorkerError("bad_request", "status accepts only execution_id, fence and close")
@@ -1106,6 +1224,8 @@ def _verb_status(payload: dict) -> dict:
 
 
 def _verb_spool_release(payload: dict) -> dict:
+    from src.runtime_profile import require_joint
+    require_joint()
     execution_id = payload.get("execution_id")
     resolution = payload.get("resolution")
     if set(payload) != {"execution_id", "resolution"} or resolution not in ("not_started", "finalized", "recovered"):
@@ -1131,6 +1251,8 @@ def _verb_spool_release(payload: dict) -> dict:
 
 
 def _verb_cancel(payload: dict) -> dict:
+    from src.runtime_profile import require_joint
+    require_joint()
     execution_id = payload.get("execution_id")
     if set(payload) != {"execution_id"}:
         raise WorkerError("bad_request", "cancel requires only execution_id")
@@ -1155,6 +1277,8 @@ def _verb_cancel(payload: dict) -> dict:
 
 
 def _run_spooled(execution_id: str) -> int:
+    from src.runtime_profile import require_joint
+    require_joint()
     spool = _spool_path(execution_id)
     files = _spool_files(spool)
     claim = read_decision(files["claim"])
@@ -1223,12 +1347,16 @@ def _run_spooled(execution_id: str) -> int:
 # ---------------------------------------------------------------------
 
 def _prepare_path(lease_id: Any) -> Path:
+    from src.runtime_profile import require_joint
+    require_joint()
     if not isinstance(lease_id, str) or not _EXECUTION_ID_RE.fullmatch(lease_id):
         raise WorkerError("bad_request", "lease_id contains unsupported characters")
     return _PREPARE_ROOT / lease_id
 
 
 def _prepare_view(record: Path) -> dict:
+    from src.runtime_profile import require_joint
+    require_joint()
     files = _spool_files(record)
     claim = read_decision(files["claim"])
     if claim is None:
@@ -1250,6 +1378,8 @@ def _prepare_view(record: Path) -> dict:
 
 
 def _wait_s(default: float) -> float:
+    from src.runtime_profile import require_joint
+    require_joint()
     deadline = _CURRENT_DEADLINE_S["value"]
     if isinstance(deadline, (int, float)) and deadline > 10:
         return min(default, float(deadline) - 10)
@@ -1257,6 +1387,8 @@ def _wait_s(default: float) -> float:
 
 
 def _verb_worktree_prepare(payload: dict) -> dict:
+    from src.runtime_profile import require_joint
+    require_joint()
     repo_id = payload.get("repo_id")
     branch = payload.get("branch")
     base_ref = payload.get("base_ref")
@@ -1292,6 +1424,8 @@ def _verb_worktree_prepare(payload: dict) -> dict:
 
 
 def _verb_worktree_prepare_status(payload: dict) -> dict:
+    from src.runtime_profile import require_joint
+    require_joint()
     lease_id = payload.get("lease_id")
     if set(payload) - {"lease_id", "fence"}:
         raise WorkerError("bad_request", "worktree.prepare_status accepts only lease_id and fence")
@@ -1306,6 +1440,8 @@ def _verb_worktree_prepare_status(payload: dict) -> dict:
 
 
 def _run_prepare(lease_id: str) -> int:
+    from src.runtime_profile import require_joint
+    require_joint()
     record = _prepare_path(lease_id)
     files = _spool_files(record)
     claim = read_decision(files["claim"])
@@ -1343,6 +1479,8 @@ def _run_prepare(lease_id: str) -> int:
 # ---------------------------------------------------------------------
 
 def _record_attempt(spool: Path, kind: str, request: dict) -> int:
+    from src.runtime_profile import require_joint
+    require_joint()
     directory = spool / kind
     number = len(_attempts(spool, kind)) + 1
     while True:
@@ -1357,6 +1495,8 @@ def _wait_attempts(spool: Path, kind: str, number: int, wait_s: float) -> dict |
     """Wait for attempt `number`'s result AND quiescence of EVERY recorded
     attempt of this kind (S6.10). Earlier attempts with no run decision are
     fenced so they can never start later."""
+    from src.runtime_profile import require_joint
+    require_joint()
     directory = spool / kind
     deadline = time.monotonic() + wait_s
     while True:
@@ -1381,6 +1521,8 @@ def _wait_attempts(spool: Path, kind: str, number: int, wait_s: float) -> dict |
 
 
 def _verb_worktree_finalize(payload: dict) -> dict:
+    from src.runtime_profile import require_joint
+    require_joint()
     execution_id = payload.get("execution_id")
     for name in ("repo_id", "worktree_path", "branch", "commit_message", "expected_head_sha"):
         if not isinstance(payload.get(name), str) or not payload.get(name):
@@ -1419,10 +1561,14 @@ def _verb_worktree_finalize(payload: dict) -> dict:
 
 
 def _git(path: str, args: list[str], *, timeout: int = 120) -> subprocess.CompletedProcess:
+    from src.runtime_profile import require_joint
+    require_joint()
     return _run_git(path, args, timeout=timeout)
 
 
 def _exact_commit_push(path: str, commit_sha: str, branch: str) -> dict:
+    from src.runtime_profile import require_joint
+    require_joint()
     pushed = _git(path, ["push", "origin", f"{commit_sha}:refs/heads/{branch}"], timeout=300)
     if pushed.returncode == 0:
         return {"state": "pushed", "commit_sha": commit_sha, "remote": "origin", "branch": branch,
@@ -1438,6 +1584,8 @@ def _exact_commit_push(path: str, commit_sha: str, branch: str) -> dict:
 
 
 def _finalize_logic(execution_id: str, spool: Path, request: dict) -> dict:
+    from src.runtime_profile import require_joint
+    require_joint()
     path = str(Path(request["worktree_path"]).resolve())
     branch, expected = request["branch"], request["expected_head_sha"]
     commit_record = spool / "finalize" / "commit.json"
@@ -1498,6 +1646,8 @@ def _finalize_logic(execution_id: str, spool: Path, request: dict) -> dict:
 
 
 def _run_attempt(kind: str, execution_id: str, number: str) -> int:
+    from src.runtime_profile import require_joint
+    require_joint()
     spool = _spool_path(execution_id)
     directory = spool / kind
     attempt = read_decision(directory / f"attempt-{number}.json")
@@ -1522,6 +1672,8 @@ def _run_attempt(kind: str, execution_id: str, number: str) -> int:
 
 
 def _run_attempt_body(kind, execution_id, spool, directory, number, request) -> int:
+    from src.runtime_profile import require_joint
+    require_joint()
     try:
         if kind == "finalize":
             verified = _worktree_verification(request["repo_id"], request["worktree_path"], request["branch"])
@@ -1538,6 +1690,8 @@ def _run_attempt_body(kind, execution_id, spool, directory, number, request) -> 
 
 
 def _push_logic(request: dict) -> dict:
+    from src.runtime_profile import require_joint
+    require_joint()
     repo_path = estate_router.resolve_repo_path(request["repo_id"])
     if repo_path is None:
         return {"outcome": "repo_unavailable", "reason": f"repo {request['repo_id']!r} does not resolve"}
@@ -1549,6 +1703,8 @@ def _push_logic(request: dict) -> dict:
 
 
 def _verb_worktree_push(payload: dict) -> dict:
+    from src.runtime_profile import require_joint
+    require_joint()
     execution_id = payload.get("execution_id")
     for name in ("repo_id", "branch", "commit_sha"):
         if not isinstance(payload.get(name), str) or not payload.get(name):
@@ -1578,6 +1734,8 @@ def _verb_worktree_push(payload: dict) -> dict:
 
 
 def main(argv: list[str] | None = None) -> int:
+    from src.runtime_profile import require_joint
+    require_joint()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", help="worker checkout root")
     parser.add_argument("--run-spooled", metavar="EXECUTION_ID")

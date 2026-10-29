@@ -62,6 +62,8 @@ class RoutingConfigError(RuntimeError):
 
 
 def _load_yaml(name: str) -> dict:
+    from src.runtime_profile import require_joint
+    require_joint()
     path = _CONFIG_DIR / f"{name}.yaml"
     if not path.exists():
         return {}
@@ -79,6 +81,8 @@ def host_static_state(host: dict) -> dict:
     identity, never worker enablement, and a host with neither identity key
     fails closed.
     """
+    from src.runtime_profile import require_joint
+    require_joint()
     worker = host.get("worker") or {}
     identity_verified = host.get("identity_verified")
     if identity_verified is None and "identity_verified" not in host:
@@ -109,6 +113,8 @@ def host_reachable(host: dict, live_hostname: str) -> tuple[bool, str]:
     that sshd was up). Kept as a plain function (not folded into
     `eligible_hosts`) because `scripts/agent` imports it directly for its
     own static-gate display."""
+    from src.runtime_profile import require_joint
+    require_joint()
     state = host_static_state(host)
     if not state["identity_verified"]:
         return False, f"{host['id']} identity not verified"
@@ -136,6 +142,8 @@ def resolve_repo_path(repo_id: str) -> Optional[str]:
     instead of an empty scratch dir. Returns None if the repo id is
     unknown, its root var isn't set on this host, or the resolved path
     doesn't exist — never guesses."""
+    from src.runtime_profile import require_joint
+    require_joint()
     registry = _load_yaml("repositories")
     entry = next((r for r in registry.get("repos", []) if r.get("id") == repo_id), None)
     if entry is None:
@@ -169,6 +177,8 @@ def current_host_id() -> Optional[str]:
     that script isn't an importable module) — kept here rather than
     duplicated at the route, for the same reason `host_reachable` already
     is."""
+    from src.runtime_profile import require_joint
+    require_joint()
     estate = _load_yaml("estate")
     live_hostname = socket.gethostname()
     for host in estate.get("hosts", []):
@@ -191,6 +201,8 @@ def eligible_hosts(repo_id: Optional[str] = None) -> list[dict]:
     worker itself, only that sshd was up. `worker_health` is TTL-cached
     (`estate_worker_client`), so calling this repeatedly in one request
     doesn't re-dispatch a subprocess/SSH round trip every time."""
+    from src.runtime_profile import require_joint
+    require_joint()
     estate = _load_yaml("estate")
     live_hostname = socket.gethostname()
     out = []
@@ -275,6 +287,8 @@ def reconcile_stale_sessions(db, LogicalSession) -> int:
     lives in this module rather than in `scripts/agent` — so `agent claude
     where` (local CLI) and `/api/estate/sessions` (HTTP, this module) read
     one reconciliation rule, not two that could drift apart."""
+    from src.runtime_profile import require_joint
+    require_joint()
     from datetime import datetime, timedelta, timezone
     cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=_STALE_ACTIVE_SESSION_SECONDS)
     stale = db.query(LogicalSession).filter(
@@ -299,6 +313,8 @@ def active_logical_sessions() -> list[dict]:
     has no local `core.database` to query directly, so this is also the
     body of `GET /api/estate/sessions` (routes/estate_routing_routes.py);
     `scripts/agent`'s `agent claude where` reads the same rows locally."""
+    from src.runtime_profile import require_joint
+    require_joint()
     from core.database import LogicalSession, get_db_session
     with get_db_session() as db:
         reconcile_stale_sessions(db, LogicalSession)
@@ -320,6 +336,8 @@ def _ollama_model_live(model: str, timeout: float = 3.0) -> tuple[bool, str]:
     model could have been removed since. Only applies to local/Ollama-
     style bindings; a future paid-provider binding would need its own
     liveness check rather than reusing this one blindly."""
+    from src.runtime_profile import require_joint
+    require_joint()
     import httpx
     try:
         resp = httpx.get(f"{_OLLAMA_BASE}/api/tags", timeout=timeout)
@@ -346,6 +364,8 @@ def experiment_priority_active() -> tuple[bool, str]:
     over a scheduler redesign — no existing host-load/reservation
     mechanism was found in a targeted search of src/ and core/ before
     this was added."""
+    from src.runtime_profile import require_joint
+    require_joint()
     if _EXPERIMENT_RESERVATION_PATH.exists():
         try:
             import json
@@ -384,6 +404,8 @@ def experiment_priority_active() -> tuple[bool, str]:
 def host_gpu_admission_config(host_id: Optional[str]) -> Optional[dict]:
     """``worker.gpu_admission`` for ``host_id`` in config/estate.yaml, or None when the host has none
     (a host without the block is never subject to GPU admission; see src/gpu_admission.py)."""
+    from src.runtime_profile import require_joint
+    require_joint()
     if not host_id:
         return None
     for host in _load_yaml("estate").get("hosts", []):
@@ -396,6 +418,8 @@ def host_gpu_admission_config(host_id: Optional[str]) -> Optional[dict]:
 def gpu_admission_for_host(host_id: str) -> dict:
     """Classify household GPU contention on ``host_id`` from its (TTL-cached) worker health. Never raises for a
     transport problem: an unreadable host is ``unknown``, which does not withhold work."""
+    from src.runtime_profile import require_joint
+    require_joint()
     from src import gpu_admission
     from src.estate_worker_client import WorkerTransportError, worker_health
 
@@ -431,6 +455,8 @@ def resolve_alias(alias: str, host_id: Optional[str] = None) -> dict:
     experiment is reserved/active on the checked host — heavy background
     inference must not contend with a live robotics experiment for a
     shared GPU. Aliases without that tag are unaffected either way."""
+    from src.runtime_profile import require_joint
+    require_joint()
     models = _load_yaml("models")
     entry = next((c for c in models.get("capabilities", []) if c["alias"] == alias), None)
     if entry is None:
@@ -538,6 +564,8 @@ def _record_decision(task: dict, *, host_id, executor, model_alias, concrete_mod
     or junk reason onto telemetry and have it read as a legitimate
     controller retention (task's completion gate #5: the reason must be
     genuine, not merely present)."""
+    from src.runtime_profile import require_joint
+    require_joint()
     from core.database import RoutingDecision, get_db_session
     from src.delegation_preflight import _valid_nondelegation_reason
     raw_reason = task.get("nondelegation_reason")
@@ -599,6 +627,8 @@ def _select_host(eligible: list[dict], capabilities: list[str]) -> tuple[dict, l
     final recorded status (a `local` candidate can still be downgraded to
     `needs_escalation` by a quality-floor/context failure `resolve_alias`
     itself can't see)."""
+    from src.runtime_profile import require_joint
+    require_joint()
     if not capabilities:
         return eligible[0], [], "deterministic"
 
@@ -681,6 +711,8 @@ def resolve_route(task: dict, *, record_decision: bool = True) -> dict:
     and ignored rather than rejected, so callers can send the real
     envelope now without this module needing to understand every field.
     """
+    from src.runtime_profile import require_joint
+    require_joint()
     repo_id = task.get("repo")
     hosts = eligible_hosts(repo_id)
     eligible = [h for h in hosts if h["eligible"]]
@@ -830,6 +862,8 @@ def _update_decision_outcome(decision_id: str, *, status: str, deterministic_gat
     swallow-and-log discipline as `_record_decision`: a telemetry update
     failing must not turn an actually-successful execution into a
     reported failure."""
+    from src.runtime_profile import require_joint
+    require_joint()
     if decision_id.startswith("decision-unrecorded-"):
         return  # the routing write itself already failed; nothing to update
     from core.database import RoutingDecision, get_db_session
@@ -866,6 +900,8 @@ def _retryable_local_error(exc: Exception) -> bool:
     timeout) qualify — a bad request, an auth failure, or any other
     deterministic upstream rejection would fail identically on a second
     attempt and just doubles latency for no benefit."""
+    from src.runtime_profile import require_joint
+    require_joint()
     if isinstance(exc, (ConnectionError, TimeoutError)):
         return True
     text = str(exc).lower()
@@ -911,6 +947,8 @@ def execute_local(concrete_model: str, objective: "str | list[dict]", *, timeout
     request/model-not-found) never retries. The paid path
     (`execute_codex`) intentionally has no retry logic at all — never
     blindly repeat a paid prompt (Workstream C invariant)."""
+    from src.runtime_profile import require_joint
+    require_joint()
     from fastapi import HTTPException
 
     from src.llm_core import llm_call
@@ -963,6 +1001,8 @@ def _resolve_codex_binary() -> tuple[Optional[str], str]:
     fall back to the system PATH copy otherwise (still `--sandbox
     read-only` either way — this only changes which binary answers the
     same call, never the flags/isolation)."""
+    from src.runtime_profile import require_joint
+    require_joint()
     local_candidate = Path.home() / ".local" / "codex-cli" / "node_modules" / ".bin" / "codex"
     if local_candidate.exists():
         return str(local_candidate), "user-local (~/.local/codex-cli, no sudo/global-policy change)"
@@ -980,6 +1020,8 @@ def _codex_available() -> tuple[bool, str]:
     resolves (see `_resolve_codex_binary`) and `~/.codex/auth.json`
     exists, the same "host-local auth, no secrets moved between hosts"
     discipline as every other credential check in this codebase."""
+    from src.runtime_profile import require_joint
+    require_joint()
     binary, _source = _resolve_codex_binary()
     if not binary:
         return False, "codex binary not found (checked user-local install and system PATH)"
@@ -991,6 +1033,8 @@ def _codex_available() -> tuple[bool, str]:
 
 def _kill_process_tree(root_pid: int, process_group_id: int, *, reap_timeout: float = 5.0) -> dict:
     """Compatibility re-export preserving existing router monkeypatch seams."""
+    from src.runtime_profile import require_joint
+    require_joint()
     original_stat = _estate_worker_procs._proc_stat_fields
     original_tree = _estate_worker_procs._process_tree_pids
     try:
@@ -1012,6 +1056,8 @@ def _execute_codex_with_sandbox(objective: str, *, sandbox: str, provider: str,
     one place prevents the narrow write lane drifting from the established
     paid-worker behavior.
     """
+    from src.runtime_profile import require_joint
+    require_joint()
     import os
     import signal
     import subprocess
@@ -1117,6 +1163,8 @@ def execute_codex(objective: str, *, timeout: float = 180.0, cwd: Optional[str] 
     cannot mutate a repo. It does not rely on a ParkLease; implementation
     authority is isolated in `execute_codex_write`.
     """
+    from src.runtime_profile import require_joint
+    require_joint()
     return _execute_codex_with_sandbox(
         objective, sandbox="read-only", provider="codex", timeout=timeout, cwd=cwd,
     )
@@ -1124,6 +1172,8 @@ def execute_codex(objective: str, *, timeout: float = 180.0, cwd: Optional[str] 
 
 def _codex_write_authority(repo_id: str, host_id: str) -> dict:
     """Resolve the repo and prove its existing lease without acquiring one."""
+    from src.runtime_profile import require_joint
+    require_joint()
     if resolve_repo_path(repo_id) is None:
         return {"ok": False, "error": f"implementation mode cannot resolve registered repo {repo_id!r} on this host"}
     lease = active_lease_for_repo(repo_id, host_id)
@@ -1159,6 +1209,8 @@ def execute_codex_write(objective: str, *, repo_id: str, host_id: str,
     worktree so direct Python callers cannot bypass `run_task`'s gate. It
     deliberately cannot acquire or broaden write authority.
     """
+    from src.runtime_profile import require_joint
+    require_joint()
     # Stage 6 (gate round 6 finding 2): the direct, untracked in-process
     # write lane is closed. A workspace-write run must go through
     # execute_write_via_worker -- an EstateExecution row, a decide_once run
@@ -1183,6 +1235,8 @@ _STALE_EXECUTION_PID_GRACE_SECONDS = 5
 def _estate_execution_provenance(execution) -> dict:
     """Shared field projection for `EstateExecution` rows so the poll
     route and any future caller see the same shape."""
+    from src.runtime_profile import require_joint
+    require_joint()
     return {
         "execution_id": execution.id,
         "decision_id": execution.decision_id,
@@ -1231,6 +1285,8 @@ def _create_estate_execution(*, decision_id, objective, executor, provider,
     closes the TOCTOU window between _in_flight_execution_for_lease's
     read and this write.
     """
+    from src.runtime_profile import require_joint
+    require_joint()
     from sqlalchemy.exc import IntegrityError
     from core.database import SessionLocal, EstateExecution
     execution_id = str(uuid.uuid4())
@@ -1257,6 +1313,8 @@ def _update_estate_execution(execution_id: str, **fields) -> None:
     -> running -> terminal). Callers pass only the columns that changed
     so an earlier update (e.g. `on_started` recording the pid) is never
     clobbered by a later one that doesn't know about it."""
+    from src.runtime_profile import require_joint
+    require_joint()
     from core.database import SessionLocal, EstateExecution
     db = SessionLocal()
     try:
@@ -1286,6 +1344,8 @@ def _in_flight_execution_for_lease(lease_id: str) -> Optional[dict]:
     happened to poll yet would read as "in flight" forever, permanently
     blocking every future dispatch against that lease even though
     nothing is actually running."""
+    from src.runtime_profile import require_joint
+    require_joint()
     from core.database import SessionLocal, EstateExecution
     db = SessionLocal()
     try:
@@ -1310,6 +1370,8 @@ def execute_codex_write_durable(objective: str, *, repo_id: str, host_id: str,
     and ran workspace-write in-process with no run decision or tracked unit.
     Every call is delegated to the Stage 6 worker lane, which re-validates
     the exact lease inside `lease_serialized_transaction`. Deleted in Stage 9."""
+    from src.runtime_profile import require_joint
+    require_joint()
     return execute_write_via_worker(objective, repo_id=repo_id, host_id=host_id, decision_id=decision_id,
                                     wait_timeout=wait_timeout, timeout=timeout)
 
@@ -1342,6 +1404,8 @@ def _resolve_paid_provider(alias: Optional[str]) -> dict:
     provider configured at all gets a truthful failure, not a silent
     guess). Returns `{"provider": name, "concrete_model_label": label}`
     or `{"provider": None, "reason": ...}`."""
+    from src.runtime_profile import require_joint
+    require_joint()
     models = _load_yaml("models")
     entry = next((c for c in models.get("capabilities", []) if c.get("alias") == alias), None) if alias else None
     provider_name = (entry or {}).get("paid_provider") or models.get("default_paid_provider")
@@ -1379,6 +1443,8 @@ def _dispatch_read_only(host_id: str, executor: str, task: dict, *, concrete_mod
     when one was observed, distinct from `placement.executed_host` (which
     a mismatch always leaves `None` -- an observed-but-wrong host must
     never be treated as having executed anything)."""
+    from src.runtime_profile import require_joint
+    require_joint()
     from src.estate_worker_client import WorkerTransportError, call_worker
 
     objective = task.get("objective")
@@ -1437,6 +1503,8 @@ def _dispatch_failure_actual_route(result: dict) -> Optional[str]:
     distinguish "no worker answered at all" from "the wrong worker
     answered"; every other dispatch failure leaves this `None`, same as
     before this function existed."""
+    from src.runtime_profile import require_joint
+    require_joint()
     if result.get("error_code") != "placement_mismatch":
         return None
     observed_host = (result.get("placement") or {}).get("observed_host")
@@ -1486,6 +1554,8 @@ def run_task(task: dict) -> dict:
     lease. Missing repo, path, host identity, or lease fails closed; the
     advisory paid lane above remains unchanged when mode is absent.
     """
+    from src.runtime_profile import require_joint
+    require_joint()
     task = dict(task)
     if not task.get("recommended_route"):
         from src.delegation_preflight import recommended_lane_for_task

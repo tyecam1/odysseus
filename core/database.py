@@ -2670,6 +2670,8 @@ def lease_serialized_transaction(lease_id: Optional[str] = None, repo_id: Option
     the lease row(s) `FOR UPDATE`.
 
     Never make a worker call while inside this block."""
+    from src.runtime_profile import require_joint
+    require_joint()
     from sqlalchemy.exc import OperationalError
     from sqlalchemy.orm import Session
 
@@ -3450,6 +3452,19 @@ def archive_session(session_id: str):
             db.commit()
             return True
     return False
+
+# Reader databases may contain the existing authority tables, but cannot use
+# them as another execution authority (including direct ORM/bulk SQL calls).
+@event.listens_for(engine, "before_cursor_execute")
+def _reader_authority_tables_inert(conn, cursor, statement, parameters, context, executemany):
+    from src.runtime_profile import is_reader
+    if is_reader():
+        import re
+        sql = re.sub(r"/\*.*?\*/|--[^\r\n]*", "", statement, flags=re.S).lstrip()
+        if re.match(r"(?:INSERT|UPDATE|DELETE|REPLACE|WITH)\b", sql, re.I) and re.search(
+            r"\b(?:park_leases|estate_executions|logical_sessions|routing_decisions)\b", sql, re.I
+        ):
+            raise PermissionError("execution authority unavailable in reader profile")
 
 # Initialize the database by creating all tables
 

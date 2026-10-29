@@ -30,6 +30,8 @@ import sys
 import os, sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "_lib"))
 from cli import quiet_logs, emit, fail, common_parser, run, REPO_ROOT as _REPO_ROOT
+from src.runtime_profile import require_joint
+require_joint()  # Reader processes cannot become an estate controller via the CLI.
 quiet_logs()
 
 import argparse

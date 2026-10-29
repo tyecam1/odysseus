@@ -12,12 +12,16 @@ _UNSAFE_BRANCH_CHARS_RE = re.compile(r"[^A-Za-z0-9._-]+")
 
 def sanitize_branch_for_path(branch: str) -> str:
     """Map a branch name to a deterministic filesystem-safe directory name."""
+    from src.runtime_profile import require_joint
+    require_joint()
     cleaned = _UNSAFE_BRANCH_CHARS_RE.sub("_", branch.strip())
     cleaned = cleaned.strip("._-")
     return cleaned or "branch"
 
 
 def _resolve_registered_repo_path(repo_id: str) -> Optional[Path]:
+    from src.runtime_profile import require_joint
+    require_joint()
     from src.estate_router import resolve_repo_path
 
     resolved = resolve_repo_path(repo_id)
@@ -25,12 +29,16 @@ def _resolve_registered_repo_path(repo_id: str) -> Optional[Path]:
 
 
 def _worktree_root_for_repo(repo_id: str, repo_path: Path) -> Path:
+    from src.runtime_profile import require_joint
+    require_joint()
     if repo_path.parent.name == "projects":
         return repo_path.parent.parent / "aoteru-worktrees" / repo_id
     return repo_path.parent / "aoteru-worktrees" / repo_id
 
 
 def worktree_path_for_branch(repo_id: str, branch: str) -> Optional[Path]:
+    from src.runtime_profile import require_joint
+    require_joint()
     repo_path = _resolve_registered_repo_path(repo_id)
     if repo_path is None:
         return None
@@ -39,6 +47,8 @@ def worktree_path_for_branch(repo_id: str, branch: str) -> Optional[Path]:
 
 def is_live_checkout_path(repo_id: str, path: str) -> bool:
     """True when `path` resolves to the registered live checkout for `repo_id`."""
+    from src.runtime_profile import require_joint
+    require_joint()
     repo_path = _resolve_registered_repo_path(repo_id)
     if repo_path is None:
         return False
@@ -49,6 +59,8 @@ def is_live_checkout_path(repo_id: str, path: str) -> bool:
 
 
 def _run_git(args: list[str], *, cwd: Path, timeout: int = 30) -> subprocess.CompletedProcess:
+    from src.runtime_profile import require_joint
+    require_joint()
     return subprocess.run(
         ["git", "-C", str(cwd), *args],
         capture_output=True,
@@ -58,6 +70,8 @@ def _run_git(args: list[str], *, cwd: Path, timeout: int = 30) -> subprocess.Com
 
 
 def _parse_worktree_list(porcelain: str) -> list[dict]:
+    from src.runtime_profile import require_joint
+    require_joint()
     entries: list[dict] = []
     current: dict[str, str | bool] = {}
     for line in porcelain.splitlines():
@@ -80,6 +94,8 @@ def _parse_worktree_list(porcelain: str) -> list[dict]:
 
 
 def _branch_exists(repo_path: Path, branch: str) -> bool:
+    from src.runtime_profile import require_joint
+    require_joint()
     result = _run_git(["show-ref", "--verify", "--quiet", f"refs/heads/{branch}"], cwd=repo_path)
     return result.returncode == 0
 
@@ -92,6 +108,8 @@ def verify_worktree(
     expected_head: Optional[str] = None,
 ) -> dict:
     """Validate that a path is the expected linked worktree for a registered repo."""
+    from src.runtime_profile import require_joint
+    require_joint()
     try:
         repo_path = _resolve_registered_repo_path(repo_id)
         if repo_path is None:
@@ -171,6 +189,8 @@ def verify_worktree(
 
 def create_or_reuse_worktree(repo_id: str, branch: str, *, base_ref: str = "HEAD") -> dict:
     """Create or reuse the deterministic linked worktree for `repo_id` and `branch`."""
+    from src.runtime_profile import require_joint
+    require_joint()
     repo_path = _resolve_registered_repo_path(repo_id)
     if repo_path is None:
         raise RuntimeError(f"cannot create worktree: registered repo {repo_id!r} does not resolve on this host")
@@ -211,6 +231,8 @@ def create_or_reuse_worktree(repo_id: str, branch: str, *, base_ref: str = "HEAD
 
 def cleanup_worktree(repo_id: str, worktree_path: str, *, expected_branch: str) -> dict:
     """Remove a clean linked worktree and refuse to delete a dirty or live one."""
+    from src.runtime_profile import require_joint
+    require_joint()
     verification = verify_worktree(repo_id, worktree_path, expected_branch)
     if not verification["ok"]:
         return verification

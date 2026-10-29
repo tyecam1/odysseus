@@ -9,6 +9,8 @@
 param(
     [ValidateSet('Install','Uninstall','Run','Start','Stop','Restart','Status','Health','Logs')]
     [string]$Action = 'Status',
+    [ValidateSet('joint','misumi-reader','phd-reader')]
+    [string]$Profile = 'joint',
     [string]$SourceRoot = $PSScriptRoot,
     [string]$DataRoot = (Join-Path $env:LOCALAPPDATA 'Odysseus\Misumi'),
     [string]$BindHost = '0.0.0.0',
@@ -35,6 +37,14 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# Capture explicitness before the legacy default is canonicalised.
+if ($Profile -ne 'joint') {
+    if (-not $PSBoundParameters.ContainsKey('DataRoot') -or $DataRoot -notmatch '^(?:[A-Za-z]:[\\/]|\\\\[^\\]+[\\][^\\]+)') {
+        throw 'Reader requires explicit absolute DataRoot'
+    }
+    if ($TranscriptRuntime) { throw 'TranscriptRuntime unavailable in reader profile' }
+}
+
 if ((Split-Path -Leaf $SourceRoot) -eq 'windows') {
     $SourceRoot = (Resolve-Path (Join-Path $SourceRoot '..\..')).Path
 } else {
@@ -46,6 +56,18 @@ $LogDir = Join-Path $DataRoot 'logs'
 $LogPath = Join-Path $LogDir 'odysseus-host.log'
 $HealthUrl = "http://127.0.0.1:$Port/api/health"
 $ReadyUrl = "http://127.0.0.1:$Port/api/ready"
+
+function Assert-ReaderConfiguration {
+    $env:ODYSSEUS_RUNTIME_PROFILE = $Profile
+    if ($Profile -eq 'joint') { return }
+    $env:ODYSSEUS_DATA_DIR = $DataRoot
+    if ($HouseholdRoot) { $env:MISUMI_HOUSEHOLD_ROOT = $HouseholdRoot }
+    if ($ObsidianPhDRoot) { $env:BBC_OBSIDIAN_PHD_ROOT = $ObsidianPhDRoot }
+    # Load the exact app dotenv with the same precedence. Pure validation must
+    # succeed BEFORE wrapper New-Item, supervisor log writes or task installation.
+    & $Python -B -c "import sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]); from dotenv import load_dotenv; load_dotenv(Path(sys.argv[1]) / '.env', encoding='utf-8-sig'); from src.runtime_profile import runtime_profile; runtime_profile()" $SourceRoot
+    if ($LASTEXITCODE -ne 0) { throw 'Reader configuration refused before state creation' }
+}
 
 function Assert-Configuration {
     if ($Port -lt 1 -or $Port -gt 65535) { throw "Invalid port: $Port" }
@@ -61,6 +83,7 @@ function Assert-Configuration {
     if ($ObsidianPhDRoot -and -not (Test-Path -LiteralPath $ObsidianPhDRoot)) {
         throw "Obsidian-PhD repository not found at $ObsidianPhDRoot"
     }
+    Assert-ReaderConfiguration
 }
 
 function Get-Listener {
@@ -107,7 +130,7 @@ switch ($Action) {
         $env:APP_PORT = [string]$Port
         $env:AUTH_ENABLED = 'true'
         $env:LOCALHOST_BYPASS = 'false'
-        $env:MISUMI_REQUIRED = 'true'
+        if ($Profile -eq 'joint') { $env:MISUMI_REQUIRED = 'true' }
         if ($HouseholdRoot) { $env:MISUMI_HOUSEHOLD_ROOT = [IO.Path]::GetFullPath($HouseholdRoot) }
         if ($ObsidianPhDRoot) { $env:BBC_OBSIDIAN_PHD_ROOT = [IO.Path]::GetFullPath($ObsidianPhDRoot) }
         if ($ModelHealthUrl) { $env:MISUMI_MODEL_HEALTH_URL = $ModelHealthUrl }
@@ -139,6 +162,7 @@ switch ($Action) {
         $argumentParts = @(
             '-NoProfile','-ExecutionPolicy','Bypass','-WindowStyle','Hidden',
             '-File',('"' + $scriptPath + '"'),'-Action','Run',
+            '-Profile',$Profile,
             '-SourceRoot',('"' + $SourceRoot + '"'),
             '-DataRoot',('"' + $DataRoot + '"'),
             '-BindHost',$BindHost,'-Port',[string]$Port,'-TaskName',('"' + $TaskName + '"')
@@ -206,6 +230,7 @@ switch ($Action) {
         $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
         $listener = Get-Listener
         [pscustomobject]@{
+            profile = $Profile
             task = $TaskName
             task_state = if ($task) { [string]$task.State } else { 'not-installed' }
             task_triggers = if ($task) { (@($task.Triggers | ForEach-Object { $_.CimClass.CimClassName -replace 'MSFT_Task|Trigger', '' }) -join ',') } else { $null }

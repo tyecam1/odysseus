@@ -9,6 +9,9 @@ This package contains only what's needed for:
 - Authentication
 """
 
+from src.runtime_profile import runtime_profile as _runtime_profile
+_runtime_profile()  # Refuse before eager package imports can initialize state.
+
 from src.llm_core import (
     llm_call,
     llm_call_async,

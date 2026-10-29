@@ -54,6 +54,8 @@ class LocalTransport:
     `transport_for_host` refuses to build one otherwise."""
 
     def send(self, request: dict, *, deadline_s: float) -> dict:
+        from src.runtime_profile import require_joint
+        require_joint()
         try:
             completed = subprocess.run(
                 [sys.executable, "-m", "src.estate_worker"],
@@ -93,6 +95,8 @@ class SshTransport:
         self.host_cfg = host_cfg
 
     def send(self, request: dict, *, deadline_s: float) -> dict:
+        from src.runtime_profile import require_joint
+        require_joint()
         host_id = self.host_cfg.get("id")
         ssh_cfg = (self.host_cfg.get("worker") or {}).get("ssh") or {}
         host_public_key = ssh_cfg.get("host_public_key")
@@ -156,6 +160,8 @@ class SshTransport:
 
 
 def _host_config(host_id: str) -> dict:
+    from src.runtime_profile import require_joint
+    require_joint()
     from src import estate_router
 
     estate = estate_router._load_yaml("estate")
@@ -170,6 +176,8 @@ def transport_for_host(host_id: str):
     host other than this process's own current host — a config typo or a
     stale route response must never make this process execute work on
     behalf of a different host under a false local identity."""
+    from src.runtime_profile import require_joint
+    require_joint()
     from src import estate_router
 
     host_cfg = _host_config(host_id)
@@ -204,6 +212,8 @@ def verify_attestation(response: dict, request: dict, host_cfg: dict) -> None:
     attestation/identity concern, so `call_worker()` always reaches this
     function for it and a mismatch is correctly `placement_mismatch`,
     not `worker_protocol_error`."""
+    from src.runtime_profile import require_joint
+    require_joint()
     attestation = response.get("attestation") or {}
     observed_host_id = attestation.get("host_id")
     expected_host = request.get("expected_host_id")
@@ -234,6 +244,8 @@ def call_worker(host_id: str, verb: str, payload: dict, *, deadline_s: float) ->
     any failure — transport, protocol, worker-reported error, or
     attestation mismatch — so callers never get a result that silently
     came from the wrong place."""
+    from src.runtime_profile import require_joint
+    require_joint()
     host_cfg = _host_config(host_id)
     transport = transport_for_host(host_id)
     request = build_request(verb, host_id, payload, deadline_s)
@@ -260,12 +272,16 @@ def clear_caches() -> None:
     """Test-only reset of the in-memory TTL caches. Never persisted —
     live health/inventory is explicitly not a new database table (plan
     §D: 'Nothing about health or inventory is persisted in a new table')."""
+    from src.runtime_profile import require_joint
+    require_joint()
     _health_cache.clear()
     _inventory_cache.clear()
     _repo_probe_cache.clear()
 
 
 def worker_health(host_id: str, *, deadline_s: float = 20.0) -> dict:
+    from src.runtime_profile import require_joint
+    require_joint()
     now = time.monotonic()
     cached = _health_cache.get(host_id)
     if cached is not None and now - cached[0] < _HEALTH_TTL_S:
@@ -277,6 +293,8 @@ def worker_health(host_id: str, *, deadline_s: float = 20.0) -> dict:
 
 
 def worker_inventory(host_id: str, models_of_interest: Optional[list[str]] = None, *, deadline_s: float = 30.0) -> dict:
+    from src.runtime_profile import require_joint
+    require_joint()
     key = (host_id, tuple(sorted(models_of_interest or [])))
     now = time.monotonic()
     cached = _inventory_cache.get(key)
@@ -296,6 +314,8 @@ def worker_repo_probe(host_id: str, repo_id: str, *, deadline_s: float = 15.0) -
     locality to host selection (Stage 5 review finding: a host was never
     excluded merely for lacking the repo). Never derived from the
     control-plane's own checkout or from config alone."""
+    from src.runtime_profile import require_joint
+    require_joint()
     key = (host_id, repo_id)
     now = time.monotonic()
     cached = _repo_probe_cache.get(key)

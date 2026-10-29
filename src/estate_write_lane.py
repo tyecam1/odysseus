@@ -65,11 +65,15 @@ _ADMISSION_TEST_HOOK = None
 
 
 def _next_action_observe(execution_id: str) -> dict:
+    from src.runtime_profile import require_joint
+    require_joint()
     return {"http": f"GET /api/estate/run/{execution_id}?wait=60",
             "cli": f"aoteru execution {execution_id} --wait 60"}
 
 
 def _next_action_push(execution_id: str) -> dict:
+    from src.runtime_profile import require_joint
+    require_joint()
     return {"http": f"POST /api/estate/run/{execution_id}/push", "cli": f"aoteru push {execution_id}"}
 
 
@@ -79,6 +83,8 @@ def _next_action_push(execution_id: str) -> dict:
 
 def _worker(host_id: str, verb: str, payload: dict, *, deadline_s: float):
     """Returns (result, None) or (None, WorkerTransportError)."""
+    from src.runtime_profile import require_joint
+    require_joint()
     from src import estate_worker_client as client
     try:
         response = client.call_worker(host_id, verb, payload, deadline_s=deadline_s)
@@ -88,6 +94,8 @@ def _worker(host_id: str, verb: str, payload: dict, *, deadline_s: float):
 
 
 def _is_ambiguous(exc) -> bool:
+    from src.runtime_profile import require_joint
+    require_joint()
     return exc is not None and getattr(exc, "code", None) not in PRE_CLAIM_REFUSAL_CODES
 
 
@@ -96,11 +104,15 @@ def _is_ambiguous(exc) -> bool:
 # ---------------------------------------------------------------------
 
 def _now():
+    from src.runtime_profile import require_joint
+    require_joint()
     from core.database import utcnow_naive
     return utcnow_naive()
 
 
 def _load_row(execution_id: str):
+    from src.runtime_profile import require_joint
+    require_joint()
     from core.database import EstateExecution, get_db_session
     with get_db_session() as db:
         row = db.query(EstateExecution).filter(EstateExecution.id == execution_id).one_or_none()
@@ -111,6 +123,8 @@ def _load_row(execution_id: str):
 
 
 def _handle_of(row) -> Optional[dict]:
+    from src.runtime_profile import require_joint
+    require_joint()
     try:
         value = json.loads(row.worker_handle_json) if row.worker_handle_json else None
     except (TypeError, ValueError):
@@ -119,6 +133,8 @@ def _handle_of(row) -> Optional[dict]:
 
 
 def _is_placeholder(row) -> bool:
+    from src.runtime_profile import require_joint
+    require_joint()
     return (_handle_of(row) or {}).get("dispatch_state") == "pending_start"
 
 
@@ -127,6 +143,8 @@ def _transition(execution_id: str, from_states: tuple, **fields) -> bool:
     while the worktree is unresolved -- so racing observers (monitor,
     reconcile, wait) never regress or double-apply an outcome. Outcome
     writes never touch worktree_resolution."""
+    from src.runtime_profile import require_joint
+    require_joint()
     from core.database import EstateExecution, get_db_session
     assert "worktree_resolution" not in fields
     with get_db_session() as db:
@@ -139,6 +157,8 @@ def _transition(execution_id: str, from_states: tuple, **fields) -> bool:
 
 
 def _merge_finalization(existing: Optional[str], **parts) -> str:
+    from src.runtime_profile import require_joint
+    require_joint()
     try:
         value = json.loads(existing) if existing else {}
     except (TypeError, ValueError):
@@ -150,6 +170,8 @@ def _merge_finalization(existing: Optional[str], **parts) -> str:
 
 
 def _record_outcome(row, state: str, host_id: str, result: Optional[dict] = None) -> None:
+    from src.runtime_profile import require_joint
+    require_joint()
     if not row.decision_id:
         return
     ok = state == "succeeded" and bool((result or {}).get("ok"))
@@ -173,6 +195,8 @@ def _lease_authority(repo_id: str, host_id: str) -> dict:
     `authoritative` (S6.4) lease held by `host_id` with repo write scope,
     a branch and a bound worktree_path. A preliminary check only -- the
     authority moment is re-validated inside the admission transaction."""
+    from src.runtime_profile import require_joint
+    require_joint()
     lease = park_lease_ops.active_lease_for_repo(repo_id, host_id)
     if lease is None:
         return {"ok": False, "code": "write_lease_missing",
@@ -202,6 +226,8 @@ _UNRESOLVED_REFUSALS = {
 
 
 def _admission_outcome(blocker) -> dict:
+    from src.runtime_profile import require_joint
+    require_joint()
     if blocker.lifecycle_state in ("accepted", "running"):
         return {"dispatch": "reused_in_flight", "execution_id": blocker.id,
                 "lifecycle_state": blocker.lifecycle_state}
@@ -218,6 +244,8 @@ def _admission_outcome(blocker) -> dict:
 def execute_write_via_worker(objective: str, *, repo_id: str, host_id: str,
                              decision_id: Optional[str] = None,
                              wait_timeout: float = 30.0, timeout: float = 1800.0) -> dict:
+    from src.runtime_profile import require_joint
+    require_joint()
     from sqlalchemy.exc import IntegrityError
     from core.database import EstateExecution, ParkLease, lease_serialized_transaction
 
@@ -325,6 +353,8 @@ def execute_write_via_worker(objective: str, *, repo_id: str, host_id: str,
 
 
 def _start_payload(row) -> dict:
+    from src.runtime_profile import require_joint
+    require_joint()
     return {
         "execution_id": row.id, "kind": "codex-write", "objective": row.objective,
         "repo_id": row.repo_id,
@@ -336,6 +366,8 @@ def _start_payload(row) -> dict:
 
 
 def _start_was_ambiguous(row) -> bool:
+    from src.runtime_profile import require_joint
+    require_joint()
     return bool((_handle_of(row) or {}).get("start_ambiguous"))
 
 
@@ -343,6 +375,8 @@ def _update_placeholder(execution_id: str, mutate) -> Optional[dict]:
     """Serialized read-modify-write of a still-placeholder row's dispatch
     state. Returns the new placeholder, or None when the row is no longer
     an unresolved accepted placeholder (then no start may be issued)."""
+    from src.runtime_profile import require_joint
+    require_joint()
     from core.database import EstateExecution, lease_serialized_transaction
     row = _load_row(execution_id)
     if row is None:
@@ -360,6 +394,8 @@ def _update_placeholder(execution_id: str, mutate) -> Optional[dict]:
 def _claim_start_attempt(execution_id: str) -> Optional[int]:
     """6e adjudication finding 1: every start issuance is a persisted,
     serialized attempt number taken BEFORE the worker call."""
+    from src.runtime_profile import require_joint
+    require_joint()
     placeholder = _update_placeholder(
         execution_id, lambda p: {**p, "start_attempts": int(p.get("start_attempts") or 0) + 1})
     return None if placeholder is None else placeholder["start_attempts"]
@@ -367,10 +403,14 @@ def _claim_start_attempt(execution_id: str) -> Optional[int]:
 
 def _persist_start_ambiguity(execution_id: str) -> None:
     """6d adjudication finding 2: ambiguity is DURABLE."""
+    from src.runtime_profile import require_joint
+    require_joint()
     _update_placeholder(execution_id, lambda p: {**p, "start_ambiguous": True})
 
 
 def _fence_and_apply(execution_id: str, host_id: str) -> None:
+    from src.runtime_profile import require_joint
+    require_joint()
     view, exc = _worker(host_id, "status", {"execution_id": execution_id, "fence": True}, deadline_s=20)
     if exc is None:
         _apply_view(execution_id, view, fenced=True)
@@ -385,6 +425,8 @@ def _dispatch_start(execution_id: str) -> None:
     for this id, with no recorded ambiguity (round-0 finding 3, 6d finding
     2, 6e finding 1). Otherwise -- and once the persisted deadline has
     passed -- resolution goes only through `status {fence: true}`."""
+    from src.runtime_profile import require_joint
+    require_joint()
     for _attempt in range(2):
         row = _load_row(execution_id)
         if row is None or not _is_placeholder(row) or row.worktree_resolution != "unresolved":
@@ -417,6 +459,8 @@ def _resolve_not_started(execution_id: str, reason: str, *, sole_attempt: Option
     being taken as proof: allowed only when, inside the serialized
     transaction, the row still records exactly that one start attempt and
     no ambiguity. Worker-proven outcomes (fenced / start_failed) pass None."""
+    from src.runtime_profile import require_joint
+    require_joint()
     from core.database import EstateExecution, lease_serialized_transaction
     row = _load_row(execution_id)
     if row is None:
@@ -447,6 +491,8 @@ def _apply_view(execution_id: str, view: dict, *, start_answer: bool = False, fe
                 observe_only: bool = False) -> None:
     """Map one worker observation onto the row (steps 6-8). Outcome only;
     never touches worktree_resolution except via _resolve_not_started."""
+    from src.runtime_profile import require_joint
+    require_joint()
     row = _load_row(execution_id)
     if row is None or row.worktree_resolution != "unresolved":
         return
@@ -498,6 +544,8 @@ def _apply_view(execution_id: str, view: dict, *, start_answer: bool = False, fe
 
 
 def _mark_lost_if_due(execution_id: str) -> bool:
+    from src.runtime_profile import require_joint
+    require_joint()
     row = _load_row(execution_id)
     if row is None or row.lifecycle_state not in ("accepted", "running") or row.worktree_resolution != "unresolved":
         return False
@@ -516,6 +564,8 @@ def _mark_lost_if_due(execution_id: str) -> bool:
 def _observe_worker_execution(execution_id: str) -> None:
     """Step 8 monitor. Polls `status`; never redispatches; stops at any
     non-running observation or `lost`."""
+    from src.runtime_profile import require_joint
+    require_joint()
     while True:
         row = _load_row(execution_id)
         if row is None or row.worktree_resolution != "unresolved" \
@@ -531,6 +581,8 @@ def _observe_worker_execution(execution_id: str) -> None:
 
 def _release_spool(execution_id: str, resolution: str) -> None:
     """Best-effort S6.8 acknowledgement after a resolution commit."""
+    from src.runtime_profile import require_joint
+    require_joint()
     from core.database import EstateExecution, get_db_session
     row = _load_row(execution_id)
     if row is None or row.worker_handle_json is None:
@@ -555,6 +607,8 @@ def reconcile_stale_estate_executions(db, EstateExecution) -> int:
     rows are observed through the worker; placeholder rows resolve through
     the same same-id start / fence logic as dispatch; resolved rows get
     their spool.release retried. Never redispatches under a new id."""
+    from src.runtime_profile import require_joint
+    require_joint()
     reconciled = _reconcile_legacy(db, EstateExecution)
     now = _now()
     stale_before = now - timedelta(seconds=OBSERVATION_STALE_SECONDS)
@@ -589,6 +643,8 @@ def reconcile_stale_estate_executions(db, EstateExecution) -> int:
 
 
 def _reconcile_legacy(db, EstateExecution) -> int:
+    from src.runtime_profile import require_joint
+    require_joint()
     import os
     cutoff_accept = _now() - timedelta(seconds=_router._STALE_EXECUTION_ACCEPT_GRACE_SECONDS)
     cutoff_pid = _now() - timedelta(seconds=_router._STALE_EXECUTION_PID_GRACE_SECONDS)
@@ -639,6 +695,8 @@ def _trigger_background_reconcile() -> None:
     """Estate-wide reconciliation (other rows, spool.release retries) runs
     off the request path, single-flight and rate-limited (6d adjudication
     finding 4), so one GET never waits on other executions' workers."""
+    from src.runtime_profile import require_joint
+    require_joint()
     state = _BACKGROUND_RECONCILE
     now = time.monotonic()
     if now - state["last"] < BACKGROUND_RECONCILE_INTERVAL_SECONDS or not state["lock"].acquire(blocking=False):
@@ -661,6 +719,8 @@ def _trigger_background_reconcile() -> None:
 
 def _reconcile_one(execution_id: str, budget_s: float) -> None:
     """Observe ONE row, bounded by the caller's remaining budget."""
+    from src.runtime_profile import require_joint
+    require_joint()
     row = _load_row(execution_id)
     if row is None or row.worker_handle_json is None or row.worktree_resolution != "unresolved" \
             or row.lifecycle_state not in ("accepted", "running", "lost"):
@@ -684,6 +744,8 @@ def get_estate_execution(execution_id: str, wait_s: float = 0) -> Optional[dict]
     Observation only -- never dispatches a new execution. Worker calls are
     limited to THIS row and to the remaining wait budget; estate-wide
     reconciliation is triggered in the background (finding 4)."""
+    from src.runtime_profile import require_joint
+    require_joint()
     from core.database import EstateExecution, SessionLocal
     started = time.monotonic()
     deadline = started + max(0.0, min(float(wait_s or 0), 60.0))
@@ -714,6 +776,8 @@ def get_estate_execution(execution_id: str, wait_s: float = 0) -> Optional[dict]
 
 
 def execution_provenance(row) -> dict:
+    from src.runtime_profile import require_joint
+    require_joint()
     view = _router._estate_execution_provenance(row)
     view.update({
         "worktree_resolution": row.worktree_resolution,
@@ -737,6 +801,8 @@ def execution_provenance(row) -> dict:
 # ---------------------------------------------------------------------
 
 def finalize_execution(*, execution_id: str, repo_id: str, host_id: str, commit_message: str) -> dict:
+    from src.runtime_profile import require_joint
+    require_joint()
     from core.database import EstateExecution, ParkLease, lease_serialized_transaction
     row = _load_row(execution_id)
     if row is None:
@@ -816,6 +882,8 @@ def finalize_execution(*, execution_id: str, repo_id: str, host_id: str, commit_
 
 def recover_execution_lease(execution_id: str, *, lease_id: str, host_id: str, repo_id: str,
                             branch: str, worktree_path: str) -> dict:
+    from src.runtime_profile import require_joint
+    require_joint()
     from core.database import EstateExecution, ParkLease, get_db_session, lease_serialized_transaction
     supplied = {"lease_id": lease_id, "host_id": host_id, "repo_id": repo_id,
                 "branch": branch, "worktree_path": worktree_path}
@@ -891,6 +959,8 @@ def recover_execution_lease(execution_id: str, *, lease_id: str, host_id: str, r
 # ---------------------------------------------------------------------
 
 def push_finalized_execution(execution_id: str) -> dict:
+    from src.runtime_profile import require_joint
+    require_joint()
     from core.database import EstateExecution, get_db_session
     row = _load_row(execution_id)
     if row is None:

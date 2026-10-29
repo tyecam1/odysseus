@@ -106,6 +106,8 @@ PARK_PREPARE_STALE_SECONDS = 300
 
 
 def _unresolved_execution(db, lease_id: str):
+    from src.runtime_profile import require_joint
+    require_joint()
     from core.database import EstateExecution
     return db.query(EstateExecution).filter(
         EstateExecution.lease_id == lease_id,
@@ -117,6 +119,8 @@ def lease_authority_state(db, lease, *, now=None) -> dict:
     """S6.4: the single canonical authority/reclaimability rule. Heartbeat
     age (`park_lease_is_stale`) is telemetry only; a lease protected by
     any unresolved execution is never reclaimable, whatever its age."""
+    from src.runtime_profile import require_joint
+    require_joint()
     from core.database import park_lease_is_stale, utcnow_naive
     now = now or utcnow_naive()
     heartbeat_stale = park_lease_is_stale(lease, now=now)
@@ -151,6 +155,8 @@ def git_is_clean(path: str) -> tuple[bool, str]:
     (including the command itself failing) is treated as dirty. Shared
     by `scripts/agent`'s `park` CLI subcommand and `park_repo_by_id`
     below — not re-derived per caller."""
+    from src.runtime_profile import require_joint
+    require_joint()
     try:
         out = subprocess.run(
             ["git", "-C", path, "status", "--porcelain"],
@@ -179,6 +185,8 @@ def park_repo_by_id(
     host; fails closed (`RepoNotClean`) if the resolved worktree is
     dirty or git itself fails. Only then delegates to `park_repo` — same
     stale-reclaim/live-conflict semantics, not re-derived."""
+    from src.runtime_profile import require_joint
+    require_joint()
     from src.estate_router import resolve_repo_path
 
     live_path = resolve_repo_path(repo_id)
@@ -213,6 +221,8 @@ def park_repo(
     says `reclaimable` -- never from heartbeat age alone. A live or
     protected lease, or any `preparing` reservation, raises ParkConflict;
     the partial unique index is the backstop."""
+    from src.runtime_profile import require_joint
+    require_joint()
     from core.database import ParkLease, lease_serialized_transaction, utcnow_naive
     from sqlalchemy.exc import IntegrityError
 
@@ -260,6 +270,8 @@ def park_repo(
 def heartbeat_repo(repo_id: str, host_id: Optional[str] = None) -> dict:
     """Renew heartbeat_at on the caller's active lease. Raises NoActiveLease
     rather than acquiring one — heartbeat never creates a lease."""
+    from src.runtime_profile import require_joint
+    require_joint()
     from core.database import ParkLease, get_db_session, utcnow_naive
 
     with get_db_session() as db:
@@ -292,6 +304,8 @@ def renew_lease_for_execution(execution_id: str) -> bool:
     execution was admitted under. One conditional UPDATE keyed on the
     recorded lease id/repo/host; never a repo/host lookup, so it can never
     renew a later or reassigned lease. Not exposed on HTTP/CLI/worker."""
+    from src.runtime_profile import require_joint
+    require_joint()
     import logging
     from core.database import EstateExecution, ParkLease, get_db_session, utcnow_naive
     with get_db_session() as db:
@@ -318,6 +332,8 @@ def renew_lease_for_execution(execution_id: str) -> bool:
 def unpushed_executions(db, lease_id: str) -> list:
     """S6.10: finalized/recovered executions under a lease whose recorded
     commit is not pushed -- surfaced, never blocking."""
+    from src.runtime_profile import require_joint
+    require_joint()
     import json
     from core.database import EstateExecution
     out = []
@@ -343,6 +359,8 @@ def active_leases_summary() -> list:
     since lease visibility is one field among many for any caller of this,
     not the caller's reason to exist. `stale` is heartbeat-age telemetry;
     `reclaimable`/`protected_by` are the authority facts (S6.4)."""
+    from src.runtime_profile import require_joint
+    require_joint()
     try:
         from core.database import ParkLease, get_db_session
         with get_db_session() as db:
@@ -370,6 +388,8 @@ def active_lease_for_repo(repo_id: str, host_id: str) -> Optional[dict]:
     protected lease IS returned (with `heartbeat_stale`/`protected_by_
     execution_id`), because an unresolved execution still depends on it;
     a stale unprotected lease is None and fails closed as before."""
+    from src.runtime_profile import require_joint
+    require_joint()
     try:
         from core.database import ParkLease, get_db_session
         with get_db_session() as db:
@@ -404,6 +424,8 @@ def release_repo(repo_id: str, host_id: Optional[str] = None) -> dict:
     LeaseHasUnresolvedExecution while any execution under the lease is
     `unresolved` -- no force flag; the only other exit is recovery
     release. Raises NoActiveLease if none matches."""
+    from src.runtime_profile import require_joint
+    require_joint()
     from core.database import ParkLease, lease_serialized_transaction, utcnow_naive
 
     with lease_serialized_transaction(repo_id=repo_id) as db:
@@ -439,6 +461,8 @@ _PREPARE_CLIENT_SIDE = frozenset({"worker_unreachable", "worker_protocol_error",
 def _release_reservation(lease_id: str) -> bool:
     """Release a `preparing` reservation by exact id (always safe: no
     execution can exist under a non-active lease)."""
+    from src.runtime_profile import require_joint
+    require_joint()
     from core.database import ParkLease, lease_serialized_transaction, utcnow_naive
     with lease_serialized_transaction(lease_id=lease_id) as db:
         row = db.query(ParkLease).filter(ParkLease.id == lease_id).one_or_none()
@@ -450,6 +474,8 @@ def _release_reservation(lease_id: str) -> bool:
 
 
 def _call_prepare_worker(host_id: str, verb: str, payload: dict, deadline_s: float):
+    from src.runtime_profile import require_joint
+    require_joint()
     from src import estate_worker_client as client
     try:
         return client.call_worker(host_id, verb, payload, deadline_s=deadline_s).get("result") or {}, None
@@ -464,6 +490,8 @@ def park_with_worktree(repo_id: str, host_id: str, branch: str, *, session_id: O
     outcomes keep it `preparing` (S6.9) and raise PrepareOutcomeUnresolved.
     A competing stale `preparing` reservation is probed (outside any lock)
     and the reservation retried once."""
+    from src.runtime_profile import require_joint
+    require_joint()
     from core.database import ParkLease, lease_serialized_transaction, utcnow_naive
     try:
         reservation = park_repo(repo_id, host_id, "", branch=branch, session_id=session_id, status="preparing")
@@ -520,6 +548,8 @@ def resolve_preparing_reservation(lease_id: str) -> dict:
     """S6.9: resolve an ambiguous `preparing` reservation by the same
     lease_id. Probe with fence (no lock held); release only when the
     worker proves the original prepare cannot still run. Never binds."""
+    from src.runtime_profile import require_joint
+    require_joint()
     from core.database import ParkLease, get_db_session
     with get_db_session() as db:
         row = db.query(ParkLease).filter(ParkLease.id == lease_id).one_or_none()

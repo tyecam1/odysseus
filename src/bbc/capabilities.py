@@ -118,6 +118,8 @@ class CapabilityRegistry:
         *,
         granted_permissions: Iterable[str],
     ) -> Dict[str, Any]:
+        from src.runtime_profile import require_inspection
+        require_inspection(capability_id, inputs)
         detail = self.detail(capability_id)
         if detail.replacement_status != "active":
             raise PermissionError(f"capability is not active: {capability_id}")
