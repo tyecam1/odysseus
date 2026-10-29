@@ -59,7 +59,7 @@ def test_am_bare_text_is_conversation_not_estate_execution(client, monkeypatch, 
     assert client.main(["What's on the shopping list?"]) == 0
     assert captured["method"] == "POST"
     assert captured["path"] == "/misumi/respond"
-    assert captured["body"] == {"prompt": "What's on the shopping list?", "persona": "auto"}
+    assert captured["body"] == {"prompt": "What's on the shopping list?", "persona": "auto", "session_id": "am-cli"}
     assert capsys.readouterr().out.strip() == "Shopping list confirmed."
 
 
@@ -72,7 +72,18 @@ def test_am_chat_selects_persona_and_can_show_sources(client, monkeypatch, capsy
     assert client.main(["chat", "Dinner?", "--persona", "sanji", "--json"]) == 0
     assert seen["path"] == "/misumi/respond"
     assert seen["body"]["persona"] == "sanji"
+    assert seen["body"]["session_id"] == "am-cli"
     assert '"sources"' in capsys.readouterr().out
+
+
+def test_am_chat_custom_session(client, monkeypatch):
+    seen = {}
+    def fake_request(cfg, method, path, body=None, timeout=30.0):
+        seen["body"] = body
+        return {"status": 200, "body": {"text": "OK"}}
+    monkeypatch.setattr(client, "_request", fake_request)
+    assert client.main(["chat", "continue", "--session", "research"]) == 0
+    assert seen["body"]["session_id"] == "research"
 
 
 def test_am_chat_scope_denial_does_not_fall_back_to_estate(client, monkeypatch, capsys):
