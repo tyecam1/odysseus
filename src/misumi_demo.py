@@ -313,11 +313,20 @@ _PRIVATE_LOOKING = re.compile(
     r"\b[A-Za-z0-9]{40,}\b|"
     # an endpoint in any guest-visible text: URL, localhost, name:port, bracketed IPv6, or a host-like domain
     # (anchored at token starts so scanning stays linear on a 60 KB string)
-    r"(?i:://|\blocalhost\b|(?<![\w.-])(?!\d{4}-\d{2}-\d{2}t\d{2}:)(?=[\w.-]*[^\W\d]|[\w.-]*-)\w[\w.-]*:\d+(?!\w)|\[[0-9a-f:.]{2,}\]|(?<![a-z0-9_])(?:[0-9a-f]{0,4}:){1,7}:[0-9a-f]{0,4}(?![a-z0-9_])|"
-    r"(?<![\w.-])[\w-]+(?:\.[\w-]+)*\.(?:com|org|net|io|ai|dev|local|lan|internal|home|test|example|arpa)(?![\w-])))")
+    r"(?i:://|\blocalhost\b|\[[0-9a-f:.]{2,}\]|(?<![a-z0-9_])(?:[0-9a-f]{0,4}:){1,7}:[0-9a-f]{0,4}(?![a-z0-9_])))")
 
 
 _COLON_LIKE = str.maketrans({"\u2236": ":", "\ua789": ":", "\u0589": ":"})
+
+
+# Host:port and host-like names, in any script. A label is any run of characters that is not whitespace or a prose/URL delimiter (so combining marks,
+# CJK, Devanagari etc. count); anchored at token starts so scanning stays linear on a 60 KB string.
+_LBL = r"[^\s:;,!?()<>\[\]{}\x22\x27/\\|@#$%^&*+=~`]"
+_LBL_NOT_NUM = r"[^\d.\s:;,!?()<>\[\]{}\x22\x27/\\|@#$%^&*+=~`]"
+_LBL_NO_DOT = r"[^.\s:;,!?()<>\[\]{}\x22\x27/\\|@#$%^&*+=~`]"
+_ENDPOINT = re.compile(
+    r"(?i:(?<!" + _LBL + r")(?!\d{4}-\d{2}-\d{2}t\d{2}:)(?=[\d.]*" + _LBL_NOT_NUM + r")" + _LBL + r"+:\d+(?!\w)"      # host:port (not 10:30, not an ISO time)
+    r"|(?<!" + _LBL + r")" + _LBL_NO_DOT + r"+(?:\." + _LBL_NO_DOT + r"+)*\.(?:com|org|net|io|ai|dev|local|lan|internal|home|test|example|arpa)(?!" + _LBL_NO_DOT + r"))")
 
 
 def _decoded(text: str) -> str:
@@ -333,10 +342,10 @@ def _decoded(text: str) -> str:
 
 
 def _looks_private(text: str) -> bool:
-    if _PRIVATE_LOOKING.search(text):
+    if _PRIVATE_LOOKING.search(text) or _ENDPOINT.search(text):
         return True
     decoded = _decoded(text)
-    return decoded is None or _PRIVATE_LOOKING.search(decoded) is not None
+    return decoded is None or _PRIVATE_LOOKING.search(decoded) is not None or _ENDPOINT.search(decoded) is not None
 
 
 def _strings(value: Any):

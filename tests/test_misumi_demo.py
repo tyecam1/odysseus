@@ -850,10 +850,10 @@ def test_an_endpoint_in_any_guest_visible_field_makes_a_recording_unreplayable(c
 
 @pytest.mark.parametrize("text", ["gemma4:12b answered", "llama3.1:8b", "at 10:30 on Tuesday", "2026-10-29T12:19:59Z", "recorded 2026-10-28T00:00:00Z", "10:30:45", "std and 1:2:3", "e.g. 4 eggs", "2:1 and 12:30", "3 tins, 2:1 ratio", "stock.md and pantry/eggs.md"])
 def test_ordinary_text_is_not_mistaken_for_an_endpoint(text):
-    assert demo._PRIVATE_LOOKING.search(text) is None
+    assert not demo._looks_private(text)
 
 
-@pytest.mark.parametrize("text", ["a:1", "box:8", "1a:1", "a.:1", "_a:1", "::1", "1::1", "host:123456", "a%EF%BC%9A1", "a%E2%80%8B%3A1", "a%25252525252525253A1", "a&colon;1", "a&#58;1", "\u00e9:1", "\u00e9.test:1", "\u00e9.test", "a\u2236 1".replace(" ", ""), "a%253A1", "a%25253A1", "a\u200b:1", "http%3A%2F%2Fbox%3A8", "box\uff0elocal\uff1a8", "x.example.org"])
+@pytest.mark.parametrize("text", ["a:1", "box:8", "1a:1", "a.:1", "_a:1", "::1", "1::1", "host:123456", "a%EF%BC%9A1", "a%E2%80%8B%3A1", "a%25252525252525253A1", "a&colon;1", "a&#58;1", "\u00e9:1", "\u0915\u093f:1", "\u0915\u093f.test", "\u4e2d\u6587:8080", "a\u0301:1", "\u00e9.test:1", "\u00e9.test", "a\u2236 1".replace(" ", ""), "a%253A1", "a%25253A1", "a\u200b:1", "http%3A%2F%2Fbox%3A8", "box\uff0elocal\uff1a8", "x.example.org"])
 def test_one_digit_ports_and_encoded_endpoints_are_detected(text):
     bad = {"x": text}
     assert any(demo._looks_private(s) for s in demo._strings(bad)), text
