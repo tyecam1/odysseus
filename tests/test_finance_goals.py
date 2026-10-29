@@ -554,3 +554,155 @@ def test_newest_invalid_run_locks_despite_older_valid_chain(tmp_path: Path):
                for b in mt00["blockers"])
     assert any("run-new.json" in b and "hash mismatch" in b
                for b in mt00["blockers"])
+
+
+def test_unattributable_receipt_locks_every_goal():
+    # a receipt that cannot even be attributed to a goal (missing
+    # goal_id) poisons the whole ledger: every goal locks until it is
+    # repaired — a healthy goal's own evidence chain cannot override it
+    attestation = _receipt("FT-00", fg.KIND_OPERATOR_ATTESTATION)
+    run = _receipt("FT-00", fg.KIND_RUN, run_id="run-9")
+    verifies = _receipt("FT-00", fg.KIND_INDEPENDENT_VERIFICATION,
+                        verifies="run-9")
+    poison = {"_file": "poison.json",
+              "_invalid": "missing fields: ['goal_id']"}
+    result = _evaluate([attestation, run, verifies, poison])
+    ft00 = _goal(result, "FT-00")
+    assert ft00["satisfied"] is False
+    assert ft00["eligible"] is False
+    assert any("unattributable" in b for b in ft00["blockers"])
+    assert result["ledger_unattributable"]
+    # isolation: the SAME chain without the poison satisfies
+    result = _evaluate([attestation, run, verifies])
+    assert _goal(result, "FT-00")["satisfied"] is True
+
+
+def test_goal_attributed_unknown_kind_receipt_locks_that_goal():
+    # attributed to MT-00 but of an unknown kind: it locks MT-00's
+    # satisfaction while leaving other goals' derivations untouched
+    weird = {"_file": "weird.json", "goal_id": "MT-00", "kind": "banana",
+             "status": "pass", "observed_at": NOW.isoformat()}
+    mt_att = _receipt("MT-00", fg.KIND_OPERATOR_ATTESTATION)
+    ft_att = _receipt("FT-00", fg.KIND_OPERATOR_ATTESTATION)
+    result = _evaluate([mt_att, ft_att, weird])
+    mt00 = _goal(result, "MT-00")
+    assert mt00["satisfied"] is False
+    assert any("malformed receipt(s)" in b and "weird.json" in b
+               for b in mt00["blockers"])
+    ft00 = _goal(result, "FT-00")
+    assert not any("malformed" in b for b in ft00["blockers"])
+    assert result["ledger_unattributable"] == []
+
+
+def test_goal_attributed_invalid_status_receipt_locks_that_goal(tmp_path: Path):
+    # a goal-attributed receipt with an impossible status, as it arrives
+    # from the receipts DIRECTORY (load_receipts flags it _invalid): it
+    # can never be classified into the newest-governs ordering, so it
+    # locks the goal from the malformed bucket instead of leaving an
+    # older valid chain silently satisfied (Sol round-3 finding 1)
+    (tmp_path / "bad-status.json").write_text(json.dumps({
+        "goal_id": "MT-00", "kind": "run", "status": "banana",
+        "observed_at": NOW.isoformat(), "run_id": "r9",
+        "artifacts": copy.deepcopy(POLICY_ARTIFACT),
+    }), encoding="utf-8")
+    loaded = fg.load_receipts(tmp_path)
+    assert loaded[0].get("_invalid")
+    mt_att = _receipt("MT-00", fg.KIND_OPERATOR_ATTESTATION)
+    run = _receipt("MT-00", fg.KIND_RUN, run_id="run-9")
+    verifies = _receipt("MT-00", fg.KIND_INDEPENDENT_VERIFICATION,
+                        verifies="run-9")
+    result = _evaluate([mt_att, run, verifies] + loaded)
+    mt00 = _goal(result, "MT-00")
+    assert mt00["satisfied"] is False
+    assert any("malformed receipt(s)" in b and "bad-status.json" in b
+               for b in mt00["blockers"])
+
+
+def test_unparseable_observed_at_treated_as_newest_and_locks(tmp_path: Path):
+    # an unparseable observed_at cannot be proven OLDER than the newest
+    # receipt, so it must never sort to the back of history: it is
+    # treated as newest and locks the goal (no fallback to the old chain)
+    stable = tmp_path / "stable-evidence.json"
+    stable.write_text('{"stable": true}', encoding="utf-8")
+    art = [{"label": "stable", "path": str(stable),
+            "sha256": fg.sha256_file(stable)}]
+    attestation = _receipt("MT-00", fg.KIND_OPERATOR_ATTESTATION)
+    old_run = _receipt("MT-00", fg.KIND_RUN, run_id="run-old", days_ago=2,
+                       artifacts=copy.deepcopy(art), name="run-old.json")
+    old_verify = _receipt(
+        "MT-00", fg.KIND_INDEPENDENT_VERIFICATION, verifies="run-old",
+        days_ago=2, artifacts=copy.deepcopy(art), name="verify-old.json",
+    )
+    unreadable = _receipt("MT-00", fg.KIND_RUN, run_id="run-new",
+                          artifacts=copy.deepcopy(art), name="run-new.json")
+    unreadable["observed_at"] = "not-a-timestamp"
+    result = fg.evaluate_goals(
+        registries=[MT, FT],
+        receipts=[attestation, old_run, old_verify, unreadable],
+        policy=fg.load_policy(), now=NOW, repo_root=tmp_path,
+    )
+    mt00 = _goal(result, "MT-00")
+    assert mt00["satisfied"] is False
+    assert any("unparseable observed_at" in b for b in mt00["blockers"])
+    assert any("newest run receipt does not validate" in b
+               for b in mt00["blockers"])
+
+
+def test_verification_hash_without_matching_path_does_not_bind(tmp_path: Path):
+    # identical BYTES at two paths (latest.json vs a timestamped
+    # snapshot) share a sha256: a verification citing the other file's
+    # path must not count as citing the run's evidence
+    payload = '{"records": []}\n'
+    snapshot = tmp_path / "snapshot-20261029T100000Z.json"
+    latest = tmp_path / "latest.json"
+    snapshot.write_text(payload, encoding="utf-8")
+    latest.write_text(payload, encoding="utf-8")
+    digest = fg.sha256_bytes(payload.encode("utf-8"))
+    attestation = _receipt("MT-00", fg.KIND_OPERATOR_ATTESTATION)
+    run = _receipt("MT-00", fg.KIND_RUN, run_id="run-9",
+                   artifacts=[{"label": "snapshot", "path": str(snapshot),
+                               "sha256": digest}])
+    lookalike = _receipt(
+        "MT-00", fg.KIND_INDEPENDENT_VERIFICATION, verifies="run-9",
+        artifacts=[{"label": "snapshot", "path": str(latest),
+                    "sha256": digest}],
+    )
+    result = fg.evaluate_goals(
+        registries=[MT, FT], receipts=[attestation, run, lookalike],
+        policy=fg.load_policy(), now=NOW, repo_root=tmp_path,
+    )
+    mt00 = _goal(result, "MT-00")
+    assert mt00["satisfied"] is False
+    assert any("cites none of run" in b for b in mt00["blockers"])
+    # the same verification citing the run's ACTUAL path satisfies
+    good = _receipt(
+        "MT-00", fg.KIND_INDEPENDENT_VERIFICATION, verifies="run-9",
+        artifacts=[{"label": "snapshot", "path": str(snapshot),
+                    "sha256": digest}],
+    )
+    result = fg.evaluate_goals(
+        registries=[MT, FT], receipts=[attestation, run, good],
+        policy=fg.load_policy(), now=NOW, repo_root=tmp_path,
+    )
+    assert _goal(result, "MT-00")["satisfied"] is True
+
+
+def test_future_dated_receipt_recovers_when_clock_catches_up():
+    # future-dating is fail-closed but not a permanent lock: the receipt
+    # ages into validity once the clock reaches its stamped time
+    attestation = _receipt("MT-00", fg.KIND_OPERATOR_ATTESTATION)
+    run = _receipt("MT-00", fg.KIND_RUN, run_id="run-9", days_ago=-1)
+    verifies = _receipt("MT-00", fg.KIND_INDEPENDENT_VERIFICATION,
+                        verifies="run-9", days_ago=-1)
+    result = _evaluate([attestation, run, verifies])
+    mt00 = _goal(result, "MT-00")
+    assert mt00["satisfied"] is False
+    assert any("future-dated" in b and "recovers" in b
+               for b in mt00["blockers"])
+    later = fg.evaluate_goals(
+        registries=[MT, FT], receipts=[attestation, run, verifies],
+        policy=fg.load_policy(), now=NOW + timedelta(days=2),
+    )
+    mt00 = _goal(later, "MT-00")
+    assert mt00["satisfied"] is True
+    assert mt00["blockers"] == []

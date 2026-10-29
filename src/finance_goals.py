@@ -25,8 +25,10 @@ derives current status on every call, fail-closed:
   directions: the NEWEST run receipt governs (when it stops validating
   the goal locks with no fallback to older runs), older receipts are
   notes only, and a fresh run + a verification that cites one of the
-  run's own artifact hashes (dated at/after the run) can re-satisfy the
-  goal after the code or artifacts it cites change.
+  run's own artifacts (exact sha256+path pair, dated at/after the run)
+  can re-satisfy the goal after the code or artifacts it cites change.
+  A receipt that cannot even be attributed to a goal (unparseable, no
+  goal_id) locks EVERY goal until the ledger is repaired.
 
 No scheduler, no writes, no network: a pure function of (registries,
 receipts, files, clock). The HTTP adapter in
@@ -183,9 +185,13 @@ def _receipt_blockers(
             f"{receipt['observed_at']}, ttl {ttl}d)"
         )
     elif observed > now + timedelta(minutes=FUTURE_SKEW_MINUTES):
+        # fail-closed but not permanent: the receipt ages into validity
+        # once the clock reaches its stamped time, so a single mis-dated
+        # receipt can never lock a goal forever
         blockers.append(
             f"receipt {receipt.get('_file')}: future-dated (observed "
-            f"{receipt['observed_at']}, now {now.astimezone(timezone.utc).isoformat()})"
+            f"{receipt['observed_at']}, now {now.astimezone(timezone.utc).isoformat()}; "
+            "recovers when the clock reaches the stamped time)"
         )
     if check_artifacts:
         for artifact in receipt.get("artifacts") or []:
@@ -243,41 +249,81 @@ def evaluate_goals(
         KIND_OPERATOR_ATTESTATION: {},
         KIND_INDEPENDENT_VERIFICATION: {},
     }
+    # Malformed evidence is never invisible: receipts that carry a
+    # goal_id but cannot be classified lock that goal, and receipts that
+    # cannot even be attributed (unparseable, no goal_id) lock EVERY
+    # goal — a corrupted ledger must fail closed, not quietly drop the
+    # poisoned file out of the derivation.
+    malformed_by_goal: Dict[str, List[str]] = {}
+    global_invalid: List[str] = []
     for receipt in receipts:
+        file_name = receipt.get("_file") or "?"
         goal_id = receipt.get("goal_id")
         kind = receipt.get("kind")
+        invalid_reason = receipt.get("_invalid")
         if goal_id is None or kind is None:
+            # cannot be attributed to a goal at all (unparseable JSON,
+            # missing goal_id/kind): poisons the whole ledger
+            global_invalid.append(
+                f"{file_name} ({invalid_reason or 'no goal_id/kind attribution'})"
+            )
             continue
-        by_goal.setdefault(kind, {}).setdefault(goal_id, {})[
-            receipt.get("_file") or "?"
-        ] = receipt
+        if kind not in by_goal or invalid_reason:
+            # attributed to a goal but malformed (bad status, missing
+            # fields) or of unknown kind: locks that goal specifically
+            malformed_by_goal.setdefault(goal_id, []).append(
+                f"{file_name} ("
+                + (invalid_reason or f"unknown kind {kind!r}")
+                + ")"
+            )
+            continue
+        by_goal[kind].setdefault(goal_id, {})[file_name] = receipt
 
     evaluated: List[Dict[str, Any]] = []
 
-    def _observed_at(receipt: Dict[str, Any]) -> datetime:
+    def _observed_at(receipt: Dict[str, Any]) -> Optional[datetime]:
+        """Parse observed_at, or None when unparseable (unorderable)."""
         try:
             parsed = _parse_iso(receipt["observed_at"])
         except (KeyError, TypeError, ValueError):
-            return datetime.min.replace(tzinfo=timezone.utc)
+            return None
         if parsed.tzinfo is None:
             parsed = parsed.replace(tzinfo=timezone.utc)
         return parsed
+
+    def _order_key(receipt: Dict[str, Any]) -> Any:
+        parsed = _observed_at(receipt)
+        if parsed is None:
+            # unparseable receipts sort LAST: an unreadable timestamp can
+            # never be proven older than the newest receipt, so it must
+            # never quietly sort to the back of history
+            return (1, datetime.min.replace(tzinfo=timezone.utc))
+        return (0, parsed)
 
     def own_evidence_blockers(goal_id: str) -> List[str]:
         """Blockers in this goal's OWN run/verification receipts.
 
         The NEWEST run receipt (by observed_at) governs — valid or not.
         If the newest run no longer validates (stale, future-dated,
-        artifact hash mismatch), the goal is LOCKED even when an older
-        run still validates: fresh evidence cannot silently fall back to
-        a superseded result. Older receipts are notes, surfaced only
-        while the goal stays locked, so they never permanently poison a
-        goal that has fresher valid evidence."""
+        artifact hash mismatch, unparseable timestamp), the goal is
+        LOCKED even when an older run still validates: fresh evidence
+        cannot silently fall back to a superseded result. Older receipts
+        are notes, surfaced only while the goal stays locked. A receipt
+        whose observed_at cannot be parsed is treated as newest (it
+        cannot be proven older), and a receipt that cannot be classified
+        at all locks the goal from the malformed bucket."""
+        malformed = malformed_by_goal.get(goal_id) or []
+        if malformed:
+            return [
+                f"{goal_id}: malformed receipt(s) in the evidence ledger — "
+                "locked: " + "; ".join(malformed)
+            ]
+
         notes: List[str] = []
         run_receipts = by_goal[KIND_RUN].get(goal_id) or {}
         ordered = sorted(
             run_receipts.items(),
-            key=lambda kv: (_observed_at(kv[1]), kv[0]),
+            key=lambda kv: (_order_key(kv[1]), kv[0]),
         )
         if not ordered:
             return [f"{goal_id}: no run receipt"]
@@ -295,10 +341,16 @@ def evaluate_goals(
                     receipt, now=now, policy=policy, repo_root=repo_root,
                     check_artifacts=_artifact_check_needed(receipt),
                 ))
+            if _observed_at(receipt) is None:
+                problems.append(
+                    f"run receipt {name} has an unparseable observed_at — "
+                    "cannot be ordered against other evidence"
+                )
             return problems
 
         # Older receipts are history: their problems are noted but can
-        # neither lock nor unlock the goal. Only the NEWEST governs.
+        # neither lock nor unlock the goal. Only the NEWEST governs —
+        # and unparseable timestamps sort newest, so they lock.
         for name, receipt in ordered[:-1]:
             if run_problems(name, receipt):
                 notes.append(
@@ -317,8 +369,11 @@ def evaluate_goals(
             ]
         best_run = newest
 
-        run_hashes = {
-            artifact.get("sha256")
+        # (sha256, path) pairs, not bare hashes: identical bytes at two
+        # paths (latest.json vs a timestamped snapshot) must not let a
+        # verification "cite" an artifact the run receipt never named
+        run_cited = {
+            (artifact.get("sha256"), artifact.get("path"))
             for artifact in best_run.get("artifacts") or []
         }
         run_observed = _observed_at(best_run)
@@ -358,23 +413,28 @@ def evaluate_goals(
                     "not independent"
                 )
             # A verification cannot predate the run it claims to verify.
-            if _observed_at(verification) < run_observed:
+            # (unparseable observed_at already produced a blocker above,
+            # so None never reaches this comparison)
+            v_observed = _observed_at(verification)
+            if v_observed is not None and v_observed < run_observed:
                 problems.append(
                     f"verification {name} predates run "
                     f"{best_run.get('run_id')!r}"
                 )
             # The verifier must have actually looked at the run's
             # evidence: at least one verification artifact must reproduce
-            # a hash the run receipt cites (run_id strings are reusable;
-            # artifact hashes bind the verification to THIS run).
-            v_hashes = {
-                artifact.get("sha256")
+            # an EXACT (sha256, path) pair the run receipt cites (run_id
+            # strings are reusable and identical bytes can live at many
+            # paths; the pair binds the verification to THIS run).
+            v_cited = {
+                (artifact.get("sha256"), artifact.get("path"))
                 for artifact in verification.get("artifacts") or []
             }
-            if not (run_hashes & v_hashes):
+            if not (run_cited & v_cited):
                 problems.append(
                     f"verification {name} cites none of run "
-                    f"{best_run.get('run_id')!r}'s artifact hashes"
+                    f"{best_run.get('run_id')!r}'s artifacts "
+                    "(exact sha256+path pairs)"
                 )
             if problems:
                 notes.append(f"{goal_id}: " + "; ".join(problems))
@@ -419,6 +479,17 @@ def evaluate_goals(
         blockers: List[str] = list(sat_blockers)
 
         eligible = True
+        if global_invalid:
+            # a receipt that cannot be attributed to ANY goal (unparseable
+            # JSON, missing goal_id) poisons the whole ledger: every goal
+            # locks until the file is repaired or removed — it must never
+            # be quietly dropped from the derivation
+            satisfied = False
+            eligible = False
+            blockers.append(
+                f"{goal_id}: evidence ledger has unattributable receipt(s) "
+                "— locked: " + "; ".join(global_invalid)
+            )
         if goal.get("depends_on"):
             for dep in goal["depends_on"]:
                 dep_satisfied, _ = goal_satisfaction(dep, frozenset())
@@ -461,6 +532,7 @@ def evaluate_goals(
     return {
         "ok": True,
         "evaluated_at": now.astimezone(timezone.utc).isoformat(),
+        "ledger_unattributable": global_invalid,
         "policy": {
             "receipt_ttl_days": policy.get("receipt_ttl_days"),
             "independent_verifiers": policy.get("independent_verifiers"),

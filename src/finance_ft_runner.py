@@ -15,6 +15,15 @@ never sends anything but ``docker`` commands against the pinned image;
 there is no exchange credential path and no order routing other than
 Freqtrade's own simulated wallet.
 
+Deployment fact (observed live against the pinned digest 2026-10-29):
+a running freqtrade container recursively re-chowns the mounted
+user_data tree to its internal user (uid 1000 — a different account on
+the host), so the invoking user cannot keep write access to the
+workspace across runs. The verified-config snapshot write/cleanup is
+therefore DELEGATED to one-shot pinned-image containers (stdin -> file,
+and rm) whenever a direct write is not permitted, with the bytes
+re-read from the host afterwards to assert the round trip.
+
 Simulation only. This module must never be used to place real orders —
 real-money execution requires a separately ratified authority that this
 programme does not hold (see misumi finance framework).
@@ -23,6 +32,7 @@ programme does not hold (see misumi finance framework).
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import subprocess
@@ -60,6 +70,17 @@ ALLOWED_EXTRA_FLAGS = {
     "--timerange", "--days", "--new-pairs-days",
 }
 VALUE_EXTRA_FLAGS = {"--timerange", "--days", "--new-pairs-days"}
+
+# The TYPED data channel (--pairs/--timeframe/--timerange -> data_args) is
+# validated by the same grammar the CLI applies: these flags, these value
+# shapes. data_args reaches docker only through build_docker_argv, which
+# enforces this allowlist itself — a caller forgetting CLI validation must
+# not be able to smuggle an unvalidated token into the argv.
+DATA_FLAGS_BOOLEAN = {"--dl-trades", "--erase", "--prepend"}
+DATA_FLAGS_VALUE = {"--timeframe", "--timerange", "--days", "--new-pairs-days"}
+DATA_FLAGS_MULTI = {"--pairs"}
+DAYS_RE = re.compile(r"^\d+$")
+
 STRATEGY_RE = re.compile(r"^[A-Za-z0-9_]+$")
 CONTAINER_NAME = "finance-ft00-dryrun"
 
@@ -109,6 +130,66 @@ def validate_extra_args(extra_args: Optional[List[str]]) -> List[str]:
                 )
             else:
                 i += 1  # consume the flag's value
+        i += 1
+    return findings
+
+
+def validate_data_args(data_args: Optional[List[str]]) -> List[str]:
+    """Findings for typed download tokens outside the safe grammar.
+    Empty list == safe. Mirrors the CLI's typed validation so
+    build_docker_argv enforces the same shapes itself."""
+    findings: List[str] = []
+    tokens = list(data_args or [])
+    value_checkers: Dict[str, Any] = {
+        "--timeframe": (TIMEFRAME_RE, "<n><s|m|h|d>"),
+        "--timerange": (TIMERANGE_RE, "YYYYMMDD[-YYYYMMDD][-]"),
+        "--days": (DAYS_RE, "a positive integer"),
+        "--new-pairs-days": (DAYS_RE, "a positive integer"),
+    }
+    i = 0
+    while i < len(tokens):
+        token = tokens[i]
+        if token in DATA_FLAGS_BOOLEAN:
+            i += 1
+            continue
+        if token in value_checkers:
+            pattern, shape = value_checkers[token]
+            if i + 1 >= len(tokens):
+                findings.append(f"data argument {token!r} requires a value")
+            elif tokens[i + 1].startswith("-"):
+                findings.append(
+                    f"data argument {token!r} requires a non-flag value "
+                    f"(got {tokens[i + 1]!r})"
+                )
+            elif not pattern.match(tokens[i + 1]):
+                findings.append(
+                    f"data argument {token!r} value {tokens[i + 1]!r} is "
+                    f"not {shape}"
+                )
+            i += 2
+            continue
+        if token == "--pairs":
+            pairs: List[str] = []
+            j = i + 1
+            while j < len(tokens) and not tokens[j].startswith("-"):
+                pairs.append(tokens[j])
+                j += 1
+            if not pairs:
+                findings.append("data argument '--pairs' requires >=1 pair")
+            for pair in pairs:
+                if not SPOT_PAIR_RE.match(pair):
+                    findings.append(
+                        f"--pairs entry {pair!r} is not a plain spot pair "
+                        "(no ':' derivatives)"
+                    )
+            i = j
+            continue
+        findings.append(
+            f"data argument {token!r} is not in the typed download grammar "
+            f"(boolean {sorted(DATA_FLAGS_BOOLEAN)}, value "
+            f"{sorted(DATA_FLAGS_VALUE)}, multi {sorted(DATA_FLAGS_MULTI)}); "
+            "raw tokens belong to the --extra allowlist channel"
+        )
         i += 1
     return findings
 
@@ -205,9 +286,10 @@ def build_docker_argv(
     volume; no network publication is ever added.
 
     ``data_args`` carries FIRST-CLASS typed download arguments (pairs /
-    timeframe / timerange, validated by the caller's regexes) and is not
-    allowlist-checked; ``extra_args`` is the raw user-supplied remainder
-    and must pass :func:`validate_extra_args`.
+    timeframe / timerange) and must pass :func:`validate_data_args` —
+    the builder does not trust the caller to have validated them;
+    ``extra_args`` is the raw user-supplied remainder and must pass
+    :func:`validate_extra_args`.
 
     By default the container runs with the image's own lifecycle (root →
     entrypoint chown of user_data to its internal ftuser → drop to
@@ -222,6 +304,9 @@ def build_docker_argv(
     overlay = validate_extra_args(extra_args)
     if overlay:
         raise ValueError("; ".join(overlay))
+    data_findings = validate_data_args(data_args)
+    if data_findings:
+        raise ValueError("; ".join(data_findings))
     volume = f"{user_data_dir.resolve()}:/freqtrade/user_data"
     # Foreground commands self-clean with --rm; a detached smoke run must
     # NOT use --rm, so a crash leaves the container's logs inspectable
@@ -398,6 +483,99 @@ def redact_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
     return safe
 
 
+def build_snapshot_write_argv(user_data_dir: Path, name: str) -> List[str]:
+    """docker argv writing the verified-config snapshot via the pinned
+    image (bytes on stdin -> file). Needed because a running freqtrade
+    container chowns the mounted user_data tree to its internal user,
+    locking the invoking account out of direct writes."""
+    return [
+        "docker", "run", "--rm", "-i",
+        "--entrypoint", "/bin/sh",
+        "-v", f"{user_data_dir.resolve()}:/freqtrade/user_data",
+        DEFAULT_PINNED_IMAGE,
+        "-c", f"cat > /freqtrade/user_data/{name}",
+    ]
+
+
+def build_snapshot_rm_argv(user_data_dir: Path, name: str) -> List[str]:
+    """docker argv removing a snapshot file via the pinned image
+    (best-effort cleanup under the same uid-1000 constraint)."""
+    return [
+        "docker", "run", "--rm",
+        "--entrypoint", "/bin/rm",
+        "-v", f"{user_data_dir.resolve()}:/freqtrade/user_data",
+        DEFAULT_PINNED_IMAGE,
+        "-f", f"/freqtrade/user_data/{name}",
+    ]
+
+
+def materialise_verified_config(
+    cfg_path: Path, user_data: Path, cfg: Dict[str, Any],
+) -> Path:
+    """Snapshot the VERIFIED config bytes to a content-addressed file
+    directly inside the workspace and return its path.
+
+    Closes the verify→execute TOCTOU window: the guard verifies content
+    loaded from ``cfg_path``, but docker later loads whatever bytes are
+    at that path when the container starts. After this call the executed
+    file is ``.verified-<sha12>.json`` — its name encodes the sha256 of
+    the bytes the guard verified, and the round-trip assert re-reads and
+    re-parses them, so a post-verification swap of the original file can
+    no longer change what executes. Raises ConfigUnsafeError on any
+    mismatch (fail closed).
+
+    When the invoking user cannot write the workspace directly (the
+    freqtrade container re-chowns it to its internal uid on every run),
+    the write is delegated to a one-shot pinned-image container; the
+    bytes are still re-read from the host and asserted afterwards."""
+    raw = Path(cfg_path).read_bytes()
+    digest = hashlib.sha256(raw).hexdigest()[:12]
+    target = Path(user_data) / f".verified-{digest}.json"
+    try:
+        target.write_bytes(raw)
+    except PermissionError:
+        proc = subprocess.run(
+            build_snapshot_write_argv(Path(user_data), target.name),
+            input=raw, capture_output=True, timeout=120,
+        )
+        if proc.returncode != 0:
+            raise ConfigUnsafeError(
+                "verified-config snapshot could not be written (direct "
+                "write not permitted and pinned-image delegation failed): "
+                + proc.stderr.decode("utf-8", errors="replace")[-300:]
+            )
+    try:
+        reread = target.read_bytes()
+        if hashlib.sha256(reread).hexdigest()[:12] != digest:
+            raise ConfigUnsafeError(
+                f"verified-config round-trip hash mismatch for {target}"
+            )
+        if json.loads(reread.decode("utf-8")) != cfg:
+            raise ConfigUnsafeError(
+                "verified-config round-trip mismatch: snapshotted bytes do "
+                "not parse as the config the guard verified"
+            )
+    except Exception:
+        remove_snapshot_best_effort(Path(user_data), target.name)
+        raise
+    return target
+
+
+def remove_snapshot_best_effort(user_data: Path, name: str) -> None:
+    """Remove a snapshot file, delegating to the pinned image when the
+    invoking user lacks write permission on the workspace. Never raises."""
+    try:
+        (Path(user_data) / name).unlink(missing_ok=True)
+    except OSError:
+        try:
+            subprocess.run(
+                build_snapshot_rm_argv(Path(user_data), name),
+                capture_output=True, timeout=120,
+            )
+        except Exception:
+            pass
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         prog=RUNNER_NAME,
@@ -510,26 +688,45 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(json.dumps(result, indent=2))
         return 0 if result["returncode"] == 0 else 4
 
-    if args.action == "download-data":
-        result = run_command(
-            build_docker_argv(
-                "download-data", image_ref=args.image, user_data_dir=user_data,
-                config_name=config_name, data_args=data_args,
-                extra_args=list(args.extra),
-            ),
-            timeout_s=1800, log_path=log_dir / "download-data.log",
-        )
-        print(json.dumps(result, indent=2))
-        return 0 if result["returncode"] == 0 else 4
+    # Actions that EXECUTE the config close the verify→execute TOCTOU
+    # window first: docker loads a content-addressed snapshot of the
+    # verified bytes, not the mutable original path.
+    try:
+        verified_path = materialise_verified_config(cfg_path, user_data, cfg)
+    except (OSError, ConfigUnsafeError) as exc:
+        print(json.dumps(
+            {
+                "ok": False, "action": args.action, "fail_closed": True,
+                "findings": [f"verified config could not be snapshotted: {exc}"],
+            }, indent=2))
+        return 3
+    try:
+        config_name = verified_path.name
 
-    if args.action == "dry-run-smoke":
-        result = dry_run_smoke(
-            image_ref=args.image, user_data_dir=user_data,
-            strategy=strategy or "", log_dir=log_dir,
-            config_name=config_name, cycles=args.cycles,
-        )
-        print(json.dumps(result, indent=2))
-        return 0 if result.get("ok") else 5
+        if args.action == "download-data":
+            result = run_command(
+                build_docker_argv(
+                    "download-data", image_ref=args.image,
+                    user_data_dir=user_data, config_name=config_name,
+                    data_args=data_args, extra_args=list(args.extra),
+                ),
+                timeout_s=1800, log_path=log_dir / "download-data.log",
+            )
+            print(json.dumps(result, indent=2))
+            return 0 if result["returncode"] == 0 else 4
+
+        if args.action == "dry-run-smoke":
+            result = dry_run_smoke(
+                image_ref=args.image, user_data_dir=user_data,
+                strategy=strategy or "", log_dir=log_dir,
+                config_name=config_name, cycles=args.cycles,
+            )
+            print(json.dumps(result, indent=2))
+            return 0 if result.get("ok") else 5
+    finally:
+        # best-effort cleanup; the snapshot is evidence-addressed, so a
+        # leftover never collides with a future run's snapshot
+        remove_snapshot_best_effort(user_data, verified_path.name)
 
     return 1
 

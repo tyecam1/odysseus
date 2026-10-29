@@ -375,3 +375,66 @@ def test_cli_exit_codes(tmp_path: Path, monkeypatch):
         (tmp_path / "latest.json").read_text(encoding="utf-8")
     )
     assert manifest["records"]
+
+
+def test_gdelt_domain_derived_from_url_host_not_metadata():
+    # the URL host is the authority for diversity counting; GDELT's
+    # free-text ``domain`` metadata must not be able to merge two
+    # distinct publishers (or split one) when it disagrees with the URL
+    payload = {"articles": [{
+        "url": "https://real-publisher.com/story",
+        "title": "Real Story",
+        "seendate": "20261029T090000Z",
+        "domain": "spoofed-merge.example",
+    }]}
+    result = mp.collect_gdelt(
+        "bitcoin", max_records=5, collected_at="2026-10-29T10:00:00Z",
+        first_seen_index={}, fetch=lambda url, timeout: payload,
+    )
+    assert result.status == "ok"
+    assert result.records[0].source == "gdelt-doc-2.0:real-publisher.com"
+
+
+def test_gdelt_domain_falls_back_to_metadata_when_url_has_no_host():
+    payload = {"articles": [{
+        "url": "no-host-token",  # no dotted host in the URL itself
+        "title": "Fallback Story",
+        "seendate": "20261029T090000Z",
+        "domain": "fallback.example",
+    }]}
+    result = mp.collect_gdelt(
+        "bitcoin", max_records=5, collected_at="2026-10-29T10:00:00Z",
+        first_seen_index={}, fetch=lambda url, timeout: payload,
+    )
+    assert result.status == "ok"
+    assert result.records[0].source == "gdelt-doc-2.0:fallback.example"
+
+
+def test_corrupt_snapshot_fails_closed(tmp_path: Path):
+    (tmp_path / "snapshot-20261029T100000Z.json").write_text(
+        "{ truncated", encoding="utf-8")
+    with pytest.raises(ValueError, match="corrupt evidence snapshot"):
+        mp.load_first_seen_index(tmp_path)
+
+
+def test_non_object_latest_fails_closed(tmp_path: Path):
+    (tmp_path / "latest.json").write_text("[]", encoding="utf-8")
+    with pytest.raises(ValueError, match="not a JSON object"):
+        mp.load_first_seen_index(tmp_path)
+
+
+def test_run_probe_refuses_to_run_over_corrupt_history(
+    tmp_path: Path, capsys,
+):
+    # a corrupt history file must never be quietly treated as "no
+    # history": the probe refuses (rc 2) rather than silently reset
+    # every first-seen time the file carried
+    (tmp_path / "latest.json").write_text("{ truncated", encoding="utf-8")
+    args = mp.build_parser().parse_args(
+        ["--out-dir", str(tmp_path), "--sources", "kraken-public-spot"])
+    rc = mp.run_probe(args, Path(__file__))
+    assert rc == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["fail_closed"] is True
+    assert "unreadable history" in payload["error"]

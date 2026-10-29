@@ -44,7 +44,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 
 PROBE_NAME = "finance-mt-probe"
-PROBE_VERSION = "0.2"
+PROBE_VERSION = "0.3"
 USER_AGENT = (
     f"{PROBE_NAME}/{PROBE_VERSION} (odysseus finance MT-00; "
     "household research, read-only public APIs; github.com/tyecam1)"
@@ -290,8 +290,14 @@ def collect_gdelt(
         # Never trust the raw host string for diversity counting:
         # normalise to the registrable domain so m./www. mirrors of one
         # publisher are one source, and count the story once per
-        # registrable domain even when the URL differs.
-        domain = registrable_domain(art.get("domain") or source_url)
+        # registrable domain even when the URL differs. The URL host is
+        # the authority — GDELT's free-text ``domain`` metadata is only a
+        # fallback when the URL carries no parseable dotted host, so a
+        # spoofed/absent metadata field can neither merge two distinct
+        # publishers nor split one.
+        domain = registrable_domain(source_url)
+        if "." not in domain:
+            domain = registrable_domain(art.get("domain") or "")
         story_key = (domain, normalize_title(art.get("title") or ""))
         if story_key in seen_stories:
             deduped_syndication += 1
@@ -635,20 +641,34 @@ def render_digest_markdown(report: Dict[str, Any]) -> str:
 # snapshot persistence (append-only out-dir)
 # --------------------------------------------------------------------------
 
+def _load_snapshot_json(path: Path) -> Dict[str, Any]:
+    """Load a snapshot JSON object. A corrupt/truncated snapshot is a
+    LOST-EVIDENCE event, never a skip: raising (fail closed) forces
+    repair of the file instead of silently resetting every first-seen
+    time it carried."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"corrupt evidence snapshot {path.name}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ValueError(f"evidence snapshot {path.name} is not a JSON object")
+    return data
+
+
 def load_first_seen_index(out_dir: Path) -> Tuple[Dict[str, str], Optional[Dict[str, Any]]]:
     """First-seen map merged across EVERY snapshot in out_dir (earliest
     wins), plus the latest snapshot for baseline comparison. Reading
     only latest.json would lose first-seen times whenever a run's source
     selection omits a source (e.g. an intervening no-Kraken run would
     reset candle first_seen times); the full scan makes the index
-    monotone across source-selection changes."""
-    previous: Optional[Dict[str, Any]] = None
+    monotone across source-selection changes. Corrupt history (any
+    snapshot, or latest.json) raises ValueError — it must never be
+    quietly treated as "no history", which would reset first-seen
+    times without a trace."""
     latest = out_dir / "latest.json"
+    previous: Optional[Dict[str, Any]] = None
     if latest.exists():
-        try:
-            previous = json.loads(latest.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            previous = None
+        previous = _load_snapshot_json(latest)
 
     def merge_into(index: Dict[str, str], data: Dict[str, Any]) -> None:
         for rec in data.get("records", []):
@@ -662,10 +682,7 @@ def load_first_seen_index(out_dir: Path) -> Tuple[Dict[str, str], Optional[Dict[
 
     index: Dict[str, str] = {}
     for snapshot_path in sorted(out_dir.glob("snapshot-*.json")):
-        try:
-            merge_into(index, json.loads(snapshot_path.read_text(encoding="utf-8")))
-        except (OSError, json.JSONDecodeError):
-            continue
+        merge_into(index, _load_snapshot_json(snapshot_path))
     if previous:
         merge_into(index, previous)
     return index, previous
@@ -734,7 +751,19 @@ def write_snapshot(
 def run_probe(args: argparse.Namespace, code_file: Path) -> int:
     collected = iso(utc_now())
     out_dir = Path(args.out_dir)
-    first_seen_index, previous = load_first_seen_index(out_dir)
+    try:
+        first_seen_index, previous = load_first_seen_index(out_dir)
+    except ValueError as exc:
+        # fail closed: running over unreadable history would silently
+        # reset every first-seen time the corrupt file carried
+        print(json.dumps(
+            {
+                "ok": False,
+                "fail_closed": True,
+                "error": f"refusing to run over unreadable history: {exc}",
+            }, indent=2,
+        ))
+        return 2
     results: List[SourceResult] = []
     market_context: Dict[str, Any] = {}
 

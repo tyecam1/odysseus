@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 from pathlib import Path
 
@@ -273,3 +274,105 @@ def test_cli_validates_typed_download_args(tmp_path: Path, capsys):
     assert rc == 3
     findings = json.loads(capsys.readouterr().out)["findings"]
     assert any("--timerange" in f for f in findings)
+
+
+def test_validate_data_args_shapes():
+    assert ft.validate_data_args([]) == []
+    assert ft.validate_data_args(
+        ["--pairs", "BTC/USD", "ETH/USD", "--timeframe", "1h",
+         "--timerange", "20260901-", "--days", "5", "--dl-trades"]
+    ) == []
+    # unknown token (overlay shapes belong to the --extra channel)
+    findings = ft.validate_data_args(
+        ["--config", "/freqtrade/user_data/evil.json"])
+    assert findings and "typed download grammar" in findings[0]
+    # flag-looking value refused
+    findings = ft.validate_data_args(["--timerange", "--config=/tmp/evil"])
+    assert findings and "non-flag value" in findings[0]
+    # --pairs with no values refused
+    assert ft.validate_data_args(["--pairs"])[0].endswith("requires >=1 pair")
+    # bad value shapes refused
+    findings = ft.validate_data_args(["--days", "five"])
+    assert findings and "not a positive integer" in findings[0]
+    findings = ft.validate_data_args(["--timeframe", "1x"])
+    assert findings and "not <n><s|m|h|d>" in findings[0]
+    findings = ft.validate_data_args(["--pairs", "BTC/USD:USD"])
+    assert findings and "plain spot pair" in findings[0]
+
+
+def test_builder_validates_data_args_not_trusts_caller():
+    user_data = Path("/home/agent/finance-paper/user_data")
+    # a caller skipping CLI validation must not smuggle an unvalidated
+    # token into the docker argv via data_args
+    with pytest.raises(ValueError, match="typed download grammar"):
+        ft.build_docker_argv(
+            "download-data", image_ref=GOOD_IMAGE, user_data_dir=user_data,
+            data_args=["--config", "/freqtrade/user_data/evil.json"],
+        )
+    with pytest.raises(ValueError, match="non-flag value"):
+        ft.build_docker_argv(
+            "download-data", image_ref=GOOD_IMAGE, user_data_dir=user_data,
+            data_args=["--timerange", "--config=/tmp/evil"],
+        )
+    with pytest.raises(ValueError, match="plain spot pair"):
+        ft.build_docker_argv(
+            "download-data", image_ref=GOOD_IMAGE, user_data_dir=user_data,
+            data_args=["--pairs", "BTC/USD:USD"],
+        )
+
+
+def test_materialise_verified_config_closes_verify_execute_gap(tmp_path: Path):
+    # the executed config is a content-addressed snapshot of the VERIFIED
+    # bytes: swapping the original file after verification cannot change
+    # what runs
+    cfg = good_config()
+    cfg_path = tmp_path / "config-ft00.json"
+    cfg_path.write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
+    snap = ft.materialise_verified_config(cfg_path, tmp_path, cfg)
+    assert snap.parent == tmp_path  # directly inside the workspace
+    digest = hashlib.sha256(cfg_path.read_bytes()).hexdigest()[:12]
+    assert snap.name == f".verified-{digest}.json"
+    assert snap.read_bytes() == cfg_path.read_bytes()
+    # post-verification tamper of the ORIGINAL: the snapshot still
+    # carries the verified bytes and the argv still names the snapshot
+    cfg_path.write_text(json.dumps({**cfg, "dry_run": False}),
+                        encoding="utf-8")
+    assert json.loads(snap.read_text(encoding="utf-8"))["dry_run"] is True
+    argv = ft.build_docker_argv(
+        "dry-run", image_ref=GOOD_IMAGE, user_data_dir=tmp_path,
+        strategy="SMACrossBaseline", config_name=snap.name,
+    )
+    assert f"/freqtrade/user_data/{snap.name}" in argv
+    # idempotent: re-materialising the same verified bytes reuses the
+    # same content address
+    again = ft.materialise_verified_config(cfg_path, tmp_path,
+                                           json.loads(cfg_path.read_text()))
+    assert again.name != snap.name  # different verified content -> new address
+    assert json.loads(again.read_text())["dry_run"] is False
+
+
+def test_snapshot_delegation_argv_uses_pinned_image_and_workspace_only():
+    # a running freqtrade container chowns the mounted workspace to its
+    # internal uid, so snapshot write/cleanup may have to go through
+    # one-shot pinned-image containers — these argv builders are the
+    # ONLY new docker surface, and they must stay pinned + workspace-only
+    write_argv = ft.build_snapshot_write_argv(
+        Path("/home/agent/finance-paper/user_data"), ".verified-abc.json")
+    assert write_argv[0] == "docker"
+    assert "--rm" in write_argv and "-i" in write_argv
+    assert GOOD_IMAGE in write_argv
+    assert write_argv[write_argv.index("--entrypoint") + 1] == "/bin/sh"
+    assert "/home/agent/finance-paper/user_data:/freqtrade/user_data" in write_argv
+    assert write_argv[-1] == "cat > /freqtrade/user_data/.verified-abc.json"
+    assert "--privileged" not in write_argv
+
+    rm_argv = ft.build_snapshot_rm_argv(
+        Path("/home/agent/finance-paper/user_data"), ".verified-abc.json")
+    assert rm_argv[0] == "docker" and GOOD_IMAGE in rm_argv
+    assert rm_argv[rm_argv.index("--entrypoint") + 1] == "/bin/rm"
+    assert rm_argv[-2:] == ["-f", "/freqtrade/user_data/.verified-abc.json"]
+    # removal can never target anything outside the mounted workspace
+    assert all(a.startswith("-") or a in (
+        "docker", "run", GOOD_IMAGE, "/bin/rm",
+        "/freqtrade/user_data/.verified-abc.json") or ":" in a
+        for a in rm_argv)
