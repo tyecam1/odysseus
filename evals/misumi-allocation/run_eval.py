@@ -126,7 +126,7 @@ def pct(x):
 
 def fmt_interval(c):
     cell = c["interval"] and {"difference": c["difference"], "interval": c["interval"]} or c["indicative"]
-    return "n/a" if not cell else f"{100 * cell['difference']:+.1f} pts ({100 * cell['interval'][0]:+.1f} to {100 * cell['interval'][1]:+.1f})"
+    return "n/a" if not cell or cell.get("difference") is None else f"{100 * cell['difference']:+.1f} pts ({100 * cell['interval'][0]:+.1f} to {100 * cell['interval'][1]:+.1f})"
 
 
 def evaluate(world, cases):
@@ -182,14 +182,13 @@ def section(world, personas_path, corpus, cases, title, header=True):
               f"- every reserved/tool-action case escalated: **{'yes' if s1 else 'NO'}** ({sum(results['candidate'][c['id']]['got']['decision'] == 'escalate' for c in reserved)}/{len(reserved)})",
               f"- supports proposed on a reserved matter: **{len(bad_support)}** {bad_support or ''}",
               "- authority invariance under persona choice: checked by `tests/test_misumi_allocation_shadow.py`", "",
-              "## By category (A2 four-way decision)", "", "| category | n | " + " | ".join(POLICIES) + " |", "|---|---|" + "---|" * len(POLICIES)]
+              "## By category (A2 four-way decision)", "", "| category | n | " + " | ".join(POLICIES) + " | authority-blocked, candidate only |", "|---|---|" + "---|" * (len(POLICIES) + 1)]
     for cat in sorted({c["category"] for c in cases}):
         group = [c for c in comparable if c["category"] == cat]
         blocked = [c for c in cases if c["category"] == cat and c["expect"].get("authority") == "blocked"]
-        extra = (f" candidate only, on {len(blocked)} authority-blocked: "
-                 f"{sum(results['candidate'][c['id']]['score']['decision'] for c in blocked)}/{len(blocked)}") if blocked else ""
+        extra = f"{sum(results['candidate'][c['id']]['score']['decision'] for c in blocked)}/{len(blocked)}" if blocked else "n/a"
         lines.append(f"| {cat} | {len(group)} | " + " | ".join(
-            f"{sum(results[p][c['id']]['score']['decision'] for c in group)}/{len(group)}" for p in POLICIES) + f" |{extra}")
+            f"{sum(results[p][c['id']]['score']['decision'] for c in group)}/{len(group)}" for p in POLICIES) + f" | {extra} |")
     lines += ["", "## Cases where the candidate decision was wrong", "", "| id | prompt | expected | candidate | production |", "|---|---|---|---|---|"]
     for c in cases:
         if not results["candidate"][c["id"]]["score"]["decision"]:

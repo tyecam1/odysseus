@@ -48,9 +48,11 @@ LATENCY_PRIOR = {"observed_mean_extra_seconds_per_team_turn": 1.40, "distinct_ta
 
 _CROSS_CHECK = re.compile(
     r"\b(?:compare[sd]?|cross-?check(?:s|ed)?|reconcil\w*|contradict\w*|clash(?:es|ed)?|mismatch\w*|inconsisten\w*|discrepan\w*"
-    r"|check(?:ed)?\s+(?:\w+\s+){1,4}against|(?:do|does|did)\s+(?:\w+\s+){1,5}match|(?:do|does)\s+not\s+(?:seem\s+to\s+)?agree)\b",
+    r"|check(?:ed)?\s+(?:\w+\s+){1,4}against|(?:do|does|did)\s+(?:\w+\s+){1,5}match)\b",
     re.IGNORECASE,
 )
+# a statement of disagreement carries its own "not"; it is evidence of a conflict, not a negated request
+_DISAGREE = re.compile(r"\b(?:do|does|did)\s+not\s+(?:seem\s+to\s+)?(?:agree|match|add\s+up)\b|\bdisagree\w*\b", re.IGNORECASE)
 _PEOPLE = r"(?:flat-?mates?|house-?mates?|guests?|visitors?|neighbou?rs?|everyone|everybody|people)"
 _PRIVACY = re.compile(
     rf"\b(?:record|log|listen|monitor|transcrib\w*|tape|bug)\w*\b[^.?!]*\b{_PEOPLE}\b|\bmicrophones?\b[^.?!]*\b{_PEOPLE}\b|"
@@ -63,7 +65,7 @@ _ACTIONS = (
     ("blocked", "bank_write", re.compile(r"\b(?:pay|transfer|wire|withdraw|send\s+money)\b", re.I)),
     ("blocked", "destructive_delete", re.compile(
         r"\b(?:delete|erase|wipe|purge|destroy)\b|"
-        r"\b(?:remove|trash|get\s+rid\s+of|clear\s+out)\b[^.?!]{0,60}\b(?:recordings?|transcripts?|logs?|archives?|history|voice|files?|backups?|account|data)\b",
+        r"\b(?:remove|trash|get\s+rid\s+of|clear\s+out)\b[^.?!]{0,60}\b(?:recordings?|transcripts?|voice|backups?|archives?)\b",
         re.I)),
     ("playback_control", "playback", re.compile(r"\b(?:play|pause|resume|skip|queue|put\s+on)\b", re.I)),
     ("scoped_write", "scoped_record_write", re.compile(r"\b(?:add|remember|archive|save|update|note\s+that)\b", re.I)),
@@ -179,7 +181,7 @@ def propose(
     if lead != HEAD:
         pool = [p for p in pool if p in edges]
     named = {p for p in pool if term_positions(text, list(dict.fromkeys((p, names.get(p, p)))))}
-    cross_check = _ignore_negated(text, _CROSS_CHECK)  # "do not compare X" is not a request to cross-check
+    cross_check = _ignore_negated(text, _CROSS_CHECK) or bool(_DISAGREE.search(text))  # "do not compare X" is not a request to cross-check
 
     off_edge = [p for p in order if p in evidence and p not in (HEAD, lead) and lead != HEAD and p not in edges
                 and (cross_check or term_positions(text, list(dict.fromkeys((p, names.get(p, p))))))]

@@ -238,3 +238,16 @@ def test_singleton_summaries_keep_the_callers_row_order_and_reproduce_the_old_fl
     rotated = rows[5:] + rows[:5]
     expected = ep._bootstrap([1.0 if r["verified"] else 0.0 for r in rotated], 1)
     assert ep.summarise(ep.parse(rotated), ("x",))["a"]["verified_interval"] == expected
+
+
+def test_report_formatters_survive_a_withheld_indicative_reading():
+    rows = [{"task_id": f"t{i}", "plan": p, "verified": True, "safety_ok": not (p == "team" and i == 0), "costs": {"latency_seconds": 1.0}}
+            for i in range(19) for p in ("solo", "team")]
+    result = ep.compare(ep.parse(rows), "team", "solo", "verified")
+    assert result["indicative"]["direction"] == "withheld"
+    assert adapter.indicative_words("team", result).endswith("no direction offered")
+    assert adapter.interval_cells(result, 100, " pts") == ("n/a", "n/a")
+    spec = importlib.util.spec_from_file_location("alloc_run3", REPO / "evals" / "misumi-allocation" / "run_eval.py")
+    run = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(run)
+    assert run.fmt_interval(result) == "n/a"

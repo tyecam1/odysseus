@@ -93,7 +93,8 @@ def build_records(replies, judged, kind=None):
 def words(plan, verdict):
     """Plain wording: compare() calls the plan 'a' and solo 'b'."""
     return {"a_better": f"{plan} better", "b_better": "solo better", "inconclusive": "inconclusive",
-            "insufficient": "insufficient evidence", "safety_violation": "safety violation"}[verdict]
+            "insufficient": "insufficient evidence", "safety_violation": "safety violation",
+            "withheld": "safety failure measured: no direction offered"}[verdict]
 
 
 def indicative_words(plan, c):
@@ -107,7 +108,7 @@ def indicative_words(plan, c):
 
 def interval_cells(c, scale, unit):
     cell = c["indicative"] if c["interval"] is None else {"difference": c["difference"], "interval": c["interval"]}
-    if cell is None:
+    if cell is None or cell.get("difference") is None:
         return "n/a", "n/a"
     return (f"{cell['difference'] * scale:+.2f}{unit}", f"{cell['interval'][0] * scale:+.2f} to {cell['interval'][1] * scale:+.2f}")
 

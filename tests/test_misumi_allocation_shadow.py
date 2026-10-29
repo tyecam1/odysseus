@@ -214,3 +214,32 @@ def test_an_unreadable_policy_is_noted_and_does_not_silently_pass_or_block():
         raise RuntimeError("no policy")
     result = propose("Add milk to the pantry list", blocked_tools_of=boom)
     assert result["decision"] == "solo" and any("could not be read" in note for note in result["uncertainty"])
+
+
+# --- regressions found by the delta review (Sol, 2026-10-29) -------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("prompt", ["Remove the data from the chart", "Remove the files from search results", "Remove the old logs from the dashboard"])
+def test_removal_of_ordinary_things_is_not_destructive(prompt):
+    assert shadow.required_authority(prompt)["required"] != "blocked"
+    assert propose(prompt)["decision"] != "escalate"
+
+
+def test_a_statement_of_disagreement_is_still_a_cross_check_but_a_negated_request_is_not():
+    assert propose("The grocery bill and pantry do not agree. What differs?")["decision"] == "team"
+    assert propose("The grocery bill and the pantry disagree")["decision"] == "team"
+    assert propose("Do not compare the grocery bill against the pantry")["decision"] == "solo"
+
+
+def test_the_category_table_has_a_header_cell_for_every_row_cell(tmp_path):
+    spec = importlib.util.spec_from_file_location("alloc_run2", REPO / "evals" / "misumi-allocation" / "run_eval.py")
+    run = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(run)
+    import yaml as _yaml
+    registry = tmp_path / "personas.yaml"
+    registry.write_text(_yaml.safe_dump({"personas": PERSONAS}), encoding="utf-8")
+    text = run.report(str(registry), "dev")
+    block = text.split("## By category")[1].split("##")[0].strip().splitlines()
+    table = [line for line in block if line.startswith("|")]
+    widths = {line.count("|") for line in table}
+    assert len(widths) == 1, widths  # header, separator and every row have the same number of cells
