@@ -1,0 +1,39 @@
+# SYNTHETIC demonstration pantry. Invented data; describes no real household.
+updated: 2026-10-01
+
+items:
+  - name: eggs
+    category: fresh
+    quantity: 6
+    expiry: 2026-10-20
+    notes: ""
+  - name: milk
+    category: fresh
+    quantity: 1 litre
+    expiry: 2026-10-12
+    notes: ""
+  - name: tinned tomatoes
+    category: tinned
+    quantity: 3
+    expiry: null
+    notes: ""
+  - name: rice
+    category: dry
+    quantity: 2 kg
+    expiry: null
+    notes: ""
+  - name: pasta
+    category: dry
+    quantity: 500 g
+    expiry: null
+    notes: ""
+  - name: chickpeas
+    category: tinned
+    quantity: 2
+    expiry: null
+    notes: ""
+  - name: spinach
+    category: fresh_veg
+    quantity: 1 bag
+    expiry: 2026-10-09
+    notes: ""
