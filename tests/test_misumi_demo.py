@@ -651,3 +651,12 @@ def test_a_recording_with_a_review_naming_a_foreign_source_is_rejected(client):
     good = _good_recording(client)
     good["evidence_review"] = {"records": [{"source": "household/finance/bank.csv", "line": 1, "text": "x"}]}
     assert demo.validate_recording(good, "food-stock")[0] is False
+
+
+def test_the_committed_recordings_are_valid_cover_all_three_scenarios_and_name_a_real_revision(client):
+    for scenario in demo.load_scenarios():
+        data = json.loads((demo.RECORDINGS_DIR / f"{scenario['id']}.json").read_text(encoding="utf-8"))
+        assert demo.validate_recording(data, scenario["id"]) == (True, "ok"), scenario["id"]
+        assert data["capture"]["fixture_sha256"] == demo.fixture_digest() and "phase_b_input" not in data
+    assert client.get("/misumi/demo/scenarios").json()["replays"] == [s["id"] for s in demo.load_scenarios()]
+    assert (demo.RECORDINGS_DIR / "superseded-20261029").is_dir()      # the earlier recordings are kept, never replayed

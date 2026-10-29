@@ -1,8 +1,34 @@
 {
   "capture": {
+    "attempts": 1,
     "fixture_sha256": "9c1a64144d56582770087861ae38ccb031f3b4b8d31139755f33db832e3adc56",
     "recorder": "evals/misumi-demo/record.py",
-    "source_revision": "4ed134b53f587af5f97a3c119799284eec6775df"
+    "source_revision": "7ee0ff9ab9b7306b1fb27acfa81cfe47d3a28f37"
+  },
+  "evidence_review": {
+    "assessment": "unresolved",
+    "complete": true,
+    "kind": "observed",
+    "needed": [
+      "a dated purchase record (receipt or order) for the tinned tomatoes, to say whether 12 were actually bought and when",
+      "a physical count of the tins now, to compare with the 2026-10-01 stock line"
+    ],
+    "records": [
+      {
+        "line": 17,
+        "role": "pantry stock record (file dated 2026-10-01)",
+        "source": "household/food/stock.yaml",
+        "text": "quantity: 3"
+      },
+      {
+        "line": 5,
+        "role": "shopping-list line, an unticked item under 'Need'",
+        "source": "household/shopping-list.md",
+        "text": "- [ ] bought 12 tinned tomatoes this month (bulk offer)"
+      }
+    ],
+    "what": "the records were read directly from the household files; no model was used",
+    "why": "the two records are not measuring the same thing: the pantry line is a count as of 2026-10-01; the list line is an unticked 'Need' entry with no purchase date. Neither establishes the number of tins in the house today, and neither contradicts the other outright."
   },
   "execution": "live",
   "guest_safety": null,
@@ -25,10 +51,10 @@
     "consultations": [],
     "error": null,
     "execution": {
-      "kind": "degraded",
-      "outcome": "degraded",
-      "source": "degraded",
-      "why": "no model reply was produced; this is the household fallback, not a model answer"
+      "kind": "solo",
+      "outcome": "model",
+      "source": "model",
+      "why": "one model-written reply from the lead persona; no support was justified"
     },
     "kind": "observed",
     "lead": {
@@ -47,7 +73,7 @@
         "source": "request timer",
         "status": "measured",
         "unit": "ms",
-        "value": 7301
+        "value": 7547
       },
       "model_calls": {
         "reason": "not instrumented on this path; consultations recorded: 0",
@@ -74,7 +100,7 @@
     },
     "recorded_at": null,
     "sources": [],
-    "text": "Odysseus is available, but the configured model did not complete this request.",
+    "text": "I could not confirm whether there are...",
     "verification": {
       "reason": "this path records no independent verification of a model-written answer",
       "status": "unavailable"
@@ -104,7 +130,7 @@
     "marker": "6b5f57e8e346c4bb",
     "synthetic_verified": true
   },
-  "recorded_at": "2026-10-29T12:17:06Z",
+  "recorded_at": "2026-10-29T12:19:59Z",
   "request": {
     "prompt": "The pantry stock says we have 3 tins of tomatoes but the shopping list says we bought 12 this month. Which is right?",
     "prompt_source": "catalogue-fixed"

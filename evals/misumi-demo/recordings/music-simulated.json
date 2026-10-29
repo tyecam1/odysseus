@@ -1,8 +1,9 @@
 {
   "capture": {
+    "attempts": 1,
     "fixture_sha256": "9c1a64144d56582770087861ae38ccb031f3b4b8d31139755f33db832e3adc56",
     "recorder": "evals/misumi-demo/record.py",
-    "source_revision": "4ed134b53f587af5f97a3c119799284eec6775df"
+    "source_revision": "7ee0ff9ab9b7306b1fb27acfa81cfe47d3a28f37"
   },
   "execution": "live",
   "guest_safety": null,
@@ -47,7 +48,7 @@
         "source": "request timer",
         "status": "measured",
         "unit": "ms",
-        "value": 0
+        "value": 1
       },
       "model_calls": {
         "reason": "not instrumented on this path; consultations recorded: 0",
@@ -97,7 +98,7 @@
     "marker": "6b5f57e8e346c4bb",
     "synthetic_verified": true
   },
-  "recorded_at": "2026-10-29T12:15:31Z",
+  "recorded_at": "2026-10-29T12:20:00Z",
   "request": {
     "prompt": "play Kind of Blue by Miles Davis on the kitchen speaker",
     "prompt_source": "catalogue-fixed"
