@@ -1,6 +1,7 @@
 """Offline tests for the finance goal-lock evaluator (src/finance_goals.py)."""
 from __future__ import annotations
 
+import copy
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -11,6 +12,17 @@ from src import finance_goals as fg
 
 
 NOW = datetime(2026, 10, 29, 12, 0, 0, tzinfo=timezone.utc)
+
+# Verification receipts must carry their own hash-checked artifacts; this
+# default points at a real repo file so the hash check passes under the
+# default repo_root (tests with an explicit tmp repo_root override it).
+POLICY_ARTIFACT = [
+    {
+        "label": "policy",
+        "path": "repo:config/finance-goals/runtime-evaluation.json",
+        "sha256": fg.sha256_file(fg.DEFAULT_POLICY_PATH),
+    }
+]
 
 
 def _registry(goals):
@@ -37,7 +49,7 @@ FT = _registry([
 
 
 def _receipt(goal_id, kind, *, status="pass", days_ago=0, run_id="r1",
-             verifier="codex gpt-6.1-sol", verifies=None, artifacts=None,
+             verifier="codex", verifies=None, artifacts=None,
              name="receipt.json"):
     rec = {
         "_file": name,
@@ -51,7 +63,11 @@ def _receipt(goal_id, kind, *, status="pass", days_ago=0, run_id="r1",
     }
     if kind == fg.KIND_INDEPENDENT_VERIFICATION:
         rec["verifies"] = verifies if verifies is not None else run_id
-    if artifacts is not None:
+        rec["artifacts"] = (
+            artifacts if artifacts is not None
+            else copy.deepcopy(POLICY_ARTIFACT)
+        )
+    if artifacts is not None and kind != fg.KIND_INDEPENDENT_VERIFICATION:
         rec["artifacts"] = artifacts
     return rec
 
@@ -142,6 +158,8 @@ def test_stale_run_receipt_relocks_dependents():
 def test_artifact_hash_mismatch_relocks(tmp_path: Path):
     artifact = tmp_path / "config.json"
     artifact.write_text('{"dry_run": true}', encoding="utf-8")
+    vnote = tmp_path / "verification-note.txt"
+    vnote.write_text("reviewed\n", encoding="utf-8")
     attestation = _receipt("MT-00", fg.KIND_OPERATOR_ATTESTATION)
     run = _receipt(
         "MT-00", fg.KIND_RUN, run_id="run-9",
@@ -150,6 +168,8 @@ def test_artifact_hash_mismatch_relocks(tmp_path: Path):
     )
     verifies = _receipt(
         "MT-00", fg.KIND_INDEPENDENT_VERIFICATION, verifies="run-9",
+        artifacts=[{"label": "note", "path": str(vnote),
+                    "sha256": fg.sha256_file(vnote)}],
     )
     result = fg.evaluate_goals(
         registries=[MT, FT], receipts=[attestation, run, verifies],
@@ -169,13 +189,18 @@ def test_artifact_hash_mismatch_relocks(tmp_path: Path):
 
 def test_missing_artifact_file_relocks(tmp_path: Path):
     gone = tmp_path / "gone.json"
+    vnote = tmp_path / "verification-note.txt"
+    vnote.write_text("reviewed\n", encoding="utf-8")
     attestation = _receipt("MT-00", fg.KIND_OPERATOR_ATTESTATION)
     run = _receipt(
         "MT-00", fg.KIND_RUN, run_id="run-9",
         artifacts=[{"label": "cfg", "path": str(gone), "sha256": "0" * 64}],
     )
-    verifies = _receipt("MT-00", fg.KIND_INDEPENDENT_VERIFICATION,
-                        verifies="run-9")
+    verifies = _receipt(
+        "MT-00", fg.KIND_INDEPENDENT_VERIFICATION, verifies="run-9",
+        artifacts=[{"label": "note", "path": str(vnote),
+                    "sha256": fg.sha256_file(vnote)}],
+    )
     result = fg.evaluate_goals(
         registries=[MT, FT], receipts=[attestation, run, verifies],
         policy=fg.load_policy(), now=NOW, repo_root=tmp_path,
@@ -243,8 +268,11 @@ def test_repo_prefixed_artifacts_resolve_against_repo_root(tmp_path: Path):
         artifacts=[{"label": "code", "path": "repo:src/probe.py",
                     "sha256": fg.sha256_file(rel)}],
     )
-    verifies = _receipt("MT-00", fg.KIND_INDEPENDENT_VERIFICATION,
-                        verifies="run-9")
+    verifies = _receipt(
+        "MT-00", fg.KIND_INDEPENDENT_VERIFICATION, verifies="run-9",
+        artifacts=[{"label": "code", "path": "repo:src/probe.py",
+                    "sha256": fg.sha256_file(rel)}],
+    )
     result = fg.evaluate_goals(
         registries=[MT, FT], receipts=[attestation, run, verifies],
         policy=fg.load_policy(), now=NOW, repo_root=tmp_path,
@@ -269,3 +297,112 @@ def test_goal_ttl_override_in_policy():
         policy=policy, now=NOW,
     )
     assert _goal(result, "FT-04")["satisfied"] is True
+
+
+def test_verifier_identity_is_exact_not_substring():
+    # "glm-codex" contains "codex" — a substring match would let a
+    # corroborating GLM lane discharge an independent gate
+    attestation = _receipt("MT-00", fg.KIND_OPERATOR_ATTESTATION)
+    run = _receipt("MT-00", fg.KIND_RUN, run_id="run-9")
+    lookalike = _receipt(
+        "MT-00", fg.KIND_INDEPENDENT_VERIFICATION, run_id="v1",
+        verifies="run-9", verifier="glm-codex",
+    )
+    result = _evaluate([attestation, run, lookalike])
+    mt00 = _goal(result, "MT-00")
+    assert mt00["satisfied"] is False
+    assert any("corroborating" in b for b in mt00["blockers"])
+
+
+def test_failed_verification_does_not_satisfy():
+    attestation = _receipt("MT-00", fg.KIND_OPERATOR_ATTESTATION)
+    run = _receipt("MT-00", fg.KIND_RUN, run_id="run-9")
+    failed = _receipt(
+        "MT-00", fg.KIND_INDEPENDENT_VERIFICATION, run_id="v1",
+        verifies="run-9", status="fail",
+    )
+    result = _evaluate([attestation, run, failed])
+    mt00 = _goal(result, "MT-00")
+    assert mt00["satisfied"] is False
+    assert any("status='fail'" in b for b in mt00["blockers"])
+
+
+def test_run_receipt_without_run_id_cannot_satisfy():
+    attestation = _receipt("MT-00", fg.KIND_OPERATOR_ATTESTATION)
+    run = _receipt("MT-00", fg.KIND_RUN, run_id="")
+    verifies = _receipt("MT-00", fg.KIND_INDEPENDENT_VERIFICATION,
+                        verifies="")
+    result = _evaluate([attestation, run, verifies])
+    mt00 = _goal(result, "MT-00")
+    assert mt00["satisfied"] is False
+    assert any("no run_id" in b for b in mt00["blockers"])
+
+
+def test_verification_without_verifies_cannot_satisfy():
+    # missing run_id on BOTH sides must not compare equal (None == None)
+    attestation = _receipt("MT-00", fg.KIND_OPERATOR_ATTESTATION)
+    run = _receipt("MT-00", fg.KIND_RUN, run_id="run-9")
+    bare = _receipt(
+        "MT-00", fg.KIND_INDEPENDENT_VERIFICATION, run_id="v1", verifies="",
+    )
+    result = _evaluate([attestation, run, bare])
+    mt00 = _goal(result, "MT-00")
+    assert mt00["satisfied"] is False
+    assert any("names no run id" in b for b in mt00["blockers"])
+
+
+def test_verification_without_artifacts_cannot_satisfy(tmp_path: Path):
+    attestation = _receipt("MT-00", fg.KIND_OPERATOR_ATTESTATION)
+    run = _receipt("MT-00", fg.KIND_RUN, run_id="run-9")
+    bare = _receipt(
+        "MT-00", fg.KIND_INDEPENDENT_VERIFICATION, verifies="run-9",
+        artifacts=[],
+    )
+    result = _evaluate([attestation, run, bare])
+    mt00 = _goal(result, "MT-00")
+    assert mt00["satisfied"] is False
+    assert any("records no artifacts" in b for b in mt00["blockers"])
+
+
+def test_verification_artifacts_are_hash_checked(tmp_path: Path):
+    vnote = tmp_path / "verification-note.txt"
+    vnote.write_text("reviewed\n", encoding="utf-8")
+    attestation = _receipt("MT-00", fg.KIND_OPERATOR_ATTESTATION)
+    run = _receipt("MT-00", fg.KIND_RUN, run_id="run-9")
+    verifies = _receipt(
+        "MT-00", fg.KIND_INDEPENDENT_VERIFICATION, verifies="run-9",
+        artifacts=[{"label": "note", "path": str(vnote),
+                    "sha256": fg.sha256_file(vnote)}],
+    )
+    result = fg.evaluate_goals(
+        registries=[MT, FT], receipts=[attestation, run, verifies],
+        policy=fg.load_policy(), now=NOW, repo_root=tmp_path,
+    )
+    assert _goal(result, "MT-00")["satisfied"] is True
+
+    vnote.write_text("tampered\n", encoding="utf-8")
+    result = fg.evaluate_goals(
+        registries=[MT, FT], receipts=[attestation, run, verifies],
+        policy=fg.load_policy(), now=NOW, repo_root=tmp_path,
+    )
+    mt00 = _goal(result, "MT-00")
+    assert mt00["satisfied"] is False
+    assert any("hash mismatch" in b for b in mt00["blockers"])
+
+
+def test_own_evidence_cannot_satisfy_goal_with_locked_deps():
+    # MT-04 carries a full satisfied-quality evidence chain of its own,
+    # but MT-03/FT-02 have no receipts at all: it must stay locked.
+    receipts = [
+        _receipt("MT-04", fg.KIND_RUN, run_id="run-mt04"),
+        _receipt("MT-04", fg.KIND_INDEPENDENT_VERIFICATION,
+                 verifies="run-mt04"),
+    ]
+    result = _evaluate(receipts)
+    mt04 = _goal(result, "MT-04")
+    assert mt04["satisfied"] is False
+    assert mt04["eligible"] is False
+    assert any("dependency MT-03 not satisfied" in b for b in mt04["blockers"])
+    assert any("dependency FT-02 not satisfied" in b for b in mt04["blockers"])
+    # and its OWN evidence raised no blocker — the lock is purely the deps
+    assert not any(b.startswith("MT-04: ") for b in mt04["blockers"])

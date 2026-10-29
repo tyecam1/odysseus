@@ -6,11 +6,14 @@ goal FT-00: "Attest safe paper-only environment").
 
 The guard is fail-closed: a configuration is runnable only when EVERY
 safety property holds (simulation-only, spot, no credentials, no
-leverage/margin/derivatives, no public listeners, digest-pinned official
-image, workspace outside the knowledgebase). Anything ambiguous is
-rejected. The runner never sends anything but ``docker`` commands against
-the pinned image; there is no exchange credential path and no order
-routing other than Freqtrade's own simulated wallet.
+leverage/margin/derivatives, no public listeners, exactly the pinned
+official image, workspace outside the knowledgebase). Anything ambiguous
+is rejected. Overlay routes around the verified configuration —
+``add_config_files`` in the config, or extra ``--config``/``--userdir``/
+``--strategy`` freqtrade arguments — are rejected outright. The runner
+never sends anything but ``docker`` commands against the pinned image;
+there is no exchange credential path and no order routing other than
+Freqtrade's own simulated wallet.
 
 Simulation only. This module must never be used to place real orders —
 real-money execution requires a separately ratified authority that this
@@ -32,14 +35,28 @@ RUNNER_NAME = "finance-ft-runner"
 RUNNER_VERSION = "0.1"
 
 # Official image pinned by digest (tag ``stable`` resolved 2026-10-29,
-# image created 2026-09-29, Python 3.14.7 / CCXT 4.5.84). A bare tag is
-# never accepted — pinning must be by digest so a re-pulled "stable"
-# cannot silently change the engine under an attestation.
+# image created 2026-09-29, Python 3.14.7 / CCXT 4.5.84). The guard
+# requires this reference EXACTLY: a digest alone proves nothing about
+# which repository it names, so ``evil/freqtrade@sha256:<same digest>``
+# must not pass, and a bare tag is never accepted — pinning must be by
+# digest so a re-pulled "stable" cannot silently change the engine under
+# an attestation.
 DEFAULT_PINNED_IMAGE = (
     "freqtradeorg/freqtrade@sha256:"
     "9d67afb8eb5f4e1210f4fb067efcbd5e005bd4f1c27f6f3888b8b9fc7f9b5199"
 )
 DIGEST_RE = re.compile(r"^[a-z0-9./_-]+@sha256:[0-9a-f]{64}$")
+
+# Extra freqtrade arguments are restricted to this allowlist. Freqtrade
+# merges multiple --config files with later files taking precedence and
+# lets --userdir/--strategy/--db-url override verified values, so those
+# (and anything unrecognised) are refused: they could re-introduce
+# credentials, derivatives settings or listeners the guard just rejected.
+ALLOWED_EXTRA_FLAGS = {
+    "--dl-trades", "--erase", "--prepend", "--timeframe",
+    "--timerange", "--days", "--new-pairs-days",
+}
+VALUE_EXTRA_FLAGS = {"--timeframe", "--timerange", "--days", "--new-pairs-days"}
 SPOT_PAIR_RE = re.compile(r"^[A-Z0-9.]+/[A-Z0-9.]+$")
 STRATEGY_RE = re.compile(r"^[A-Za-z0-9_]+$")
 CONTAINER_NAME = "finance-ft00-dryrun"
@@ -58,14 +75,50 @@ class ConfigUnsafeError(ValueError):
     """Raised (or returned as findings) when a config fails the guard."""
 
 
+def validate_extra_args(extra_args: Optional[List[str]]) -> List[str]:
+    """Findings for extra freqtrade tokens outside the safe allowlist.
+    Empty list == safe. Freqtrade overlays later ``--config`` files onto
+    earlier ones, so an unchecked extra ``--config`` could re-introduce
+    credentials, futures settings or an enabled API server after the
+    main config passed the guard."""
+    findings: List[str] = []
+    tokens = list(extra_args or [])
+    i = 0
+    while i < len(tokens):
+        token = tokens[i]
+        if token not in ALLOWED_EXTRA_FLAGS:
+            findings.append(
+                f"extra freqtrade argument {token!r} is not in the safe "
+                f"allowlist {sorted(ALLOWED_EXTRA_FLAGS)} (overlay flags "
+                "such as --config/-c/--userdir/--strategy are never "
+                "permitted)"
+            )
+            i += 1
+            continue
+        if token in VALUE_EXTRA_FLAGS:
+            if i + 1 >= len(tokens):
+                findings.append(f"extra argument {token!r} requires a value")
+            else:
+                i += 1  # consume the flag's value
+        i += 1
+    return findings
+
+
 def verify_config(cfg: Dict[str, Any], image_ref: str) -> List[str]:
     """Return a list of safety findings. Empty list == safe to run."""
     findings: List[str] = []
 
-    if not DIGEST_RE.match(image_ref or ""):
+    if image_ref != DEFAULT_PINNED_IMAGE:
         findings.append(
-            f"engine image is not digest-pinned: {image_ref!r} "
-            "(required: name@sha256:<64 hex>)"
+            f"engine image {image_ref!r} is not the pinned official "
+            f"reference — only the exact digest-pinned official image "
+            f"{DEFAULT_PINNED_IMAGE!r} may run"
+        )
+
+    if cfg.get("add_config_files"):
+        findings.append(
+            "add_config_files is present — overlay config files bypass "
+            "the verified configuration and are not permitted"
         )
 
     if cfg.get("dry_run") is not True:
@@ -146,6 +199,14 @@ def build_docker_argv(
     ftuser): freqtrade is pip-installed under ftuser's 0700 home, so an
     explicit ``--user`` cannot reach the binary. Pass ``uid_gid``
     explicitly only with an image that supports it."""
+    if not DIGEST_RE.match(image_ref or ""):
+        raise ValueError(
+            "image_ref must be digest-pinned (name@sha256:<64 hex>): "
+            f"{image_ref!r}"
+        )
+    overlay = validate_extra_args(extra_args)
+    if overlay:
+        raise ValueError("; ".join(overlay))
     volume = f"{user_data_dir.resolve()}:/freqtrade/user_data"
     # Foreground commands self-clean with --rm; a detached smoke run must
     # NOT use --rm, so a crash leaves the container's logs inspectable
@@ -358,6 +419,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 0
 
     findings = verify_config(cfg, args.image)
+    findings += validate_extra_args(args.extra)
     if findings:
         print(json.dumps(
             {

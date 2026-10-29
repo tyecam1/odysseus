@@ -10,7 +10,8 @@ import pytest
 from src import finance_ft_runner as ft
 
 
-GOOD_IMAGE = (
+GOOD_IMAGE = ft.DEFAULT_PINNED_IMAGE
+assert GOOD_IMAGE == (
     "freqtradeorg/freqtrade@sha256:"
     "9d67afb8eb5f4e1210f4fb067efcbd5e005bd4f1c27f6f3888b8b9fc7f9b5199"
 )
@@ -39,7 +40,21 @@ def test_good_config_passes():
 
 def test_rejects_tag_instead_of_digest():
     findings = ft.verify_config(good_config(), "freqtradeorg/freqtrade:stable")
-    assert any("digest" in f for f in findings)
+    assert any("pinned official" in f for f in findings)
+
+
+def test_rejects_lookalike_repo_with_same_digest():
+    # a digest alone proves nothing about WHICH repository it names
+    evil = "evil/freqtrade@" + GOOD_IMAGE.split("@", 1)[1]
+    findings = ft.verify_config(good_config(), evil)
+    assert any("pinned official" in f for f in findings)
+
+
+def test_rejects_add_config_files_overlay():
+    cfg = good_config()
+    cfg["add_config_files"] = ["/freqtrade/user_data/overlay.json"]
+    findings = ft.verify_config(cfg, GOOD_IMAGE)
+    assert any("add_config_files" in f for f in findings)
 
 
 def test_rejects_dry_run_false():
@@ -132,6 +147,54 @@ def test_unknown_action_rejected():
             "moon", image_ref=GOOD_IMAGE,
             user_data_dir=Path("/home/agent/finance-paper/user_data"),
         )
+
+
+def test_extra_args_restricted_to_safe_allowlist():
+    # data-download flags only; overlays are refused
+    assert ft.validate_extra_args([]) == []
+    assert ft.validate_extra_args(["--dl-trades"]) == []
+    assert ft.validate_extra_args(["--timerange", "20260901-"]) == []
+    assert ft.validate_extra_args(["--timeframe", "1h"]) == []
+    for overlay in (
+        ["--config", "/freqtrade/user_data/unsafe.json"],
+        ["-c", "/etc/ft.json"],
+        ["--userdir", "/etc"],
+        ["--strategy", "Evil"],
+        ["--db-url", "sqlite:////tmp/x.sqlite"],
+    ):
+        findings = ft.validate_extra_args(overlay)
+        assert findings and overlay[0] in findings[0], overlay
+    assert ft.validate_extra_args(["--timerange"])[0].endswith(
+        "requires a value"
+    )
+
+
+def test_build_docker_argv_refuses_overlays_and_bare_tags():
+    with pytest.raises(ValueError, match="allowlist"):
+        ft.build_docker_argv(
+            "download-data", image_ref=GOOD_IMAGE,
+            user_data_dir=Path("/home/agent/finance-paper/user_data"),
+            extra_args=["--config", "/freqtrade/user_data/unsafe.json"],
+        )
+    with pytest.raises(ValueError, match="digest-pinned"):
+        ft.build_docker_argv(
+            "dry-run", image_ref="freqtradeorg/freqtrade:stable",
+            user_data_dir=Path("/home/agent/finance-paper/user_data"),
+            strategy="S",
+        )
+
+
+def test_cli_fails_closed_on_config_overlay_extra(tmp_path: Path, capsys):
+    cfg_path = tmp_path / "config-ft00.json"
+    cfg_path.write_text(json.dumps(good_config()), encoding="utf-8")
+    rc = ft.main(
+        ["verify-config", "--config", str(cfg_path),
+         "--extra=--config", "--extra=/freqtrade/user_data/unsafe.json"]
+    )
+    assert rc == 3
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["fail_closed"] is True
+    assert any("--config" in f for f in payload["findings"])
 
 
 def test_redact_config_hides_credentials():

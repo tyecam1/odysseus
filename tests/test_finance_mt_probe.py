@@ -32,6 +32,41 @@ GDELT_PAYLOAD = {
     ]
 }
 
+# www./m. mirrors of ONE registrable domain plus two distinct .co.uk
+# publishers carrying the same wire story.
+GDELT_MIRROR_PAYLOAD = {
+    "articles": [
+        {
+            "url": "https://www.example.co.uk/a1",
+            "title": "Bitcoin Surges Past Key Level",
+            "seendate": "20261029T090000Z",
+            "domain": "www.example.co.uk",
+            "sourcecountry": "UnitedStates",
+        },
+        {
+            "url": "https://m.example.co.uk/a1",
+            "title": "Bitcoin surges past key level",
+            "seendate": "20261029T093000Z",
+            "domain": "m.example.co.uk",
+            "sourcecountry": "",
+        },
+        {
+            "url": "https://site-a.co.uk/a2",
+            "title": "Ether Also Rises",
+            "seendate": "20261029T100000Z",
+            "domain": "site-a.co.uk",
+            "sourcecountry": "",
+        },
+        {
+            "url": "https://site-b.co.uk/a2",
+            "title": "Ether also rises",
+            "seendate": "20261029T100000Z",
+            "domain": "site-b.co.uk",
+            "sourcecountry": "",
+        },
+    ]
+}
+
 HN_TOP = [1, 2, 3]
 HN_ITEMS = {
     1: {"id": 1, "title": "Show HN: probe", "url": "https://example.com/h1",
@@ -57,6 +92,11 @@ def gdelt_fetch(url, timeout):
     return GDELT_PAYLOAD
 
 
+def gdelt_mirror_fetch(url, timeout):
+    assert "gdeltproject" in url
+    return GDELT_MIRROR_PAYLOAD
+
+
 def hn_fetch(url, timeout):
     if "topstories" in url:
         return HN_TOP
@@ -80,7 +120,11 @@ def test_gdelt_records_follow_evidence_contract():
     rec = result.records[0].to_contract()
     for field_name in mp.EVIDENCE_FIELDS:
         assert field_name in rec, field_name
-    assert rec["published_at"] == "2026-10-29T09:00:00Z"
+    # seendate is the monitor's retrieval time, NOT a publication time —
+    # it must not be laundered into published_at
+    assert rec["published_at"] is None
+    assert "seendate" in rec["uncertainty"]
+    assert "retrieval" in rec["uncertainty"]
     assert rec["first_seen_at"] == "2026-10-29T10:00:00Z"
     assert rec["collected_at"] == "2026-10-29T10:00:00Z"
     assert rec["source"].startswith("gdelt-doc-2.0:")
@@ -102,6 +146,35 @@ def test_syndication_counts_distinct_domains_not_articles():
     assert topic["distinct_domains"] == 2
     assert topic["hypothesis_id"] is None
     assert "persona L" in topic["interpretation"]
+
+
+def test_registrable_domain_normalisation():
+    # bare hosts (GDELT's domain field) and URLs both normalise
+    assert mp.registrable_domain("m.example.co.uk") == "example.co.uk"
+    assert mp.registrable_domain("https://www.example.co.uk/a1") == "example.co.uk"
+    assert mp.registrable_domain("https://site-a.co.uk/a2") == "site-a.co.uk"
+    assert mp.registrable_domain("https://site-b.co.uk/a2") == "site-b.co.uk"
+    assert mp.registrable_domain("https://sub.example.com/x") == "example.com"
+    assert mp.registrable_domain("notahost") == "notahost"
+
+
+def test_mirrors_of_one_registrable_domain_are_one_story():
+    result = mp.collect_gdelt(
+        "bitcoin", max_records=10, collected_at="2026-10-29T10:00:00Z",
+        first_seen_index={}, fetch=gdelt_mirror_fetch,
+    )
+    assert result.deduped_exact == 0
+    assert result.deduped_syndication == 1  # m.example.co.uk mirror folded
+    domains = {r.source.split(":", 1)[1] for r in result.records}
+    # 3 registrable domains: example.co.uk (mirrors collapsed),
+    # site-a.co.uk, site-b.co.uk (distinct .co.uk publishers stay distinct)
+    assert domains == {"example.co.uk", "site-a.co.uk", "site-b.co.uk"}
+    report = mp.build_report(
+        "2026-10-29T10:00:00Z", [result], {}, None, {"sources": ["gdelt"]}
+    )
+    topic = next(t for t in report["topics"] if t["topic_id"] == "gdelt:bitcoin")
+    assert topic["records"] == 3  # 4 articles, one mirror deduplicated
+    assert topic["distinct_domains"] == 3
 
 
 def test_hn_records_and_normalization():
@@ -131,6 +204,24 @@ def test_kraken_candles_recorded_with_market_entity():
     assert rec["raw_metric"] == 12.5
     assert rec["normalized_metric"] == round(12.5 / 25.0, 6)
     assert rec["link_to_market_candles"].startswith("kraken:XXBTZUSD:")
+
+
+def test_kraken_first_seen_carried_forward():
+    # a closed candle seen in an earlier collection keeps its original
+    # first_seen_at; first_seen must not reset to each collection time
+    first, _ = mp.collect_kraken(
+        pair="BTCUSD", collected_at="2026-10-29T10:00:00Z",
+        first_seen_index={}, fetch=kraken_fetch,
+    )
+    index = {r.event_id: r.first_seen_at for r in first.records}
+    second, _ = mp.collect_kraken(
+        pair="BTCUSD", collected_at="2026-10-29T16:00:00Z",
+        first_seen_index=index, fetch=kraken_fetch,
+    )
+    for rec in second.records:
+        contract = rec.to_contract()
+        assert contract["first_seen_at"] == "2026-10-29T10:00:00Z"
+        assert contract["collected_at"] == "2026-10-29T16:00:00Z"
 
 
 def test_first_seen_carried_forward_from_prior_snapshot(tmp_path: Path):

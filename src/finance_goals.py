@@ -9,9 +9,13 @@ The registries are durable DEFINITIONS, not runtime state. This module
 derives current status on every call, fail-closed:
 
 - a goal is **satisfied** only while it has a ``run`` receipt with
-  status=pass, inside its TTL, whose recorded artifact hashes still match
-  the live files, AND a current ``independent_verification`` receipt from
-  an accepted independent verifier naming that exact run;
+  status=pass and a ``run_id``, inside its TTL, whose recorded artifact
+  hashes still match the live files, AND a current
+  ``independent_verification`` receipt (status=pass, with its own
+  hash-checked artifacts) from an accepted independent verifier — matched
+  by EXACT identity, never substring — naming that exact run, AND every
+  dependency of the goal is itself satisfied (own evidence can never
+  unlock a goal whose dependencies are still locked);
 - a goal is **eligible** (may be worked on) when its unlock arm holds:
   root goals need a current ``operator_attestation``; dependent goals
   need every dependency satisfied;
@@ -30,7 +34,7 @@ import hashlib
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_REGISTRIES_DIR = REPO_ROOT / "config" / "finance-goals"
@@ -235,15 +239,8 @@ def evaluate_goals(
 
     evaluated: List[Dict[str, Any]] = []
 
-    def goal_blockers(goal_id: str, seen: Optional[set] = None) -> List[str]:
-        """Satisfaction blockers for goal_id (recursion-safe on cycles)."""
-        seen = seen or set()
-        if goal_id in seen:
-            return [f"{goal_id}: dependency cycle"]
-        seen.add(goal_id)
-        if goal_id not in goals:
-            return [f"{goal_id}: unknown dependency goal"]
-
+    def own_evidence_blockers(goal_id: str) -> List[str]:
+        """Blockers in this goal's OWN run/verification receipts."""
         blockers: List[str] = []
         run_receipts = by_goal[KIND_RUN].get(goal_id) or {}
         best_run: Optional[Dict[str, Any]] = None
@@ -252,6 +249,9 @@ def evaluate_goals(
                 blockers.append(
                     f"{goal_id}: receipt {name} status={receipt.get('status')!r}"
                 )
+                continue
+            if not receipt.get("run_id"):
+                blockers.append(f"{goal_id}: receipt {name} has no run_id")
                 continue
             receipt_blockers = _receipt_blockers(
                 receipt, now=now, policy=policy, repo_root=repo_root,
@@ -269,11 +269,22 @@ def evaluate_goals(
         for name, verification in sorted(verifications.items()):
             v_blockers = _receipt_blockers(
                 verification, now=now, policy=policy, repo_root=repo_root,
-                check_artifacts=False,
+                check_artifacts=_artifact_check_needed(verification),
             )
             if v_blockers:
                 blockers.extend(
                     f"{goal_id}: verification {name}: {b}" for b in v_blockers
+                )
+                continue
+            if verification.get("status") != "pass":
+                blockers.append(
+                    f"{goal_id}: verification {name} "
+                    f"status={verification.get('status')!r}"
+                )
+                continue
+            if not verification.get("verifies"):
+                blockers.append(
+                    f"{goal_id}: verification {name} names no run id"
                 )
                 continue
             if verification.get("verifies") != best_run.get("run_id"):
@@ -283,8 +294,17 @@ def evaluate_goals(
                     f"{best_run.get('run_id')!r}"
                 )
                 continue
-            verifier = str(verification.get("verifier") or "").lower()
-            if not any(v in verifier for v in policy.get("independent_verifiers", [])):
+            if not verification.get("artifacts"):
+                blockers.append(
+                    f"{goal_id}: verification {name} records no artifacts"
+                )
+                continue
+            # EXACT identity match against the accepted independent lanes.
+            # A substring match would let e.g. "glm-codex" ride on "codex"
+            # and discharge a gate a corroborating lane must never open.
+            if verification.get("verifier") not in policy.get(
+                "independent_verifiers", []
+            ):
                 blockers.append(
                     f"{goal_id}: verification lane "
                     f"{verification.get('verifier')!r} is corroborating, "
@@ -300,22 +320,42 @@ def evaluate_goals(
             )
         return blockers
 
+    satisfaction_cache: Dict[str, Tuple[bool, List[str]]] = {}
+
+    def goal_satisfaction(goal_id: str, seen: frozenset) -> Tuple[bool, List[str]]:
+        """(satisfied, blockers), recursion-safe on cycles. A goal is
+        satisfied only while its OWN evidence is current AND every
+        dependency is itself satisfied — own receipts can never unlock a
+        goal whose dependencies are still locked (cross-program MT-04 ->
+        MT-03 + FT-02 included)."""
+        if goal_id in satisfaction_cache:
+            return satisfaction_cache[goal_id]
+        if goal_id in seen:
+            return False, [f"{goal_id}: dependency cycle"]
+        if goal_id not in goals:
+            return False, [f"dependency {goal_id}: unknown goal id"]
+        blockers = list(own_evidence_blockers(goal_id))
+        for dep in goals[goal_id].get("depends_on") or []:
+            dep_satisfied, dep_blockers = goal_satisfaction(
+                dep, seen | {goal_id}
+            )
+            if not dep_satisfied:
+                blockers.append(f"dependency {dep} not satisfied")
+                blockers.extend(dep_blockers)
+        result = (not blockers, blockers)
+        satisfaction_cache[goal_id] = result
+        return result
+
     for goal_id, goal in goals.items():
-        own_blockers = goal_blockers(goal_id)
-        satisfied = not own_blockers
-        blockers: List[str] = list(own_blockers)
+        satisfied, sat_blockers = goal_satisfaction(goal_id, frozenset())
+        blockers: List[str] = list(sat_blockers)
 
         eligible = True
         if goal.get("depends_on"):
             for dep in goal["depends_on"]:
-                if dep not in goals:
+                dep_satisfied, _ = goal_satisfaction(dep, frozenset())
+                if not dep_satisfied:
                     eligible = False
-                    blockers.append(f"dependency {dep}: unknown goal id")
-                else:
-                    dep_blockers = goal_blockers(dep)
-                    if dep_blockers:
-                        eligible = False
-                        blockers.extend(dep_blockers)
         else:
             attestations = by_goal[KIND_OPERATOR_ATTESTATION].get(goal_id) or {}
             current_attestation = None

@@ -13,8 +13,14 @@ Design rules (spec):
 - excluded upstreams (X cookies, private Reddit, YouTube internals,
   retailer scraping, paid APIs) are not implemented at all;
 - every observation carries published_at, first_seen_at and collected_at
-  distinctly; syndicated copies are deduplicated and counted as ONE
-  source per registrable domain, never as independent corroboration;
+  distinctly. published_at is set ONLY when the source itself provides a
+  verified publisher timestamp (HN item time, exchange candle open):
+  GDELT's ``seendate`` is the monitor's retrieval time, not a publication
+  time, so GDELT records carry published_at = null with the seendate
+  recorded in ``uncertainty`` — never inferred. Syndicated copies are
+  deduplicated (exact URL, then registrable-domain + normalised title,
+  so m.example.co.uk and www.example.co.uk are ONE story) and counted as
+  ONE source per registrable domain, never as independent corroboration;
 - bounded retries with backoff; no background scheduling, no persistence
   beyond the out-dir snapshot files.
 
@@ -38,7 +44,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 
 PROBE_NAME = "finance-mt-probe"
-PROBE_VERSION = "0.1"
+PROBE_VERSION = "0.2"
 USER_AGENT = (
     f"{PROBE_NAME}/{PROBE_VERSION} (odysseus finance MT-00; "
     "household research, read-only public APIs; github.com/tyecam1)"
@@ -99,6 +105,14 @@ _WS_RE = re.compile(r"\s+")
 _PUNCT_RE = re.compile(r"[^\w\s]")
 _MAX_TITLE_WORDS = 12
 
+# Common multi-part public suffixes where the registrable domain is the
+# last THREE labels (example.co.uk, not co.uk).
+MULTI_PART_SUFFIXES = {
+    "co.uk", "org.uk", "ac.uk", "gov.uk", "com.au", "net.au", "org.au",
+    "co.jp", "ne.jp", "or.jp", "com.br", "com.mx", "com.cn", "co.nz",
+    "co.za", "co.in", "com.sg",
+}
+
 
 class SourceUnavailableError(RuntimeError):
     """A public source failed its bounded retry budget."""
@@ -110,7 +124,7 @@ class EvidenceRecord:
     topic_id: str
     source: str
     source_url: str
-    published_at: str
+    published_at: Optional[str]  # None unless the source itself provides one
     first_seen_at: str
     collected_at: str
     window: str
@@ -139,6 +153,7 @@ class SourceResult:
     retries: int = 0
     error: Optional[str] = None
     deduped_exact: int = 0
+    deduped_syndication: int = 0
 
 
 # --------------------------------------------------------------------------
@@ -159,11 +174,28 @@ def stable_event_id(source: str, source_url: str) -> str:
 
 
 def registrable_domain(url: str) -> str:
-    host = (urlparse(url).hostname or "").lower()
+    """Registrable domain of a URL or bare hostname (GDELT's ``domain``
+    field is a bare host). Handles common multi-part public suffixes so
+    that m.example.co.uk and www.example.co.uk collapse to example.co.uk
+    while two different .co.uk publishers stay distinct. Not a full
+    Public Suffix List — the goal is honest syndication counting, and an
+    unmapped suffix fails safe by over-splitting (never under-counting
+    diversity)."""
+    host = (urlparse(url).hostname or "").lower().strip(".")
+    if not host:
+        host = (url or "").lower().strip()
+        if "://" in host:
+            host = host.split("://", 1)[1]
+        host = host.split("/", 1)[0].strip(".")
     parts = [p for p in host.split(".") if p]
+    if not parts:
+        return "unknown"
+    last_two = ".".join(parts[-2:]) if len(parts) >= 2 else ""
+    if last_two in MULTI_PART_SUFFIXES and len(parts) >= 3:
+        return ".".join(parts[-3:])
     if len(parts) >= 2:
-        return ".".join(parts[-2:])
-    return host or "unknown"
+        return last_two
+    return host
 
 
 def normalize_title(title: str) -> str:
@@ -239,7 +271,9 @@ def collect_gdelt(
     articles = (payload or {}).get("articles") or []
     records: List[EvidenceRecord] = []
     seen_urls = set()
+    seen_stories = set()  # (registrable domain, normalised title)
     deduped = 0
+    deduped_syndication = 0
     topic_id = f"gdelt:{normalize_title(query)[:40]}"
     for art in articles:
         source_url = art.get("url") or ""
@@ -247,8 +281,17 @@ def collect_gdelt(
             deduped += 1
             continue
         seen_urls.add(source_url)
-        domain = art.get("domain") or registrable_domain(source_url)
-        published = parse_gdelt_seen(art.get("seendate", ""))
+        # Never trust the raw host string for diversity counting:
+        # normalise to the registrable domain so m./www. mirrors of one
+        # publisher are one source, and count the story once per
+        # registrable domain even when the URL differs.
+        domain = registrable_domain(art.get("domain") or source_url)
+        story_key = (domain, normalize_title(art.get("title") or ""))
+        if story_key in seen_stories:
+            deduped_syndication += 1
+            continue
+        seen_stories.add(story_key)
+        seen_iso = parse_gdelt_seen(art.get("seendate", ""))
         event_id = stable_event_id(SOURCE_GDELT, source_url)
         records.append(
             EvidenceRecord(
@@ -256,7 +299,7 @@ def collect_gdelt(
                 topic_id=topic_id,
                 source=f"{SOURCE_GDELT}:{domain}",
                 source_url=source_url,
-                published_at=published,
+                published_at=None,
                 first_seen_at=first_seen_index.get(event_id, collected_at),
                 collected_at=collected_at,
                 geography=art.get("sourcecountry") or None,
@@ -270,13 +313,18 @@ def collect_gdelt(
                 source_health=(
                     f"http 200; retries={used_retries}; articles={len(articles)}"
                 ),
-                uncertainty="high (single-source sample, publisher timestamps unverified)",
+                uncertainty=(
+                    "high (single-source sample; GDELT seendate "
+                    f"{seen_iso or art.get('seendate') or 'unknown'} is the "
+                    "monitor's retrieval timestamp, not a verified publisher "
+                    "timestamp — published_at is unknown for this source)"
+                ),
                 window=collected_at[:10],
             )
         )
     return SourceResult(
         SOURCE_GDELT, "ok", records, http_status=status, retries=used_retries,
-        deduped_exact=deduped,
+        deduped_exact=deduped, deduped_syndication=deduped_syndication,
     )
 
 
@@ -356,6 +404,7 @@ def collect_kraken(
     interval_min: int = 60,
     keep_candles: int = 24,
     collected_at: str,
+    first_seen_index: Optional[Dict[str, str]] = None,
     fetch: Optional[Callable] = None,
     retries: int = 3,
 ) -> Tuple[SourceResult, Dict[str, Any]]:
@@ -387,6 +436,7 @@ def collect_kraken(
         ), {}
 
     candles = candles[-keep_candles:]
+    first_seen_index = first_seen_index or {}
     market_pair = f"{pair[:3]}/{pair[3:]}" if len(pair) == 6 else pair
     max_volume = max((float(c[6]) for c in candles), default=0.0) or 1.0
     records: List[EvidenceRecord] = []
@@ -402,7 +452,7 @@ def collect_kraken(
                 source=SOURCE_KRAKEN,
                 source_url=url.split("?")[0] + f"?pair={pair}&interval={interval_min}",
                 published_at=ts,
-                first_seen_at=collected_at,
+                first_seen_at=first_seen_index.get(event_id, collected_at),
                 collected_at=collected_at,
                 raw_metric=volume,
                 normalized_metric=round(volume / max_volume, 6),
@@ -498,6 +548,7 @@ def build_report(
                 "http_status": res.http_status,
                 "retries": res.retries,
                 "deduped_exact": res.deduped_exact,
+                "deduped_syndication": res.deduped_syndication,
                 "error": res.error,
             }
             for res in results
@@ -529,12 +580,15 @@ def render_digest_markdown(report: Dict[str, Any]) -> str:
     lines.append("")
     lines.append("## Source health")
     lines.append("")
-    lines.append("| source | status | records | retries | deduped | error |")
-    lines.append("|---|---|---|---|---|---|")
+    lines.append(
+        "| source | status | records | retries | deduped | synd-deduped | error |"
+    )
+    lines.append("|---|---|---|---|---|---|---|")
     for res in report["source_results"]:
         lines.append(
             f"| {res['source']} | {res['status']} | {res['records']} "
-            f"| {res['retries']} | {res['deduped_exact']} | {res['error'] or ''} |"
+            f"| {res['retries']} | {res['deduped_exact']} "
+            f"| {res['deduped_syndication']} | {res['error'] or ''} |"
         )
     lines.append("")
     lines.append("## Attention (top topics by distinct-domain diversity)")
@@ -683,6 +737,7 @@ def run_probe(args: argparse.Namespace, code_file: Path) -> int:
             interval_min=args.kraken_interval,
             keep_candles=args.kraken_candles,
             collected_at=collected,
+            first_seen_index=first_seen_index,
             retries=args.retries,
         )
         results.append(kraken_result)
