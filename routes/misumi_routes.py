@@ -2481,6 +2481,8 @@ def setup_misumi_routes(
             if recording is None or recording["request"].get("prompt") != prompt[:400]:
                 raise HTTPException(404, "no recording of this scenario and prompt")
             return demo.replay_from_recording(recording, mode=body.mode)
+        if not body.session_id or body.session_id == "default":
+            raise HTTPException(422, "session_id is required for a live demonstration run")
         key = demo.DemoSessions.key(_owner(request), body.session_id)
         provenance = demo.provenance_stamp(ready, _demo_household_root())
         lease = demo_sessions.begin(key)
@@ -2545,6 +2547,8 @@ def setup_misumi_routes(
         ready, reason = demo.guest_ready(_demo_household_root())
         if not ready:
             raise HTTPException(409, reason)
+        if not session_id or session_id == "default":
+            raise HTTPException(422, "session_id is required to reset a demonstration session")
         cleared = demo_sessions.reset(demo.DemoSessions.key(_owner(request), session_id))
         return {"reset": True, "session_events_cleared": cleared, "simulated_music": "fresh", "scope": "this demonstration session only",
                 "shared_operational_log": "untouched"}

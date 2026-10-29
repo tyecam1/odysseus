@@ -76,6 +76,8 @@ GUEST_SAFETY = {
 STATE_VARS = ("MISUMI_ROUTING_STATE_ROOT", "MISUMI_PERSONA_STATE_ROOT", "MISUMI_DIALOGUE_STATE_ROOT")
 DATA_VAR = "ODYSSEUS_DATA_DIR"
 _SCAN_LIMIT = 5000
+MAX_SESSION_LOG_BYTES = 32768
+MAX_SESSION_LOG_LINES = 50
 
 
 def _real(path: Any) -> str:
@@ -111,6 +113,9 @@ def verify_synthetic(household_root: Optional[Path], environ: Optional[Mapping[s
     root = _real(household_root)
     if not _marked(root):
         return False, f"the household root is not marked synthetic (no {SYNTHETIC_MARKER}); refusing to serve a guest from it"
+    approved = fixture_digest()
+    if not approved or tree_digest(Path(root)) != approved:
+        return False, "the household root's content is not the approved synthetic fixture (a marker alone is not enough)"
     for var in DOMAIN_ROOT_VARS["misumi"]:
         value = str(env.get(var, "")).strip()
         if value and not (_inside(_real(value), root) or _marked(_real(value))):
@@ -230,7 +235,7 @@ class DemoSessions:
 
     @staticmethod
     def key(owner: Optional[str], session_id: Optional[str]) -> str:
-        return hashlib.sha256(f"{owner or ''}\0{session_id or 'default'}".encode("utf-8")).hexdigest()[:24]
+        return hashlib.sha256(f"{owner or ''}\0{session_id or ''}".encode("utf-8")).hexdigest()[:24]
 
     def _path(self, key: str, generation: int) -> Path:
         return self.directory / f"{key}-{generation}.jsonl"
@@ -253,8 +258,19 @@ class DemoSessions:
             self._evict()
             return DemoLease(self, key, entry, entry.generation, self._path(key, entry.generation))
 
+    def _trim(self, path: Path) -> None:
+        """A session's log keeps only its most recent records (bounded storage); the shared operational log is never trimmed."""
+        try:
+            if path.is_file() and path.stat().st_size > 0:
+                lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+                if len(lines) > MAX_SESSION_LOG_LINES or path.stat().st_size > MAX_SESSION_LOG_BYTES:
+                    path.write_text("\n".join(lines[-MAX_SESSION_LOG_LINES:]) + "\n", encoding="utf-8", newline="\n")
+        except OSError:
+            pass
+
     def finish(self, lease: DemoLease) -> None:
         with self._lock:
+            self._trim(lease.path)
             lease.entry.active = max(0, lease.entry.active - 1)
             if lease.entry.gone or lease.entry.generation != lease.generation:
                 lease.path.unlink(missing_ok=True)
@@ -277,7 +293,9 @@ class DemoSessions:
 
 _PRIVATE_LOOKING = re.compile(
     r"(?:[A-Za-z]:\\|/home/|/Users/|/etc/|/var/|/tmp/|~/|\.ts\.net|\bBearer\s|\body_[A-Za-z0-9]{6,}|BEGIN [A-Z ]*KEY|"
-    r"[\w.+-]+@[\w-]+\.[\w.]+|\b\d{1,3}(?:\.\d{1,3}){3}\b|(?i:password\s*[:=]))")
+    r"[\w.+-]+@[\w-]+\.[\w.]+|\b\d{1,3}(?:\.\d{1,3}){3}\b|(?i:(?:password|passwd|secret|api[_-]?key|token)\s*[:=])|"
+    r"\bsk-[A-Za-z0-9_-]{16,}|\bgh[pousr]_[A-Za-z0-9]{20,}|\bAKIA[0-9A-Z]{16}\b|\bxox[baprs]-[A-Za-z0-9-]{10,}|\beyJ[A-Za-z0-9_-]{10,}\.|"
+    r"\b[A-Za-z0-9]{40,}\b)")
 
 
 def _strings(value: Any):
@@ -294,6 +312,12 @@ def _strings(value: Any):
 
 def fixture_files() -> frozenset:
     return frozenset(p.relative_to(FIXTURE).as_posix() for p in FIXTURE.rglob("*") if p.is_file() and p.name != SYNTHETIC_MARKER)
+
+
+_STAMP_KEYS = frozenset({"synthetic_verified", "marker", "fixture_sha256", "checked"})
+_CAPTURE_KEYS = frozenset({"recorder", "source_revision", "fixture_sha256", "attempts"})
+_RECORDING_KEYS = frozenset({"schema", "mode", "execution", "labels", "scenario", "request", "observed", "guest_safety", "offline_evaluations",
+                             "shadow_proposal", "provenance", "evidence_review", "capture", "recorded_at"})
 
 
 def validate_recording(data: Any, scenario_id: str) -> Tuple[bool, str]:
@@ -327,7 +351,12 @@ def validate_recording(data: Any, scenario_id: str) -> Tuple[bool, str]:
     encoded = json.dumps(data, ensure_ascii=False)
     if len(encoded) > 65536:
         return False, "recording is larger than a demonstration record"
-    for text in _strings(data):
+    if set(data) - _RECORDING_KEYS or set(stamp) - _STAMP_KEYS or set(capture) - _CAPTURE_KEYS:
+        return False, "recording has fields outside the recording contract"
+    scanned = {key: value for key, value in data.items() if key not in ("provenance", "capture")}
+    scanned["provenance"] = {k: v for k, v in stamp.items() if k not in ("marker", "fixture_sha256")}   # the digests are hex by design; every other field is scanned
+    scanned["capture"] = {k: v for k, v in capture.items() if k not in ("fixture_sha256", "source_revision")}
+    for text in _strings(scanned):
         if _PRIVATE_LOOKING.search(text):
             return False, "recording contains private-looking content"
     return True, "ok"

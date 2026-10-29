@@ -86,6 +86,7 @@ def run(client, scenario, mode="guest", scopes=None, owner=None, **extra):
     headers = {} if scopes is None else {"x-test-scopes": scopes}
     if owner:
         headers["x-test-owner"] = owner
+    extra.setdefault("session_id", "testsession0001")      # a live run needs an explicit session id; replay ignores it
     return client.post("/misumi/demo/run", json={"scenario_id": scenario, "mode": mode, **extra}, headers=headers)
 
 
@@ -567,10 +568,10 @@ def test_a_consultation_never_claims_it_improved_the_result():
 def test_the_live_provenance_stamp_carries_the_content_digest_of_the_household_actually_served(client):
     stamp = run(client, "food-stock", mode="developer").json()["provenance"]
     assert stamp["fixture_sha256"] == demo.fixture_digest() and len(stamp["fixture_sha256"]) == 64      # the test household is a copy of the fixture
-    (client.household / "household" / "extra.md").write_text("one more file", encoding="utf-8")        # any change to the served tree changes the digest
-    changed = run(client, "food-stock", mode="developer").json()["provenance"]
-    assert changed["synthetic_verified"] is True and changed["fixture_sha256"] != demo.fixture_digest()
     assert demo.provenance_stamp(False, client.household)["fixture_sha256"] is None
+    (client.household / "household" / "extra.md").write_text("one more file", encoding="utf-8")        # any change to the served tree changes the digest
+    assert demo.tree_digest(client.household) != demo.fixture_digest()
+    assert run(client, "food-stock").status_code == 409                                                   # ... and a changed household is not served to guests
 
 
 def test_guest_replay_is_rebuilt_from_an_allowlist_and_never_exposes_developer_only_fields(client, tmp_path, monkeypatch):
@@ -581,18 +582,26 @@ def test_guest_replay_is_rebuilt_from_an_allowlist_and_never_exposes_developer_o
     rec["observed"]["binding"]["admin"] = "developer only"
     rec["shadow_proposal"] = {"kind": "shadow_proposal", "proposal": {"decision": "team"}}
     rec["offline_evaluations"] = [{"title": "x"}]
+    # layer 1: the replay builder is an allowlist, whatever it is given
+    guest = demo.replay_from_recording(rec, mode="guest")
+    text = json.dumps(guest)
+    for secret in ("should never appear", "developer only", "internal_debug", "debug_trace", "phase_b_input", "source_revision", "capture"):
+        assert secret not in text, secret
+    assert guest["shadow_proposal"] is None and guest["offline_evaluations"] == [] and guest["observed"]["sources"] == []
+    assert guest["observed"]["kind"] == "replay" and guest["labels"]["replayed"] is True and guest["labels"]["live"] is False
+    # layer 2: a recording carrying fields outside the contract is not replayable at all
     folder = tmp_path / "recordings"
     folder.mkdir()
     (folder / "food-stock.json").write_text(json.dumps(rec), encoding="utf-8")
     monkeypatch.setattr(demo, "RECORDINGS_DIR", folder)
+    assert run(client, "food-stock", execution="replay").status_code == 404
+    # a contract-conforming recording replays for a guest without developer fields and for a developer with them
+    ok = _good_recording(client)
+    (folder / "food-stock.json").write_text(json.dumps(ok), encoding="utf-8")
     guest = run(client, "food-stock", execution="replay").json()
-    text = json.dumps(guest)
-    for secret in ("should never appear", "developer only", "internal_debug", "debug_trace", "phase_b_input", "source_revision"):
-        assert secret not in text, secret
-    assert guest["shadow_proposal"] is None and guest["offline_evaluations"] == [] and guest["observed"]["sources"] == []
-    assert guest["observed"]["kind"] == "replay" and guest["labels"]["replayed"] is True and guest["labels"]["live"] is False
+    assert guest["shadow_proposal"] is None and "phase_b_input" not in guest and "capture" not in guest
     dev = run(client, "food-stock", mode="developer", execution="replay").json()
-    assert dev["shadow_proposal"] is not None and "phase_b_input" not in dev and dev["observed"]["kind"] == "replay"
+    assert "phase_b_input" not in dev and dev["observed"]["kind"] == "replay"
 
 
 def test_replay_never_executes_a_provider_or_a_model(client, tmp_path, monkeypatch):
@@ -637,7 +646,8 @@ def test_the_catalogues_assessment_agrees_with_the_fixture():
 
 def test_a_missing_expected_record_is_reported_as_unavailable_not_filled_in(client):
     (client.household / "household" / "shopping-list.md").write_text("# nothing here\n", encoding="utf-8")
-    review = run(client, "evidence-anomaly", mode="developer").json()["evidence_review"]
+    scenario = next(s for s in demo.load_scenarios() if s["id"] == "evidence-anomaly")
+    review = demo.evidence_review(scenario, client.household)      # the review function itself (a changed root is refused for guests, above)
     assert review["complete"] is False and review["assessment"] == "unavailable" and review["needed"] == []
 
 
@@ -670,3 +680,68 @@ def test_a_guest_is_never_shown_a_model_endpoints_host_or_port():
     guest = demo.build_inspection(scenario, mode="guest", **common)
     assert guest["observed"]["binding"]["backend"] == "model endpoint /api/chat" and "127.0.0.1" not in json.dumps(guest)
     assert demo.build_inspection(scenario, mode="developer", **common)["observed"]["binding"]["backend"] == "http://127.0.0.1:11434/api/chat"
+
+
+def test_a_copied_marker_on_a_real_looking_household_is_not_enough(tmp_path, monkeypatch):
+    c = _client(tmp_path, monkeypatch)
+    (c.household / "household" / "food" / "stock.yaml").write_text("items:\n  - name: real private item\n", encoding="utf-8")
+    assert (c.household / demo.SYNTHETIC_MARKER).is_file()
+    assert "not the approved synthetic fixture" in _guest_reason(c)["reason"] and _guest_reason(c)["available"] is False
+    assert run(c, "food-stock").status_code == 409 and c.post("/misumi/demo/reset?session_id=abc").status_code == 409
+
+
+def test_an_omitted_or_default_session_id_is_refused_so_visitors_cannot_share_one(client):
+    assert client.post("/misumi/demo/run", json={"scenario_id": "food-stock", "mode": "guest"}).status_code == 422
+    assert client.post("/misumi/demo/run", json={"scenario_id": "food-stock", "mode": "guest", "session_id": "default"}).status_code == 422
+    assert client.post("/misumi/demo/reset").status_code == 422
+    assert client.post("/misumi/demo/reset?session_id=default").status_code == 422
+    assert demo.DemoSessions.key("o", None) != demo.DemoSessions.key("o", "default")
+
+
+def test_a_sessions_event_file_is_bounded(tmp_path):
+    sessions = demo.DemoSessions(tmp_path / "s")
+    lease = sessions.begin(sessions.key("o", "a"))
+    lease.path.parent.mkdir(parents=True, exist_ok=True)
+    lease.path.write_text("".join(json.dumps({"n": i, "pad": "x" * 600}) + "\n" for i in range(500)), encoding="utf-8")
+    sessions.finish(lease)
+    lines = lease.path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == demo.MAX_SESSION_LOG_LINES and json.loads(lines[-1])["n"] == 499
+
+
+# Credential-shaped samples are assembled at run time so the source holds no literal that a secret scanner (or a reader) could mistake for a real one.
+_SECRET_SAMPLES = [
+    "sk" + "-" + "1234567890" + "abcdefghijklmnop", "gh" + "p_" + "abcdefghijklmnopqrstuvwx", "AK" + "IA" + "ABCDEFGHIJKLMNOP",
+    "xo" + "xb-" + "1234567890-abcdef", "ey" + "JhbGciOiJIUzI1NiJ9" + ".payload", "api_" + "key = hunter2", "a" * 44, "tok" + "en: abc",
+]
+
+
+@pytest.mark.parametrize("secret", _SECRET_SAMPLES)
+def test_credential_shaped_text_is_never_replayable(client, secret):
+    good = _good_recording(client)
+    assert demo.validate_recording(good, "food-stock")[0] is True      # the 64-hex digests in provenance/capture are not mistaken for secrets
+    good["observed"]["text"] = f"the answer mentions {secret} in passing"
+    assert demo.validate_recording(good, "food-stock") == (False, "recording contains private-looking content")
+
+
+def test_a_session_log_is_trimmed_by_record_count_even_when_small(tmp_path):
+    sessions = demo.DemoSessions(tmp_path / "s")
+    lease = sessions.begin(sessions.key("o", "a"))
+    lease.path.parent.mkdir(parents=True, exist_ok=True)
+    lease.path.write_text("".join(f'{{"n":{i}}}\n' for i in range(51)), encoding="utf-8")        # 51 short records, well under the byte limit
+    assert lease.path.stat().st_size < demo.MAX_SESSION_LOG_BYTES
+    sessions.finish(lease)
+    lines = lease.path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 50 and json.loads(lines[0])["n"] == 1 and json.loads(lines[-1])["n"] == 50
+
+
+def test_provenance_and_capture_are_validated_field_by_field_and_carry_no_extra_text(client):
+    good = _good_recording(client)
+    assert demo.validate_recording(good, "food-stock") == (True, "ok")
+    for where, key in (("provenance", "operator_note"), ("capture", "operator_note"), (None, "operator_note")):
+        bad = json.loads(json.dumps(good))
+        (bad[where] if where else bad)[key] = "password: hunter2"
+        assert demo.validate_recording(bad, "food-stock") == (False, "recording has fields outside the recording contract"), (where, key)
+    for where, key in (("provenance", "checked"), ("capture", "recorder")):
+        bad = json.loads(json.dumps(good))
+        bad[where][key] = "token: abc123"
+        assert demo.validate_recording(bad, "food-stock")[0] is False, (where, key)
