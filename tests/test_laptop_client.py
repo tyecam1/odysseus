@@ -30,6 +30,7 @@ def test_pyproject_declares_stdlib_only_console_script():
     import tomllib
     data = tomllib.loads(PYPROJECT_PATH.read_text(encoding="utf-8"))
     assert data["project"]["scripts"]["aoteru"] == "aoteru:main"
+    assert data["project"]["scripts"]["am"] == "aoteru:main"
     assert data["project"].get("dependencies") == []
     assert data["tool"]["setuptools"]["py-modules"] == ["aoteru"]
 
@@ -46,6 +47,60 @@ def test_client_is_stdlib_only():
         elif isinstance(node, ast.ImportFrom) and node.module:
             found.add(node.module.split(".")[0])
     assert found <= STDLIB, f"non-stdlib import(s) found: {found - STDLIB}"
+
+
+
+def test_am_bare_text_is_conversation_not_estate_execution(client, monkeypatch, capsys):
+    captured = {}
+    def fake_request(cfg, method, path, body=None, timeout=30.0):
+        captured.update(method=method, path=path, body=body, timeout=timeout)
+        return {"status": 200, "body": {"text": "Shopping list confirmed.", "sources": []}}
+    monkeypatch.setattr(client, "_request", fake_request)
+    assert client.main(["What's on the shopping list?"]) == 0
+    assert captured["method"] == "POST"
+    assert captured["path"] == "/misumi/respond"
+    assert captured["body"] == {"prompt": "What's on the shopping list?", "persona": "auto"}
+    assert capsys.readouterr().out.strip() == "Shopping list confirmed."
+
+
+def test_am_chat_selects_persona_and_can_show_sources(client, monkeypatch, capsys):
+    seen = {}
+    def fake_request(cfg, method, path, body=None, timeout=30.0):
+        seen.update(path=path, body=body)
+        return {"status": 200, "body": {"text": "Use miso.", "sources": [{"path": "stock.yaml", "line": 3}]}}
+    monkeypatch.setattr(client, "_request", fake_request)
+    assert client.main(["chat", "Dinner?", "--persona", "sanji", "--json"]) == 0
+    assert seen["path"] == "/misumi/respond"
+    assert seen["body"]["persona"] == "sanji"
+    assert '"sources"' in capsys.readouterr().out
+
+
+def test_am_chat_scope_denial_does_not_fall_back_to_estate(client, monkeypatch, capsys):
+    paths = []
+    def fake_request(cfg, method, path, body=None, timeout=30.0):
+        paths.append(path)
+        return {"status": 403, "body": {"detail": "Forbidden"}}
+    monkeypatch.setattr(client, "_request", fake_request)
+    assert client.main(["a question"]) == 1
+    assert paths == ["/misumi/respond"]
+    assert "misumi:execute" in capsys.readouterr().out
+
+
+def test_am_chat_accepts_file_without_shell_quoting(client, monkeypatch, tmp_path):
+    prompt_path = tmp_path / "prompt.txt"
+    prompt_path.write_text('First line\n"What now?"', encoding="utf-8")
+    received = {}
+    def fake_request(cfg, method, path, body=None, timeout=30.0):
+        received["body"] = body
+        return {"status": 200, "body": {"text": "OK"}}
+    monkeypatch.setattr(client, "_request", fake_request)
+    assert client.main(["chat", "--objective-file", str(prompt_path)]) == 0
+    assert received["body"]["prompt"] == 'First line\n"What now?"'
+
+
+def test_am_without_args_shows_help(client, capsys):
+    assert client.main([]) == 0
+    assert "chat" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("argv", [
