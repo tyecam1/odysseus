@@ -26,6 +26,7 @@ import hashlib
 import itertools
 import os
 import threading
+import urllib.parse
 import re
 import socket
 import tempfile
@@ -417,6 +418,14 @@ def _consultations(response: Mapping[str, Any]) -> List[Dict[str, Any]]:
     return out
 
 
+def _backend_label(value: Any, guest: bool) -> Optional[str]:
+    """The backend as logged, except that a guest is never shown a model endpoint's host or port (the path alone says which API ran)."""
+    text = _clip(value, 80)
+    if guest and "://" in text:
+        return "model endpoint " + (urllib.parse.urlparse(text).path or "/")
+    return text or None
+
+
 def build_inspection(scenario: Mapping[str, Any], *, mode: str, execution: str, prompt: str, prompt_source: str,
                      preview: Optional[Mapping[str, Any]], response: Optional[Mapping[str, Any]], event: Optional[Mapping[str, Any]],
                      shadow: Optional[Mapping[str, Any]] = None, host: Optional[str] = None, error: Optional[str] = None,
@@ -442,7 +451,7 @@ def build_inspection(scenario: Mapping[str, Any], *, mode: str, execution: str, 
                  "source": _clip(response.get("persona_source"), 12), "method": _clip(routing.get("method"), 40), "reasons": reasons},
         "execution": {"kind": kind, "why": why, "source": _clip(response.get("source"), 24), "outcome": _clip(event.get("outcome"), 40)},
         "binding": {
-            "model": _clip(event.get("model"), 80) or None, "backend": _clip(event.get("backend"), 40) or None,
+            "model": _clip(event.get("model"), 80) or None, "backend": _backend_label(event.get("backend"), guest),
             "host": None if guest else (host or socket.gethostname()),
             "tools": list(dict.fromkeys([_clip(t, 60) for t in (event.get("selected_tools") or [])] + ([f"music.*:{_clip(music.get('provider'), 20)}"] if music else []))),
             "model_note": "no model was used for this answer" if kind == "deterministic" else None,

@@ -660,3 +660,13 @@ def test_the_committed_recordings_are_valid_cover_all_three_scenarios_and_name_a
         assert data["capture"]["fixture_sha256"] == demo.fixture_digest() and "phase_b_input" not in data
     assert client.get("/misumi/demo/scenarios").json()["replays"] == [s["id"] for s in demo.load_scenarios()]
     assert (demo.RECORDINGS_DIR / "superseded-20261029").is_dir()      # the earlier recordings are kept, never replayed
+
+
+def test_a_guest_is_never_shown_a_model_endpoints_host_or_port():
+    scenario = demo.load_scenarios()[1]
+    event = {"backend": "http://127.0.0.1:11434/api/chat", "model": "m", "outcome": "model", "latency_ms": 5}
+    response = {"text": "x", "source": "model", "persona": "sanji", "persona_source": "auto", "routing": {}, "sources": []}
+    common = dict(execution="live", prompt="p", prompt_source="catalogue-fixed", preview=None, response=response, event=event)
+    guest = demo.build_inspection(scenario, mode="guest", **common)
+    assert guest["observed"]["binding"]["backend"] == "model endpoint /api/chat" and "127.0.0.1" not in json.dumps(guest)
+    assert demo.build_inspection(scenario, mode="developer", **common)["observed"]["binding"]["backend"] == "http://127.0.0.1:11434/api/chat"
