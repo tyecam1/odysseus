@@ -243,3 +243,10 @@ def test_the_category_table_has_a_header_cell_for_every_row_cell(tmp_path):
     table = [line for line in block if line.startswith("|")]
     widths = {line.count("|") for line in table}
     assert len(widths) == 1, widths  # header, separator and every row have the same number of cells
+
+
+def test_a_negated_disagreement_is_not_a_conflict():
+    for prompt in ("The grocery bill and pantry do not disagree", "The grocery bill and pantry never disagree", "The bill and pantry don't disagree"):
+        assert propose(prompt)["decision"] == "solo", prompt
+    assert propose("The grocery bill and the pantry disagree")["decision"] == "team"
+    assert propose("The grocery bill and pantry do not agree")["decision"] == "team"

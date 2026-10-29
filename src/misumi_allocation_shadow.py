@@ -52,7 +52,7 @@ _CROSS_CHECK = re.compile(
     re.IGNORECASE,
 )
 # a statement of disagreement carries its own "not"; it is evidence of a conflict, not a negated request
-_DISAGREE = re.compile(r"\b(?:do|does|did)\s+not\s+(?:seem\s+to\s+)?(?:agree|match|add\s+up)\b|\bdisagree\w*\b", re.IGNORECASE)
+_DISAGREE = re.compile(r"\b(?:do|does|did)\s+not\s+(?:seem\s+to\s+)?(?:agree|match|add\s+up)\b|(?<!\bnot\s)(?<!\bnever\s)(?<!n\'t\s)\bdisagree\w*\b", re.IGNORECASE)
 _PEOPLE = r"(?:flat-?mates?|house-?mates?|guests?|visitors?|neighbou?rs?|everyone|everybody|people)"
 _PRIVACY = re.compile(
     rf"\b(?:record|log|listen|monitor|transcrib\w*|tape|bug)\w*\b[^.?!]*\b{_PEOPLE}\b|\bmicrophones?\b[^.?!]*\b{_PEOPLE}\b|"
