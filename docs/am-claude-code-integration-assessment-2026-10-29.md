@@ -16,13 +16,13 @@ The existing `aoteru` CLI is a compatibility alias for `am`. The package, `aoter
 
 | Invocation | Endpoint | Meaning | Minimum token scope |
 | --- | --- | --- | --- |
-| `am "question"` | `POST /misumi/respond` | Conversational assistant; persona `auto` | `misumi:execute` |
+| `am "question"` | `POST /misumi/respond` | Conversational assistant; persona `auto`; session `am-cli` | `misumi:execute` |
 | `am chat "question" --persona sanji` | `POST /misumi/respond` | Explicit persona; no new authority | `misumi:execute` |
 | `am chat "question" --json` | `POST /misumi/respond` | Full source/provenance fields | `misumi:execute` |
 | `am preflight "task"` | `POST /api/estate/preflight` | Routing/lease recommendation | `estate:read` or `estate:execute` |
 | `am ask "task"` | `POST /api/estate/run` | Task execution, not ordinary chat | `estate:execute` |
 
-The CLI never infers permission from persona identity. Unknown personas remain subject to the server's validation. Keep the prior `aoteru` entry point and existing config. Existing scripts and `AGENTS.md` references remain valid.
+The conversational CLI uses the explicit owner-scoped `am-cli` session key by default (overridable with `--session`), rather than submitting unrelated stateless requests. The CLI never infers permission from persona identity. Unknown personas remain subject to the server's validation. Keep the prior `aoteru` entry point and existing config. Existing scripts and `AGENTS.md` references remain valid.
 
 ## Claude Code: two different integration questions
 
