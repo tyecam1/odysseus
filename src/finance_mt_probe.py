@@ -36,6 +36,7 @@ import math
 import re
 import sys
 import time
+import unicodedata
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -53,7 +54,7 @@ except ImportError:  # pragma: no cover - dependency absent
     _idna = None
 
 PROBE_NAME = "finance-mt-probe"
-PROBE_VERSION = "0.8"
+PROBE_VERSION = "0.9"
 USER_AGENT = (
     f"{PROBE_NAME}/{PROBE_VERSION} (odysseus finance MT-00; "
     "household research, read-only public APIs; github.com/tyecam1)"
@@ -113,6 +114,9 @@ EVIDENCE_FIELDS = [
 _WS_RE = re.compile(r"\s+")
 _PUNCT_RE = re.compile(r"[^\w\s]")
 _MAX_TITLE_WORDS = 12
+# HN item ids are sequential integers (~4e7 today); anything outside
+# (0, 10^12] is not a plausible id, only a malformed feed entry
+_MAX_HN_ITEM_ID = 10**12
 
 # Common multi-part public suffixes where the registrable domain is the
 # last THREE labels (example.co.uk, not co.uk). Not a full Public Suffix
@@ -301,6 +305,20 @@ def normalize_title(
     return " ".join(words)
 
 
+def story_key_title(title: str) -> str:
+    """Punctuation-PRESERVING normalisation for the syndication story
+    key: NFKC + lowercase + whitespace collapse, full length. The label
+    normaliser strips punctuation, which collided DISTINCT titles
+    ("C++ 2026 release" and "C# 2026 release" both became
+    "c 2026 release"); for a key the safe direction is distinctness —
+    a punctuation difference keeps two stories apart (under-merge only
+    loses one dedup opportunity; over-merge destroys evidence)."""
+    if not isinstance(title, str):
+        return ""  # ill-typed feed field must not abort the source
+    text = unicodedata.normalize("NFKC", title).lower()
+    return " ".join(_WS_RE.sub(" ", text).strip().split())
+
+
 def parse_gdelt_seen(seendate: str) -> Optional[str]:
     # GDELT format 20261029T120000Z -> ISO-8601
     if not isinstance(seendate, str):
@@ -399,9 +417,11 @@ def collect_gdelt(
     deduped = 0
     deduped_syndication = 0
     topic_id = f"gdelt:{normalize_title(query)[:40]}"
+    malformed_articles = 0
     for art in articles:
         if not isinstance(art, dict):
-            deduped += 1
+            # a scalar/None entry is malformed data, not a duplicate
+            malformed_articles += 1
             continue
         raw_url = art.get("url")
         source_url = raw_url if isinstance(raw_url, str) and raw_url else ""
@@ -420,9 +440,10 @@ def collect_gdelt(
         domain = registrable_domain(source_url)
         if "." not in domain:
             domain = registrable_domain(art.get("domain") or "")
-        # full normalised title (no word cap): the story key must not
-        # merge titles that first differ beyond word 12
-        title = normalize_title(art.get("title") or "", max_words=None)
+        # punctuation-preserving FULL title: the story key must not
+        # merge titles that first differ beyond word 12 NOR titles that
+        # differ only in stripped punctuation ("C++" vs "C#")
+        title = story_key_title(art.get("title") or "")
         if domain != "unknown" and title:
             story_key = (domain, title)
         else:
@@ -471,8 +492,16 @@ def collect_gdelt(
             )
         )
     return SourceResult(
-        SOURCE_GDELT, "ok", records, http_status=status, retries=used_retries,
+        SOURCE_GDELT, "ok" if records else "failed", records,
+        http_status=status, retries=used_retries,
         deduped_exact=deduped, deduped_syndication=deduped_syndication,
+        error=None if records else (
+            f"no usable articles (articles={len(articles)}, "
+            f"malformed={malformed_articles}, deduped_exact={deduped}, "
+            f"deduped_syndication={deduped_syndication}) — a source "
+            "supplying zero evidence is NOT healthy and cannot count "
+            "toward the bounded snapshot"
+        ),
     )
 
 
@@ -505,8 +534,13 @@ def collect_hackernews(
         # int(item_id) on a float('inf')/huge-float id raises
         # OverflowError — a malformed topstories entry is skipped and
         # counted, never allowed to abort the source. bool is an int
-        # subclass but is not an item id.
-        if not isinstance(item_id, int) or isinstance(item_id, bool):
+        # subclass but is not an item id; negative or implausibly huge
+        # ints are equally malformed entries, not fetchable items.
+        if (
+            not isinstance(item_id, int)
+            or isinstance(item_id, bool)
+            or not 0 < item_id <= _MAX_HN_ITEM_ID
+        ):
             errors += 1
             continue
         try:
@@ -557,14 +591,23 @@ def collect_hackernews(
                     "platform engagement, not demand"
                 ),
                 source_access_rights=SOURCE_ACCESS_RIGHTS[SOURCE_HN],
-                source_health=(
-                    f"topstories http {status}; items fetched={len(records) + 1};"
-                    f" item errors={errors}"
-                ),
+                # placeholder: overwritten after the loop so the count
+                # reflects ALL skipped ids, not just those before this
+                # record was appended
+                source_health="pending (final counts applied post-loop)",
                 uncertainty="medium (scores self-selected by community voting)",
                 window=collected_at[:10],
             )
         )
+    # final error count applied to EVERY record post-loop: an in-loop
+    # f-string froze the count as of each record's append, understating
+    # skips that happened after it
+    health = (
+        f"topstories http {status}; items={len(records)}; "
+        f"item errors={errors}"
+    )
+    for rec in records:
+        rec.source_health = health
     return SourceResult(
         SOURCE_HN, "ok" if records else "failed", records,
         http_status=status, retries=used_retries,
@@ -694,7 +737,14 @@ def collect_kraken(
         "last_volume": parsed[-1][2] if parsed else None,
     }
     return SourceResult(
-        SOURCE_KRAKEN, "ok", records, http_status=status, retries=used_retries
+        SOURCE_KRAKEN, "ok" if records else "failed", records,
+        http_status=status, retries=used_retries,
+        error=None if records else (
+            f"no usable candles (candles={len(candles)}, "
+            f"skipped_malformed={skipped_candles}) — a source supplying "
+            "zero evidence is NOT healthy and cannot count toward the "
+            "bounded snapshot"
+        ),
     ), summary
 
 

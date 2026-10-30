@@ -707,9 +707,10 @@ def test_non_finite_feed_numbers_never_reach_records():
         pair="BTCUSD", collected_at="2026-10-30T00:00:00Z",
         first_seen_index={}, fetch=lambda url, timeout: payload,
     )
-    assert kr.status == "ok"
+    assert kr.status == "failed"  # zero usable candles = NOT healthy
     assert kr.records == []
     assert summary["skipped_malformed_candles"] == 2
+    assert "no usable candles" in (kr.error or "")
     assert all(
         math.isfinite(v) for r in kr.records
         for v in (r.raw_metric, r.normalized_metric or 0.0)
@@ -918,3 +919,122 @@ def test_hosted_platform_same_title_never_merges():
     assert len(result.records) == 2
     domains = {r.source.split(":", 1)[1] for r in result.records}
     assert domains == {"alpha.github.io", "beta.github.io"}
+
+
+# ---------------------------------------------------------------------
+# round-10 pins: punctuation-preserving story keys, zero-evidence
+# sources are failed, honest HN id/error accounting
+# ---------------------------------------------------------------------
+
+
+def test_punctuation_only_title_difference_never_merges():
+    # "C++ 2026 release" and "C# 2026 release" both normalised to
+    # "c 2026 release" under punctuation stripping and merged; the
+    # story key now preserves punctuation (NFKC + lower + ws only)
+    payload = {"articles": [
+        {"url": "https://one.example/cpp", "title": "C++ 2026 release"},
+        {"url": "https://one.example/csharp", "title": "C# 2026 release"},
+    ]}
+    result = mp.collect_gdelt(
+        "bitcoin", max_records=10, collected_at="2026-10-30T00:00:00Z",
+        first_seen_index={}, fetch=lambda url, timeout: payload,
+    )
+    assert result.status == "ok"
+    assert result.deduped_syndication == 0
+    assert len(result.records) == 2
+
+
+def test_story_key_title_is_punctuation_preserving_nfkc():
+    assert mp.story_key_title("C++ 2026 Release") == "c++ 2026 release"
+    assert mp.story_key_title("C# 2026 Release") == "c# 2026 release"
+    assert mp.story_key_title("C++ 2026 Release") != mp.story_key_title(
+        "C# 2026 Release")
+    # fullwidth forms fold to ONE spelling (NFKC), so Unicode decoys
+    # cannot split one publisher's identical headline
+    assert mp.story_key_title("Ｂｉｔｃｏｉｎ Ｔｏｐｓ ５０ｋ") == mp.story_key_title(
+        "Bitcoin Tops 50k")
+    assert mp.story_key_title(["not", "a", "title"]) == ""
+    # labels keep the word-capped, punctuation-stripped form
+    assert mp.normalize_title("C++ 2026 release") == "c 2026 release"
+
+
+def test_all_malformed_gdelt_articles_fail_the_source():
+    # scalar entries are malformed data (not duplicates); a source that
+    # supplies ZERO usable records is failed and cannot count toward
+    # the bounded 2/3-healthy snapshot
+    payload = {"articles": [1, "x", None]}
+    result = mp.collect_gdelt(
+        "bitcoin", max_records=10, collected_at="2026-10-30T00:00:00Z",
+        first_seen_index={}, fetch=lambda url, timeout: payload,
+    )
+    assert result.status == "failed"
+    assert result.records == []
+    assert "no usable articles" in (result.error or "")
+    assert "malformed=3" in (result.error or "")
+
+
+def test_empty_gdelt_articles_fail_the_source():
+    # a 200 artlist with ZERO articles supplies no evidence either —
+    # failed, never "ok with 0 records" (cannot count toward 2/3)
+    payload = {"articles": []}
+    result = mp.collect_gdelt(
+        "bitcoin", max_records=10, collected_at="2026-10-30T00:00:00Z",
+        first_seen_index={}, fetch=lambda url, timeout: payload,
+    )
+    assert result.status == "failed"
+    assert "no usable articles" in (result.error or "")
+    assert "articles=0" in (result.error or "")
+
+
+def test_zero_valid_candles_fail_the_kraken_source():
+    payload = {"error": [], "result": {"XXBTZUSD": [
+        [1790000000, "100", "101", "99", "1e999", "100.2", "12.5", 57],
+    ], "last": 1790003600}}
+    result, summary = mp.collect_kraken(
+        pair="BTCUSD", collected_at="2026-10-30T00:00:00Z",
+        first_seen_index={}, fetch=lambda url, timeout: payload,
+    )
+    assert result.status == "failed"
+    assert "no usable candles" in (result.error or "")
+    assert summary["skipped_malformed_candles"] == 1
+
+
+def test_hn_health_counts_errors_after_the_record():
+    # ids [7, True, "bad"]: the record for 7 previously froze
+    # "item errors=0" because both skips happened AFTER its append
+    good = {"id": 7, "title": "Good", "time": 1790000000, "score": 10}
+
+    def fetch(url, timeout):
+        if "topstories" in url:
+            return [7, True, "bad"]
+        return good
+
+    hn = mp.collect_hackernews(
+        top_n=3, collected_at="2026-10-30T00:00:00Z", first_seen_index={},
+        fetch=fetch,
+    )
+    assert hn.status == "ok"
+    health = hn.records[0].to_contract()["source_health"]
+    assert "item errors=2" in health
+    assert "items=1" in health
+
+
+def test_hn_implausible_int_ids_skipped():
+    # negative and 10**400 integer ids are malformed feed entries, not
+    # fetchable items — skipped and counted, never fetched
+    fetched = []
+
+    def fetch(url, timeout):
+        if "topstories" in url:
+            return [-5, 10**400, 7]
+        fetched.append(url)
+        return {"id": 7, "title": "Good", "time": 1790000000, "score": 1}
+
+    hn = mp.collect_hackernews(
+        top_n=3, collected_at="2026-10-30T00:00:00Z", first_seen_index={},
+        fetch=fetch,
+    )
+    assert hn.status == "ok"
+    assert len(hn.records) == 1
+    assert len(fetched) == 1  # only item 7 was ever fetched
+    assert "item errors=2" in hn.records[0].to_contract()["source_health"]
