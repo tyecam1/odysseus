@@ -54,7 +54,7 @@ except ImportError:  # pragma: no cover - dependency absent
     _idna = None
 
 PROBE_NAME = "finance-mt-probe"
-PROBE_VERSION = "0.9"
+PROBE_VERSION = "0.10"
 USER_AGENT = (
     f"{PROBE_NAME}/{PROBE_VERSION} (odysseus finance MT-00; "
     "household research, read-only public APIs; github.com/tyecam1)"
@@ -425,7 +425,13 @@ def collect_gdelt(
             continue
         raw_url = art.get("url")
         source_url = raw_url if isinstance(raw_url, str) and raw_url else ""
-        if not source_url or source_url in seen_urls:
+        if not source_url:
+            # an article with no locatable URL is malformed data (it
+            # cannot be cited or deduplicated), NOT a duplicate of
+            # anything — count it honestly
+            malformed_articles += 1
+            continue
+        if source_url in seen_urls:
             deduped += 1
             continue
         seen_urls.add(source_url)
@@ -551,6 +557,9 @@ def collect_hackernews(
         if not isinstance(item, dict) or not isinstance(
             item.get("title"), str
         ) or not item.get("title"):
+            # a fetched item with no usable title is an item-level
+            # failure: count it, never silently drop it
+            errors += 1
             continue
         url_field = item.get("url")
         source_url = (
@@ -611,7 +620,11 @@ def collect_hackernews(
     return SourceResult(
         SOURCE_HN, "ok" if records else "failed", records,
         http_status=status, retries=used_retries,
-        error=None if records else "no items",
+        error=None if records else (
+            f"no usable items (ids={len(ids[:top_n])}, "
+            f"item errors={errors}) — a source supplying zero evidence "
+            "is NOT healthy and cannot count toward the bounded snapshot"
+        ),
     )
 
 

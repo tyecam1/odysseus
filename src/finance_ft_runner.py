@@ -40,11 +40,12 @@ import stat
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 RUNNER_NAME = "finance-ft-runner"
-RUNNER_VERSION = "0.3"
+RUNNER_VERSION = "0.4"
 
 # Official image pinned by digest (tag ``stable`` resolved 2026-10-29,
 # image created 2026-09-29, Python 3.14.7 / CCXT 4.5.84). The guard
@@ -439,6 +440,23 @@ def run_command(argv: List[str], *, timeout_s: float, log_path: Optional[Path] =
     }
 
 
+def _stop_trailer(stop_rc: int, prior_output: str) -> str:
+    """Trailer the runner appends to the cycle log AFTER `docker stop`.
+    Carries the stop returncode (FT-00 acceptance evidence the raw bot
+    log cannot contain) and a digest of everything BEFORE the trailer,
+    so any later truncation or editing of the committed log is
+    detectable against this line."""
+    digest = hashlib.sha256(
+        prior_output.encode("utf-8", "replace")
+    ).hexdigest()[:16]
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return (
+        f"\n=== dry-run-smoke trailer (appended by runner v{RUNNER_VERSION} "
+        f"after docker stop --time 60) at {stamp}: stop rc={stop_rc}; "
+        f"prior-output sha256[:16]={digest} ===\n"
+    )
+
+
 def dry_run_smoke(
     *,
     image_ref: str,
@@ -508,6 +526,7 @@ def dry_run_smoke(
             )
             runner.run(["docker", "rm", "-f", name],
                        capture_output=True, text=True, timeout=60)
+            output += _stop_trailer(stop.returncode, output)
             log_path.write_text(output, encoding="utf-8")
             return {
                 "ok": False,
@@ -530,6 +549,12 @@ def dry_run_smoke(
         )
         runner.run(["docker", "rm", "-f", name],
                    capture_output=True, text=True, timeout=60)
+        # The stop outcome is itself FT-00 acceptance evidence: append a
+        # trailer AFTER the container output so the COMMITTED log proves
+        # the SIGTERM stop result. Without it the log ends at a RUNNING
+        # heartbeat and a failed stop would look identical to a clean
+        # one (round-10 review finding 1).
+        output += _stop_trailer(stop.returncode, output)
         log_path.write_text(output, encoding="utf-8")
         evidence.append(
             {

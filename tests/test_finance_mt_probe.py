@@ -1038,3 +1038,65 @@ def test_hn_implausible_int_ids_skipped():
     assert len(hn.records) == 1
     assert len(fetched) == 1  # only item 7 was ever fetched
     assert "item errors=2" in hn.records[0].to_contract()["source_health"]
+
+
+# ---------------------------------------------------------------------
+# round-11 pins: honest missing-URL and titleless-item accounting
+# ---------------------------------------------------------------------
+
+
+def test_gdelt_missing_url_counted_malformed_not_deduped():
+    # three articles with no locatable URL previously showed
+    # "malformed=0, deduped_exact=3" — a false diagnosis
+    payload = {"articles": [
+        {"title": "no url one"},
+        {"url": "", "title": "empty url"},
+        {"url": 12345, "title": "int url"},
+    ]}
+    result = mp.collect_gdelt(
+        "bitcoin", max_records=10, collected_at="2026-10-30T00:00:00Z",
+        first_seen_index={}, fetch=lambda url, timeout: payload,
+    )
+    assert result.status == "failed"
+    err = result.error or ""
+    assert "malformed=3" in err
+    assert "deduped_exact=0" in err
+
+
+def test_hn_titleless_item_counted_in_errors():
+    # a fetched item with no usable title is an item-level failure —
+    # counted, never silently dropped from the error total
+    items = {
+        7: {"id": 7, "title": "Good", "time": 1790000000, "score": 1},
+        8: {"id": 8, "title": None, "time": 1790000000, "score": 1},
+        9: {"id": 9},
+    }
+
+    def fetch(url, timeout):
+        if "topstories" in url:
+            return [7, 8, 9]
+        item_id = int(url.rsplit("/", 1)[-1].split(".")[0])
+        return items.get(item_id)
+
+    hn = mp.collect_hackernews(
+        top_n=3, collected_at="2026-10-30T00:00:00Z", first_seen_index={},
+        fetch=fetch,
+    )
+    assert hn.status == "ok"
+    assert len(hn.records) == 1
+    assert "item errors=2" in hn.records[0].to_contract()["source_health"]
+
+
+def test_hn_all_failed_error_names_counts():
+    # every id fails to fetch: the source error carries the counts,
+    # not just "no items"
+    hn = mp.collect_hackernews(
+        top_n=2, collected_at="2026-10-30T00:00:00Z", first_seen_index={},
+        fetch=lambda url, timeout: (
+            [11, 12] if "topstories" in url else None
+        ),
+    )
+    assert hn.status == "failed"
+    err = hn.error or ""
+    assert "no usable items" in err
+    assert "ids=2" in err and "item errors=2" in err

@@ -593,3 +593,70 @@ def test_strategy_and_config_name_grammar_guarded():
             "dry-run", image_ref=GOOD_IMAGE, user_data_dir=Path("/w"),
             config_name="a b.json",
         )
+
+
+# ---------------------------------------------------------------------
+# round-11 pins: the stop outcome is evidence IN the committed log
+# ---------------------------------------------------------------------
+
+
+class _FakeProc:
+    def __init__(self, returncode=0, stdout="", stderr=""):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+class _FakeDocker:
+    """Minimal docker double for dry_run_smoke: logs carry the ready
+    marker, stop returns the scripted rc."""
+
+    def __init__(self, marker, stop_rc=0):
+        self.marker = marker
+        self.stop_rc = stop_rc
+
+    def run(self, argv, **kwargs):
+        if len(argv) > 1 and argv[1] == "logs":
+            return _FakeProc(0, stdout=self.marker)
+        if len(argv) > 1 and argv[1] == "stop":
+            return _FakeProc(self.stop_rc)
+        return _FakeProc(0)  # docker run (start) / rm
+
+
+def test_smoke_log_carries_stop_trailer(tmp_path):
+    # round-10 finding 1: the cycle logs ended at a RUNNING heartbeat;
+    # a failed stop was indistinguishable from a clean one. The runner
+    # now appends a trailer AFTER docker stop carrying the stop rc and
+    # a digest of the prior output.
+    logs = tmp_path / "logs"
+    result = ft.dry_run_smoke(
+        image_ref=GOOD_IMAGE, user_data_dir=tmp_path,
+        strategy="SMACrossBaseline", log_dir=logs,
+        config_name="config-ft00.json", cycles=2,
+        ready_markers=["BOT-READY"], post_ready_s=0,
+        runner=_FakeDocker(marker="BOT-READY"),
+    )
+    assert result["ok"] is True
+    for ev in result["evidence"]:
+        assert ev["stop_returncode"] == 0
+    for cycle in (1, 2):
+        text = (logs / f"dryrun-cycle{cycle}.log").read_text(encoding="utf-8")
+        assert "dry-run-smoke trailer" in text
+        assert "stop rc=0" in text
+        assert "prior-output sha256[:16]=" in text
+        # trailer is the LAST thing in the committed log
+        assert text.rstrip().endswith("===")
+
+
+def test_smoke_failed_stop_leaves_rc_in_log(tmp_path):
+    logs = tmp_path / "logs"
+    result = ft.dry_run_smoke(
+        image_ref=GOOD_IMAGE, user_data_dir=tmp_path,
+        strategy="SMACrossBaseline", log_dir=logs,
+        config_name="config-ft00.json", cycles=1,
+        ready_markers=["BOT-READY"], post_ready_s=0,
+        runner=_FakeDocker(marker="BOT-READY", stop_rc=1),
+    )
+    assert result["ok"] is False and result["stage"] == "stop"
+    text = (logs / "dryrun-cycle1.log").read_text(encoding="utf-8")
+    assert "stop rc=1" in text  # the failure is IN the committed log
