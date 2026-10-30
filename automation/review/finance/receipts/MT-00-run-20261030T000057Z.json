@@ -1,0 +1,40 @@
+{
+  "goal_id": "MT-00",
+  "kind": "run",
+  "status": "pass",
+  "observed_at": "2026-10-30T00:00:57Z",
+  "run_id": "mt00-lab-20261030T000057Z",
+  "code_commit": "c3df74b9c3a95ac37b473cbc224a5c0c5ed3a0d7",
+  "verifier": "self-attested-executor (pending independent verification)",
+  "source_config_hash": "6ae41b08b4f1903e688b651f843666ff7267164075d19e6509ec6fe10e5d05b5",
+  "data_snapshot_ids": [
+    "automation/review/finance/mt00/snapshot-20261030T000057Z.json"
+  ],
+  "source_access_audit_id": "automation/review/finance/mt00/run-manifest-20261030T000057Z.json",
+  "evaluation_artifacts": [
+    "automation/review/finance/mt00/digest-20261030T000057Z.md"
+  ],
+  "notes": "Live MT-00 probe on hz2-workstation (lab) against the round-6 review-fix code (commit c3df74b, probe v0.6): GDELT DOC 2.0 + HN official API + Kraken public spot candles, all public/no-auth/no-key. Sources at 20261030T000057Z: HN ok (25 records), Kraken ok (24), GDELT FAILED (0 records; GDELT is in a 429 window this run \u2014 recorded honestly in source_health; 2/3 healthy satisfies the bounded snapshot, GDELT cadence under scheduling stays an FT/MT-01 question). Round-6 fixes live in this run: WITHOUT the idna package a non-ASCII host now classifies 'unknown' instead of falling back to IDNA 2003 (which maps fa\u00df.de to fass.de and splits one publisher into two domains); ill-typed GDELT feed fields (int/list url or title, non-string seendate/domain/sourcecountry) can no longer abort the source \u2014 the unusable record is skipped and the usable one survives; records whose domain is 'unknown' (malformed or unparseable URL) get UNIQUE story keys so syndication dedup can never false-merge two distinct publishers that share a title; HN items degrade per-field (bad time/score/url never abort the source) and structurally bad Kraken candles are skipped and counted, never fatal; first_seen_at history must now be CANONICAL zero-padded ISO-8601 Z (a parseable-but-unpadded 2026-9-30 value would break lexicographic ordering and retain the wrong first-seen time). First-seen carry-forward live-proven for text (HN 23/25 carry earlier first_seen) AND candles (Kraken 23/24). Syndication dedup on (registrable domain, normalised title); GDELT published_at stays null (seendate is retrieval time, recorded in uncertainty). Excluded by policy: x-cookies, private reddit, youtube internals, retailer scraping, paid APIs. Interpretation reserved for persona L.",
+  "artifacts": [
+    {
+      "label": "mt-probe-code",
+      "path": "repo:src/finance_mt_probe.py",
+      "sha256": "de3acbd4028be08870f5a6f77998535c6d2b9433a36a49ca4a89064d503d7311"
+    },
+    {
+      "label": "mt-run-manifest",
+      "path": "repo:automation/review/finance/mt00/run-manifest-20261030T000057Z.json",
+      "sha256": "6ae41b08b4f1903e688b651f843666ff7267164075d19e6509ec6fe10e5d05b5"
+    },
+    {
+      "label": "mt-snapshot",
+      "path": "repo:automation/review/finance/mt00/snapshot-20261030T000057Z.json",
+      "sha256": "f027b21750acf9323047d057707b87dc6ebe734be5f15f2fde39780d0965ca6b"
+    },
+    {
+      "label": "mt-digest",
+      "path": "repo:automation/review/finance/mt00/digest-20261030T000057Z.md",
+      "sha256": "30982c15b1ab98c3c90ed66870caa9e105bcb67fb52d3a564c04437bea2b101d"
+    }
+  ]
+}
