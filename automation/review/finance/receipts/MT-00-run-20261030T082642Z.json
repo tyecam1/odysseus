@@ -1,0 +1,45 @@
+{
+  "goal_id": "MT-00",
+  "kind": "run",
+  "status": "pass",
+  "observed_at": "2026-10-30T08:26:42Z",
+  "run_id": "mt00-lab-20261030T082642Z",
+  "code_commit": "42cc96120e7f08075386c79ceb2a30af5779bbdf",
+  "verifier": "self-attested-executor (pending independent verification)",
+  "source_config_hash": "b6a1872f76120e691f00427969b5f522383ad02c753cdada051a1aa94325d57f",
+  "data_snapshot_ids": [
+    "automation/review/finance/mt00/snapshot-20261030T082642Z.json"
+  ],
+  "source_access_audit_id": "automation/review/finance/mt00/run-manifest-20261030T082642Z.json",
+  "evaluation_artifacts": [
+    "automation/review/finance/mt00/digest-20261030T082642Z.md"
+  ],
+  "notes": "Live MT-00 probe on hz2-workstation (lab) against the round-8 review-fix code (commit 42cc961, probe v0.8): GDELT DOC 2.0 + HN official API + Kraken public spot candles, all public/no-auth/no-key. Sources at 20261030T082642Z: HN ok (25 records), Kraken ok (24), GDELT failed (0 records; health records http_status=429 retries=3 truthfully when a window is rate-limited; 2/3 healthy satisfies the bounded snapshot, GDELT cadence stays an MT-01 question). Round-8 fixes live in this run (probe v0.8): NEGATIVE close/volume in a candle are skipped and counted like other malformed candles (finite inputs whose ratio previously produced -inf in normalized_metric); a pre-epoch (negative) candle timestamp is rejected rather than recording a 1969 observation; a valid-JSON huge-int HN score (10**400) is zeroed like inf/NaN instead of aborting; non-int topstories ids (bool/str/float/inf) are skipped and counted; a 200 response with the WRONG SHAPE (list/string payload, or a Kraken result that is not an object) fails that source honestly with status and retries instead of raising AttributeError; the syndication story key uses the FULL normalised title (two same-domain titles differing at word 13 stay distinct); hosted-platform hosts (alpha.github.io vs beta.github.io, substack/blogspot/etc.) are distinct publishers, never merged onto the platform domain. First-seen carry-forward live-proven for text (HN 15/25 carry earlier first_seen) AND candles (Kraken 16/24). Offline suite record committed at automation/review/finance/test-suite-round9.txt (8446 passed / 46 skipped / 5 xfailed, 126 finance). Syndication dedup on (registrable domain, normalised title); GDELT published_at stays null (seendate is retrieval time, recorded in uncertainty). Excluded by policy: x-cookies, private reddit, youtube internals, retailer scraping, paid APIs. Interpretation reserved for persona L.",
+  "artifacts": [
+    {
+      "label": "mt-probe-code",
+      "path": "repo:src/finance_mt_probe.py",
+      "sha256": "000443ebae16cf47c6cc58cd7c0edfb61be2bb22a96b9f82fe529d73e43b8d43"
+    },
+    {
+      "label": "mt-run-manifest",
+      "path": "repo:automation/review/finance/mt00/run-manifest-20261030T082642Z.json",
+      "sha256": "b6a1872f76120e691f00427969b5f522383ad02c753cdada051a1aa94325d57f"
+    },
+    {
+      "label": "mt-snapshot",
+      "path": "repo:automation/review/finance/mt00/snapshot-20261030T082642Z.json",
+      "sha256": "9659af0516e585bef9bc1c501b76d195c2e341c1ba63ece89dc0bcbf22c7eeb2"
+    },
+    {
+      "label": "mt-digest",
+      "path": "repo:automation/review/finance/mt00/digest-20261030T082642Z.md",
+      "sha256": "be19a84cfc7476eaabf9dcc8a893fb3c5ac7857232501400a0c4f32956cb4119"
+    },
+    {
+      "label": "mt-suite-record",
+      "path": "repo:automation/review/finance/test-suite-round9.txt",
+      "sha256": "e2d500063c796c648f5a7b89b173eaa9dca31abf998b36ab5cc831053ac1f3c1"
+    }
+  ]
+}

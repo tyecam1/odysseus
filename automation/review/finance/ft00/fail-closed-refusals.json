@@ -1,6 +1,6 @@
 {
   "goal_id": "FT-00",
-  "note": "fail-closed refusals against the round-8 code",
+  "note": "fail-closed refusals against the round-9 code",
   "refusals": [
     {
       "case": "t6-dryrun",
@@ -53,15 +53,15 @@
       ]
     }
   ],
-  "observed_at": "2026-10-30T00:26:03Z",
+  "observed_at": "2026-10-30T08:27:35Z",
   "hardlink_neutralisation": {
-    "case": "t8-hardlink",
+    "case": "t9-hardlink",
     "planted": ".verified-config-ft00.json.json hardlinked to config-ft00.json",
     "result": "cleared by materialise; smoke succeeded on a fresh nlink=1 inode with the container-side sha256 preflight binding the executed bytes"
   },
   "delegated_noclobber_refusal": {
-    "case": "t8-symlink-replant",
-    "setup": "symlink planted at the content-addressed snapshot path pointing at an innocent file; the delegated one-shot write (the exact set -C noclobber form build_snapshot_write_argv emits) was then run against it",
+    "case": "t9-symlink-replant",
+    "setup": "symlink planted at the content-addressed snapshot path pointing at an innocent file (path cleared first so the plant itself succeeds, proving the refusal is against the SYMLINK); the delegated one-shot write (the exact set -C noclobber form build_snapshot_write_argv emits) was then run against it",
     "result": "open REFUSED (nonzero rc) and the innocent target file was NOT truncated \u2014 its original bytes survived byte-for-byte"
   }
 }
