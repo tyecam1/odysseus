@@ -948,3 +948,33 @@ def test_object_verifies_cannot_match_a_valid_run():
         "no current independent verification" in b
         for b in mt00["blockers"]
     )
+
+
+# --- round-8: a directory/unreadable artifact is a per-goal blocker,
+# --- never a lost response ---
+
+
+def test_directory_artifact_locks_goal_not_response(tmp_path):
+    # an artifact path naming a DIRECTORY raises IsADirectoryError in
+    # the hasher unless guarded: it must lock just that goal inside an
+    # ok:true response
+    run = _receipt("MT-00", fg.KIND_RUN, run_id="run-dir", days_ago=0,
+                   name="dir-artifact.json",
+                   artifacts=[{
+                       "label": "dir",
+                       "sha256": "a" * 64,
+                       "path": "repo:subdir",
+                   }])
+    (tmp_path / "subdir").mkdir(exist_ok=True)
+    result = fg.evaluate_goals(
+        registries=[MT, FT],
+        receipts=_satisfying_mt00_receipts() + [
+            run, _receipt("MT-00", fg.KIND_OPERATOR_ATTESTATION),
+        ],
+        policy=fg.load_policy(), now=NOW, repo_root=tmp_path,
+    )
+    assert result["ok"] is True
+    mt00 = _goal(result, "MT-00")
+    assert mt00["satisfied"] is False
+    assert any("not a regular file" in b for b in mt00["blockers"])
+    assert any("dir-artifact.json" in b for b in mt00["blockers"])

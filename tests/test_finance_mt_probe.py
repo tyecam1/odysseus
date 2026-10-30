@@ -625,3 +625,132 @@ def test_kraken_malformed_candle_skipped_not_fatal():
     assert summary["skipped_malformed_candles"] == 2
     assert summary["last_close"] == 101.5
     assert summary["last_volume"] == 25.0
+
+
+# --- round-7 review findings: non-retryable HTTP errors, out-of-range
+# --- timestamps, non-finite numbers, unusable titles, failed-source
+# --- health fields ---
+
+
+def test_non_retryable_http_error_fails_the_source_not_the_probe():
+    # a 403 must become failed-source health (with the status recorded),
+    # never an uncaught HTTPError that aborts the whole probe
+    import urllib.error
+
+    def forbidden(url, timeout):
+        raise urllib.error.HTTPError(url, 403, "forbidden", {}, None)
+
+    result = mp.collect_gdelt(
+        "bitcoin", max_records=5, collected_at="2026-10-30T00:00:00Z",
+        first_seen_index={}, fetch=forbidden, retries=3,
+    )
+    assert result.status == "failed"
+    assert result.http_status == 403
+    assert "403" in (result.error or "")
+
+
+def test_exhausted_retries_record_status_and_retry_count(monkeypatch):
+    # the 429-exhausted case must carry http_status 429 and the retry
+    # budget in the structured health fields, not null/zero
+    import urllib.error
+
+    monkeypatch.setattr(mp.time, "sleep", lambda s: None)
+
+    def always_429(url, timeout):
+        raise urllib.error.HTTPError(url, 429, "rate", {}, None)
+
+    result = mp.collect_gdelt(
+        "bitcoin", max_records=5, collected_at="2026-10-30T00:00:00Z",
+        first_seen_index={}, fetch=always_429, retries=3,
+    )
+    assert result.status == "failed"
+    assert result.http_status == 429
+    assert result.retries == 3
+
+
+def test_out_of_range_kraken_timestamp_skipped_not_fatal():
+    # int-but-out-of-range candle time (999999999999) previously passed
+    # the parse and blew up in fromtimestamp; it must be skipped+counted
+    payload = {"error": [], "result": {"XXBTZUSD": [
+        [999999999999, "100", "101", "99", "100.5", "100.2", "12.5", 57],
+        [1790003600, "100.5", "102", "100", "101.5", "101", "25.0", 91],
+    ], "last": 1790003600}}
+    result, summary = mp.collect_kraken(
+        pair="BTCUSD", collected_at="2026-10-30T00:00:00Z",
+        first_seen_index={}, fetch=lambda url, timeout: payload,
+    )
+    assert result.status == "ok"
+    assert len(result.records) == 1
+    assert summary["skipped_malformed_candles"] == 1
+
+
+def test_non_finite_feed_numbers_never_reach_records():
+    # "1e999" (inf) and "NaN" volumes/scores must be dropped or zeroed:
+    # json.dumps would otherwise emit Infinity/NaN into the snapshot
+    hn_items = {1: {"id": 1, "title": "Big", "time": 1790000000,
+                    "score": "1e999"}}
+    hn = mp.collect_hackernews(
+        top_n=1, collected_at="2026-10-30T00:00:00Z", first_seen_index={},
+        fetch=lambda url, timeout: (
+            [1] if "topstories" in url else hn_items.get(1)
+        ),
+    )
+    assert hn.status == "ok"
+    assert hn.records[0].to_contract()["raw_metric"] == 0.0
+
+    import math
+    payload = {"error": [], "result": {"XXBTZUSD": [
+        [1790000000, "100", "101", "99", "1e999", "100.2", "12.5", 57],
+        [1790003600, "100.5", "102", "100", "101.5", "101", "NaN", 91],
+    ], "last": 1790003600}}
+    kr, summary = mp.collect_kraken(
+        pair="BTCUSD", collected_at="2026-10-30T00:00:00Z",
+        first_seen_index={}, fetch=lambda url, timeout: payload,
+    )
+    assert kr.status == "ok"
+    assert kr.records == []
+    assert summary["skipped_malformed_candles"] == 2
+    assert all(
+        math.isfinite(v) for r in kr.records
+        for v in (r.raw_metric, r.normalized_metric or 0.0)
+    )
+
+
+def test_snapshot_writer_refuses_non_finite_json(tmp_path):
+    # belt behind the collector guards: allow_nan=False makes any leak
+    # a loud failure instead of invalid strict-JSON output
+    import pytest as _pytest
+
+    report = {
+        "generated_at": "2026-10-30T00:00:00Z",
+        "params": {},
+        "source_results": [],
+        "topics": [],
+    }
+    bad = mp.EvidenceRecord(
+        event_id="e", topic_id="t", source="s", source_url="u",
+        published_at=None, first_seen_at="2026-10-30T00:00:00Z",
+        collected_at="2026-10-30T00:00:00Z", window="2026-10-30",
+        source_access_rights="test", source_health="test",
+        raw_metric=float("inf"),
+    )
+    carrier = mp.SourceResult("test", "ok", records=[bad])
+    with _pytest.raises(ValueError):
+        mp.write_snapshot(tmp_path, report, [carrier], Path(__file__))
+
+
+def test_unusable_titles_never_false_merge_within_a_domain():
+    # two DISTINCT stories from one domain whose titles are unusable
+    # (non-string / empty) must not collapse onto the shared
+    # ("domain", "") dedup key — both records survive
+    payload = {"articles": [
+        {"url": "https://one.example/a", "title": ["not", "a", "title"]},
+        {"url": "https://one.example/b", "title": ""},
+    ]}
+    result = mp.collect_gdelt(
+        "bitcoin", max_records=10, collected_at="2026-10-30T00:00:00Z",
+        first_seen_index={}, fetch=lambda url, timeout: payload,
+    )
+    assert result.status == "ok"
+    assert result.deduped_syndication == 0
+    assert len(result.records) == 2

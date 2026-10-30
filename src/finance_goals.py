@@ -243,11 +243,28 @@ def _receipt_blockers(
                 blockers.append(
                     f"receipt {receipt.get('_file')}: artifact missing: {art_path}"
                 )
-            elif sha256_file(path) != recorded:
+            elif not path.is_file():
+                # a well-typed path that names a DIRECTORY (or anything
+                # else non-regular) is a per-goal blocker, never an
+                # IsADirectoryError that loses the whole response
                 blockers.append(
-                    f"receipt {receipt.get('_file')}: artifact hash mismatch "
-                    f"({label})"
+                    f"receipt {receipt.get('_file')}: artifact is not a "
+                    f"regular file: {art_path}"
                 )
+            else:
+                try:
+                    actual = sha256_file(path)
+                except OSError:
+                    blockers.append(
+                        f"receipt {receipt.get('_file')}: artifact "
+                        f"unreadable: {art_path}"
+                    )
+                else:
+                    if actual != recorded:
+                        blockers.append(
+                            f"receipt {receipt.get('_file')}: artifact hash "
+                            f"mismatch ({label})"
+                        )
     return blockers
 
 

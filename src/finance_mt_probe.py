@@ -32,6 +32,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import re
 import sys
 import time
@@ -52,7 +53,7 @@ except ImportError:  # pragma: no cover - dependency absent
     _idna = None
 
 PROBE_NAME = "finance-mt-probe"
-PROBE_VERSION = "0.6"
+PROBE_VERSION = "0.7"
 USER_AGENT = (
     f"{PROBE_NAME}/{PROBE_VERSION} (odysseus finance MT-00; "
     "household research, read-only public APIs; github.com/tyecam1)"
@@ -128,7 +129,17 @@ MULTI_PART_SUFFIXES = {
 
 
 class SourceUnavailableError(RuntimeError):
-    """A public source failed its bounded retry budget."""
+    """A public source failed its bounded retry budget (or returned a
+    non-retryable HTTP error). Carries the last HTTP status and the
+    retries actually used, so failed-source health reports them instead
+    of silently recording null/zero."""
+
+    def __init__(self, message: str, *, url: Optional[str] = None,
+                 status: Optional[int] = None, retries: int = 0):
+        super().__init__(message)
+        self.url = url
+        self.status = status
+        self.retries = retries
 
 
 @dataclass
@@ -287,8 +298,13 @@ def http_get_json(
     fetch: Optional[Callable[[str, float], Any]] = None,
 ) -> Tuple[Any, int, int]:
     """Bounded GET with exponential backoff. ``fetch`` is injectable for
-    offline tests (returns a JSON-decodable payload or raises)."""
+    offline tests (returns a JSON-decodable payload or raises). Every
+    terminal failure — retry budget exhausted OR a non-retryable HTTP
+    error (e.g. 403) — surfaces as SourceUnavailableError carrying the
+    status and retries, so no collector ever sees a raw HTTPError it
+    does not catch."""
     last_error: Optional[Exception] = None
+    last_status: Optional[int] = None
     attempt = 0
     for attempt in range(1, retries + 1):
         try:
@@ -301,13 +317,20 @@ def http_get_json(
                 return json.loads(body), resp.status, attempt - 1
         except HTTPError as exc:
             last_error = exc
+            last_status = exc.code
             if exc.code not in (429, 500, 502, 503, 504):
-                raise
+                raise SourceUnavailableError(
+                    f"{url}: HTTP {exc.code} (non-retryable)",
+                    url=url, status=exc.code, retries=attempt,
+                ) from exc
         except (URLError, TimeoutError, json.JSONDecodeError) as exc:
             last_error = exc
         if attempt < retries:
             time.sleep(backoff_base_s * (2 ** (attempt - 1)))
-    raise SourceUnavailableError(f"{url}: {last_error} after {retries} attempts")
+    raise SourceUnavailableError(
+        f"{url}: {last_error} after {retries} attempts",
+        url=url, status=last_status, retries=retries,
+    )
 
 
 # --------------------------------------------------------------------------
@@ -331,7 +354,10 @@ def collect_gdelt(
             url, retries=retries, fetch=fetch
         )
     except SourceUnavailableError as exc:
-        return SourceResult(SOURCE_GDELT, "failed", error=str(exc))
+        return SourceResult(
+            SOURCE_GDELT, "failed", error=str(exc),
+            http_status=exc.status, retries=exc.retries,
+        )
 
     articles = (payload or {}).get("articles") or []
     records: List[EvidenceRecord] = []
@@ -362,14 +388,14 @@ def collect_gdelt(
         if "." not in domain:
             domain = registrable_domain(art.get("domain") or "")
         title = normalize_title(art.get("title") or "")
-        if domain != "unknown":
+        if domain != "unknown" and title:
             story_key = (domain, title)
         else:
-            # An unknown-domain record must never syndication-merge with
-            # ANOTHER unknown-domain record on a shared title — that
-            # would drop a distinct publisher's story on a technicality.
-            # Over-merge destroys evidence; under-merge only loses one
-            # dedup opportunity, so key by the URL itself.
+            # An unknown-domain OR unusable-title record must never
+            # syndication-merge with another on the same empty key —
+            # that would drop a distinct story on a technicality
+            # (over-merge destroys evidence; under-merge only loses one
+            # dedup opportunity), so key by the URL itself.
             story_key = (domain, source_url)
         if story_key in seen_stories:
             deduped_syndication += 1
@@ -431,7 +457,10 @@ def collect_hackernews(
             HN_TOPSTORIES_URL, retries=retries, fetch=fetch
         )
     except SourceUnavailableError as exc:
-        return SourceResult(SOURCE_HN, "failed", error=str(exc))
+        return SourceResult(
+            SOURCE_HN, "failed", error=str(exc),
+            http_status=exc.status, retries=exc.retries,
+        )
     if not isinstance(ids, list):
         return SourceResult(SOURCE_HN, "failed", error="topstories payload not a list")
 
@@ -465,8 +494,10 @@ def collect_hackernews(
             published = None  # one bad item never aborts the source
         try:
             score = float(item.get("score") or 0)
+            if not math.isfinite(score):
+                raise ValueError("non-finite score")
         except (TypeError, ValueError):
-            score = 0.0
+            score = 0.0  # inf/NaN must never reach the snapshot JSON
         records.append(
             EvidenceRecord(
                 event_id=event_id,
@@ -511,7 +542,10 @@ def collect_kraken(
     try:
         payload, status, used_retries = http_get_json(url, retries=retries, fetch=fetch)
     except SourceUnavailableError as exc:
-        return SourceResult(SOURCE_KRAKEN, "failed", error=str(exc)), {}
+        return SourceResult(
+            SOURCE_KRAKEN, "failed", error=str(exc),
+            http_status=exc.status, retries=exc.retries,
+        ), {}
 
     errors = (payload or {}).get("error") or []
     if errors:
@@ -537,16 +571,24 @@ def collect_kraken(
     candles = candles[-keep_candles:]
     first_seen_index = first_seen_index or {}
     market_pair = f"{pair[:3]}/{pair[3:]}" if len(pair) == 6 else pair
-    # A structurally bad candle (short list, non-numeric fields) is
-    # skipped and counted, never allowed to abort the whole source.
+    # A structurally bad candle (short list, non-numeric fields, an
+    # integer-but-out-of-range timestamp, or a non-finite float like
+    # inf/NaN from "1e999"/"NaN" strings) is skipped and counted, never
+    # allowed to abort the whole source or poison the snapshot JSON.
     parsed: List[Tuple[int, float, float]] = []
     skipped_candles = 0
     for candle in candles:
         try:
             if not isinstance(candle, list) or len(candle) < 7:
                 raise TypeError("candle is not a 7+ element list")
-            parsed.append((int(candle[0]), float(candle[4]), float(candle[6])))
-        except (TypeError, ValueError):
+            candle_time = int(candle[0])
+            datetime.fromtimestamp(candle_time, tz=timezone.utc)
+            close_v = float(candle[4])
+            volume = float(candle[6])
+            if not (math.isfinite(close_v) and math.isfinite(volume)):
+                raise ValueError("non-finite candle field")
+            parsed.append((candle_time, close_v, volume))
+        except (TypeError, ValueError, OverflowError, OSError):
             skipped_candles += 1
     max_volume = max((v for _, _, v in parsed), default=0.0) or 1.0
     records: List[EvidenceRecord] = []
@@ -851,8 +893,12 @@ def write_snapshot(
         "records": records,
     }
     snapshot_path = out_dir / f"snapshot-{stamp}.json"
+    # allow_nan=False: a non-finite value (inf/NaN) that somehow survived
+    # the collector guards raises HERE — a loud failed run — instead of
+    # silently writing Infinity/NaN into files that claim to be JSON
     snapshot_path.write_text(
-        json.dumps(snapshot, indent=2, ensure_ascii=False) + "\n",
+        json.dumps(snapshot, indent=2, ensure_ascii=False, allow_nan=False)
+        + "\n",
         encoding="utf-8",
     )
     digest_path = out_dir / f"digest-{stamp}.md"
@@ -874,7 +920,8 @@ def write_snapshot(
         json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
     (out_dir / "latest.json").write_text(
-        json.dumps(snapshot, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+        json.dumps(snapshot, indent=2, ensure_ascii=False, allow_nan=False)
+        + "\n", encoding="utf-8"
     )
     return {
         "snapshot": str(snapshot_path),
