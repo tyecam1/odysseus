@@ -754,3 +754,167 @@ def test_unusable_titles_never_false_merge_within_a_domain():
     assert result.status == "ok"
     assert result.deduped_syndication == 0
     assert len(result.records) == 2
+
+
+# ---------------------------------------------------------------------
+# round-9 pins: negative candle fields, pre-epoch candles, huge-int HN
+# scores, non-int topstory ids, wrong-shape payloads, full-title keys,
+# hosted-platform domains
+# ---------------------------------------------------------------------
+
+
+def test_negative_kraken_fields_skipped_not_fatal():
+    # finite-but-negative close/volume previously produced -inf in
+    # normalized_metric (volume / max_volume with a negative max) —
+    # skipped+counted like other malformed candles
+    payload = {"error": [], "result": {"XXBTZUSD": [
+        [1790000000, "100", "101", "99", "-5", "100.2", "12.5", 57],
+        [1790003600, "100.5", "102", "100", "101.5", "101", "-1e308", 91],
+        [1790007200, "100.5", "102", "100", "101.5", "101", "1e-320", 91],
+    ], "last": 1790007200}}
+    result, summary = mp.collect_kraken(
+        pair="BTCUSD", collected_at="2026-10-30T00:00:00Z",
+        first_seen_index={}, fetch=lambda url, timeout: payload,
+    )
+    assert result.status == "ok"
+    # negative close and negative volume skipped; the POSITIVE
+    # subnormal volume survives and normalises finitely
+    assert len(result.records) == 1
+    assert summary["skipped_malformed_candles"] == 2
+    rec = result.records[0].to_contract()
+    assert rec["raw_metric"] == 1e-320
+    assert 0.0 <= rec["normalized_metric"] <= 1.0
+
+
+def test_pre_epoch_kraken_timestamp_skipped():
+    # -1 previously passed int() + fromtimestamp as a 1969 candle
+    payload = {"error": [], "result": {"XXBTZUSD": [
+        [-1, "100", "101", "99", "100.5", "100.2", "12.5", 57],
+        [1790003600, "100.5", "102", "100", "101.5", "101", "25.0", 91],
+    ], "last": 1790003600}}
+    result, summary = mp.collect_kraken(
+        pair="BTCUSD", collected_at="2026-10-30T00:00:00Z",
+        first_seen_index={}, fetch=lambda url, timeout: payload,
+    )
+    assert result.status == "ok"
+    assert len(result.records) == 1
+    assert summary["skipped_malformed_candles"] == 1
+    # no pre-1970 market observation can reach the snapshot
+    assert all(
+        r.to_contract()["published_at"] >= "1970" for r in result.records
+    )
+
+
+def test_hn_huge_int_score_zeroed():
+    # float(10**400) is OverflowError from a VALID JSON integer —
+    # zeroed exactly like inf/NaN, never an abort
+    item = {"id": 1, "title": "Big", "time": 1790000000, "score": 10**400}
+    hn = mp.collect_hackernews(
+        top_n=1, collected_at="2026-10-30T00:00:00Z", first_seen_index={},
+        fetch=lambda url, timeout: (
+            [1] if "topstories" in url else item
+        ),
+    )
+    assert hn.status == "ok"
+    assert hn.records[0].to_contract()["raw_metric"] == 0.0
+
+
+def test_hn_non_int_topstory_ids_skipped_not_fatal():
+    # inf/bool/str/float entries in the topstories list previously
+    # reached int(item_id) and aborted the source with OverflowError
+    good = {"id": 7, "title": "Good", "time": 1790000000, "score": 10}
+
+    def fetch(url, timeout):
+        if "topstories" in url:
+            return [True, "x", 1.5, float("inf"), 7]
+        return good if url.endswith("/7.json") else None
+
+    hn = mp.collect_hackernews(
+        top_n=5, collected_at="2026-10-30T00:00:00Z", first_seen_index={},
+        fetch=fetch,
+    )
+    assert hn.status == "ok"
+    assert len(hn.records) == 1
+    rec = hn.records[0].to_contract()
+    assert rec["raw_metric"] == 10.0
+    assert "item errors=4" in rec["source_health"]
+
+
+def test_gdelt_wrong_shape_payload_fails_source_not_probe():
+    # a 200 response whose body is [1] is a failed source, never an
+    # AttributeError aborting the probe
+    result = mp.collect_gdelt(
+        "bitcoin", max_records=10, collected_at="2026-10-30T00:00:00Z",
+        first_seen_index={}, fetch=lambda url, timeout: [1],
+    )
+    assert result.status == "failed"
+    assert result.http_status == 200
+    assert "articles list" in (result.error or "")
+
+
+def test_kraken_wrong_shape_payload_fails_source_not_probe():
+    # non-object payload, or a result that is not an object: failed
+    # source with honest status/retries, never an abort
+    for bad in ([1], {"error": [], "result": [1]}, {"error": [], "result": "x"}):
+        result, summary = mp.collect_kraken(
+            pair="BTCUSD", collected_at="2026-10-30T00:00:00Z",
+            first_seen_index={}, fetch=lambda url, timeout, p=bad: p,
+        )
+        assert result.status == "failed"
+        assert result.http_status == 200
+        assert summary == {}
+
+
+def test_long_titles_differing_late_never_merge():
+    # two same-domain titles identical through word 12 and differing at
+    # word 13 are DISTINCT stories — the story key uses the FULL title
+    prefix = " ".join(f"w{i}" for i in range(12))
+    payload = {"articles": [
+        {"url": "https://one.example/a", "title": f"{prefix} alpha"},
+        {"url": "https://one.example/b", "title": f"{prefix} beta"},
+    ]}
+    result = mp.collect_gdelt(
+        "bitcoin", max_records=10, collected_at="2026-10-30T00:00:00Z",
+        first_seen_index={}, fetch=lambda url, timeout: payload,
+    )
+    assert result.status == "ok"
+    assert result.deduped_syndication == 0
+    assert len(result.records) == 2
+
+
+def test_normalize_title_word_cap_is_opt_in():
+    long_title = " ".join(f"w{i}" for i in range(20))
+    # labels/topic ids keep the bounded form
+    assert len(mp.normalize_title(long_title).split()) == 12
+    # the syndication key passes the FULL normalised title
+    assert mp.normalize_title(long_title, max_words=None) == long_title
+
+
+def test_hosted_platform_hosts_are_distinct_publishers():
+    # alpha.github.io and beta.github.io are DIFFERENT publishers, not
+    # both "github.io" (the platform is a host, not the publisher)
+    assert mp.registrable_domain("https://alpha.github.io/a") == "alpha.github.io"
+    assert mp.registrable_domain("https://beta.github.io/b") == "beta.github.io"
+    assert (
+        mp.registrable_domain("https://alpha.github.io/a")
+        != mp.registrable_domain("https://beta.github.io/b")
+    )
+    assert mp.registrable_domain("https://someone.substack.com/p/x") == "someone.substack.com"
+    # classic multi-part suffixes unchanged
+    assert mp.registrable_domain("https://site.co.uk/x") == "site.co.uk"
+
+
+def test_hosted_platform_same_title_never_merges():
+    payload = {"articles": [
+        {"url": "https://alpha.github.io/post", "title": "Same Title"},
+        {"url": "https://beta.github.io/post", "title": "Same Title"},
+    ]}
+    result = mp.collect_gdelt(
+        "bitcoin", max_records=10, collected_at="2026-10-30T00:00:00Z",
+        first_seen_index={}, fetch=lambda url, timeout: payload,
+    )
+    assert result.status == "ok"
+    assert result.deduped_syndication == 0
+    assert len(result.records) == 2
+    domains = {r.source.split(":", 1)[1] for r in result.records}
+    assert domains == {"alpha.github.io", "beta.github.io"}

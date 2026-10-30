@@ -978,3 +978,40 @@ def test_directory_artifact_locks_goal_not_response(tmp_path):
     assert mt00["satisfied"] is False
     assert any("not a regular file" in b for b in mt00["blockers"])
     assert any("dir-artifact.json" in b for b in mt00["blockers"])
+
+
+def test_extreme_future_receipt_locks_goal_not_response():
+    # observed_at = 9999-12-31T23:59:59Z previously raised OverflowError
+    # in observed + timedelta(days=ttl) and lost the WHOLE /goals
+    # response; now it is a per-receipt future-dating lock
+    attestation = _receipt("MT-00", fg.KIND_OPERATOR_ATTESTATION)
+    run = _receipt("MT-00", fg.KIND_RUN, run_id="run-x")
+    run["observed_at"] = "9999-12-31T23:59:59Z"
+    verifies = _receipt("MT-00", fg.KIND_INDEPENDENT_VERIFICATION,
+                        verifies="run-x")
+    verifies["observed_at"] = "9999-12-31T23:59:59Z"
+    result = _evaluate([attestation, run, verifies])
+    assert result["ok"] is True  # the response itself survives
+    mt00 = _goal(result, "MT-00")
+    assert mt00["satisfied"] is False
+    assert any("beyond datetime range" in b for b in mt00["blockers"])
+
+
+def test_unexpected_receipt_exception_locks_never_loses_response(monkeypatch):
+    # structural invariant (catch-all wrapper): whatever a FUTURE review
+    # round finds, an unexpected failure while evaluating a hostile
+    # receipt is itself a per-receipt blocker — the /goals response can
+    # never be lost
+    def boom(*args, **kwargs):
+        raise RuntimeError("unexpected hostile-receipt failure")
+
+    monkeypatch.setattr(fg, "_receipt_blockers_inner", boom)
+    receipts = [
+        _receipt("MT-00", fg.KIND_OPERATOR_ATTESTATION),
+        _receipt("MT-00", fg.KIND_RUN, run_id="run-x"),
+    ]
+    result = _evaluate(receipts)
+    assert result["ok"] is True
+    mt00 = _goal(result, "MT-00")
+    assert mt00["satisfied"] is False
+    assert any("could not be evaluated" in b for b in mt00["blockers"])

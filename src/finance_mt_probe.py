@@ -53,7 +53,7 @@ except ImportError:  # pragma: no cover - dependency absent
     _idna = None
 
 PROBE_NAME = "finance-mt-probe"
-PROBE_VERSION = "0.7"
+PROBE_VERSION = "0.8"
 USER_AGENT = (
     f"{PROBE_NAME}/{PROBE_VERSION} (odysseus finance MT-00; "
     "household research, read-only public APIs; github.com/tyecam1)"
@@ -125,6 +125,16 @@ MULTI_PART_SUFFIXES = {
     "com.mx", "com.ar", "com.pe", "com.uy", "com.vn", "com.cn", "com.tw",
     "com.hk", "com.sg", "com.my", "com.ph", "co.id", "co.il", "co.nz",
     "co.za", "co.in", "com.tr", "com.ua", "com.gr", "com.pl", "co.th",
+}
+
+# Hosted-publishing platforms: the registrable domain is the last THREE
+# labels (alpha.github.io, not github.io) — unlike co.uk, the platform
+# itself is NOT the publisher: two same-titled stories on different
+# github.io/blogspot.com/etc. hosts are DIFFERENT publishers and must
+# never syndication-merge. Same conservative direction as above.
+HOSTED_PLATFORM_SUFFIXES = {
+    "github.io", "gitlab.io", "pages.dev", "vercel.app", "netlify.app",
+    "wordpress.com", "blogspot.com", "substack.com",
 }
 
 
@@ -263,19 +273,32 @@ def registrable_domain(url: str) -> str:
     if not parts:
         return "unknown"
     last_two = ".".join(parts[-2:]) if len(parts) >= 2 else ""
-    if last_two in MULTI_PART_SUFFIXES and len(parts) >= 3:
+    if (
+        last_two in MULTI_PART_SUFFIXES
+        or last_two in HOSTED_PLATFORM_SUFFIXES
+    ) and len(parts) >= 3:
         return ".".join(parts[-3:])
     if len(parts) >= 2:
         return last_two
     return host
 
 
-def normalize_title(title: str) -> str:
+def normalize_title(
+    title: str, max_words: Optional[int] = _MAX_TITLE_WORDS
+) -> str:
+    """Normalise a title for matching. Truncates to ``max_words`` words
+    by default (labels, topic ids), but the syndication story key passes
+    ``max_words=None``: a 12-word prefix would merge two same-domain
+    titles that first differ at word 13 — losing a distinct story to a
+    truncation the dedup never needed."""
     if not isinstance(title, str):
         title = ""  # ill-typed feed field must not abort the source
     text = _PUNCT_RE.sub(" ", title.lower())
     text = _WS_RE.sub(" ", text).strip()
-    return " ".join(text.split()[:_MAX_TITLE_WORDS])
+    words = text.split()
+    if max_words is not None:
+        words = words[:max_words]
+    return " ".join(words)
 
 
 def parse_gdelt_seen(seendate: str) -> Optional[str]:
@@ -359,7 +382,17 @@ def collect_gdelt(
             http_status=exc.status, retries=exc.retries,
         )
 
-    articles = (payload or {}).get("articles") or []
+    # A 200 response with the WRONG SHAPE (list, string, null, or an
+    # object without an articles list) is a failed source, never an
+    # AttributeError aborting the probe.
+    if not isinstance(payload, dict) or not isinstance(
+        payload.get("articles"), list
+    ):
+        return SourceResult(
+            SOURCE_GDELT, "failed", http_status=status, retries=used_retries,
+            error="gdelt payload is not an object with an articles list",
+        )
+    articles = payload["articles"]
     records: List[EvidenceRecord] = []
     seen_urls = set()
     seen_stories = set()  # (registrable domain, normalised title)
@@ -387,7 +420,9 @@ def collect_gdelt(
         domain = registrable_domain(source_url)
         if "." not in domain:
             domain = registrable_domain(art.get("domain") or "")
-        title = normalize_title(art.get("title") or "")
+        # full normalised title (no word cap): the story key must not
+        # merge titles that first differ beyond word 12
+        title = normalize_title(art.get("title") or "", max_words=None)
         if domain != "unknown" and title:
             story_key = (domain, title)
         else:
@@ -467,8 +502,15 @@ def collect_hackernews(
     records: List[EvidenceRecord] = []
     errors = 0
     for item_id in ids[:top_n]:
+        # int(item_id) on a float('inf')/huge-float id raises
+        # OverflowError — a malformed topstories entry is skipped and
+        # counted, never allowed to abort the source. bool is an int
+        # subclass but is not an item id.
+        if not isinstance(item_id, int) or isinstance(item_id, bool):
+            errors += 1
+            continue
         try:
-            item, _, _ = http_get_json(item_url(int(item_id)), retries=1, fetch=fetch)
+            item, _, _ = http_get_json(item_url(item_id), retries=1, fetch=fetch)
         except (SourceUnavailableError, ValueError, TypeError):
             errors += 1
             continue
@@ -493,10 +535,12 @@ def collect_hackernews(
         except (ValueError, OverflowError, OSError):
             published = None  # one bad item never aborts the source
         try:
+            # float(10**400) is OverflowError: a valid-JSON integer can
+            # still be unrepresentable as a float — zero it like inf/NaN
             score = float(item.get("score") or 0)
             if not math.isfinite(score):
                 raise ValueError("non-finite score")
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             score = 0.0  # inf/NaN must never reach the snapshot JSON
         records.append(
             EvidenceRecord(
@@ -547,13 +591,26 @@ def collect_kraken(
             http_status=exc.status, retries=exc.retries,
         ), {}
 
-    errors = (payload or {}).get("error") or []
+    # Shape-guard the payload before any .get(): a 200 response that is
+    # a list/string (or whose result is not an object) is a failed
+    # source, never an AttributeError aborting the probe.
+    if not isinstance(payload, dict):
+        return SourceResult(
+            SOURCE_KRAKEN, "failed", http_status=status, retries=used_retries,
+            error="kraken payload is not an object",
+        ), {}
+    errors = payload.get("error") or []
     if errors:
         return SourceResult(
             SOURCE_KRAKEN, "failed", http_status=status, retries=used_retries,
             error=f"kraken error payload: {errors}",
         ), {}
-    result = (payload or {}).get("result") or {}
+    result = payload.get("result")
+    if not isinstance(result, dict):
+        return SourceResult(
+            SOURCE_KRAKEN, "failed", http_status=status, retries=used_retries,
+            error="kraken result is not an object",
+        ), {}
     candles: List[List[Any]] = []
     result_key = None
     for key, value in result.items():
@@ -571,10 +628,12 @@ def collect_kraken(
     candles = candles[-keep_candles:]
     first_seen_index = first_seen_index or {}
     market_pair = f"{pair[:3]}/{pair[3:]}" if len(pair) == 6 else pair
-    # A structurally bad candle (short list, non-numeric fields, an
-    # integer-but-out-of-range timestamp, or a non-finite float like
-    # inf/NaN from "1e999"/"NaN" strings) is skipped and counted, never
-    # allowed to abort the whole source or poison the snapshot JSON.
+    # A structurally bad candle (short list, non-numeric fields, a
+    # negative or integer-but-out-of-range timestamp, a non-finite float
+    # like inf/NaN from "1e999"/"NaN" strings, or NEGATIVE close/volume
+    # — finite inputs whose ratio can still produce -inf in
+    # normalized_metric) is skipped and counted, never allowed to abort
+    # the whole source or poison the snapshot JSON.
     parsed: List[Tuple[int, float, float]] = []
     skipped_candles = 0
     for candle in candles:
@@ -582,11 +641,15 @@ def collect_kraken(
             if not isinstance(candle, list) or len(candle) < 7:
                 raise TypeError("candle is not a 7+ element list")
             candle_time = int(candle[0])
+            if candle_time < 0:
+                raise ValueError("pre-epoch candle time")
             datetime.fromtimestamp(candle_time, tz=timezone.utc)
             close_v = float(candle[4])
             volume = float(candle[6])
             if not (math.isfinite(close_v) and math.isfinite(volume)):
                 raise ValueError("non-finite candle field")
+            if close_v < 0 or volume < 0:
+                raise ValueError("negative candle field")
             parsed.append((candle_time, close_v, volume))
         except (TypeError, ValueError, OverflowError, OSError):
             skipped_candles += 1

@@ -185,6 +185,27 @@ def _receipt_blockers(
     receipt: Dict[str, Any], *, now: datetime, policy: Dict[str, Any],
     repo_root: Path, check_artifacts: bool,
 ) -> List[str]:
+    """Fail-closed wrapper: ANY unexpected failure while evaluating a
+    hostile receipt is itself a blocker (the receipt cannot vouch for
+    anything) — it can never take the whole /goals response down. This
+    is deliberate: reviews repeatedly found new ill-typed-input crashes,
+    so the invariant is enforced structurally, not per-field."""
+    try:
+        return _receipt_blockers_inner(
+            receipt, now=now, policy=policy, repo_root=repo_root,
+            check_artifacts=check_artifacts,
+        )
+    except Exception as exc:  # broad by design: fail closed, never 500
+        return [
+            f"receipt {receipt.get('_file')!r}: could not be evaluated "
+            f"({type(exc).__name__}: {exc}) — locked"
+        ]
+
+
+def _receipt_blockers_inner(
+    receipt: Dict[str, Any], *, now: datetime, policy: Dict[str, Any],
+    repo_root: Path, check_artifacts: bool,
+) -> List[str]:
     if receipt.get("_invalid"):
         return [f"receipt {receipt.get('_file')}: {receipt['_invalid']}"]
     blockers: List[str] = []
@@ -199,20 +220,34 @@ def _receipt_blockers(
         blockers.append(
             f"receipt {receipt.get('_file')}: unknown kind {receipt['kind']!r}"
         )
-    elif now > observed + timedelta(days=ttl):
-        blockers.append(
-            f"receipt {receipt.get('_file')}: stale (observed "
-            f"{receipt['observed_at']}, ttl {ttl}d)"
-        )
-    elif observed > now + timedelta(minutes=FUTURE_SKEW_MINUTES):
-        # fail-closed but not permanent: the receipt ages into validity
-        # once the clock reaches its stamped time, so a single mis-dated
-        # receipt can never lock a goal forever
-        blockers.append(
-            f"receipt {receipt.get('_file')}: future-dated (observed "
-            f"{receipt['observed_at']}, now {now.astimezone(timezone.utc).isoformat()}; "
-            "recovers when the clock reaches the stamped time)"
-        )
+    else:
+        try:
+            expiry = observed + timedelta(days=ttl)
+        except OverflowError:
+            # 9999-12-31T23:59:59Z + ttl overflows datetime; a receipt
+            # stamped at the far future edge is future-dated, not a crash
+            expiry = None
+        if expiry is not None and now > expiry:
+            blockers.append(
+                f"receipt {receipt.get('_file')}: stale (observed "
+                f"{receipt['observed_at']}, ttl {ttl}d)"
+            )
+        elif expiry is None:
+            blockers.append(
+                f"receipt {receipt.get('_file')}: future-dated (observed "
+                f"{receipt['observed_at']} beyond datetime range; recovers "
+                "only if re-stamped within range)"
+            )
+        elif observed > now + timedelta(minutes=FUTURE_SKEW_MINUTES):
+            # fail-closed but not permanent: the receipt ages into
+            # validity once the clock reaches its stamped time, so a
+            # single mis-dated receipt can never lock a goal forever
+            blockers.append(
+                f"receipt {receipt.get('_file')}: future-dated (observed "
+                f"{receipt['observed_at']}, now "
+                f"{now.astimezone(timezone.utc).isoformat()}; recovers when "
+                "the clock reaches the stamped time)"
+            )
     if check_artifacts:
         for artifact in receipt.get("artifacts") or []:
             if not isinstance(artifact, dict):
