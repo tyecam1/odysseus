@@ -44,7 +44,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 RUNNER_NAME = "finance-ft-runner"
-RUNNER_VERSION = "0.2"
+RUNNER_VERSION = "0.3"
 
 # Official image pinned by digest (tag ``stable`` resolved 2026-10-29,
 # image created 2026-09-29, Python 3.14.7 / CCXT 4.5.84). The guard
@@ -86,8 +86,15 @@ DATA_FLAGS_VALUE = {"--timeframe", "--timerange", "--days", "--new-pairs-days"}
 DATA_FLAGS_MULTI = {"--pairs"}
 DAYS_RE = re.compile(r"^\d+$")
 
-STRATEGY_RE = re.compile(r"^[A-Za-z0-9_]+$")
 CONTAINER_NAME = "finance-ft00-dryrun"
+
+# Where the sha-bound entrypoint stages the verified config INSIDE the
+# container before freqtrade runs. Deliberately OUTSIDE the mounted
+# /freqtrade/user_data volume: the container's writable layer is not
+# reachable by any host-side process that can merely write the mounted
+# workspace, so the checksum and freqtrade's open() act on bytes no
+# workspace-writer can replace.
+PRIVATE_CONFIG_PATH = "/tmp/ft-verified-config.json"
 
 # Exchanges usable with PUBLIC data only (no key required for OHLCV).
 ALLOWED_PUBLIC_SPOT_EXCHANGES = {"kraken", "binance"}
@@ -299,9 +306,14 @@ def build_docker_argv(
 
     When ``config_sha256`` (a full sha256 of the snapshot's bytes) is
     given for a config-executing action, the container entrypoint
-    becomes ``/bin/sh -c '<checksum check> && exec "$@"'``: freqtrade
-    runs only if the config file it is about to read still hashes to
-    the verified digest, closing the post-check host-side swap window.
+    becomes ``/bin/sh -c '<copy> && <checksum check> && exec "$@"'``:
+    the mounted snapshot is FIRST copied to PRIVATE_CONFIG_PATH (the
+    container's own writable layer — never inside the mounted volume, so
+    no host-side process can touch it), the COPY's sha256 is verified,
+    and only then does freqtrade exec — reading the copy. This closes
+    the check-to-use race: the file freqtrade opens is never a path a
+    workspace-writer can replace, because check and use are the same
+    inode in container-private storage.
 
     By default the container runs with the image's own lifecycle (root →
     entrypoint chown of user_data to its internal ftuser → drop to
@@ -328,17 +340,28 @@ def build_docker_argv(
 
     volume = f"{user_data_dir.resolve()}:/freqtrade/user_data"
     config_arg = f"/freqtrade/user_data/{config_name}"
+    # In the sha-bound form freqtrade must read the CONTAINER-PRIVATE
+    # copy, never the mounted path (see PRIVATE_CONFIG_PATH). The
+    # builder refuses a private path that would fall inside the mount.
+    if config_sha256 is not None and action in ("download-data", "dry-run"):
+        if PRIVATE_CONFIG_PATH.startswith("/freqtrade/user_data/"):
+            raise ValueError(
+                "PRIVATE_CONFIG_PATH must live outside the mounted volume"
+            )
+        exec_config_arg = PRIVATE_CONFIG_PATH
+    else:
+        exec_config_arg = config_arg
     cmd_args: List[str]
     if action == "version":
         cmd_args = ["--version"]
     elif action == "download-data":
         cmd_args = [
-            "download-data", "--config", config_arg,
+            "download-data", "--config", exec_config_arg,
             "--userdir", "/freqtrade/user_data",
         ] + list(data_args or []) + list(extra_args or [])
     elif action == "dry-run":
         cmd_args = [
-            "trade", "--config", config_arg,
+            "trade", "--config", exec_config_arg,
             "--userdir", "/freqtrade/user_data",
             "--dry-run", "--strategy", strategy or "",
         ] + list(extra_args or [])
@@ -359,12 +382,15 @@ def build_docker_argv(
 
     if config_sha256 is not None:
         # Bind the config bytes INSIDE the container, at open time: the
-        # entrypoint verifies the snapshot's sha256 and only then execs
-        # freqtrade. This closes the last host-side window — anything
-        # swapped on the host after the runner's own checks fails the
-        # container-side checksum instead of executing. Freqtrade args
-        # travel as positional parameters ("$@"), never through the
-        # shell string, so no token of them can inject.
+        # entrypoint COPIES the mounted snapshot to PRIVATE_CONFIG_PATH
+        # (container-private storage — a host-side workspace writer
+        # cannot replace what it cannot address), verifies the COPY's
+        # sha256, and only then execs freqtrade, which reads the copy.
+        # The checksum and freqtrade's open() therefore act on the same
+        # unreachable-from-the-host inode: there is no window between
+        # check and use. Freqtrade args travel as positional parameters
+        # ("$@"), never through the shell string, so no token of them
+        # can inject.
         if action not in ("download-data", "dry-run"):
             raise ValueError(
                 "config_sha256 binding applies only to config-executing "
@@ -373,7 +399,8 @@ def build_docker_argv(
         if not SHA256_RE.match(config_sha256):
             raise ValueError("config_sha256 must be a full sha256 hex digest")
         script = (
-            f"printf '%s  %s\\n' {config_sha256} {config_arg} "
+            f"cp {config_arg} {PRIVATE_CONFIG_PATH} && "
+            f"printf '%s  %s\\n' {config_sha256} {PRIVATE_CONFIG_PATH} "
             '| sha256sum -c --status - && exec "$@"'
         )
         # "$@" expands to the params AFTER argv0, so the full command —
@@ -535,13 +562,20 @@ def build_snapshot_write_argv(user_data_dir: Path, name: str) -> List[str]:
     """docker argv writing the verified-config snapshot via the pinned
     image (bytes on stdin -> file). Needed because a running freqtrade
     container chowns the mounted user_data tree to its internal user,
-    locking the invoking account out of direct writes."""
+    locking the invoking account out of direct writes.
+
+    ``set -C`` (noclobber) makes the redirect open with O_CREAT|O_EXCL
+    semantics: if ANYTHING appears at the path between the runner's
+    clear and the container's open — in particular a replanted SYMLINK
+    — the open fails instead of following the link and truncating its
+    target. A refused write fails the snapshot (fail closed); a
+    truncated innocent host file can never be undone."""
     return [
         "docker", "run", "--rm", "-i",
         "--entrypoint", "/bin/sh",
         "-v", f"{user_data_dir.resolve()}:/freqtrade/user_data",
         DEFAULT_PINNED_IMAGE,
-        "-c", f"cat > /freqtrade/user_data/{name}",
+        "-c", f"set -C; cat > /freqtrade/user_data/{name}",
     ]
 
 

@@ -43,13 +43,16 @@ from urllib import request as urllib_request
 from urllib.error import HTTPError, URLError
 from urllib.parse import unquote, urlparse
 
-try:  # UTS-46 IDNA (correct ß→xn--fa-hia mapping); stdlib fallback below
+try:  # UTS-46 IDNA (correct ß→xn--fa-hia mapping)
     import idna as _idna
 except ImportError:  # pragma: no cover - dependency absent
+    # No stdlib fallback: IDNA 2003 (ß→ss) would SPLIT one publisher
+    # into two domains; without UTS-46 a non-ASCII host is classified
+    # "unknown" instead (see _canonical_host)
     _idna = None
 
 PROBE_NAME = "finance-mt-probe"
-PROBE_VERSION = "0.5"
+PROBE_VERSION = "0.6"
 USER_AGENT = (
     f"{PROBE_NAME}/{PROBE_VERSION} (odysseus finance MT-00; "
     "household research, read-only public APIs; github.com/tyecam1)"
@@ -188,9 +191,11 @@ def _canonical_host(host: str) -> str:
     dot stripped, and non-ASCII labels IDNA-encoded — so ``bücher.de``,
     ``BÜCHER.de.`` and ``xn--bcher-kva.de`` all collapse to one
     publisher instead of counting as two domains. Uses UTS-46 IDNA
-    (the ``idna`` package) when available so that ``faß.de`` maps to
-    its true punycode form ``xn--fa-hia.de``; the stdlib codec (IDNA
-    2003, which maps ß→ss) is only a fallback."""
+    (the ``idna`` package) so that ``faß.de`` maps to its true punycode
+    form ``xn--fa-hia.de``. When the ``idna`` package is unavailable a
+    non-ASCII host returns "" (callers classify it "unknown"): the
+    stdlib IDNA 2003 codec (ß→ss) would SPLIT one publisher into two
+    domains, so it is never applied."""
     host = (host or "").strip()
     try:
         host = unquote(host)
@@ -198,13 +203,12 @@ def _canonical_host(host: str) -> str:
         pass  # keep the raw form; still canonicalised below
     host = host.lower().strip().rstrip(".")
     if host and not host.isascii():
+        if _idna is None:
+            return ""  # refuse to guess: "unknown" never merges wrongly
         try:
-            if _idna is not None:
-                host = _idna.encode(host, uts46=True).decode("ascii")
-            else:
-                host = host.encode("idna").decode("ascii")
+            host = _idna.encode(host, uts46=True).decode("ascii")
         except Exception:
-            pass  # odd unicode input: fall through on the raw form
+            return ""  # odd unicode input: refuse to guess
     return host
 
 
@@ -227,6 +231,8 @@ def registrable_domain(url: str) -> str:
     probe does not do. Diversity counts may therefore overstate when a
     story is syndicated via redirector links — interpretation stays with
     persona L."""
+    if not isinstance(url, str):
+        return "unknown"  # ill-typed feed field (int/list/object URL)
     try:
         host = _canonical_host(urlparse(url).hostname or "")
     except ValueError:
@@ -254,13 +260,17 @@ def registrable_domain(url: str) -> str:
 
 
 def normalize_title(title: str) -> str:
-    text = _PUNCT_RE.sub(" ", (title or "").lower())
+    if not isinstance(title, str):
+        title = ""  # ill-typed feed field must not abort the source
+    text = _PUNCT_RE.sub(" ", title.lower())
     text = _WS_RE.sub(" ", text).strip()
     return " ".join(text.split()[:_MAX_TITLE_WORDS])
 
 
 def parse_gdelt_seen(seendate: str) -> Optional[str]:
     # GDELT format 20261029T120000Z -> ISO-8601
+    if not isinstance(seendate, str):
+        return None
     match = re.match(r"^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$", seendate or "")
     if not match:
         return None
@@ -331,7 +341,11 @@ def collect_gdelt(
     deduped_syndication = 0
     topic_id = f"gdelt:{normalize_title(query)[:40]}"
     for art in articles:
-        source_url = art.get("url") or ""
+        if not isinstance(art, dict):
+            deduped += 1
+            continue
+        raw_url = art.get("url")
+        source_url = raw_url if isinstance(raw_url, str) and raw_url else ""
         if not source_url or source_url in seen_urls:
             deduped += 1
             continue
@@ -347,13 +361,25 @@ def collect_gdelt(
         domain = registrable_domain(source_url)
         if "." not in domain:
             domain = registrable_domain(art.get("domain") or "")
-        story_key = (domain, normalize_title(art.get("title") or ""))
+        title = normalize_title(art.get("title") or "")
+        if domain != "unknown":
+            story_key = (domain, title)
+        else:
+            # An unknown-domain record must never syndication-merge with
+            # ANOTHER unknown-domain record on a shared title — that
+            # would drop a distinct publisher's story on a technicality.
+            # Over-merge destroys evidence; under-merge only loses one
+            # dedup opportunity, so key by the URL itself.
+            story_key = (domain, source_url)
         if story_key in seen_stories:
             deduped_syndication += 1
             continue
         seen_stories.add(story_key)
         seen_iso = parse_gdelt_seen(art.get("seendate", ""))
         event_id = stable_event_id(SOURCE_GDELT, source_url)
+        geo = art.get("sourcecountry")
+        if not isinstance(geo, str) or not geo:
+            geo = None
         records.append(
             EvidenceRecord(
                 event_id=event_id,
@@ -363,7 +389,7 @@ def collect_gdelt(
                 published_at=None,
                 first_seen_at=first_seen_index.get(event_id, collected_at),
                 collected_at=collected_at,
-                geography=art.get("sourcecountry") or None,
+                geography=geo,
                 raw_metric=1.0,
                 sampling_bias=(
                     "GDELT covers a sample of global news monitoring; "
@@ -417,18 +443,30 @@ def collect_hackernews(
         except (SourceUnavailableError, ValueError, TypeError):
             errors += 1
             continue
-        if not isinstance(item, dict) or item.get("title") is None:
+        if not isinstance(item, dict) or not isinstance(
+            item.get("title"), str
+        ) or not item.get("title"):
             continue
+        url_field = item.get("url")
         source_url = (
-            item.get("url")
-            or f"https://news.ycombinator.com/item?id={item_id}"
+            url_field
+            if isinstance(url_field, str) and url_field
+            else f"https://news.ycombinator.com/item?id={item_id}"
         )
         event_id = stable_event_id(SOURCE_HN, str(item_id))
-        published = (
-            iso(datetime.fromtimestamp(item["time"], tz=timezone.utc))
-            if item.get("time")
-            else None
-        )
+        time_field = item.get("time")
+        try:
+            published = (
+                iso(datetime.fromtimestamp(time_field, tz=timezone.utc))
+                if isinstance(time_field, (int, float))
+                else None
+            )
+        except (ValueError, OverflowError, OSError):
+            published = None  # one bad item never aborts the source
+        try:
+            score = float(item.get("score") or 0)
+        except (TypeError, ValueError):
+            score = 0.0
         records.append(
             EvidenceRecord(
                 event_id=event_id,
@@ -438,7 +476,7 @@ def collect_hackernews(
                 published_at=published,
                 first_seen_at=first_seen_index.get(event_id, collected_at),
                 collected_at=collected_at,
-                raw_metric=float(item.get("score") or 0),
+                raw_metric=score,
                 sampling_bias=(
                     "HN front page skews tech-adjacent attention; score is "
                     "platform engagement, not demand"
@@ -499,12 +537,22 @@ def collect_kraken(
     candles = candles[-keep_candles:]
     first_seen_index = first_seen_index or {}
     market_pair = f"{pair[:3]}/{pair[3:]}" if len(pair) == 6 else pair
-    max_volume = max((float(c[6]) for c in candles), default=0.0) or 1.0
-    records: List[EvidenceRecord] = []
+    # A structurally bad candle (short list, non-numeric fields) is
+    # skipped and counted, never allowed to abort the whole source.
+    parsed: List[Tuple[int, float, float]] = []
+    skipped_candles = 0
     for candle in candles:
-        ts = iso(datetime.fromtimestamp(int(candle[0]), tz=timezone.utc))
-        event_id = stable_event_id(SOURCE_KRAKEN, f"{result_key}:{candle[0]}")
-        volume = float(candle[6])
+        try:
+            if not isinstance(candle, list) or len(candle) < 7:
+                raise TypeError("candle is not a 7+ element list")
+            parsed.append((int(candle[0]), float(candle[4]), float(candle[6])))
+        except (TypeError, ValueError):
+            skipped_candles += 1
+    max_volume = max((v for _, _, v in parsed), default=0.0) or 1.0
+    records: List[EvidenceRecord] = []
+    for candle_time, _close, volume in parsed:
+        ts = iso(datetime.fromtimestamp(candle_time, tz=timezone.utc))
+        event_id = stable_event_id(SOURCE_KRAKEN, f"{result_key}:{candle_time}")
         records.append(
             EvidenceRecord(
                 event_id=event_id,
@@ -519,9 +567,13 @@ def collect_kraken(
                 normalized_metric=round(volume / max_volume, 6),
                 sampling_bias="single exchange spot volume; not global market depth",
                 source_access_rights=SOURCE_ACCESS_RIGHTS[SOURCE_KRAKEN],
-                source_health=f"http {status}; retries={used_retries}; candles={len(candles)}",
+                source_health=(
+                    f"http {status}; retries={used_retries}; "
+                    f"candles={len(parsed)}"
+                    + (f"; skipped_malformed={skipped_candles}" if skipped_candles else "")
+                ),
                 uncertainty="low (official exchange public data)",
-                link_to_market_candles=f"kraken:{result_key}:{candle[0]}",
+                link_to_market_candles=f"kraken:{result_key}:{candle_time}",
                 window=f"{ts[:10]}",
             )
         )
@@ -529,11 +581,12 @@ def collect_kraken(
         "pair_requested": pair,
         "pair_returned": result_key,
         "interval_minutes": interval_min,
-        "candles": len(candles),
+        "candles": len(parsed),
+        "skipped_malformed_candles": skipped_candles,
         "oldest": records[0].published_at if records else None,
         "newest": records[-1].published_at if records else None,
-        "last_close": float(candles[-1][4]) if candles else None,
-        "last_volume": float(candles[-1][6]) if candles else None,
+        "last_close": parsed[-1][1] if parsed else None,
+        "last_volume": parsed[-1][2] if parsed else None,
     }
     return SourceResult(
         SOURCE_KRAKEN, "ok", records, http_status=status, retries=used_retries
@@ -748,13 +801,20 @@ def load_first_seen_index(out_dir: Path) -> Tuple[Dict[str, str], Optional[Dict[
                 )
             try:
                 # content, not just shape: a bogus timestamp would flow
-                # into reports as a false first-seen time, and would
-                # break the lexicographic ISO ordering the merge relies on
-                datetime.strptime(first_seen, "%Y-%m-%dT%H:%M:%SZ")
+                # into reports as a false first-seen time. CANONICAL FORM
+                # is enforced with a parse→re-render round trip because
+                # the merge orders timestamps lexicographically — an
+                # unpadded but parseable value like 2026-9-30T00:00:00Z
+                # would sort AFTER 2026-10-01T00:00:00Z and retain the
+                # WRONG first-seen time.
+                parsed = datetime.strptime(first_seen, "%Y-%m-%dT%H:%M:%SZ")
+                if parsed.strftime("%Y-%m-%dT%H:%M:%SZ") != first_seen:
+                    raise ValueError("noncanonical")
             except ValueError:
                 raise ValueError(
                     f"evidence snapshot {name}: record #{i} first_seen_at "
-                    f"{first_seen!r} is not an ISO-8601 Z timestamp"
+                    f"{first_seen!r} is not a canonical zero-padded "
+                    "ISO-8601 Z timestamp"
                 ) from None
             current = index.get(event_id)
             if current is None or first_seen < current:

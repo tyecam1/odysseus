@@ -328,7 +328,7 @@ def test_run_receipt_without_run_id_cannot_satisfy():
     result = _evaluate([attestation, run, verifies])
     mt00 = _goal(result, "MT-00")
     assert mt00["satisfied"] is False
-    assert any("no run_id" in b for b in mt00["blockers"])
+    assert any("no usable run_id" in b for b in mt00["blockers"])
 
 
 def test_verification_without_verifies_cannot_satisfy():
@@ -341,7 +341,7 @@ def test_verification_without_verifies_cannot_satisfy():
     result = _evaluate([attestation, run, bare])
     mt00 = _goal(result, "MT-00")
     assert mt00["satisfied"] is False
-    assert any("names no run id" in b for b in mt00["blockers"])
+    assert any("names no usable run id" in b for b in mt00["blockers"])
 
 
 def test_verification_without_artifacts_cannot_satisfy(tmp_path: Path):
@@ -889,3 +889,62 @@ def test_artifacts_not_objects_is_invalid_at_load():
         rec = next(r for r in loaded
                    if r["_file"] == "illtyped-artifacts.json")
         assert "artifacts" in (rec.get("_invalid") or "")
+
+
+# --- round-7: ill-typed identity fields and artifact fields lock, never
+# --- crash the response or match by value-equality ---
+
+
+def test_ill_typed_artifact_path_locks_goal_not_response():
+    # a list/object artifact PATH in a NEWEST run must produce a
+    # per-goal malformed lock inside an ok:true response — never an
+    # AttributeError that loses the whole /goals evaluation
+    run = _receipt("MT-00", fg.KIND_RUN, run_id="run-9", days_ago=0,
+                   name="illtyped-path.json",
+                   artifacts=[{
+                       "label": "x",
+                       "sha256": "a" * 64,
+                       "path": ["repo:", "src/x.py"],
+                   }])
+    result = _evaluate(_satisfying_mt00_receipts()
+                      + [run, _receipt("MT-00", fg.KIND_OPERATOR_ATTESTATION)])
+    assert result["ok"] is True
+    mt00 = _goal(result, "MT-00")
+    assert mt00["satisfied"] is False
+    assert any("malformed artifact entry" in b for b in mt00["blockers"])
+    # the ill-typed run is NEWER than the valid one, so it governs
+    assert any("illtyped-path.json" in b for b in mt00["blockers"])
+
+
+def test_object_run_id_cannot_be_a_valid_run_identity():
+    # {"a": 1} is truthy: without a string guard it slips past the
+    # run_id check, and a value-equal OBJECT "verifies" then matches it
+    # ({"a": 1} == {"a": 1} in Python) — an ill-typed pair must never
+    # satisfy a goal
+    run = _receipt("MT-00", fg.KIND_RUN, run_id={"a": 1}, days_ago=0,
+                   name="object-runid.json")
+    verifies = _receipt("MT-00", fg.KIND_INDEPENDENT_VERIFICATION,
+                        run_id="v1", verifies={"a": 1}, days_ago=0)
+    result = _evaluate(_satisfying_mt00_receipts() + [
+        run, verifies, _receipt("MT-00", fg.KIND_OPERATOR_ATTESTATION),
+    ])
+    mt00 = _goal(result, "MT-00")
+    assert mt00["satisfied"] is False
+    assert any("no usable run_id" in b for b in mt00["blockers"])
+
+
+def test_object_verifies_cannot_match_a_valid_run():
+    # even with a perfectly valid newest run, a verification whose
+    # "verifies" is an object (value-equal to nothing string-typed) must
+    # be rejected as unusable identity, not compared by value equality
+    verifies = _receipt("MT-00", fg.KIND_INDEPENDENT_VERIFICATION,
+                        run_id="v1", verifies=["run-9"], days_ago=0)
+    result = _evaluate(_satisfying_mt00_receipts() + [verifies])
+    mt00 = _goal(result, "MT-00")
+    assert mt00["satisfied"] is False
+    assert any(
+        "no usable run id" in b for b in mt00["blockers"]
+    ) or any(
+        "no current independent verification" in b
+        for b in mt00["blockers"]
+    )

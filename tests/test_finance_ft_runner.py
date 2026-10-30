@@ -372,7 +372,9 @@ def test_snapshot_delegation_argv_uses_pinned_image_and_workspace_only():
     assert GOOD_IMAGE in write_argv
     assert write_argv[write_argv.index("--entrypoint") + 1] == "/bin/sh"
     assert "/home/agent/finance-paper/user_data:/freqtrade/user_data" in write_argv
-    assert write_argv[-1] == "cat > /freqtrade/user_data/.verified-abc.json"
+    assert write_argv[-1] == (
+        "set -C; cat > /freqtrade/user_data/.verified-abc.json"
+    )  # noclobber: a replanted path is refused, never truncated
     assert "--privileged" not in write_argv
 
     rm_argv = ft.build_snapshot_rm_argv(
@@ -500,10 +502,11 @@ def test_materialise_catches_true_vs_one_source_swap(tmp_path):
 
 
 def test_docker_argv_binds_config_sha_inside_container():
-    # with a full sha256 the container entrypoint becomes a checksum
-    # preflight: freqtrade runs only if the config file STILL hashes to
-    # the verified digest at open time, and freqtrade's own arguments
-    # travel as positional parameters, never inside the shell string
+    # with a full sha256 the container entrypoint COPIES the mounted
+    # snapshot to container-private storage, verifies the COPY's sha256
+    # (check and use are then the same host-unreachable inode), and only
+    # then execs freqtrade, which reads the copy; freqtrade's own
+    # arguments travel as positional parameters, never the shell string
     sha = "a" * 64
     argv = ft.build_docker_argv(
         "dry-run", image_ref=GOOD_IMAGE,
@@ -518,16 +521,50 @@ def test_docker_argv_binds_config_sha_inside_container():
     # <subcommand> ... (exec "$@" never runs argv0 itself)
     assert argv[argv.index("-c") + 2] == "sh"
     assert argv[argv.index("-c") + 3] == "freqtrade"
-    assert ("printf '%s  %s" + "\\n' " + sha + " ") in script
+    assert script.startswith("cp /freqtrade/user_data/")
+    assert ("cp /freqtrade/user_data/.verified-f330b591b66a.json "
+            + ft.PRIVATE_CONFIG_PATH + " && ") in script
+    assert ("printf '%s  %s" + "\\n' " + sha + " " +
+            ft.PRIVATE_CONFIG_PATH) in script
+    assert "/freqtrade/user_data/.verified-f330b591b66a.json" not in (
+        script.split(" && ", 1)[1]
+    )  # after the cp, only the private copy is referenced
     assert "sha256sum -c --status -" in script
     assert 'exec "$@"' in script
-    # the config path appears in the script; strategy and subcommand do
-    # NOT (they are positional args, immune to injection)
-    assert "/freqtrade/user_data/.verified-f330b591b66a.json" in script
     assert "SMACrossBaseline" not in script
     assert "trade" not in script.replace("freqtrade", "")
     assert argv[argv.index("-c") + 4] == "trade"
     assert "SMACrossBaseline" in argv
+
+
+def test_sha_bound_freqtrade_reads_the_private_copy_not_the_mount():
+    # the --config VALUE must be the container-private path: a path
+    # inside the mounted volume stays replaceable by any workspace
+    # writer, which is exactly the check-to-use race round 6 found
+    for action, extra in (
+        ("dry-run", {"strategy": "SMACrossBaseline"}),
+        ("download-data", {"data_args": ["--timeframe", "1h"]}),
+    ):
+        argv = ft.build_docker_argv(
+            action, image_ref=GOOD_IMAGE,
+            user_data_dir=Path("/w"), config_sha256="b" * 64, **extra,
+        )
+        cmd = argv[argv.index("-c") + 3:]
+        assert cmd[0] == "freqtrade"
+        cfg_value = cmd[cmd.index("--config") + 1]
+        assert cfg_value == ft.PRIVATE_CONFIG_PATH
+        assert not cfg_value.startswith("/freqtrade/user_data")
+        assert not ft.PRIVATE_CONFIG_PATH.startswith("/freqtrade/user_data/")
+
+
+def test_snapshot_write_argv_refuses_to_clobber_noclobber():
+    # the delegated snapshot write must open with O_EXCL semantics
+    # (set -C): a symlink replanted between the clear and the
+    # container's open is REFUSED, never followed and truncated
+    argv = ft.build_snapshot_write_argv(Path("/w"), ".verified-abc.json")
+    script = argv[argv.index("-c") + 1]
+    assert script.startswith("set -C; cat > ")
+    assert script.endswith("/freqtrade/user_data/.verified-abc.json")
 
 
 def test_docker_argv_sha_binding_rejects_bad_inputs():

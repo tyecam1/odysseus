@@ -223,7 +223,13 @@ def _receipt_blockers(
             label = artifact.get("label")
             recorded = artifact.get("sha256")
             art_path = artifact.get("path")
-            if not label or not recorded or not art_path:
+            if (
+                not isinstance(label, str) or not label
+                or not isinstance(recorded, str) or not recorded
+                or not isinstance(art_path, str) or not art_path
+            ):
+                # ill-typed (list/object/int) fields are malformed, not a
+                # crash: they must lock the goal, not lose the response
                 blockers.append(
                     f"receipt {receipt.get('_file')}: malformed artifact entry"
                 )
@@ -368,8 +374,13 @@ def evaluate_goals(
             problems: List[str] = []
             if receipt.get("status") != "pass":
                 problems.append(f"run receipt {name} status={receipt.get('status')!r}")
-            elif not receipt.get("run_id"):
-                problems.append(f"run receipt {name} has no run_id")
+            elif not isinstance(receipt.get("run_id"), str) or not receipt.get(
+                "run_id"
+            ):
+                # a non-string run_id (list/object) is unusable identity,
+                # and value-equality must never let an ill-typed pair
+                # match an ill-typed verification below
+                problems.append(f"run receipt {name} has no usable run_id")
             elif not receipt.get("artifacts"):
                 problems.append(f"run receipt {name} records no artifacts")
             else:
@@ -407,10 +418,15 @@ def evaluate_goals(
 
         # (sha256, path) pairs, not bare hashes: identical bytes at two
         # paths (latest.json vs a timestamped snapshot) must not let a
-        # verification "cite" an artifact the run receipt never named
+        # verification "cite" an artifact the run receipt never named.
+        # Non-dict entries or ill-typed fields are skipped (never
+        # unhashable-tuple crashes): they already locked the goal above.
         run_cited = {
             (artifact.get("sha256"), artifact.get("path"))
             for artifact in best_run.get("artifacts") or []
+            if isinstance(artifact, dict)
+            and isinstance(artifact.get("sha256"), str)
+            and isinstance(artifact.get("path"), str)
         }
         run_observed = _observed_at(best_run)
 
@@ -425,8 +441,10 @@ def evaluate_goals(
                 problems.append(
                     f"verification {name} status={verification.get('status')!r}"
                 )
-            if not verification.get("verifies"):
-                problems.append(f"verification {name} names no run id")
+            if not isinstance(verification.get("verifies"), str) or not (
+                verification.get("verifies")
+            ):
+                problems.append(f"verification {name} names no usable run id")
             elif verification.get("verifies") != best_run.get("run_id"):
                 problems.append(
                     f"verification {name} names run "
@@ -465,6 +483,9 @@ def evaluate_goals(
             v_cited = {
                 (artifact.get("sha256"), artifact.get("path"))
                 for artifact in verification.get("artifacts") or []
+                if isinstance(artifact, dict)
+                and isinstance(artifact.get("sha256"), str)
+                and isinstance(artifact.get("path"), str)
             }
             if not (run_cited & v_cited):
                 problems.append(

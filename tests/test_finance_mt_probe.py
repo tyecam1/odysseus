@@ -518,3 +518,110 @@ def test_first_seen_at_content_must_parse(tmp_path):
         ]}), encoding="utf-8")
     with pytest.raises(ValueError):
         mp.load_first_seen_index(tmp_path)
+
+
+# --- round-7 review findings: no IDNA-2003 fallback, ill-typed feed
+# --- fields, unknown-domain story keys, canonical timestamps ---
+
+
+def test_missing_idna_package_never_applies_idna2003(monkeypatch):
+    # without the idna package a non-ASCII host must classify "unknown",
+    # NEVER fall back to stdlib IDNA 2003 (which maps faß.de to fass.de
+    # and would split one publisher into two domains)
+    monkeypatch.setattr(mp, "_idna", None)
+    assert mp.registrable_domain("https://faß.de/story") == "unknown"
+    assert mp.registrable_domain("https://BÜCHER.de./x") == "unknown"
+    # ASCII hosts are unaffected by the package being absent
+    assert mp.registrable_domain("https://fass.de/x") == "fass.de"
+    assert mp.registrable_domain("https://example.co.uk/a") == "example.co.uk"
+
+
+def test_ill_typed_feed_fields_do_not_abort_gdelt():
+    # int/list url, list title, None seendate, int domain/country: no
+    # combination of ill-typed GDELT fields may abort the whole source
+    payload = {"articles": [
+        {"url": 12345, "title": "int url"},
+        {"url": ["https://x.example/a"], "title": "list url"},
+        {"url": "https://a.example/1", "title": ["list title"],
+         "seendate": None, "domain": 77, "sourcecountry": 42},
+    ]}
+    result = mp.collect_gdelt(
+        "bitcoin", max_records=10, collected_at="2026-10-29T10:00:00Z",
+        first_seen_index={}, fetch=lambda url, timeout: payload,
+    )
+    assert result.status == "ok"
+    assert len(result.records) == 1  # only the usable record survives
+    rec = result.records[0].to_contract()
+    assert rec["source"] == "gdelt-doc-2.0:a.example"
+    assert rec["geography"] is None  # int sourcecountry coerced away
+
+
+def test_unknown_domain_records_never_false_merge():
+    # two UNPARSEABLE-URL articles sharing a title: syndication dedup on
+    # (unknown, title) would drop a distinct publisher's story — the
+    # story key must be unique per record instead (over-merge destroys
+    # evidence; under-merge only loses one dedup opportunity)
+    payload = {"articles": [
+        {"url": "malformed one", "title": "Same Wire Story"},
+        {"url": "malformed two", "title": "same wire story"},
+    ]}
+    result = mp.collect_gdelt(
+        "bitcoin", max_records=10, collected_at="2026-10-29T10:00:00Z",
+        first_seen_index={}, fetch=lambda url, timeout: payload,
+    )
+    assert result.status == "ok"
+    assert result.deduped_syndication == 0
+    assert len(result.records) == 2
+
+
+def test_unpadded_timestamp_fails_closed(tmp_path):
+    # 2026-9-30 PARSES but is noncanonical: it sorts AFTER 2026-10-01
+    # lexicographically and would retain the WRONG first-seen time —
+    # the merge gate must reject it, not accept it into ordering
+    (tmp_path / "latest.json").write_text(
+        json.dumps({"records": [
+            {"event_id": "e1", "first_seen_at": "2026-9-30T00:00:00Z"},
+        ]}), encoding="utf-8")
+    with pytest.raises(ValueError, match="canonical"):
+        mp.load_first_seen_index(tmp_path)
+
+
+def test_hn_ill_typed_item_fields_do_not_abort():
+    # non-numeric time/score and an int url on ONE item must degrade
+    # that item's fields, never abort the HN collection
+    items = {1: {"id": 1, "title": "Odd item", "url": 123,
+                 "time": "abc", "score": "x"}}
+    result = mp.collect_hackernews(
+        top_n=1, collected_at="2026-10-29T10:00:00Z",
+        first_seen_index={},
+        fetch=lambda url, timeout: (
+            [1] if "topstories" in url else items.get(1)
+        ),
+    )
+    assert result.status == "ok"
+    assert len(result.records) == 1
+    rec = result.records[0].to_contract()
+    assert rec["published_at"] is None
+    assert rec["raw_metric"] == 0.0
+    assert rec["source_url"] == "https://news.ycombinator.com/item?id=1"
+
+
+def test_kraken_malformed_candle_skipped_not_fatal():
+    # a structurally bad candle in the OHLC series must be skipped and
+    # counted, never allowed to abort the Kraken collection
+    payload = {"error": [], "result": {"XXBTZUSD": [
+        [1790000000, "100", "101", "99", "100.5", "100.2", "12.5", 57],
+        ["oops"],
+        {"not": "a candle"},
+        [1790003600, "100.5", "102", "100", "101.5", "101", "25.0", 91],
+    ], "last": 1790003600}}
+    result, summary = mp.collect_kraken(
+        pair="BTCUSD", collected_at="2026-10-29T10:00:00Z",
+        first_seen_index={}, fetch=lambda url, timeout: payload,
+    )
+    assert result.status == "ok"
+    assert len(result.records) == 2
+    assert summary["candles"] == 2
+    assert summary["skipped_malformed_candles"] == 2
+    assert summary["last_close"] == 101.5
+    assert summary["last_volume"] == 25.0
