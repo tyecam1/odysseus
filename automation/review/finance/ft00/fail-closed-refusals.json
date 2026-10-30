@@ -1,9 +1,9 @@
 {
   "goal_id": "FT-00",
-  "note": "fail-closed refusals against the round-7 code",
+  "note": "fail-closed refusals against the round-8 code",
   "refusals": [
     {
-      "case": "t5-dryrun",
+      "case": "t6-dryrun",
       "rc_expected_3": true,
       "fail_closed": true,
       "findings": [
@@ -11,7 +11,7 @@
       ]
     },
     {
-      "case": "t5-key",
+      "case": "t6-key",
       "rc_expected_3": true,
       "fail_closed": true,
       "findings": [
@@ -19,7 +19,7 @@
       ]
     },
     {
-      "case": "t5-futures",
+      "case": "t6-futures",
       "rc_expected_3": true,
       "fail_closed": true,
       "findings": [
@@ -28,7 +28,7 @@
       ]
     },
     {
-      "case": "t5-overlay",
+      "case": "t6-overlay",
       "rc_expected_3": true,
       "fail_closed": true,
       "findings": [
@@ -36,7 +36,7 @@
       ]
     },
     {
-      "case": "t5-extra",
+      "case": "t6-extra",
       "rc_expected_3": true,
       "fail_closed": true,
       "findings": [
@@ -45,7 +45,7 @@
       ]
     },
     {
-      "case": "t5-badpair",
+      "case": "t6-badpair",
       "rc_expected_3": true,
       "fail_closed": true,
       "findings": [
@@ -53,14 +53,14 @@
       ]
     }
   ],
-  "observed_at": "2026-10-30T00:02:05Z",
+  "observed_at": "2026-10-30T00:26:03Z",
   "hardlink_neutralisation": {
-    "case": "t7-hardlink",
+    "case": "t8-hardlink",
     "planted": ".verified-config-ft00.json.json hardlinked to config-ft00.json",
     "result": "cleared by materialise; smoke succeeded on a fresh nlink=1 inode with the container-side sha256 preflight binding the executed bytes"
   },
   "delegated_noclobber_refusal": {
-    "case": "t7-symlink-replant",
+    "case": "t8-symlink-replant",
     "setup": "symlink planted at the content-addressed snapshot path pointing at an innocent file; the delegated one-shot write (the exact set -C noclobber form build_snapshot_write_argv emits) was then run against it",
     "result": "open REFUSED (nonzero rc) and the innocent target file was NOT truncated \u2014 its original bytes survived byte-for-byte"
   }
