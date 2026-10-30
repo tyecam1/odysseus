@@ -1,0 +1,47 @@
+{
+  "goal_id": "FT-00",
+  "kind": "run",
+  "status": "pass",
+  "observed_at": "2026-10-29T17:08:13Z",
+  "run_id": "ft00-lab-20261029T1708Z",
+  "code_commit": "3cac9b370e6bb0aa3892a14c9be74d8472af391a",
+  "strategy_hash": "30e3e51435ab8bc7e2d3d89dab1e1dcb1c760edd642b4a69140141f333d2b428",
+  "config_hash": "f330b591b66aeaf4ef82b2f1786137c53597e5461d942e388e488b1c9badcc60",
+  "engine_digest": "freqtradeorg/freqtrade@sha256:9d67afb8eb5f4e1210f4fb067efcbd5e005bd4f1c27f6f3888b8b9fc7f9b5199",
+  "engine_version": "freqtrade 2026.9 (image Python 3.14.7, CCXT 4.5.84)",
+  "data_snapshot": "kraken live public OHLCV during dry-run; historic klines require --dl-trades on kraken (time-boxed attempt exceeded 9min for 3d x 2 pairs; deferred to FT-01)",
+  "independent_verifier": "self-attested-executor (pending independent verification)",
+  "notes": "FT-00 on hz2-workstation (lab) against the post-review-fix code (commit 3cac9b3): docker 29.1.3 (owner-authorized install 2026-10-29); guard now requires the EXACT pinned official digest reference and rejects overlay routes. verify-config pass; FIVE fail-closed refusals rc=3 (dry_run=false, exchange key set, futures + colon pair, add_config_files overlay in config, and --extra=--config overlay at CLI level). Dry-run smoke 2/2 cycles reached state=RUNNING heartbeat on live Kraken public data with zero credentials, graceful SIGTERM stop rc=0 both cycles. Spot only, no margin/derivatives, no exchange keys, no public listeners, no telegram, workspace outside knowledgebase.",
+  "artifacts": [
+    {
+      "label": "ft-config",
+      "path": "repo:automation/review/finance/ft00/config-ft00.json",
+      "sha256": "f330b591b66aeaf4ef82b2f1786137c53597e5461d942e388e488b1c9badcc60"
+    },
+    {
+      "label": "ft-engine-pin",
+      "path": "repo:automation/review/finance/ft00/engine-pin.txt",
+      "sha256": "44e196b7f2c22bb93def934f70a46ae2696b31f140b4e060327bec9494eaad47"
+    },
+    {
+      "label": "ft-strategy",
+      "path": "repo:automation/review/finance/ft00/SMACrossBaseline.py",
+      "sha256": "30e3e51435ab8bc7e2d3d89dab1e1dcb1c760edd642b4a69140141f333d2b428"
+    },
+    {
+      "label": "ft-runner-code",
+      "path": "repo:src/finance_ft_runner.py",
+      "sha256": "2682ba2a0d4d19b5d9e6cc45462d24a31790afb3850aa337020d252b093a98ca"
+    },
+    {
+      "label": "ft-dryrun-cycle1-log",
+      "path": "repo:automation/review/finance/ft00/dryrun-cycle1.log",
+      "sha256": "ac6e770afff6f42961b5a765fc7f7e2a7a0f6383e9dbe18ae7f3ca0aa60e3d4f"
+    },
+    {
+      "label": "ft-dryrun-cycle2-log",
+      "path": "repo:automation/review/finance/ft00/dryrun-cycle2.log",
+      "sha256": "7eb522eafc6bcdabe5fdc7f075adf24e39265d9c55c4ce14c00cf5832a129ea8"
+    }
+  ]
+}

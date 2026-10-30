@@ -1,0 +1,45 @@
+{
+  "goal_id": "MT-00",
+  "kind": "run",
+  "status": "pass",
+  "observed_at": "2026-10-30T08:51:46Z",
+  "run_id": "mt00-lab-20261030T085146Z",
+  "code_commit": "183a1ec6422116ccb2b1bffeca9651e2f7fd8fd3",
+  "verifier": "self-attested-executor (pending independent verification)",
+  "source_config_hash": "837fa98985fe1ae30b420cd5f8932ae82c2f6e2d5dc20902861c768781b639de",
+  "data_snapshot_ids": [
+    "automation/review/finance/mt00/snapshot-20261030T085146Z.json"
+  ],
+  "source_access_audit_id": "automation/review/finance/mt00/run-manifest-20261030T085146Z.json",
+  "evaluation_artifacts": [
+    "automation/review/finance/mt00/digest-20261030T085146Z.md"
+  ],
+  "notes": "Live MT-00 probe on hz2-workstation (lab) against the round-9 review-fix code (commit 183a1ec, probe v0.9): GDELT DOC 2.0 + HN official API + Kraken public spot candles, all public/no-auth/no-key. Sources at 20261030T085146Z: HN ok (25 records), Kraken ok (24), GDELT ok (73 records; health records http_status=200 retries=1 truthfully when a window is rate-limited; 2/3 healthy satisfies the bounded snapshot, GDELT cadence stays an MT-01 question). Round-9 fixes live in this run (probe v0.9): the syndication story key is now PUNCTUATION-PRESERVING (NFKC + lowercase + whitespace collapse, full length) so titles differing only in punctuation (C++ vs C#) stay distinct stories, while fullwidth Unicode decoys of one headline still fold together; a source that supplies ZERO usable records (GDELT all-malformed/empty articles, Kraken all-malformed/negative candles) now reports status=failed with a counted reason and can never count toward the 2/3-healthy bounded snapshot; HN topstories ids outside (0, 10^12] are skipped and counted as errors, and the per-record source_health string is assembled AFTER the loop so the error count reflects every skipped id, not just those before each record. First-seen carry-forward live-proven for text (HN 24/25 carry earlier first_seen) AND candles (Kraken 24/24). Offline suite record committed at automation/review/finance/test-suite-round10.txt (8453 passed / 46 skipped / 5 xfailed, 133 finance). Syndication dedup on (registrable domain, punctuation-preserving normalised title); GDELT published_at stays null (seendate is retrieval time, recorded in uncertainty). Excluded by policy: x-cookies, private reddit, youtube internals, retailer scraping, paid APIs. Interpretation reserved for persona L.",
+  "artifacts": [
+    {
+      "label": "mt-probe-code",
+      "path": "repo:src/finance_mt_probe.py",
+      "sha256": "902751dfca6219f9422cceb06bf46594f32d7e4523468d5ffe9690a93ddf54bb"
+    },
+    {
+      "label": "mt-run-manifest",
+      "path": "repo:automation/review/finance/mt00/run-manifest-20261030T085146Z.json",
+      "sha256": "837fa98985fe1ae30b420cd5f8932ae82c2f6e2d5dc20902861c768781b639de"
+    },
+    {
+      "label": "mt-snapshot",
+      "path": "repo:automation/review/finance/mt00/snapshot-20261030T085146Z.json",
+      "sha256": "ab1963f0f5ea36efbdfff2307956188210c23477b86d03863fc645de013ea9a9"
+    },
+    {
+      "label": "mt-digest",
+      "path": "repo:automation/review/finance/mt00/digest-20261030T085146Z.md",
+      "sha256": "2240ec2cd5d3a3787a0aa18ae7bad0273d103c93e32318ebc1cc2e3d0d9a922f"
+    },
+    {
+      "label": "mt-suite-record",
+      "path": "repo:automation/review/finance/test-suite-round10.txt",
+      "sha256": "fbad6b4cd7ca10c7630dd861a88e1950869a2ed6e3650645bacdd4e2ef505115"
+    }
+  ]
+}

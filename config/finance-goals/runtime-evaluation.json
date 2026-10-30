@@ -1,0 +1,24 @@
+{
+  "version": "0.1",
+  "note": "Odysseus-owned runtime policy for deriving MT/FT goal lock state from receipts. Canonical goal definitions live in tyecam1/misumi@main:config/finance-*-goals.json; the mirrored copies in this directory are read-only runtime inputs and must be re-synced when Misumi updates them.",
+  "receipt_ttl_days": {
+    "run": 7,
+    "operator_attestation": 365,
+    "independent_verification": 30
+  },
+  "independent_verifiers": [
+    "codex",
+    "sol",
+    "human:tye"
+  ],
+  "goal_ttl_overrides": {
+    "FT-04": {
+      "run": 45,
+      "independent_verification": 45
+    },
+    "MT-03": {
+      "run": 21,
+      "independent_verification": 45
+    }
+  }
+}

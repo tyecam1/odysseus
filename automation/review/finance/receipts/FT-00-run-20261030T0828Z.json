@@ -1,0 +1,57 @@
+{
+  "goal_id": "FT-00",
+  "kind": "run",
+  "status": "pass",
+  "observed_at": "2026-10-30T08:28:59Z",
+  "run_id": "ft00-lab-20261030T0828Z",
+  "code_commit": "42cc96120e7f08075386c79ceb2a30af5779bbdf",
+  "strategy_hash": "30e3e51435ab8bc7e2d3d89dab1e1dcb1c760edd642b4a69140141f333d2b428",
+  "config_hash": "f330b591b66aeaf4ef82b2f1786137c53597e5461d942e388e488b1c9badcc60",
+  "engine_digest": "freqtradeorg/freqtrade@sha256:9d67afb8eb5f4e1210f4fb067efcbd5e005bd4f1c27f6f3888b8b9fc7f9b5199",
+  "engine_version": "freqtrade 2026.9 (image Python 3.14.7, CCXT 4.5.84)",
+  "data_snapshot": "kraken live public OHLCV during dry-run; historic klines require --dl-trades on kraken (time-boxed attempt exceeded 9min for 3d x 2 pairs; deferred to FT-01)",
+  "independent_verifier": "self-attested-executor (pending independent verification)",
+  "notes": "FT-00 on hz2-workstation (lab) against the round-8 review-fix code (commit 42cc961; runner v0.3 unchanged this round - the round-8 findings were probe/evaluator-side): docker 29.1.3. Guard invariants unchanged and re-proven live: EXACT pinned official digest at every layer; dry_run strictly true; spot only; zero exchange credentials; overlay routes rejected; the executed config is the CONTAINER-PRIVATE copy (bot log: Using config: /tmp/ft-verified-config.json) whose sha256 is verified inside the container after the copy and before freqtrade execs; the snapshot is a fresh nlink=1 inode (a planted HARDLINK is neutralised live, again); the delegated write is noclobber (a planted SYMLINK at the snapshot path - planted on a CLEAN path this round so the refusal provably targets the symlink itself - is refused rc=2 with the victim file byte-identical after). SIX fail-closed config refusals rc=3 (dry_run=false, exchange key set, futures + colon pair, add_config_files overlay, --extra=--config CLI overlay, derivatives pair via typed --pairs) recorded in fail-closed-refusals.json. Dry-run smoke 2/2 cycles reached state=RUNNING heartbeat on live Kraken public data, graceful SIGTERM stop rc=0 both cycles, zero leftover snapshots. Offline suite record committed at automation/review/finance/test-suite-round9.txt (8446 passed / 46 skipped / 5 xfailed, 126 finance). Spot only, no margin/derivatives, no exchange keys, no public listeners, no telegram, workspace outside knowledgebase.",
+  "artifacts": [
+    {
+      "label": "ft-config",
+      "path": "repo:automation/review/finance/ft00/config-ft00.json",
+      "sha256": "f330b591b66aeaf4ef82b2f1786137c53597e5461d942e388e488b1c9badcc60"
+    },
+    {
+      "label": "ft-engine-pin",
+      "path": "repo:automation/review/finance/ft00/engine-pin.txt",
+      "sha256": "44e196b7f2c22bb93def934f70a46ae2696b31f140b4e060327bec9494eaad47"
+    },
+    {
+      "label": "ft-strategy",
+      "path": "repo:automation/review/finance/ft00/SMACrossBaseline.py",
+      "sha256": "30e3e51435ab8bc7e2d3d89dab1e1dcb1c760edd642b4a69140141f333d2b428"
+    },
+    {
+      "label": "ft-runner-code",
+      "path": "repo:src/finance_ft_runner.py",
+      "sha256": "8d9ab0c01c11f020c473d8a713de2ddd15cd0846bbc0184d75f353cdd78405cb"
+    },
+    {
+      "label": "ft-fail-closed-refusals",
+      "path": "repo:automation/review/finance/ft00/fail-closed-refusals.json",
+      "sha256": "b803a13b843626fe8d5e81f8ed30ec825b6ba9f2ee5f6fa7ccf7200117e57fd4"
+    },
+    {
+      "label": "ft-dryrun-cycle1-log",
+      "path": "repo:automation/review/finance/ft00/dryrun-cycle1.log",
+      "sha256": "46f43f1622420f2cfc616ead16939618e9c1e1ba24378d90bea8fe96fbe56666"
+    },
+    {
+      "label": "ft-dryrun-cycle2-log",
+      "path": "repo:automation/review/finance/ft00/dryrun-cycle2.log",
+      "sha256": "46460ac298a33ac72ac0f11af82d91c721648c04e383ad113f083b52d45f39c5"
+    },
+    {
+      "label": "ft-suite-record",
+      "path": "repo:automation/review/finance/test-suite-round9.txt",
+      "sha256": "e2d500063c796c648f5a7b89b173eaa9dca31abf998b36ab5cc831053ac1f3c1"
+    }
+  ]
+}

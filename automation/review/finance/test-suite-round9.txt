@@ -1,0 +1,322 @@
+finance slice round-9 offline suite record
+repo: tyecam1/odysseus branch feat/finance-mt00-ft00 (round-9 code, pre-commit working tree)
+host: hz2-workstation lab worker
+date: 2026-10-30T08:17:17Z
+command: venv/bin/python -m pytest -q  (full repository suite)
+finance subset: tests/test_finance_goals.py tests/test_finance_ft_runner.py tests/test_finance_mt_probe.py -> 126 passed
+
+........................................................................ [  0%]
+........................................................................ [  1%]
+........................................................................ [  2%]
+........................................................................ [  3%]
+........................................................................ [  4%]
+........................................................................ [  5%]
+........................................................................ [  5%]
+........................................................................ [  6%]
+........................................................................ [  7%]
+........................................................................ [  8%]
+........................................................................ [  9%]
+........................................................................ [ 10%]
+...............................s........................................ [ 11%]
+........................................................................ [ 11%]
+........................................................................ [ 12%]
+........................................................................ [ 13%]
+........................................................................ [ 14%]
+s....................................................................... [ 15%]
+...................................................................s.... [ 16%]
+........................................................................ [ 16%]
+........................................................................ [ 17%]
+........................................................................ [ 18%]
+........................................................................ [ 19%]
+........................................................................ [ 20%]
+........................................................................ [ 21%]
+........................................................................ [ 22%]
+........................................................................ [ 22%]
+........................................................................ [ 23%]
+........................................................................ [ 24%]
+........................................................................ [ 25%]
+........................................................................ [ 26%]
+.........................sssssss........................................ [ 27%]
+........................................................................ [ 27%]
+........................................................................ [ 28%]
+........................................................................ [ 29%]
+........................................................................ [ 30%]
+........................................................................ [ 31%]
+........................................................................ [ 32%]
+........................................................................ [ 33%]
+........................................................................ [ 33%]
+........................................................................ [ 34%]
+........................................................................ [ 35%]
+........................................................................ [ 36%]
+.............................................s....ssssss...........s.... [ 37%]
+........................................................................ [ 38%]
+........................................................................ [ 38%]
+........................................................................ [ 39%]
+........................................................................ [ 40%]
+........................................................................ [ 41%]
+........................................................................ [ 42%]
+........................................................................ [ 43%]
+.................................s...................................... [ 44%]
+........................................................................ [ 44%]
+........................................................................ [ 45%]
+........................................................................ [ 46%]
+........................................................................ [ 47%]
+........................................................................ [ 48%]
+........................................................................ [ 49%]
+........................................................................ [ 49%]
+........................................................................ [ 50%]
+........................................................................ [ 51%]
+........................................................................ [ 52%]
+........................................................................ [ 53%]
+........................................................................ [ 54%]
+..................................................sssssssssss........... [ 55%]
+........................................................................ [ 55%]
+........................................................................ [ 56%]
+........................................................................ [ 57%]
+....x................................................................... [ 58%]
+........................................................................ [ 59%]
+........................................................................ [ 60%]
+........................................................................ [ 61%]
+........................................................................ [ 61%]
+.......................................x................x...........x... [ 62%]
+..........................x............................................. [ 63%]
+........................s.......s.......s............................... [ 64%]
+........................................................................ [ 65%]
+........................................................................ [ 66%]
+........................................................................ [ 66%]
+........................................................................ [ 67%]
+........................................................................ [ 68%]
+........................................................................ [ 69%]
+........................................................................ [ 70%]
+........................................................................ [ 71%]
+........................................................................ [ 72%]
+........................................................................ [ 72%]
+...................................................................ss... [ 73%]
+.sssssssss.............................................................. [ 74%]
+........................................................................ [ 75%]
+........................................................................ [ 76%]
+........................................................................ [ 77%]
+........................................................................ [ 77%]
+........................................................................ [ 78%]
+........................................................................ [ 79%]
+........................................................................ [ 80%]
+........................................................................ [ 81%]
+........................................................................ [ 82%]
+........................................................................ [ 83%]
+........................................................................ [ 83%]
+........................................................................ [ 84%]
+........................................................................ [ 85%]
+........................................................................ [ 86%]
+........................................................................ [ 87%]
+........................................................................ [ 88%]
+........................................................................ [ 88%]
+........................................................................ [ 89%]
+........................................................................ [ 90%]
+........................................................................ [ 91%]
+........................................................................ [ 92%]
+........................................................................ [ 93%]
+........................................................................ [ 94%]
+s....................................................................... [ 94%]
+........................................................................ [ 95%]
+........................................................................ [ 96%]
+..............................s......................................... [ 97%]
+........................................................................ [ 98%]
+........................................................................ [ 99%]
+........................................................................ [ 99%]
+.                                                                        [100%]
+=============================== warnings summary ===============================
+core/database.py:21
+tests/test_caldav_bidirectional_sync.py::test_failed_remote_delete_leaves_tombstone_and_later_retry_cleans_up
+tests/test_truncate_message_count_regression.py::test_truncate_keep_count_exceeds_total_does_not_inflate_count
+tests/test_truncate_message_count_regression.py::test_truncate_keeps_history_alias_for_context_messages
+  /home/agent/projects/odysseus-aoteru/core/database.py:21: MovedIn20Warning: The ``declarative_base()`` function is now available as sqlalchemy.orm.declarative_base(). (deprecated since: 2.0) (Background on SQLAlchemy 2.0 at: https://sqlalche.me/e/b8d9)
+    Base = declarative_base()
+
+tests/test_builtin_actions_owner_scope.py::test_classify_events_resolves_llm_for_task_owner
+  /home/agent/projects/odysseus-aoteru/src/builtin_actions.py:895: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = datetime.utcnow()
+
+tests/test_builtin_actions_owner_scope.py::test_learn_sender_signatures_resolves_llm_for_task_owner
+tests/test_builtin_actions_owner_scope.py::test_learn_sender_signatures_writes_owner_scoped_cache
+tests/test_imap_uid_commands.py::test_sig_learner_uses_uid_search
+tests/test_imap_uid_commands.py::test_sig_learner_uses_uid_fetch
+  /home/agent/projects/odysseus-aoteru/src/builtin_actions.py:1188: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    cutoff_iso = (_dt.utcnow() - _td(days=30)).isoformat()
+
+tests/test_builtin_actions_owner_scope.py::test_learn_sender_signatures_writes_owner_scoped_cache
+  /home/agent/projects/odysseus-aoteru/src/builtin_actions.py:1295: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    (addr, owner_value, cached_sig, len(bodies), _dt.utcnow().isoformat(), model, "llm"),
+
+tests/test_builtin_actions_owner_scope.py::test_check_email_urgency_resolves_llm_candidates_for_task_owner
+  /home/agent/projects/odysseus-aoteru/src/builtin_actions.py:1815: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    AGE_CUTOFF = _dt.utcnow() - _td(days=7)
+
+tests/test_caldav_client_cleanup.py::test_sync_closes_client_when_session_local_raises
+tests/test_caldav_google_principal_url.py::test_google_sync_pulls_events_instead_of_empty
+  /home/agent/projects/odysseus-aoteru/src/caldav_sync.py:309: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    start = datetime.utcnow() - timedelta(days=_LOOKBACK_DAYS)
+
+tests/test_caldav_client_cleanup.py::test_sync_closes_client_when_session_local_raises
+tests/test_caldav_google_principal_url.py::test_google_sync_pulls_events_instead_of_empty
+  /home/agent/projects/odysseus-aoteru/src/caldav_sync.py:310: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    end = datetime.utcnow() + timedelta(days=_LOOKAHEAD_DAYS)
+
+tests/test_caldav_google_principal_url.py::test_google_sync_pulls_events_instead_of_empty
+  /home/agent/projects/odysseus-aoteru/tests/test_caldav_google_principal_url.py:45: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    dt = datetime.utcnow() + timedelta(days=2)
+
+tests/test_contacts_import_nonstring.py::test_non_string_csv_degrades_cleanly
+  /home/agent/projects/odysseus-aoteru/routes/contacts/contacts_routes.py:351: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    _contact_cache["fetched_at"] = datetime.utcnow()
+
+tests/test_email_owner_scope.py::test_email_index_helpers_roundtrip_and_update_flags
+  /home/agent/projects/odysseus-aoteru/routes/email_routes.py:649: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = datetime.utcnow().isoformat() + "Z"
+
+tests/test_email_owner_scope.py::test_email_index_helpers_roundtrip_and_update_flags
+tests/test_email_owner_scope.py::test_email_index_helpers_roundtrip_and_update_flags
+  /home/agent/projects/odysseus-aoteru/routes/email_routes.py:727: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    (" ".join(sorted(parts)), datetime.utcnow().isoformat() + "Z", owner or "", _account_cache_key(account_id, owner), folder, str(uid)),
+
+tests/test_email_owner_scope.py::test_sender_signature_read_lookup_is_owner_scoped
+  /home/agent/projects/odysseus-aoteru/routes/email_routes.py:787: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = datetime.utcnow().isoformat() + "Z"
+
+tests/test_email_owner_scope.py::test_scheduled_email_routes_are_owner_scoped
+tests/test_email_owner_scope.py::test_scheduled_email_routes_are_owner_scoped
+tests/test_schedule_email_offset_normalization.py::test_positive_offset_stored_as_naive_utc
+tests/test_schedule_email_offset_normalization.py::test_negative_offset_does_not_fire_early
+tests/test_schedule_email_offset_normalization.py::test_z_suffix_stored_without_suffix
+tests/test_schedule_email_offset_normalization.py::test_naive_utc_send_at_unchanged
+  /home/agent/projects/odysseus-aoteru/routes/email_routes.py:3591: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    datetime.utcnow().isoformat(),
+
+tests/test_email_owner_scope.py::test_pending_agent_draft_routes_do_not_expose_ownerless_rows
+tests/test_email_owner_scope.py::test_pending_agent_draft_routes_block_cross_owner_actions
+  /home/agent/projects/odysseus-aoteru/routes/email_routes.py:3682: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    (datetime.utcnow().isoformat(), sid, owner or ""),
+
+tests/test_email_owner_scope.py::test_scheduled_poller_resolves_config_with_row_owner
+tests/test_scheduled_poll_race.py::test_concurrent_pollers_do_not_double_send
+tests/test_scheduled_poll_race.py::test_concurrent_pollers_do_not_double_send
+  /home/agent/projects/odysseus-aoteru/routes/email_pollers.py:1056: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now_iso = datetime.utcnow().isoformat()
+
+tests/test_email_owner_scope.py::test_scheduled_poller_resolves_config_with_row_owner
+tests/test_scheduled_poll_race.py::test_concurrent_pollers_do_not_double_send
+  /home/agent/projects/odysseus-aoteru/routes/email_pollers.py:1110: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    outer["Date"] = datetime.utcnow().strftime("%a, %d %b %Y %H:%M:%S +0000")
+
+tests/test_email_polly_imap_leak.py::test_auto_summarize_pass_logs_out_imap_on_select_failure
+  /home/agent/projects/odysseus-aoteru/routes/email_pollers.py:264: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    since = (datetime.utcnow() - _td(days=max(1, days_back))).strftime("%d-%b-%Y")
+
+tests/test_manage_mcp_command_allowlist.py::test_add_allows_safe_server_writes_row_and_connects
+tests/test_manage_mcp_command_allowlist.py::test_add_allows_safe_server_writes_row_and_connects
+  /home/agent/projects/odysseus-aoteru/src/agent_tools/admin_tools.py:269: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    is_enabled=True, created_at=datetime.utcnow(), updated_at=datetime.utcnow())
+
+tests/test_mcp_email_decode_header_spaces.py::test_mcp_send_email_stages_with_visible_owner_account_id
+tests/test_mcp_email_decode_header_spaces.py::test_mcp_send_email_stages_owner_scoped_pending_draft
+  /home/agent/projects/odysseus-aoteru/mcp_servers/email_server.py:1143: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = datetime.utcnow().isoformat()
+
+tests/test_misumi_memory.py::test_status_and_glance_work_empty_and_with_data_without_model
+tests/test_misumi_memory.py::test_status_and_glance_work_empty_and_with_data_without_model
+tests/test_misumi_routes.py::test_status_is_explicitly_read_only
+tests/test_readiness.py::test_readiness_reports_core_subsystems
+tests/test_readiness.py::test_local_first_check_is_informational_never_fatal
+tests/test_readiness.py::test_readiness_rejects_unauthenticated_network_bind
+tests/test_readiness.py::test_misumi_required_makes_household_and_model_critical
+  /home/agent/projects/odysseus-aoteru/src/readiness.py:151: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    "timestamp": datetime.utcnow().isoformat(),
+
+tests/test_misumi_memory.py: 726 warnings
+tests/test_misumi_oss_skill_routes.py: 1 warning
+tests/test_misumi_pilots.py: 33 warnings
+tests/test_misumi_routes.py: 396 warnings
+tests/test_misumi_skills.py: 67 warnings
+tests/test_oss_skill_ingestion.py: 1 warning
+tests/test_skill_index_prompt_injection.py: 12 warnings
+tests/test_skills_manager_owner_isolation.py: 2 warnings
+  /home/agent/projects/odysseus-aoteru/services/memory/skill_format.py:444: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    return datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+tests/test_research_routes_path_confinement.py::test_spinoff_uses_single_disk_lookup_for_completed_result
+tests/test_research_routes_path_confinement.py::test_spinoff_reads_saved_query_for_done_active_task
+  /home/agent/projects/odysseus-aoteru/routes/research/research_routes.py:758: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    date_str = datetime.utcnow().strftime("%Y-%m-%d")
+
+tests/test_routing_evaluator.py: 75 warnings
+  /home/agent/projects/odysseus-aoteru/tests/test_routing_evaluator.py:27: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    paid_tokens=None, created_at=datetime.utcnow(),
+
+tests/test_routing_evaluator.py: 13 warnings
+  /home/agent/projects/odysseus-aoteru/src/routing_evaluator.py:196: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = now or datetime.utcnow()
+
+tests/test_routing_evaluator.py::test_recency_weighting_down_weights_old_decisions_without_dropping_them
+  /home/agent/projects/odysseus-aoteru/tests/test_routing_evaluator.py:153: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = datetime.utcnow()
+
+tests/test_schedule_email_offset_normalization.py::test_negative_offset_does_not_fire_early
+  /home/agent/projects/odysseus-aoteru/tests/test_schedule_email_offset_normalization.py:76: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    assert not value <= datetime.utcnow().isoformat()
+
+tests/test_schedule_email_offset_normalization.py::test_naive_utc_send_at_unchanged
+  /home/agent/projects/odysseus-aoteru/tests/test_schedule_email_offset_normalization.py:95: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    naive = (datetime.utcnow() + timedelta(days=1)).isoformat()
+
+tests/test_schedule_email_offset_normalization.py::test_naive_utc_send_at_unchanged
+  /home/agent/projects/odysseus-aoteru/routes/email_routes.py:3559: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now_utc = _dt.now(_tz.utc) if parsed_at.tzinfo else _dt.utcnow()
+
+tests/test_scheduler_restart_doublefire.py::test_restart_does_not_re_dispatch_overdue_task
+tests/test_scheduler_restart_doublefire.py::test_startup_does_not_advance_paused_tasks
+  /home/agent/projects/odysseus-aoteru/venv/lib/python3.12/site-packages/_pytest/monkeypatch.py:409: RuntimeWarning: coroutine '_drive_scheduler.<locals>._never' was never awaited
+    setattr(obj, name, value)
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/test_scheduler_restart_doublefire.py::test_startup_does_not_advance_paused_tasks
+  /home/agent/projects/odysseus-aoteru/venv/lib/python3.12/site-packages/sqlalchemy/sql/base.py:1416: RuntimeWarning: coroutine '_drive_scheduler.<locals>._never' was never awaited
+    def _set_parent_with_dispatch(
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/test_session_manager_persist_guard.py::test_persist_message_still_writes_when_parent_session_exists
+tests/test_truncate_message_count_regression.py::test_truncate_keep_count_exceeds_total_does_not_inflate_count
+tests/test_truncate_message_count_regression.py::test_truncate_keep_count_exceeds_total_does_not_inflate_count
+tests/test_truncate_message_count_regression.py::test_truncate_keep_count_exceeds_total_does_not_inflate_count
+tests/test_truncate_message_count_regression.py::test_truncate_keeps_history_alias_for_context_messages
+tests/test_truncate_message_count_regression.py::test_truncate_keeps_history_alias_for_context_messages
+tests/test_truncate_message_count_regression.py::test_truncate_keeps_history_alias_for_context_messages
+  /home/agent/projects/odysseus-aoteru/core/session_manager.py:248: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    msg_time = datetime.utcnow()
+
+tests/test_skills_routes_owner_update.py::test_update_skill_route_passes_owner_to_manager
+  /home/agent/projects/odysseus-aoteru/routes/skills_routes.py:1629: PydanticDeprecatedSince20: The `dict` method is deprecated; use `model_dump` instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.13/migration/
+    updates = body.dict(exclude_none=True)
+
+tests/test_sqlite_foreign_keys.py::test_sqlite_foreign_keys_cascade
+  /home/agent/projects/odysseus-aoteru/tests/test_sqlite_foreign_keys.py:25: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    created_at=datetime.utcnow(),
+
+tests/test_sqlite_foreign_keys.py::test_sqlite_foreign_keys_cascade
+  /home/agent/projects/odysseus-aoteru/tests/test_sqlite_foreign_keys.py:26: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    updated_at=datetime.utcnow()
+
+tests/test_topic_analyzer.py::test_topic_analyzer_hydrates_sessions
+  /home/agent/projects/odysseus-aoteru/tests/test_topic_analyzer.py:62: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    created_at=datetime.utcnow(),
+
+tests/test_topic_analyzer.py::test_topic_analyzer_hydrates_sessions
+  /home/agent/projects/odysseus-aoteru/tests/test_topic_analyzer.py:63: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    updated_at=datetime.utcnow()
+
+tests/test_topic_analyzer.py::test_topic_analyzer_hydrates_sessions
+  /home/agent/projects/odysseus-aoteru/tests/test_topic_analyzer.py:70: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    timestamp=datetime.utcnow()
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+8446 passed, 46 skipped, 5 xfailed, 1394 warnings in 461.05s (0:07:41)

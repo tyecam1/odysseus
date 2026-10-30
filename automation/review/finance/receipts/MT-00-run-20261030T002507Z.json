@@ -1,0 +1,45 @@
+{
+  "goal_id": "MT-00",
+  "kind": "run",
+  "status": "pass",
+  "observed_at": "2026-10-30T00:25:07Z",
+  "run_id": "mt00-lab-20261030T002507Z",
+  "code_commit": "bed76821fc0057654498662da2f30cbaa334238d",
+  "verifier": "self-attested-executor (pending independent verification)",
+  "source_config_hash": "2ab0a06df56a20d5b14a6fbf1969b4bc78a450771fa52e6ace7d64c402eba224",
+  "data_snapshot_ids": [
+    "automation/review/finance/mt00/snapshot-20261030T002507Z.json"
+  ],
+  "source_access_audit_id": "automation/review/finance/mt00/run-manifest-20261030T002507Z.json",
+  "evaluation_artifacts": [
+    "automation/review/finance/mt00/digest-20261030T002507Z.md"
+  ],
+  "notes": "Live MT-00 probe on hz2-workstation (lab) against the round-7 review-fix code (commit bed7682, probe v0.7): GDELT DOC 2.0 + HN official API + Kraken public spot candles, all public/no-auth/no-key. Sources at 20261030T002507Z: HN ok (25 records), Kraken ok (24), GDELT failed (0 records; GDELT 429 window again - structured health now records http_status=429 retries=3 truthfully instead of null/zero; 2/3 healthy satisfies the bounded snapshot, GDELT cadence stays an MT-01 question). Round-7 fixes live in this run: a NON-RETRYABLE HTTP error (e.g. 403) now becomes failed-source health with status and retries carried - never an uncaught exception that aborts the probe; an integer-but-out-of-range Kraken candle timestamp is skipped and counted (it previously passed parsing and blew up in fromtimestamp); non-finite numbers (inf from 1e999, NaN) are dropped or zeroed at the collectors AND the snapshot writer now serialises with allow_nan=False so any leak is a loud failed run, never invalid strict-JSON output; GDELT records with unusable titles (non-string/empty) get UNIQUE per-URL story keys so dedup cannot collapse distinct stories from one domain onto a shared empty-title key. First-seen carry-forward live-proven for text (HN 25/25 carry earlier first_seen) AND candles (Kraken 24/24). Offline suite record committed at automation/review/finance/test-suite-round8.txt (8434 passed / 46 skipped / 5 xfailed, 114 finance). Syndication dedup on (registrable domain, normalised title); GDELT published_at stays null (seendate is retrieval time, recorded in uncertainty). Excluded by policy: x-cookies, private reddit, youtube internals, retailer scraping, paid APIs. Interpretation reserved for persona L.",
+  "artifacts": [
+    {
+      "label": "mt-probe-code",
+      "path": "repo:src/finance_mt_probe.py",
+      "sha256": "a50d1046d924fcc39bfb58b99cc993efdaa2cdb0909cbbc0ad58bda3911b0d11"
+    },
+    {
+      "label": "mt-run-manifest",
+      "path": "repo:automation/review/finance/mt00/run-manifest-20261030T002507Z.json",
+      "sha256": "2ab0a06df56a20d5b14a6fbf1969b4bc78a450771fa52e6ace7d64c402eba224"
+    },
+    {
+      "label": "mt-snapshot",
+      "path": "repo:automation/review/finance/mt00/snapshot-20261030T002507Z.json",
+      "sha256": "b637b7470978e83d08f39ec9ff4dc07f279a08993f111005c2e2999327a14bc0"
+    },
+    {
+      "label": "mt-digest",
+      "path": "repo:automation/review/finance/mt00/digest-20261030T002507Z.md",
+      "sha256": "f4d2861e94d0e8c1af4c701f890f6b4cfc951deb5f482aeed334e30b8e2eadd1"
+    },
+    {
+      "label": "mt-suite-record",
+      "path": "repo:automation/review/finance/test-suite-round8.txt",
+      "sha256": "5b519c7ec654d86f0a708d75cdb42732004ea94dc2950067a7964175f2d27842"
+    }
+  ]
+}

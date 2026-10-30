@@ -1,0 +1,9 @@
+{
+  "goal_id": "FT-00",
+  "kind": "operator_attestation",
+  "status": "pass",
+  "observed_at": "2026-10-29T11:00:00Z",
+  "run_id": "operator-attestation-ft00-20261029",
+  "verifier": "human:tye",
+  "notes": "Operator requested automated simulated trades only 2026-10-29, recorded in canonical misumi spec docs/core/finance-paper-trading-goals-v0.1.md (\"The operator requested automated simulated trades only on 2026-10-29\"); operator additionally authorized the lab docker install 2026-10-29. No real-money authority granted."
+}

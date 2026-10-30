@@ -1,0 +1,25 @@
+2026-10-29 12:42:48,458 - freqtrade - INFO - freqtrade 2026.9
+2026-10-29 12:42:48,734 - numexpr.utils - INFO - Note: NumExpr detected 24 cores but "NUMEXPR_MAX_THREADS" not set, so enforcing safe limit of 16.
+2026-10-29 12:42:48,734 - numexpr.utils - INFO - NumExpr defaulting to 16 threads.
+2026-10-29 12:42:49,553 - freqtrade.configuration.load_config - INFO - Using config: /freqtrade/user_data/config-ft00.json ...
+2026-10-29 12:42:49,554 - freqtrade.loggers - INFO - Enabling colorized output.
+2026-10-29 12:42:49,554 - freqtrade.loggers - INFO - Logfile configured
+2026-10-29 12:42:49,554 - freqtrade.loggers - INFO - Verbosity set to 0
+2026-10-29 12:42:49,554 - freqtrade.configuration.configuration - INFO - Parameter --timerange detected: 20260901- ...
+2026-10-29 12:42:49,577 - freqtrade.configuration.configuration - INFO - Using user-data directory: /freqtrade/user_data ...
+2026-10-29 12:42:49,577 - freqtrade.configuration.configuration - INFO - Using data directory: /freqtrade/user_data/data/kraken ...
+2026-10-29 12:42:49,578 - freqtrade.configuration.configuration - INFO - Using pairs ['BTC/USD', 'ETH/USD']
+2026-10-29 12:42:49,578 - freqtrade.configuration.configuration - INFO - timeframes --timeframes: ['1h']
+2026-10-29 12:42:49,578 - freqtrade.configuration.configuration - INFO - Filter trades by timerange: 20260901-
+2026-10-29 12:42:49,579 - freqtrade.exchange.check_exchange - INFO - Checking exchange...
+2026-10-29 12:42:49,582 - freqtrade.exchange.check_exchange - INFO - Exchange "kraken" is officially supported by the Freqtrade development team.
+2026-10-29 12:42:49,582 - freqtrade.configuration.config_validation - INFO - Validating configuration ...
+2026-10-29 12:42:50,068 - freqtrade.exchange.exchange - INFO - Instance is running with dry_run enabled
+2026-10-29 12:42:50,068 - freqtrade.exchange.exchange - INFO - Using CCXT 4.5.84
+2026-10-29 12:42:50,068 - freqtrade.exchange.exchange - INFO - Applying additional ccxt config: {'enableRateLimit': True}
+2026-10-29 12:42:50,070 - freqtrade.exchange.exchange - INFO - Applying additional ccxt config: {'enableRateLimit': True}
+2026-10-29 12:42:50,071 - freqtrade.exchange.exchange - INFO - Using Exchange "Kraken"
+2026-10-29 12:42:50,071 - freqtrade.resolvers.exchange_resolver - INFO - Using resolved exchange class 'Kraken' ...
+2026-10-29 12:42:50,072 - freqtrade.exchange.exchange - INFO - Markets were not loaded. Loading them now..
+2026-10-29 12:42:51,240 - freqtrade.data.history.history_utils - INFO - About to download pairs: ['BTC/USD', 'ETH/USD'], intervals: ['1h'] to /freqtrade/user_data/data/kraken
+2026-10-29 12:42:51,240 - freqtrade - ERROR - Historic klines not available for Kraken. Please use `--dl-trades` instead for this exchange (will unfortunately take a long time).

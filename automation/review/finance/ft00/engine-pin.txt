@@ -1,0 +1,7 @@
+image_ref=freqtradeorg/freqtrade@sha256:9d67afb8eb5f4e1210f4fb067efcbd5e005bd4f1c27f6f3888b8b9fc7f9b5199
+resolved_from_tag=stable
+image_id=sha256:9d67afb8eb5f4e1210f4fb067efcbd5e005bd4f1c27f6f3888b8b9fc7f9b5199
+image_created=2026-09-29T17:22:28Z
+pinned_on=2026-10-29
+pinned_by=finance-ft-runner DEFAULT_PINNED_IMAGE
+note=official Freqtrade image, digest-pinned; bare tags are rejected by the guard

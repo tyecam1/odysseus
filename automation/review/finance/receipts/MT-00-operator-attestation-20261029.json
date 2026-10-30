@@ -1,0 +1,9 @@
+{
+  "goal_id": "MT-00",
+  "kind": "operator_attestation",
+  "status": "pass",
+  "observed_at": "2026-10-29T11:00:00Z",
+  "run_id": "operator-attestation-mt00-20261029",
+  "verifier": "human:tye",
+  "notes": "Operator approved research-and-simulation-only intent 2026-10-29, recorded in canonical misumi spec docs/core/finance-market-media-trend-goals-v0.1.md (\"The operator has approved research and simulation only\") and reconfirmed by the operator's direct implementation instruction of 2026-10-29."
+}

@@ -1,0 +1,73 @@
+{
+  "goal_id": "FT-00",
+  "note": "fail-closed refusals against the round-11 code",
+  "refusals": [
+    {
+      "case": "t6-dryrun",
+      "rc_expected_3": true,
+      "fail_closed": true,
+      "findings": [
+        "dry_run is not strictly true"
+      ]
+    },
+    {
+      "case": "t6-key",
+      "rc_expected_3": true,
+      "fail_closed": true,
+      "findings": [
+        "exchange.key is set \u2014 no exchange credentials are permitted in simulation-only mode"
+      ]
+    },
+    {
+      "case": "t6-futures",
+      "rc_expected_3": true,
+      "fail_closed": true,
+      "findings": [
+        "trading_mode is 'futures', only spot is permitted",
+        "pair 'BTC/USD:USD' is not a plain spot pair (no ':' derivatives)"
+      ]
+    },
+    {
+      "case": "t6-overlay",
+      "rc_expected_3": true,
+      "fail_closed": true,
+      "findings": [
+        "add_config_files is present \u2014 overlay config files bypass the verified configuration and are not permitted"
+      ]
+    },
+    {
+      "case": "t6-extra",
+      "rc_expected_3": true,
+      "fail_closed": true,
+      "findings": [
+        "extra freqtrade argument '--config' is not in the safe allowlist ['--days', '--dl-trades', '--erase', '--new-pairs-days', '--prepend', '--timerange'] (overlay flags such as --config/-c/--userdir/--strategy are never permitted)",
+        "extra freqtrade argument '/freqtrade/user_data/unsafe.json' is not in the safe allowlist ['--days', '--dl-trades', '--erase', '--new-pairs-days', '--prepend', '--timerange'] (overlay flags such as --config/-c/--userdir/--strategy are never permitted)"
+      ]
+    },
+    {
+      "case": "t6-badpair",
+      "rc_expected_3": true,
+      "fail_closed": true,
+      "findings": [
+        "--pairs entry 'BTC/USD:USD' is not a plain spot pair"
+      ]
+    }
+  ],
+  "observed_at": "2026-10-30T14:08:48Z",
+  "hardlink_neutralisation": {
+    "case": "t11-hardlink",
+    "planted": ".verified-<sha12>.json hardlinked to config-ft00.json (nlink=2 observed in transcript)",
+    "result": "cleared by materialise; smoke succeeded on a fresh nlink=1 inode with the container-side sha256 preflight binding the executed bytes"
+  },
+  "delegated_noclobber_refusal": {
+    "case": "t11-symlink-replant",
+    "setup": "symlink planted at the content-addressed snapshot path pointing at an innocent file OUTSIDE the workspace mount; the delegated one-shot write (the exact set -C noclobber form build_snapshot_write_argv emits) was then run against it; full command transcript with before/after victim sha256s committed at automation/review/finance/ft00/symlink-refusal-proof.txt",
+    "refusal_line_observed": "/bin/sh: 1: cannot create /freqtrade/user_data/.verified-f330b591b66a.json: File exists",
+    "write_rc_observed": "write rc=2 (expected NONZERO: noclobber refused to follow/truncate the symlink)",
+    "victim_sha256_before": "532957bc98c77ddc0b7dc4cd854bd019cffd285fb37f3a8588f577b6ec965bf7",
+    "victim_sha256_after": "532957bc98c77ddc0b7dc4cd854bd019cffd285fb37f3a8588f577b6ec965bf7",
+    "victim_bytes_unchanged": true,
+    "result": "open REFUSED (nonzero rc) and the innocent target file was NOT truncated \u2014 original bytes survived byte-for-byte (sha256 identical)"
+  },
+  "symlink_refusal_proof_sha256": "a0722b4c19cdfb9f12b196d49cb439e1fd7a93d665df4020f0b281ca14f0eac5"
+}

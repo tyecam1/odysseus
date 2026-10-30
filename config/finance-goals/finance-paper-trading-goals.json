@@ -1,0 +1,139 @@
+{
+  "program_id": "finance-paper-trading-2026-10-29",
+  "version": "0.1",
+  "canonical_note": "docs/core/finance-paper-trading-goals-v0.1.md",
+  "owner_persona": "l",
+  "owner_repository": "tyecam1/misumi",
+  "executor": "odysseus-existing-runtime",
+  "execution_mode": "simulation_only",
+  "live_trading_allowed": false,
+  "monetary_authority": "none",
+  "derived_status_rule": "A goal is unlocked only when every dependency has a current independently verified pass receipt for the exact strategy/data/configuration hashes; otherwise locked. Receipts are evidence, not authority to send financial orders.",
+  "invalidation": [
+    "changed strategy/configuration or data provenance",
+    "outdated receipt",
+    "failed or missing independent check",
+    "simulation/live mode mismatch",
+    "risk-control or execution integrity failure"
+  ],
+  "evidence_receipt_schema": {
+    "goal_id": "string",
+    "status": "pass|fail|insufficient",
+    "observed_at": "ISO-8601",
+    "run_id": "string",
+    "code_commit": "SHA",
+    "strategy_hash": "SHA256 or not-applicable",
+    "config_hash": "SHA256",
+    "data_snapshot": "URI/ID or not-applicable",
+    "artifact_paths": [
+      "URI/path"
+    ],
+    "independent_verifier": "identity or human-confirmed",
+    "notes": "string"
+  },
+  "goals": [
+    {
+      "id": "FT-00",
+      "title": "Attest safe paper-only environment",
+      "depends_on": [],
+      "unlock_when": "Operator has authorised simulation-only work (2026-10-29); no real-money permission.",
+      "acceptance": [
+        "Official pinned Freqtrade build starts on existing qualified host.",
+        "Exchange data is accessible without credentialed trading.",
+        "Dry-run true; spot only; no withdrawals, derivatives, margin, leverage, or live order connector.",
+        "Logs, restart, stop and restricted network/service boundaries demonstrated.",
+        "No second orchestrator or personal data committed to repo."
+      ],
+      "failed_gate": "No additional stages."
+    },
+    {
+      "id": "FT-01",
+      "title": "Acquire and verify market data and naive baselines",
+      "depends_on": [
+        "FT-00"
+      ],
+      "unlock_when": "FT-00 receipt is independently verified and current.",
+      "acceptance": [
+        "Timestamped reproducible market-data snapshot for two liquid spot instruments, quote currency actually supported by exchange.",
+        "Gaps, timezones, stale candles, traded volumes, rates and transaction-cost assumptions documented.",
+        "Cash, buy-and-hold and one pre-registered simple trend strategy baseline generated on same dates."
+      ],
+      "failed_gate": "Fix data quality or stop."
+    },
+    {
+      "id": "FT-02",
+      "title": "Audit backtest validity and freeze evaluation protocol",
+      "depends_on": [
+        "FT-01"
+      ],
+      "unlock_when": "FT-01 receipt is current and data verification passes.",
+      "acceptance": [
+        "Chronological train/validation/untouched holdout or walk-forward protocol committed before viewing test outcomes.",
+        "Freqtrade lookahead-analysis and recursive-analysis run with findings recorded.",
+        "Fees, spread, slippage and adverse 2x cost sensitivity included; no final-candle future leakage.",
+        "Metrics include net return, benchmark excess return, max drawdown, exposure, trades, volatility, Sharpe where sample adequate, and test count."
+      ],
+      "failed_gate": "No strategy promotion until bias and reproducibility defects closed."
+    },
+    {
+      "id": "FT-03",
+      "title": "Evaluate a bounded candidate strategy",
+      "depends_on": [
+        "FT-02"
+      ],
+      "unlock_when": "FT-02 verified and strategy search budget precommitted.",
+      "acceptance": [
+        "At most three interpretable strategy families explored in first pass: trend, breakout, mean reversion; avoid unlimited optimisation.",
+        "All candidate trials logged, including rejected configurations and dataset windows.",
+        "One candidate is selected using validation only; holdout evaluated once with pre-registered pass/fail conditions.",
+        "Candidate must improve on relevant benchmarks after stressed costs without intolerable drawdown; otherwise record no-edge verdict.",
+        "LLM proposes hypotheses but has no exchange execution permission."
+      ],
+      "failed_gate": "If no advantage, stop or reformulate within new registered experiment; do not cherry-pick."
+    },
+    {
+      "id": "FT-04",
+      "title": "Run unattended forward paper execution and health checks",
+      "depends_on": [
+        "FT-03"
+      ],
+      "unlock_when": "FT-03 shows a reproducible acceptable candidate and verified simulation-only config.",
+      "acceptance": [
+        "Dry-run verified for minimum 30 consecutive days; no real order destination or exchange trading credentials.",
+        "Order/fill simulations, missed fills, errors, clock skew, network interruptions and fees recorded.",
+        "Daily stop/health monitor works and automatically disables simulated orders on data or integrity failure.",
+        "Performance compared with cash/buy-hold and selected baseline on matched period."
+      ],
+      "failed_gate": "On outage, corrupted data or unexpected execution, lock and restart evidence window when necessary."
+    },
+    {
+      "id": "FT-05",
+      "title": "Independently assess forward evidence and economic viability",
+      "depends_on": [
+        "FT-04"
+      ],
+      "unlock_when": "FT-04 has current logs and independent verification.",
+      "acceptance": [
+        "Prefer >=90 calendar days of forward observations and >=50 closed paper trades before drawing a trade-statistical claim; otherwise verdict insufficient evidence, not pass.",
+        "Analyse net excess return after conservative costs, drawdown, tail losses, operating time and inference/compute expenses.",
+        "Compare to precommitted benchmarks and account for tested-strategy multiplicity.",
+        "Independent adversarial review recommends stop, revise or continued simulation; do not equate profits with statistically proven alpha."
+      ],
+      "failed_gate": "Insufficient evidence or failed review cannot automatically unlock monetisation."
+    },
+    {
+      "id": "FT-06",
+      "title": "Human-only monetisation review (live execution excluded)",
+      "depends_on": [
+        "FT-05"
+      ],
+      "unlock_when": "FT-05 independent review is satisfactory AND operator explicitly approves a separate capital/risk/legal policy review.",
+      "acceptance": [
+        "Produce written decision on affordability, capital at risk, exchange access, regulation, taxation and security.",
+        "Request new explicit operator authorisation for any future real-money implementation.",
+        "Existing Misumi finance framework remains binding; this programme never enables live execution."
+      ],
+      "failed_gate": "Remain research/paper-only; zero financial orders permitted."
+    }
+  ]
+}

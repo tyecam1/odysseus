@@ -1,0 +1,52 @@
+{
+  "goal_id": "FT-00",
+  "kind": "run",
+  "status": "pass",
+  "observed_at": "2026-10-29T18:30:39Z",
+  "run_id": "ft00-lab-20261029T1830Z",
+  "code_commit": "2dc89ea8d6454aa657d419e7cd67a3aa39b17f73",
+  "strategy_hash": "30e3e51435ab8bc7e2d3d89dab1e1dcb1c760edd642b4a69140141f333d2b428",
+  "config_hash": "f330b591b66aeaf4ef82b2f1786137c53597e5461d942e388e488b1c9badcc60",
+  "engine_digest": "freqtradeorg/freqtrade@sha256:9d67afb8eb5f4e1210f4fb067efcbd5e005bd4f1c27f6f3888b8b9fc7f9b5199",
+  "engine_version": "freqtrade 2026.9 (image Python 3.14.7, CCXT 4.5.84)",
+  "data_snapshot": "kraken live public OHLCV during dry-run; historic klines require --dl-trades on kraken (time-boxed attempt exceeded 9min for 3d x 2 pairs; deferred to FT-01)",
+  "independent_verifier": "self-attested-executor (pending independent verification)",
+  "notes": "FT-00 on hz2-workstation (lab) against the round-3 review-fix code (commit 2dc89ea): docker 29.1.3 (owner-authorized install 2026-10-29). Round-3 fixes live in this run: (a) the verify\u2192execute TOCTOU window is closed \u2014 the executed config is a content-addressed snapshot (.verified-<sha12>.json, round-trip asserted, removed after the run) of the bytes the guard verified, so a post-verification swap of the original file cannot change what runs; (b) the typed download channel (data_args) is now validated by build_docker_argv itself, not trusted from the caller. Guard unchanged: EXACT pinned official digest at every layer, verified config and executed config the same file inside user_data, overlay routes rejected (add_config_files, raw --extra allowlist). verify-config pass; SIX fail-closed refusals rc=3 (dry_run=false, exchange key set, futures + colon pair, add_config_files overlay, --extra=--config CLI overlay, derivatives pair via typed --pairs) recorded in fail-closed-refusals-round3.json. Dry-run smoke 2/2 cycles reached state=RUNNING heartbeat on live Kraken public data with zero credentials, graceful SIGTERM stop rc=0 both cycles. Spot only, no margin/derivatives, no exchange keys, no public listeners, no telegram, workspace outside knowledgebase. Deployment fact recorded live: a running freqtrade container recursively re-chowns the mounted user_data to its internal user (uid 1000 = host dmem), so the verified-config snapshot write/cleanup is delegated to one-shot pinned-image containers when the invoking user cannot write directly; the round-trip assert still re-reads the bytes from the host.",
+  "artifacts": [
+    {
+      "label": "ft-config",
+      "path": "repo:automation/review/finance/ft00/config-ft00.json",
+      "sha256": "f330b591b66aeaf4ef82b2f1786137c53597e5461d942e388e488b1c9badcc60"
+    },
+    {
+      "label": "ft-engine-pin",
+      "path": "repo:automation/review/finance/ft00/engine-pin.txt",
+      "sha256": "44e196b7f2c22bb93def934f70a46ae2696b31f140b4e060327bec9494eaad47"
+    },
+    {
+      "label": "ft-strategy",
+      "path": "repo:automation/review/finance/ft00/SMACrossBaseline.py",
+      "sha256": "30e3e51435ab8bc7e2d3d89dab1e1dcb1c760edd642b4a69140141f333d2b428"
+    },
+    {
+      "label": "ft-runner-code",
+      "path": "repo:src/finance_ft_runner.py",
+      "sha256": "158fe2e179a1e94f3d0da9930d6136c3ed761a1c8a87a719f14a66c248eaf497"
+    },
+    {
+      "label": "ft-fail-closed-refusals",
+      "path": "repo:automation/review/finance/ft00/fail-closed-refusals-round3.json",
+      "sha256": "ddfe61bb46611abeb8335b110a962be91fbf30818a1db99e5afdc6ed4dc9718f"
+    },
+    {
+      "label": "ft-dryrun-cycle1-log",
+      "path": "repo:automation/review/finance/ft00/dryrun-cycle1.log",
+      "sha256": "9fd309c0e2e06fe497b889ec382fc9bd7f6ea8e4832202569245fbcc3c3648ef"
+    },
+    {
+      "label": "ft-dryrun-cycle2-log",
+      "path": "repo:automation/review/finance/ft00/dryrun-cycle2.log",
+      "sha256": "8f33ee802d9240df7472e8d06c8921b9f37d0b862b6c65fb46bbc7774cec8669"
+    }
+  ]
+}

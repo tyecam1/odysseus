@@ -1,0 +1,40 @@
+{
+  "goal_id": "MT-00",
+  "kind": "run",
+  "status": "pass",
+  "observed_at": "2026-10-29T17:26:26Z",
+  "run_id": "mt00-lab-20261029T172626Z",
+  "code_commit": "453caf8d4d9bb7acab61de7a38756cc112e53c3f",
+  "verifier": "self-attested-executor (pending independent verification)",
+  "source_config_hash": "7ceb507235837995c40992cccd7feb337eaa4e4052ee3902ed8416ab8ef0b519",
+  "data_snapshot_ids": [
+    "automation/review/finance/mt00/snapshot-20261029T172626Z.json"
+  ],
+  "source_access_audit_id": "automation/review/finance/mt00/run-manifest-20261029T172626Z.json",
+  "evaluation_artifacts": [
+    "automation/review/finance/mt00/digest-20261029T172626Z.md"
+  ],
+  "notes": "Live MT-00 probe on hz2-workstation (lab) against the round-2 review-fix code (commit 453caf8): GDELT DOC 2.0 + HN official API + Kraken public spot candles, all public/no-auth/no-key. Sources at 172626Z: HN ok (25 records), Kraken ok (24), GDELT failed \u2014 429 rate-lapsed through its full bounded retry budget (as at 170556Z and 171017Z; honest source_health; 3/3 healthy was achieved earlier the same day at 125807Z, kept in history). First-seen carry-forward live-proven for text (HN 23/25 carry earlier first_seen) AND candles (Kraken 24/24); the first-seen index now merges every historical snapshot, so source-selection gaps cannot reset it. Syndication dedup on (registrable domain, normalised title) with multi-part-suffix host normalisation (ports stripped): m./www. mirrors of one publisher fold to one story. GDELT published_at is null (seendate is the monitor's retrieval time, recorded in uncertainty, never laundered into publication). Excluded by policy: x-cookies, private reddit, youtube internals, retailer scraping, paid APIs. Interpretation reserved for persona L.",
+  "artifacts": [
+    {
+      "label": "mt-probe-code",
+      "path": "repo:src/finance_mt_probe.py",
+      "sha256": "e5380658187701ed00967f313f04be389858a3e35d317d443f9c45f97724a2d4"
+    },
+    {
+      "label": "mt-run-manifest",
+      "path": "repo:automation/review/finance/mt00/run-manifest-20261029T172626Z.json",
+      "sha256": "7ceb507235837995c40992cccd7feb337eaa4e4052ee3902ed8416ab8ef0b519"
+    },
+    {
+      "label": "mt-snapshot",
+      "path": "repo:automation/review/finance/mt00/snapshot-20261029T172626Z.json",
+      "sha256": "f1eda2ec9a1acd006dfbc5d1799ec487f4a05f7673c3c1332d653c90a76fcb87"
+    },
+    {
+      "label": "mt-digest",
+      "path": "repo:automation/review/finance/mt00/digest-20261029T172626Z.md",
+      "sha256": "08ef465c722860df0982ee79a4c0ede0e5fddb1ef05edfc3a47c6afec0826c65"
+    }
+  ]
+}
