@@ -1,4 +1,4 @@
-symlink-refusal raw transcript (round-10, 2026-10-30T08:52:30Z)
+symlink-refusal raw transcript (round-11, 2026-10-30T14:08:48Z)
 repo: tyecam1/odysseus feat/finance-mt00-ft00; host hz2-workstation (lab, docker 29.1.3)
 image: freqtradeorg/freqtrade@sha256:9d67afb8eb5f4e1210f4fb067efcbd5e005bd4f1c27f6f3888b8b9fc7f9b5199
 snapshot path: /freqtrade/user_data/.verified-f330b591b66a.json (content-addressed by config sha)
@@ -12,7 +12,7 @@ sha256:
 == step 1: symlink planted at the snapshot path (path cleared first so the plant itself succeeds) ==
 plant rc=0
 lstat of the planted path:
-lrwxrwxrwx 1 ftuser ftuser 29 Oct 30 08:52 /freqtrade/user_data/.verified-f330b591b66a.json -> /lablogs/noclobber-victim.txt
+lrwxrwxrwx 1 ftuser ftuser 29 Oct 30 14:08 /freqtrade/user_data/.verified-f330b591b66a.json -> /lablogs/noclobber-victim.txt
 
 == step 2: delegated one-shot write, the EXACT argv form build_snapshot_write_argv emits (set -C noclobber) ==
 payload: ATTACKER-BYTES (must NEVER reach the victim)

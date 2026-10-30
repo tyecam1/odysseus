@@ -1,0 +1,45 @@
+{
+  "goal_id": "MT-00",
+  "kind": "run",
+  "status": "pass",
+  "observed_at": "2026-10-30T14:07:48Z",
+  "run_id": "mt00-lab-20261030T140748Z",
+  "code_commit": "72e1ba3872cf5e77a41e810933e63f536444e0b2",
+  "verifier": "self-attested-executor (pending independent verification)",
+  "source_config_hash": "4682b7c02ac134d80ec173ca6fa6e10a1ece4940052474468fe57c32cb3ea0d0",
+  "data_snapshot_ids": [
+    "automation/review/finance/mt00/snapshot-20261030T140748Z.json"
+  ],
+  "source_access_audit_id": "automation/review/finance/mt00/run-manifest-20261030T140748Z.json",
+  "evaluation_artifacts": [
+    "automation/review/finance/mt00/digest-20261030T140748Z.md"
+  ],
+  "notes": "Live MT-00 probe on hz2-workstation (lab) against the round-10 review-fix code (commit 72e1ba3, probe v0.10): GDELT DOC 2.0 + HN official API + Kraken public spot candles, all public/no-auth/no-key. Sources at 20261030T140748Z: HN ok (25 records), Kraken ok (24), GDELT failed (0 records; health records http_status=429 retries=3 truthfully when a window is rate-limited; 2/3 healthy satisfies the bounded snapshot, GDELT cadence stays an MT-01 question). Round-10 accounting fixes live in this run (probe v0.10): a GDELT article with NO locatable URL counts as malformed (never as a duplicate - missing-URL articles previously showed malformed=0, deduped_exact=N, a false diagnosis); an HN item that fetches but has no usable title counts as an item error instead of being silently dropped; an all-failed HN source error carries the id and error counts, not just 'no items'. Earlier-round guarantees carried: punctuation-preserving story keys, zero-evidence sources failed, HN id range (0, 10^12] with post-loop error totals. First-seen carry-forward live-proven for text (HN 10/25 carry earlier first_seen) AND candles (Kraken 18/24). Offline suite record committed at automation/review/finance/test-suite-round11.txt (8458 passed / 46 skipped / 5 xfailed, 138 finance). Syndication dedup on (registrable domain, punctuation-preserving normalised title); GDELT published_at stays null (seendate is retrieval time, recorded in uncertainty). Excluded by policy: x-cookies, private reddit, youtube internals, retailer scraping, paid APIs. Interpretation reserved for persona L.",
+  "artifacts": [
+    {
+      "label": "mt-probe-code",
+      "path": "repo:src/finance_mt_probe.py",
+      "sha256": "1601e0788f41896952fdacf35cdf8518531dd88bd8db8abf784257ada3ae1d58"
+    },
+    {
+      "label": "mt-run-manifest",
+      "path": "repo:automation/review/finance/mt00/run-manifest-20261030T140748Z.json",
+      "sha256": "4682b7c02ac134d80ec173ca6fa6e10a1ece4940052474468fe57c32cb3ea0d0"
+    },
+    {
+      "label": "mt-snapshot",
+      "path": "repo:automation/review/finance/mt00/snapshot-20261030T140748Z.json",
+      "sha256": "8b2b931908de22250f0e47aef82a3fac00f0295efac5623f52c3b377238f2623"
+    },
+    {
+      "label": "mt-digest",
+      "path": "repo:automation/review/finance/mt00/digest-20261030T140748Z.md",
+      "sha256": "e6026ae76828303414be695384021c408f8e497393f147752189c4df26022423"
+    },
+    {
+      "label": "mt-suite-record",
+      "path": "repo:automation/review/finance/test-suite-round11.txt",
+      "sha256": "06d3aa53b3a3ae7342754084969bd06cb4af0fbfa628e0ffa57218855af88fcf"
+    }
+  ]
+}

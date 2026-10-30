@@ -1,0 +1,28 @@
+{
+  "ok": true,
+  "cycles": 2,
+  "evidence": [
+    {
+      "cycle": 1,
+      "ready_markers_seen": [
+        "Dry run is enabled",
+        "Using resolved strategy",
+        "Bot heartbeat"
+      ],
+      "stop_returncode": 0,
+      "log": "/home/agent/finance-paper/logs/dryrun-cycle1.log",
+      "log_tail": "tegy:* `SMACrossBaseline`\"}\n2026-10-30 14:08:53,576 - freqtrade.rpc.rpc_manager - INFO - Sending rpc message: {'type': startup, 'status': \"Searching for USD pairs to buy and sell based on [{'StaticPairList': 'StaticPairList'}]\"}\n2026-10-30 14:09:08,577 - freqtrade.worker - INFO - Bot heartbeat. PID=1, version='2026.9', state='RUNNING'\n\n=== dry-run-smoke trailer (appended by runner v0.4 after docker stop --time 60) at 2026-10-30T14:09:31Z: stop rc=0; prior-output sha256[:16]=04786d35cffe897e ===\n"
+    },
+    {
+      "cycle": 2,
+      "ready_markers_seen": [
+        "Dry run is enabled",
+        "Using resolved strategy",
+        "Bot heartbeat"
+      ],
+      "stop_returncode": 0,
+      "log": "/home/agent/finance-paper/logs/dryrun-cycle2.log",
+      "log_tail": "tegy:* `SMACrossBaseline`\"}\n2026-10-30 14:09:34,649 - freqtrade.rpc.rpc_manager - INFO - Sending rpc message: {'type': startup, 'status': \"Searching for USD pairs to buy and sell based on [{'StaticPairList': 'StaticPairList'}]\"}\n2026-10-30 14:09:49,651 - freqtrade.worker - INFO - Bot heartbeat. PID=1, version='2026.9', state='RUNNING'\n\n=== dry-run-smoke trailer (appended by runner v0.4 after docker stop --time 60) at 2026-10-30T14:10:12Z: stop rc=0; prior-output sha256[:16]=9a7ba863b2c7ec2a ===\n"
+    }
+  ]
+}
