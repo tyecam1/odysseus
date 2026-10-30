@@ -1,0 +1,30 @@
+symlink-refusal raw transcript (round-10, 2026-10-30T08:52:30Z)
+repo: tyecam1/odysseus feat/finance-mt00-ft00; host hz2-workstation (lab, docker 29.1.3)
+image: freqtradeorg/freqtrade@sha256:9d67afb8eb5f4e1210f4fb067efcbd5e005bd4f1c27f6f3888b8b9fc7f9b5199
+snapshot path: /freqtrade/user_data/.verified-f330b591b66a.json (content-addressed by config sha)
+
+== step 0: victim file created outside the workspace mount ==
+bytes:
+VICTIM-BYTES-ORIGINAL
+sha256:
+532957bc98c77ddc0b7dc4cd854bd019cffd285fb37f3a8588f577b6ec965bf7  /home/agent/finance-paper/logs/noclobber-victim.txt
+
+== step 1: symlink planted at the snapshot path (path cleared first so the plant itself succeeds) ==
+plant rc=0
+lstat of the planted path:
+lrwxrwxrwx 1 ftuser ftuser 29 Oct 30 08:52 /freqtrade/user_data/.verified-f330b591b66a.json -> /lablogs/noclobber-victim.txt
+
+== step 2: delegated one-shot write, the EXACT argv form build_snapshot_write_argv emits (set -C noclobber) ==
+payload: ATTACKER-BYTES (must NEVER reach the victim)
+/bin/sh: 1: cannot create /freqtrade/user_data/.verified-f330b591b66a.json: File exists
+write rc=2 (expected NONZERO: noclobber refused to follow/truncate the symlink)
+
+== step 3: victim intact after the refused write ==
+bytes:
+VICTIM-BYTES-ORIGINAL
+sha256:
+532957bc98c77ddc0b7dc4cd854bd019cffd285fb37f3a8588f577b6ec965bf7  /home/agent/finance-paper/logs/noclobber-victim.txt
+
+victim_sha256_before=532957bc98c77ddc0b7dc4cd854bd019cffd285fb37f3a8588f577b6ec965bf7
+victim_sha256_after=532957bc98c77ddc0b7dc4cd854bd019cffd285fb37f3a8588f577b6ec965bf7
+identical=yes
