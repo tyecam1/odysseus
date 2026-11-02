@@ -170,6 +170,8 @@ def lab_frontier_over_ssh(args: argparse.Namespace) -> dict | None:
     remote_root = os.environ.get("AOTERU_LAB_REPO_ROOT", "").strip()
     if not target or not remote_root:
         return None
+    if args.stage == "task" and not args.ref:
+        raise ValueError("task requires an exact selected --ref")
     if target.startswith("-") or any(c.isspace() for c in target):
         raise ValueError("invalid lab SSH target")
     if not Path(remote_root).is_absolute():
@@ -221,17 +223,27 @@ def main() -> int:
         parser.error("invalid budget, per-repo count or offset")
     roots, missing = resolve_roots(args.repo_root, {"misumi": args.misumi_root, "obsidian-phd": args.phd_root})
     try:
+        ssh_error = None
         # If this workstation lacks registered checkouts, try the authoritative
         # lab's own registry/checkout rather than treating a laptop clone as mandatory.
         # The same fallback serves selected-task reads when the owner is unavailable.
         if not args.local_only and (missing or (args.stage == "task" and
                 args.ref and args.ref.split(":", 1)[0] not in roots)):
-            remote = lab_frontier_over_ssh(args)
+            try:
+                remote = lab_frontier_over_ssh(args)
+            except ValueError as exc:
+                if args.stage == "task":
+                    raise
+                ssh_error = str(exc)
+                remote = None
             if remote is not None:
                 print(json.dumps(remote, ensure_ascii=False))
                 return 0
         if args.stage == "frontier":
             result = frontier(roots, missing, args.offset, args.per_repo, args.max_tokens)
+            if ssh_error:
+                result["warnings"].append(ssh_error[:300])
+                result["scope_complete"] = False
         else:
             if not args.ref:
                 parser.error("task requires --ref from frontier")
