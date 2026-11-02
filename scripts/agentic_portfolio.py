@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
+import subprocess
 from pathlib import Path
 
 import yaml
@@ -157,6 +159,50 @@ def selected(roots: dict[str, Path], ref: str, tier: str, budget: int) -> dict:
     return result
 
 
+
+def lab_frontier_over_ssh(args: argparse.Namespace) -> dict | None:
+    """SSH transport to the *same* read-only portfolio tool on the registered lab.
+
+    The SSH target and lab repo path are host-local configuration, never task
+    metadata or committed topology. Fail explicitly rather than inventing a clone.
+    """
+    target = os.environ.get("AOTERU_LAB_SSH_TARGET", "").strip()
+    remote_root = os.environ.get("AOTERU_LAB_REPO_ROOT", "").strip()
+    if not target or not remote_root:
+        return None
+    if target.startswith("-") or any(c.isspace() for c in target):
+        raise ValueError("invalid lab SSH target")
+    if not Path(remote_root).is_absolute():
+        raise ValueError("lab remote checkout path must be absolute")
+    task_args = ["task", "--ref", args.ref, "--tier", args.tier] if args.stage == "task" else [
+        "frontier", "--offset", str(args.offset), "--per-repo", str(args.per_repo)
+    ]
+    task_args += ["--max-tokens", str(args.max_tokens), "--local-only"]
+    cmd = ("cd " + shlex.quote(remote_root) +
+           " && python3 scripts/agentic_portfolio.py " + shlex.join(task_args))
+    try:
+        proc = subprocess.run(
+            ["ssh", "-n", "-T", "-o", "BatchMode=yes",
+             "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=8", target, cmd],
+            capture_output=True, text=True, timeout=30, check=False
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ValueError("lab_ssh_transport_failure: " + type(exc).__name__) from exc
+    if proc.returncode != 0:
+        raise ValueError("lab_ssh_execution_failed: exit=" + str(proc.returncode) +
+                         "; " + proc.stderr.strip()[:250])
+    try:
+        result = json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        raise ValueError("lab_ssh_invalid_portfolio_json") from exc
+    if not isinstance(result, dict) or result.get("stage") not in (
+        "L0-three-repository-frontier", "L1-selected-contract", "L3-explicit-full-task"
+    ):
+        raise ValueError("lab_ssh_unexpected_portfolio_result")
+    result["transport"] = "registered_lab_ssh"
+    return result
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("stage", choices=("frontier", "task"))
@@ -167,12 +213,23 @@ def main() -> int:
     parser.add_argument("--per-repo", type=int, default=4)
     parser.add_argument("--max-tokens", type=int, default=2500)
     parser.add_argument("--ref", help="Exact repo_id:bucket/file.md from L0 output")
+    parser.add_argument("--local-only", action="store_true",
+                        help="do not attempt a registered lab SSH fallback (used remotely)")
     parser.add_argument("--tier", choices=("contract", "full"), default="contract")
     args = parser.parse_args()
     if not 1 <= args.max_tokens <= 16000 or not 1 <= args.per_repo <= 20 or args.offset < 0:
         parser.error("invalid budget, per-repo count or offset")
     roots, missing = resolve_roots(args.repo_root, {"misumi": args.misumi_root, "obsidian-phd": args.phd_root})
     try:
+        # If this workstation lacks registered checkouts, try the authoritative
+        # lab's own registry/checkout rather than treating a laptop clone as mandatory.
+        # The same fallback serves selected-task reads when the owner is unavailable.
+        if not args.local_only and (missing or (args.stage == "task" and
+                args.ref and args.ref.split(":", 1)[0] not in roots)):
+            remote = lab_frontier_over_ssh(args)
+            if remote is not None:
+                print(json.dumps(remote, ensure_ascii=False))
+                return 0
         if args.stage == "frontier":
             result = frontier(roots, missing, args.offset, args.per_repo, args.max_tokens)
         else:

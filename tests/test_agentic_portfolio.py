@@ -1,5 +1,8 @@
 """Combined frontier must respect all three owners, source roots and stage boundaries."""
 import sys
+import argparse
+import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -109,3 +112,44 @@ def test_symlinked_bucket_is_refused(tmp_path, monkeypatch):
     rows, _, warnings = ap.collect("misumi", misumi)
     assert len(rows) == 1
     assert "misumi:codex:bucket_escape_refused" in warnings
+
+def test_lab_ssh_fallback_uses_registered_transport_without_local_clone(tmp_path, monkeypatch):
+    ody, _, _ = estate(tmp_path, monkeypatch)
+    monkeypatch.delenv("PHD_ROOT")
+    monkeypatch.setenv("AOTERU_LAB_SSH_TARGET", "lab-worker")
+    monkeypatch.setenv("AOTERU_LAB_REPO_ROOT", "/registered/lab/odysseus")
+    observed = {}
+    def fake_run(cmd, **kwargs):
+        observed["cmd"] = cmd
+        remote = {"stage": "L0-three-repository-frontier", "scope_complete": True,
+                  "records": [], "unavailable": {}}
+        return subprocess.CompletedProcess(cmd, 0, json.dumps(remote), "")
+    monkeypatch.setattr(ap.subprocess, "run", fake_run)
+    args = argparse.Namespace(stage="frontier", ref=None, tier="contract",
+                              max_tokens=2500, offset=0, per_repo=4)
+    result = ap.lab_frontier_over_ssh(args)
+    assert result["scope_complete"] and result["transport"] == "registered_lab_ssh"
+    assert observed["cmd"][:3] == ["ssh", "-n", "-T"]
+    assert "BatchMode=yes" in observed["cmd"]
+    assert "StrictHostKeyChecking=yes" in observed["cmd"]
+    assert "--local-only" in observed["cmd"][-1]
+
+
+def test_lab_ssh_failure_is_not_reported_as_complete(monkeypatch):
+    monkeypatch.setenv("AOTERU_LAB_SSH_TARGET", "lab-worker")
+    monkeypatch.setenv("AOTERU_LAB_REPO_ROOT", "/registered/lab/odysseus")
+    def denied(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 255, "", "host key verification failed")
+    monkeypatch.setattr(ap.subprocess, "run", denied)
+    args = argparse.Namespace(stage="frontier", ref=None, tier="contract",
+                              max_tokens=2500, offset=0, per_repo=4)
+    with pytest.raises(ValueError, match="lab_ssh_execution_failed"):
+        ap.lab_frontier_over_ssh(args)
+
+
+def test_no_ssh_config_returns_none(monkeypatch):
+    monkeypatch.delenv("AOTERU_LAB_SSH_TARGET", raising=False)
+    monkeypatch.delenv("AOTERU_LAB_REPO_ROOT", raising=False)
+    args = argparse.Namespace(stage="frontier", ref=None, tier="contract",
+                              max_tokens=2500, offset=0, per_repo=4)
+    assert ap.lab_frontier_over_ssh(args) is None
