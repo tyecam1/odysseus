@@ -489,7 +489,7 @@ def _good_recording(client):
     live.pop("phase_b_input")
     live["observed"]["binding"]["host"] = None   # evals/misumi-demo/record.py drops the host before saving
     live["recorded_at"] = "2026-10-28T00:00:00Z"
-    live["capture"] = {"recorder": "evals/misumi-demo/record.py", "source_revision": "a" * 40, "fixture_sha256": demo.fixture_digest()}
+    live["capture"] = {"recorder": "evals/misumi-demo/record.py", "source_revision": "a" * 40, "fixture_sha256": demo.fixture_digest(), "attempts": 1}
     return live
 
 
@@ -745,3 +745,137 @@ def test_provenance_and_capture_are_validated_field_by_field_and_carry_no_extra_
         bad = json.loads(json.dumps(good))
         bad[where][key] = "token: abc123"
         assert demo.validate_recording(bad, "food-stock")[0] is False, (where, key)
+
+
+def test_overlapping_leases_never_drop_the_newest_record_and_the_cap_holds_at_the_end(tmp_path):
+    sessions = demo.DemoSessions(tmp_path / "s")
+    key = sessions.key("o", "a")
+    first, second = sessions.begin(key), sessions.begin(key)
+    first.path.parent.mkdir(parents=True, exist_ok=True)
+    first.path.write_text("".join(f'{{"n":{i}}}\n' for i in range(51)), encoding="utf-8")
+    sessions.finish(first)                                   # second is still appending: no trim may run now
+    with first.path.open("a", encoding="utf-8") as fh:
+        fh.write('{"n":51}\n')
+    sessions.finish(second)
+    lines = first.path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == demo.MAX_SESSION_LOG_LINES and json.loads(lines[-1])["n"] == 51
+
+
+@pytest.mark.parametrize("where,key,value", [
+    ("provenance", "checked", None), ("provenance", "checked", ""), ("provenance", "checked", 7), ("provenance", "checked", "MISSING"),
+    ("capture", "attempts", -1), ("capture", "attempts", float("nan")), ("capture", "attempts", True), ("capture", "attempts", 4), ("capture", "attempts", "MISSING"),
+    ("observed", "extra", {"x": 1}), ("binding", "extra", "x"),
+    ("binding", "backend", "https://model.example.org:11434/v1/chat"), ("binding", "backend", "model.example.org:11434"),
+    ("binding", "model", "model.example.org:11434"), ("binding", "model", ["x"]), ("binding", "model", "model.example.org"), ("binding", "model", "model.example.org:service"),
+    ("binding", "model", "localhost"), ("binding", "model", "LOCALHOST"), ("binding", "model", "localhost:svc"), ("binding", "model", "xn--e1afmkfd"),
+    ("binding", "model", "intranet-box:svc"), ("binding", "backend", "localhost"), ("binding", "backend", "localhost/api/chat"),
+    ("binding", "model_note", "http://model.example.org:11434"), ("binding", "tools", ["model.example.org:service"]), ("binding", "tools", "x"),
+    ("top", "scenario", ["x"]), ("top", "evidence_review", {"records": None}), ("top", "evidence_review", {"records": "x"}),
+])
+def test_recording_contract_is_strict_and_fails_closed_without_raising(client, where, key, value):
+    bad = json.loads(json.dumps(_good_recording(client), allow_nan=True))
+    target = {"top": bad, "binding": bad["observed"]["binding"]}.get(where) or bad[where]
+    if value == "MISSING":
+        target.pop(key)
+    else:
+        target[key] = value
+    assert demo.validate_recording(bad, "food-stock")[0] is False, (where, key, value)
+
+
+def test_a_guest_replay_never_shows_an_endpoint_even_if_a_recording_carried_one(client):
+    rec = _good_recording(client)
+    rec["observed"]["binding"]["backend"] = "https://model.example.org:11434/v1/chat"
+    rec["observed"]["binding"]["model"] = "model.example.org:11434"
+    guest = demo.replay_from_recording(rec, mode="guest")
+    assert guest["observed"]["binding"]["backend"] is None and guest["observed"]["binding"]["model"] is None
+    assert "example.org" not in json.dumps(guest)
+
+
+def test_a_recording_with_duplicate_json_keys_is_not_loaded(client, tmp_path, monkeypatch):
+    good = _good_recording(client)
+    text = json.dumps(good)[:-1] + ', "mode": "guest"}'
+    (tmp_path / "food-stock.json").write_text(text, encoding="utf-8")
+    monkeypatch.setattr(demo, "RECORDINGS_DIR", tmp_path)
+    assert demo.load_recording("food-stock") is None
+
+
+def test_a_reset_between_leases_does_not_leave_the_new_generation_untrimmed(tmp_path):
+    sessions = demo.DemoSessions(tmp_path / "s")
+    key = sessions.key("o", "a")
+    old = sessions.begin(key)
+    sessions.reset(key)
+    new = sessions.begin(key)
+    new.path.parent.mkdir(parents=True, exist_ok=True)
+    new.path.write_text("".join(f'{{"n":{i}}}\n' for i in range(52)), encoding="utf-8")
+    sessions.finish(new)
+    sessions.finish(old)
+    assert len(new.path.read_text(encoding="utf-8").splitlines()) == demo.MAX_SESSION_LOG_LINES
+
+
+def test_the_byte_cap_holds_after_trimming_not_only_the_line_cap(tmp_path):
+    sessions = demo.DemoSessions(tmp_path / "s")
+    lease = sessions.begin(sessions.key("o", "a"))
+    lease.path.parent.mkdir(parents=True, exist_ok=True)
+    lease.path.write_text("".join(json.dumps({"n": i, "pad": "x" * 1000}) + "\n" for i in range(51)), encoding="utf-8")
+    sessions.finish(lease)
+    assert lease.path.stat().st_size <= demo.MAX_SESSION_LOG_BYTES
+    assert json.loads(lease.path.read_text(encoding="utf-8").splitlines()[-1])["n"] == 50
+
+
+@pytest.mark.parametrize("model", ["gemma4:12b", "llama3.1:8b", "qwen3:8b", "gpt-4.1"])
+def test_ordinary_model_tags_still_pass_the_label_check(model):
+    assert demo.safe_label(model, demo._MODEL) == model
+
+
+def test_a_guest_binding_is_rebuilt_from_allowlisted_shapes_only(client):
+    rec = _good_recording(client)
+    rec["observed"]["binding"].update(backend="localhost/api/chat", model="localhost:svc", model_note="http://model.example.org:11434",
+                                      tools=["music.search:simulation", "model.example.org:service"])
+    shown = demo.replay_from_recording(rec, mode="guest")["observed"]["binding"]
+    assert shown["backend"] is None and shown["model"] is None and shown["model_note"] is None and shown["host"] is None
+    assert shown["tools"] == ["music.search:simulation"]
+
+
+_ENDPOINT_TEXTS = ["http://model.example.org:11434/api/chat", "localhost:11434", "[::1]:11434", "see model.example.org for details", "box.lan",
+                   "intranet-box:8080", "HTTPS://X"]
+
+
+@pytest.mark.parametrize("text", _ENDPOINT_TEXTS)
+@pytest.mark.parametrize("where", ["text", "error", "lead", "verification", "consultations", "measurements"])
+def test_an_endpoint_in_any_guest_visible_field_makes_a_recording_unreplayable(client, where, text):
+    bad = _good_recording(client)
+    bad["observed"][where] = {"note": text} if where in ("lead", "verification", "measurements") else ([{"note": text}] if where == "consultations" else text)
+    assert demo.validate_recording(bad, "food-stock") == (False, "recording contains private-looking content"), (where, text)
+
+
+@pytest.mark.parametrize("text", ["gemma4:12b answered", "llama3.1:8b", "at 10:30 on Tuesday", "2026-10-29T12:19:59Z", "recorded 2026-10-28T00:00:00Z", "10:30:45", "a // b", "and/or", "pantry/eggs.md", "std and 1:2:3", "e.g. 4 eggs", "2:1 and 12:30", "3 tins, 2:1 ratio", "stock.md and pantry/eggs.md"])
+def test_ordinary_text_is_not_mistaken_for_an_endpoint(text):
+    assert not demo._looks_private(text)
+
+
+@pytest.mark.parametrize("text", ["a:1", "box:8", "1a:1", "a.:1", "_a:1", "::1", "//box", "see //box/x", "\\\\box\\share", "1::1", "host:123456", "a%EF%BC%9A1", "a%E2%80%8B%3A1", "a%25252525252525253A1", "a&colon;1", "a&#58;1", "\u00e9:1", "\u0915\u093f:1", "\u0915\u093f.test", "\u4e2d\u6587:8080", "a\u0301:1", "\u00e9.test:1", "\u00e9.test", "a\u2236 1".replace(" ", ""), "a%253A1", "a%25253A1", "a\u200b:1", "http%3A%2F%2Fbox%3A8", "box\uff0elocal\uff1a8", "x.example.org"])
+def test_one_digit_ports_and_encoded_endpoints_are_detected(text):
+    bad = {"x": text}
+    assert any(demo._looks_private(s) for s in demo._strings(bad)), text
+
+
+@pytest.mark.parametrize("payload", ["a." * 30000, "a" * 60000, "a-" * 30000, "a@" * 30000, "1." * 30000, ("a" * 9 + ":") * 6000])
+def test_the_private_content_scan_is_linear_on_a_recording_sized_string(payload):
+    import time
+    start = time.perf_counter()
+    demo._looks_private(payload)
+    assert time.perf_counter() - start < 1.5
+
+
+def test_deeply_nested_entities_are_treated_as_an_endpoint_attempt():
+    text = "a&#58;1"
+    for _ in range(40):
+        text = text.replace("&", "&#38;")
+    assert demo._looks_private(text)
+
+
+def test_a_live_guest_inspection_never_shows_an_endpoint_in_text_or_binding():
+    shown = demo.build_inspection({"id": "s", "title": "t"}, mode="guest", execution="live", prompt="p", prompt_source="catalogue", preview=None,
+                                  response={"text": "https://x", "source": "model"}, event={"model": "box:8080", "backend": "box:8080"})["observed"]
+    assert shown["text"] != "https://x" and "withheld" in shown["text"]
+    assert shown["binding"]["model"] is None and shown["binding"]["backend"] is None and shown["binding"]["host"] is None
