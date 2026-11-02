@@ -12,7 +12,7 @@ Prompt identity: estate-queue-priority-execution@v1
 
 ## Objective
 
-Continuously progress the highest-priority eligible work from the existing agent-task queues.
+Continuously progress the highest-priority eligible work **across the three existing task queues** in `tyecam1/odysseus`, `tyecam1/misumi` and `tyecam1/obsidian-PhD`.
 
 Use live repository and runtime state. Do not rely on previous session summaries when authoritative information is available.
 
@@ -20,7 +20,7 @@ Use live repository and runtime state. Do not rely on previous session summaries
 
 - Identify the current queue, active work, dependencies and available execution resources.
 - Reconcile task status against actual implementation and acceptance evidence.
-- Preserve existing repository ownership, approval rules and execution contracts.
+- Preserve each task's original repository ownership, approval rules and execution contracts. If any registered queue is unavailable, report the incomplete scope rather than claiming a complete cross-repository ranking.
 - Do not create duplicate tasks, queues or infrastructure.
 
 ## 2. Prioritise
