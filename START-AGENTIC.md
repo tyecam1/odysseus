@@ -1,20 +1,20 @@
-# Start the prioritised cross-repository work queue
+# Start the usage-aware cross-repository work queue
 
-Resolve `estate-queue-priority-execution` from `config/initialising-prompts.yaml` and execute its current registered prompt.
+Resolve `estate-queue-priority-execution` from `config/initialising-prompts.yaml` and execute its **current active** immutable prompt, not a pasted historical version.
 
-The scope is **all three** existing task authorities: `odysseus`, `misumi`, and `obsidian-phd`. Discover each through the registered local checkout in `config/repositories.yaml`. Cross-repository discovery is read-only; ownership, preflight, write leases, acceptance, and approval always remain with the task's repository.
+Scope: the three separately governed queues in `odysseus`, `misumi` and `obsidian-phd`. Discover bounded metadata with:
 
-Use progressive context disclosure:
+```sh
+python scripts/agentic_portfolio.py frontier --per-repo 4 --max-tokens 2500
+python scripts/agentic_portfolio.py task --ref REPO_ID:BUCKET/FILE.md --tier contract --max-tokens 2500
+```
 
-- **Discover:** `python scripts/agentic_portfolio.py frontier --per-repo 4 --max-tokens 2500`. This opens only task frontmatter and samples every available repository.
-- **Select:** `python scripts/agentic_portfolio.py task --ref REPO_ID:BUCKET/FILE.md --tier contract --max-tokens 2500`. Resolve the exact reference from the discovery results.
-- **Execute:** Read only necessary implementation and acceptance evidence after a task is selected.
-- **Investigate:** Expand into history and full documents only when a specific question warrants it.
+These read-only commands require registered local checkouts on **their execution host**. If the invoking laptop lacks them, use the existing Odysseus lab SSH/remote-execution route to run discovery and subsequent preflight in the **lab checkout**; do not stop, demand a laptop clone or ask the operator to run shell commands. Confirm queue scope and worker eligibility independently. An SSH connection alone is insufficient to claim a successful discovery.
 
-If registered checkouts are unavailable, report `scope_complete=false` and the missing repositories. Do not claim a complete global ranking or silently fall back to the Odysseus queue. Obtain missing read-only access through existing governed mechanisms when available.
+Before selecting, gather trustworthy current Claude, Codex and GLM usage evidence. Favour PhD research when Claude **and** Codex both have adequate task-sized allowance; favour shippable Odysseus backend and Misumi GUI work otherwise. Shipping-first, genuine urgency, ongoing near-complete work and safety gates take precedence; unknown quota is not zero quota.
 
-Use the active priority policy in `AGENTS.md`, the central routing/lease contract and the relevant domain-owner approval gates. Task metadata never grants permission; no past assistant statement or memory waives owner-only gates.
+Execute through each task's owning repository, existing preflight, qualified execution route, ParkLease and verification gates. Do not ask the operator to verify ordinary implementation. Reserve operator review for materials meant for other humans, subjective styling not determined by accepted precedent, and explicitly protected actions. Missing laptop checkout, a moving PR or a quota error is an execution-route issue, not a reason to halt all work.
 
-A session may progress multiple authorised work items while preserving one prompt application identity. Record results through the existing register's closeout and evolution process.
+Use progressive disclosure and record actual acceptance evidence. After delivering a task, update usage/priority and continue. Keep the initializer's application/evolution trace under the central register.
 
-**Stable command:** `/next-work` from the Odysseus project.
+**Stable Claude Code command:** `/lazyUsage` from the Odysseus project (or from a user-level skill installation pointing to this checkout).

@@ -239,9 +239,9 @@ prompts:
   - prompt_id: estate-queue-priority-execution
     title: Estate queue priority and execution initialiser
     status: active
-    active_version: 1
-    version: 1
-    prompt_path: docs/initialising-prompts/estate-queue-priority-execution-v1.md
+    active_version: 2
+    version: 2
+    prompt_path: docs/initialising-prompts/estate-queue-priority-execution-v2.md
     graph_path: evals/prompt-evolution/estate-queue-priority-execution.yaml
     created_at: 2026-11-02
     provenance:
@@ -267,10 +267,16 @@ prompts:
     rating_required: true
     versions:
       - version: 1
-        status: active
+        status: superseded
         prompt_path: docs/initialising-prompts/estate-queue-priority-execution-v1.md
         derived_from: explicit-operator-request-2026-11-02
-    supersedes: []
+      - version: 2
+        status: active
+        prompt_path: docs/initialising-prompts/estate-queue-priority-execution-v2.md
+        parent_version: 1
+        derived_from: operator-directed-lazyUsage-and-autonomy-2026-11-02
+    supersedes:
+      - 1
     retirement_condition: >-
       Retire only when an evidence-derived child passes the protected-invariant
       gate or the governed cross-repository work-item queue ceases to exist.

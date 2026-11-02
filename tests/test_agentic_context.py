@@ -92,12 +92,12 @@ def test_registered_entry_and_versioned_body_consistent():
     matches = [x for x in register["prompts"] if x.get("prompt_id") == "estate-queue-priority-execution"]
     assert len(matches) == 1
     entry = matches[0]
-    assert entry["status"] == "active" and entry["active_version"] == 1
+    assert entry["status"] == "active" and entry["active_version"] == 2
     assert (ROOT / entry["prompt_path"]).is_file()
-    assert "estate-queue-priority-execution@v1" in (ROOT / entry["prompt_path"]).read_text(encoding="utf-8")
+    assert "estate-queue-priority-execution@v2" in (ROOT / entry["prompt_path"]).read_text(encoding="utf-8")
     graph = yaml.safe_load((ROOT / entry["graph_path"]).read_text(encoding="utf-8"))
-    assert graph["active_head"] == "prompt:v1"
-    assert all(graph["guardrail_validation"]["prompt:v1"].values())
+    assert graph["active_head"] == "prompt:v2"
+    assert all(graph["guardrail_validation"]["prompt:v2"].values())
 
 def test_tiny_budget_fails_explicitly_instead_of_looping(tmp_path):
     card(tmp_path, "ready", "x", body="unneeded")
@@ -106,3 +106,15 @@ def test_tiny_budget_fails_explicitly_instead_of_looping(tmp_path):
         ac.output_frontier(q, 0, 2, 1)
     with pytest.raises(ValueError, match="budget"):
         ac.output_task(q, "x", "contract", 1)
+
+def test_lazy_usage_is_only_operator_skill_and_has_usage_autonomy_contract():
+    root = ROOT / ".claude" / "skills"
+    skill = (root / "lazyUsage" / "SKILL.md").read_text(encoding="utf-8")
+    assert "name: lazyUsage" in skill
+    assert "disable-model-invocation: true" in skill
+    assert not (root / "next-work" / "SKILL.md").exists()
+    starter = (ROOT / "START-AGENTIC.md").read_text(encoding="utf-8")
+    assert "/lazyUsage" in starter
+    prompt = (ROOT / "docs" / "initialising-prompts" / "estate-queue-priority-execution-v2.md").read_text(encoding="utf-8")
+    for required in ("Claude", "Codex", "GLM", "SSH", "independently verify", "human-facing"):
+        assert required in prompt
