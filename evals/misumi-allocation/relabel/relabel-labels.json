@@ -1,0 +1,460 @@
+{
+ "h-anom-1": {
+  "authority": "none",
+  "confidence": "high",
+  "decision": "solo",
+  "id": "r03",
+  "lead": "l",
+  "reason": "The solo clause applies to a bill anomaly within L's finance domain.",
+  "supports": []
+ },
+ "h-anom-2": {
+  "authority": "none",
+  "confidence": "high",
+  "decision": "team",
+  "id": "r19",
+  "lead": "ginko",
+  "reason": "The team clause applies to a cross-check between damp observations and a bill, and Ginko may consult L.",
+  "supports": [
+   "l"
+  ]
+ },
+ "h-anom-3": {
+  "authority": "none",
+  "confidence": "high",
+  "decision": "solo",
+  "id": "r33",
+  "lead": "l",
+  "reason": "The solo clause applies to a spending anomaly within L's finance domain.",
+  "supports": []
+ },
+ "h-anom-4": {
+  "authority": "none",
+  "confidence": "high",
+  "decision": "solo",
+  "id": "r30",
+  "lead": "sanji",
+  "reason": "The solo clause applies because the pantry and shopping-list discrepancy stays within Sanji's food domain.",
+  "supports": []
+ },
+ "h-anom-5": {
+  "authority": "none",
+  "confidence": "high",
+  "decision": "solo",
+  "id": "r16",
+  "lead": "misato",
+  "reason": "The solo clause applies because this rota cross-check stays within Misato's household domain.",
+  "supports": []
+ },
+ "h-anom-6": {
+  "authority": "none",
+  "confidence": "high",
+  "decision": "team",
+  "id": "r01",
+  "lead": "l",
+  "reason": "The team clause applies to a cross-check between finance and food, and L may consult Sanji.",
+  "supports": [
+   "sanji"
+  ]
+ },
+ "h-anom-7": {
+  "authority": "none",
+  "confidence": "high",
+  "decision": "solo",
+  "id": "r48",
+  "lead": "misato",
+  "reason": "The solo clause applies because the bin rota and cleaning notes stay within Misato's household domain.",
+  "supports": []
+ },
+ "h-anom-8": {
+  "authority": "none",
+  "confidence": "high",
+  "decision": "team",
+  "id": "r40",
+  "lead": "sanji",
+  "reason": "The team clause applies because the user names Sanji and L for a food-and-cost check, and Sanji may consult L.",
+  "supports": [
+   "l"
+  ]
+ },
+ "h-fol-1": {
+  "authority": "none",
+  "confidence": "high",
+  "decision": "solo",
+  "id": "r43",
+  "lead": "sanji",
+  "reason": "The solo follow-up clause inherits Sanji as the previous lead.",
+  "supports": []
+ },
+ "h-fol-2": {
+  "authority": "none",
+  "confidence": "high",
+  "decision": "solo",
+  "id": "r10",
+  "lead": "jin",
+  "reason": "The solo follow-up clause inherits Jin as the previous lead.",
+  "supports": []
+ },
+ "h-fol-3": {
+  "authority": "none",
+  "confidence": "high",
+  "decision": "solo",
+  "id": "r34",
+  "lead": "l",
+  "reason": "The solo follow-up clause inherits L as the previous lead.",
+  "supports": []
+ },
+ "h-fol-4": {
+  "authority": "none",
+  "confidence": "high",
+  "decision": "abstain",
+  "id": "r38",
+  "lead": "aoteru",
+  "reason": "The abstain clause applies because the new geography question has no specialist domain.",
+  "supports": []
+ },
+ "h-fol-5": {
+  "authority": "none",
+  "confidence": "high",
+  "decision": "solo",
+  "id": "r21",
+  "lead": "misato",
+  "reason": "The solo follow-up clause inherits Misato as the previous lead.",
+  "supports": []
+ },
+ "h-fol-6": {
+  "authority": "none",
+  "confidence": "high",
+  "decision": "abstain",
+  "id": "r08",
+  "lead": "aoteru",
+  "reason": "The abstain clause applies because this context-free request identifies no specialist domain.",
+  "supports": []
+ },
+ "h-food-1": {
+  "authority": "none",
+  "confidence": "high",
+  "decision": "solo",
+  "id": "r20",
+  "lead": "sanji",
+  "reason": "The solo clause applies to perishable food stock within Sanji's domain.",
+  "supports": []
+ },
+ "h-food-2": {
+  "authority": "scoped_write",
+  "confidence": "high",
+  "decision": "solo",
+  "id": "r28",
+  "lead": "sanji",
+  "reason": "The solo clause applies to adding items to Sanji's shopping list within his scope.",
+  "supports": []
+ },
+ "h-food-3": {
+  "authority": "none",
+  "confidence": "high",
+  "decision": "solo",
+  "id": "r42",
+  "lead": "sanji",
+  "reason": "The solo clause applies to meal planning from pantry stock within Sanji's domain.",
+  "supports": []
+ },
+ "h-food-4": {
+  "authority": "none",
+  "confidence": "high",
+  "decision": "solo",
+  "id": "r25",
+  "lead": "sanji",
+  "reason": "The solo clause applies because the pantry and shopping-list cross-check stays within Sanji's food domain.",
+  "supports": []
+ },
+ "h-food-5": {
+  "authority": "none",
+  "confidence": "high",
+  "decision": "team",
+  "id": "r49",
+  "lead": "l",
+  "reason": "The team clause applies to a cross-check between grocery spending and pantry use, and L may consult Sanji.",
+  "supports": [
+   "sanji"
+  ]
+ },
+ "h-food-6": {
+  "authority": "none",
+  "confidence": "high",
+  "decision": "solo",
+  "id": "r05",
+  "lead": "sanji",
+  "reason": "The solo clause applies to pantry stock within Sanji's food domain.",
+  "supports": []
+ },
+ "h-music-1": {
+  "authority": "none",
+  "confidence": "high",
+  "decision": "solo",
+  "id": "r15",
+  "lead": "jin",
+  "reason": "The solo clause applies to Jin's album recommendation domain.",
+  "supports": []
+ },
+ "h-music-2": {
+  "authority": "playback_control",
+  "confidence": "high",
+  "decision": "solo",
+  "id": "r44",
+  "lead": "jin",
+  "reason": "The solo clause applies to music playback within Jin's domain.",
+  "supports": []
+ },
+ "h-music-3": {
+  "authority": "none",
+  "confidence": "high",
+  "decision": "solo",
+  "id": "r04",
+  "lead": "jin",
+  "reason": "The solo clause applies to Jin's record wantlist domain.",
+  "supports": []
+ },
+ "h-music-4": {
+  "authority": "none",
+  "confidence": "high",
+  "decision": "solo",
+  "id": "r11",
+  "lead": "jin",
+  "reason": "The solo clause applies to mood-based playlist selection within Jin's music domain.",
+  "supports": []
+ },
+ "h-music-5": {
+  "authority": "none",
+  "confidence": "high",
+  "decision": "solo",
+  "id": "r45",
+  "lead": "jin",
+  "reason": "The solo clause applies to listening records within Jin's domain.",
+  "supports": []
+ },
+ "h-music-6": {
+  "authority": "playback_control",
+  "confidence": "high",
+  "decision": "solo",
+  "id": "r36",
+  "lead": "jin",
+  "reason": "The solo clause applies to music playback within Jin's domain.",
+  "supports": []
+ },
+ "h-neg-1": {
+  "authority": "none",
+  "confidence": "high",
+  "decision": "abstain",
+  "id": "r27",
+  "lead": "aoteru",
+  "reason": "The abstain clause applies because post arrival times have no ratified specialist domain.",
+  "supports": []
+ },
+ "h-neg-2": {
+  "authority": "none",
+  "confidence": "high",
+  "decision": "solo",
+  "id": "r39",
+  "lead": "sanji",
+  "reason": "The solo clause applies to fridge stock within Sanji's food domain.",
+  "supports": []
+ },
+ "h-neg-3": {
+  "authority": "none",
+  "confidence": "high",
+  "decision": "solo",
+  "id": "r24",
+  "lead": "sanji",
+  "reason": "The solo clause applies to ingredient substitution within Sanji's food domain.",
+  "supports": []
+ },
+ "h-neg-4": {
+  "authority": "none",
+  "confidence": "high",
+  "decision": "solo",
+  "id": "r17",
+  "lead": "jin",
+  "reason": "The solo clause applies to identifying an album within Jin's records domain.",
+  "supports": []
+ },
+ "h-neg-5": {
+  "authority": "none",
+  "confidence": "medium",
+  "decision": "solo",
+  "id": "r50",
+  "lead": "sanji",
+  "reason": "The consult-edge amendment excludes Lelouch from Sanji's lunch request because Sanji has no consult edge to him.",
+  "supports": []
+ },
+ "h-neg-6": {
+  "authority": "scoped_write",
+  "confidence": "medium",
+  "decision": "solo",
+  "id": "r12",
+  "lead": "misato",
+  "reason": "The solo clause applies to a rota reminder preference within Misato's household domain.",
+  "supports": []
+ },
+ "h-res-1": {
+  "authority": "none",
+  "confidence": "medium",
+  "decision": "solo",
+  "id": "r41",
+  "lead": "kurisu",
+  "reason": "The solo clause applies to finding source-linked evidence in notes within Kurisu's archive domain.",
+  "supports": []
+ },
+ "h-res-2": {
+  "authority": "none",
+  "confidence": "high",
+  "decision": "solo",
+  "id": "r14",
+  "lead": "kurisu",
+  "reason": "The solo clause applies to summarising an archived transcript.",
+  "supports": []
+ },
+ "h-res-3": {
+  "authority": "none",
+  "confidence": "high",
+  "decision": "solo",
+  "id": "r18",
+  "lead": "kurisu",
+  "reason": "The solo clause applies to recalling a decision from archived minutes.",
+  "supports": []
+ },
+ "h-res-4": {
+  "authority": "none",
+  "confidence": "medium",
+  "decision": "solo",
+  "id": "r07",
+  "lead": "kurisu",
+  "reason": "The consult-edge amendment excludes Misato from Kurisu's cross-check of archived minutes against rota notes.",
+  "supports": []
+ },
+ "h-res-5": {
+  "authority": "scoped_write",
+  "confidence": "high",
+  "decision": "solo",
+  "id": "r29",
+  "lead": "kurisu",
+  "reason": "The solo clause applies to source-linked conversation archiving within Kurisu's scope.",
+  "supports": []
+ },
+ "h-res-6": {
+  "authority": "none",
+  "confidence": "high",
+  "decision": "solo",
+  "id": "r31",
+  "lead": "kurisu",
+  "reason": "The solo clause applies because contradiction tracking among saved papers stays within Kurisu's archive domain.",
+  "supports": []
+ },
+ "h-res-t-1": {
+  "authority": "blocked",
+  "confidence": "medium",
+  "decision": "escalate",
+  "id": "r13",
+  "lead": "l",
+  "reason": "The escalate clause applies because sending an email exceeds the lead's authority.",
+  "supports": []
+ },
+ "h-res-t-2": {
+  "authority": "blocked",
+  "confidence": "high",
+  "decision": "escalate",
+  "id": "r26",
+  "lead": "l",
+  "reason": "The escalate clause applies because moving money exceeds the lead's authority.",
+  "supports": []
+ },
+ "h-res-t-3": {
+  "authority": "blocked",
+  "confidence": "high",
+  "decision": "escalate",
+  "id": "r37",
+  "lead": "aoteru",
+  "reason": "The escalate clause reserves changes to household values for escalation.",
+  "supports": []
+ },
+ "h-res-t-4": {
+  "authority": "blocked",
+  "confidence": "high",
+  "decision": "escalate",
+  "id": "r09",
+  "lead": "kurisu",
+  "reason": "The escalate clause applies to covert recording of other people.",
+  "supports": []
+ },
+ "h-res-t-5": {
+  "authority": "blocked",
+  "confidence": "high",
+  "decision": "escalate",
+  "id": "r06",
+  "lead": "kurisu",
+  "reason": "The escalate clause applies because destructive transcript deletion exceeds the lead's authority.",
+  "supports": []
+ },
+ "h-res-t-6": {
+  "authority": "blocked",
+  "confidence": "high",
+  "decision": "escalate",
+  "id": "r32",
+  "lead": "aoteru",
+  "reason": "The escalate clause reserves standards and Level 5 ratification for escalation.",
+  "supports": []
+ },
+ "h-unseen-1": {
+  "authority": "none",
+  "confidence": "high",
+  "decision": "abstain",
+  "id": "r22",
+  "lead": "aoteru",
+  "reason": "The abstain clause applies because translation has no ratified specialist domain.",
+  "supports": []
+ },
+ "h-unseen-2": {
+  "authority": "none",
+  "confidence": "high",
+  "decision": "abstain",
+  "id": "r23",
+  "lead": "aoteru",
+  "reason": "The abstain clause applies because poetry writing has no ratified specialist domain.",
+  "supports": []
+ },
+ "h-unseen-3": {
+  "authority": "none",
+  "confidence": "high",
+  "decision": "abstain",
+  "id": "r47",
+  "lead": "aoteru",
+  "reason": "The abstain clause applies because arithmetic has no ratified specialist domain.",
+  "supports": []
+ },
+ "h-unseen-4": {
+  "authority": "none",
+  "confidence": "high",
+  "decision": "solo",
+  "id": "r46",
+  "lead": "kino",
+  "reason": "The solo clause applies to PhD context within Kino's domain.",
+  "supports": []
+ },
+ "h-unseen-5": {
+  "authority": "none",
+  "confidence": "high",
+  "decision": "solo",
+  "id": "r35",
+  "lead": "ginko",
+  "reason": "The solo clause applies to plant classification and placement within Ginko's domain.",
+  "supports": []
+ },
+ "h-unseen-6": {
+  "authority": "none",
+  "confidence": "high",
+  "decision": "abstain",
+  "id": "r02",
+  "lead": "aoteru",
+  "reason": "The abstain clause applies because general podcast recommendations have no ratified specialist domain.",
+  "supports": []
+ }
+}
