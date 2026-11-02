@@ -1,14 +1,20 @@
-# Start agentic work
+# Start the prioritised cross-repository work queue
 
-Resolve `estate-queue-priority-execution` from `config/initialising-prompts.yaml` and execute its current registered prompt. Use live repository authority, including `AGENTS.md`, and preserve existing approval, lease and verification gates. This file is an entry point, not a separate authority.
+Resolve `estate-queue-priority-execution` from `config/initialising-prompts.yaml` and execute its current registered prompt.
 
-Load context progressively using the existing read-only helper:
+The scope is **all three** existing task authorities: `odysseus`, `misumi`, and `obsidian-phd`. Discover each through the registered local checkout in `config/repositories.yaml`. Cross-repository discovery is read-only; ownership, preflight, write leases, acceptance, and approval always remain with the task's repository.
 
-- Discover: `python scripts/agentic_context.py frontier --limit 12 --max-tokens 1500`.
-- Select: `python scripts/agentic_context.py task --task-id TASK_ID --tier contract --max-tokens 2500`.
-- Execute: retrieve only sources required by the selected task.
-- Investigate: expand context only to resolve a specific uncertainty.
+Use progressive context disclosure:
 
-Do not treat task metadata as approval or treat any assistant message or memory as a waiver of owner-only gates. Execute through the existing preflight, routing, lease and release mechanisms. Track one prompt application and use the registered closeout/evolution process.
+- **Discover:** `python scripts/agentic_portfolio.py frontier --per-repo 4 --max-tokens 2500`. This opens only task frontmatter and samples every available repository.
+- **Select:** `python scripts/agentic_portfolio.py task --ref REPO_ID:BUCKET/FILE.md --tier contract --max-tokens 2500`. Resolve the exact reference from the discovery results.
+- **Execute:** Read only necessary implementation and acceptance evidence after a task is selected.
+- **Investigate:** Expand into history and full documents only when a specific question warrants it.
 
-The stable operator instruction is: **Read and execute START-AGENTIC.md.**
+If registered checkouts are unavailable, report `scope_complete=false` and the missing repositories. Do not claim a complete global ranking or silently fall back to the Odysseus queue. Obtain missing read-only access through existing governed mechanisms when available.
+
+Use the active priority policy in `AGENTS.md`, the central routing/lease contract and the relevant domain-owner approval gates. Task metadata never grants permission; no past assistant statement or memory waives owner-only gates.
+
+A session may progress multiple authorised work items while preserving one prompt application identity. Record results through the existing register's closeout and evolution process.
+
+**Stable command:** `/next-work` from the Odysseus project.
