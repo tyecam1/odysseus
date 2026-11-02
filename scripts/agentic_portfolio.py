@@ -67,10 +67,14 @@ def collect(repo_id: str, root: Path) -> tuple[list[dict], dict, list[str]]:
     rows, counts, warnings = [], {}, []
     for bucket in buckets:
         folder = queue / bucket
+        if folder.is_symlink() or (folder.exists() and not folder.resolve().is_relative_to(queue)):
+            warnings.append(repo_id + ":" + bucket + ":bucket_escape_refused")
+            counts[bucket] = 0
+            continue
         paths = sorted(folder.glob("*.md")) if folder.is_dir() else []
         counts[bucket] = len(paths)
         for path in paths:
-            if path.is_symlink():
+            if path.is_symlink() or not path.resolve().is_relative_to(queue):
                 warnings.append(repo_id + ":" + bucket + ":symlink_refused")
                 continue
             try:
