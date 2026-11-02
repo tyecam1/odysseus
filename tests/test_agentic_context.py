@@ -42,8 +42,9 @@ def test_staged_task_requires_exact_id_and_defers_full_body(tmp_path):
     card(tmp_path, "ready", "a", body="A" * 12000)
     card(tmp_path, "inbox", "b", body="B" * 200)
     q = ac.queue_path(tmp_path, ac.DEFAULT_QUEUE)
-    short = ac.output_task(q, "a", "contract", 100)
-    assert short["truncated"] is True and len(short["body"]) == 300
+    short = ac.output_task(q, "a", "contract", 400)
+    assert short["truncated"] is True and 0 < len(short["body"]) < 12000
+    assert len(str(short)) < 3000
     assert "B" * 200 not in str(short)
     expanded = ac.output_task(q, "a", "full", 6000)
     assert expanded["truncated"] is False and len(expanded["body"]) == 12000
@@ -97,3 +98,11 @@ def test_registered_entry_and_versioned_body_consistent():
     graph = yaml.safe_load((ROOT / entry["graph_path"]).read_text(encoding="utf-8"))
     assert graph["active_head"] == "prompt:v1"
     assert all(graph["guardrail_validation"]["prompt:v1"].values())
+
+def test_tiny_budget_fails_explicitly_instead_of_looping(tmp_path):
+    card(tmp_path, "ready", "x", body="unneeded")
+    q = ac.queue_path(tmp_path, ac.DEFAULT_QUEUE)
+    with pytest.raises(ValueError, match="budget"):
+        ac.output_frontier(q, 0, 2, 1)
+    with pytest.raises(ValueError, match="budget"):
+        ac.output_task(q, "x", "contract", 1)
