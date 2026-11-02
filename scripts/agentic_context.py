@@ -3,7 +3,7 @@
 
 L0 frontier reads *only YAML frontmatter*, never task prose.
 L1 task loads the selected card's bounded task contract.
-L2 full is an explicit, logged-by-caller choice; source evidence is still
+L3 full is an explicit, logged-by-caller choice; source evidence is still
 opened separately and only after task selection. This is not a scheduler.
 """
 from __future__ import annotations
@@ -129,7 +129,7 @@ def output_task(queue: Path, task_id: str, tier: str, budget: int) -> dict:
         raise ValueError("task_id missing or ambiguous")
     path = matches[0]
     meta = frontmatter(path)
-    result = {"stage": "L1-selected-contract" if tier == "contract" else "L2-explicit-full-task",
+    result = {"stage": "L1-selected-contract" if tier == "contract" else "L3-explicit-full-task",
               "file": path.relative_to(queue).as_posix(),
               "metadata": safe(meta, SAFE_CONTRACT)}
     with path.open(encoding="utf-8") as stream:
