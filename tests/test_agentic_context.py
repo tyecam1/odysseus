@@ -116,5 +116,5 @@ def test_lazy_usage_is_only_operator_skill_and_has_usage_autonomy_contract():
     starter = (ROOT / "START-AGENTIC.md").read_text(encoding="utf-8")
     assert "/lazyUsage" in starter
     prompt = (ROOT / "docs" / "initialising-prompts" / "estate-queue-priority-execution-v2.md").read_text(encoding="utf-8")
-    for required in ("Claude", "Codex", "GLM", "SSH", "independently verify", "human-facing"):
+    for required in ("Claude", "Codex", "GLM", "SSH", "independently verify", "outward-facing"):
         assert required in prompt
