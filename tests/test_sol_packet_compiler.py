@@ -1040,3 +1040,53 @@ def test_w1_whatever_changes_the_compiled_request_changes_the_hash():
         assert spc.manifest_hash(changed) != spc.manifest_hash(base), change
         if "depends_on" not in change and "exposes_label_of" not in change:
             assert spc.compile_packet([changed], "pk", "c", []) != packet, change   # and the request really differs
+
+
+# ---------- independent review round 8 (gpt-6.1-sol) ----------
+
+def _two(*extra):
+    items = [make("a"), make("b")]
+    base = [good("a"), good("b")]
+    return items, json.dumps({"results": base + list(extra)})
+
+
+def test_x1_a_repeated_decision_id_member_cannot_conceal_a_conflicting_result():
+    items, _ = _two()
+    raw = ('{"results": [' + json.dumps(good("a")) + ',' + json.dumps(good("b")) + ','
+           '{"decision_id":"a","decision_id":null,"verdict":"REVISE"}]}')
+    out = spc.parse_results(items, raw)
+    assert out["a"] == "duplicate_result", "a's earlier PASS must not survive a conflicting repeated-member entry"
+    assert isinstance(out["b"], spc.ItemResult), "unrelated ids keep their valid results"
+
+
+def test_x1_every_value_the_repeated_member_took_is_considered():
+    items, _ = _two()
+    first_hides = ('{"results": [' + json.dumps(good("a")) + ','
+                   '{"decision_id":null,"decision_id":"a","verdict":"REVISE"}]}')
+    assert spc.parse_results(items, first_hides)["a"] == "duplicate_result"
+    both = ('{"results": [{"decision_id":"a","decision_id":"b","verdict":"YES","rationale":"r"}, '
+            + json.dumps(good("a")) + ',' + json.dumps(good("b")) + ']}')
+    out = spc.parse_results(items, both)
+    assert out["a"] == "duplicate_result" and out["b"] == "duplicate_result"
+
+
+def test_x1_an_ambiguous_entry_alone_leaves_its_ids_unresolved_not_trusted():
+    items, _ = _two()
+    raw = '{"results": [{"decision_id":"a","decision_id":"a","verdict":"YES"}, ' + json.dumps(good("b")) + ']}'
+    out = spc.parse_results(items, raw)
+    assert out["a"] == "malformed_result" and isinstance(out["b"], spc.ItemResult)
+
+
+def test_x1_unknown_unhashable_and_nonstring_ids_in_ambiguous_entries_are_ignored_safely():
+    items, _ = _two()
+    raw = ('{"results": [' + json.dumps(good("a")) + ',' + json.dumps(good("b")) + ','
+           '{"decision_id":"zzz","decision_id":["a"],"decision_id":{"k":1},"decision_id":5}]}')
+    out = spc.parse_results(items, raw)
+    assert isinstance(out["a"], spc.ItemResult) and isinstance(out["b"], spc.ItemResult)
+    assert set(out) == {"a", "b"}
+
+
+def test_x1_clean_duplicate_free_input_is_unchanged():
+    items, raw = _two()
+    out = spc.parse_results(items, raw)
+    assert all(isinstance(v, spc.ItemResult) for v in out.values())

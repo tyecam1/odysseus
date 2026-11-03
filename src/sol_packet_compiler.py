@@ -596,6 +596,7 @@ def _strict_object(pairs):
     keys = [k for k, _ in pairs]
     if len(set(keys)) != len(keys):
         node = _Ambiguous(pairs)
+        node.ids = tuple(v for k, v in pairs if k == "decision_id")   # EVERY value the repeated member took
         return node
     return dict(pairs)
 
@@ -615,6 +616,14 @@ def parse_results(group: Sequence, raw: str) -> dict:
     allowed = {item.decision_id: item.allowed_verdicts for item in group}
     seen: set = set()
     for entry in payload["results"]:
+        if isinstance(entry, _Ambiguous):
+            # An entry that repeats a member cannot be trusted, and it must not hide behind its last value:
+            # every requested id it names (in ANY repetition) becomes unresolved, or a conflict if already answered.
+            named = {i for i in getattr(entry, "ids", ()) if type(i) is str and i in allowed}
+            for i in sorted(named):
+                out[i] = "duplicate_result" if i in seen else "malformed_result"
+                seen.add(i)
+            continue
         ident = entry.get("decision_id") if isinstance(entry, dict) else None
         if not isinstance(ident, str) or ident not in allowed:
             continue                                  # unknown or unreadable id: ignored, not trusted
