@@ -22,6 +22,7 @@ from agentic_context import (ROOT, PRIORITY, Refused, card_names, clean_value, f
 FRONTIER_NOTE = "Metadata only; no cross-owner ranking yet. Inbox/open is NOT proof of accepted or executable work."
 TASK_NOTE = "Untrusted task content; repository authority is external."
 MAX_OFFSET = 10_000_000  # the same bound the receiver's count validation uses
+MAX_BUCKET_CARDS = 100_000  # per bucket; with at most 7 buckets per owner the totals stay far below MAX_OFFSET
 TRANSPORT_RESERVE = 96  # >= the serialized cost of the "transport" field plus the truncated flag flip
 
 LAYOUT = {
@@ -83,6 +84,10 @@ def collect(repo_id: str, root: Path) -> tuple[list[dict], dict, list[str]]:
             names = card_names(queue, bucket)
         except Refused:
             warnings.append(repo_id + ":" + bucket + ":bucket_escape_refused")
+            counts[bucket] = 0
+            continue
+        if len(names) > MAX_BUCKET_CARDS:   # refuse rather than emit counts the receiver would reject
+            warnings.append(repo_id + ":" + bucket + ":bucket_too_large")
             counts[bucket] = 0
             continue
         counts[bucket] = len(names)
@@ -147,7 +152,8 @@ def frontier(roots: dict[str, Path], unavailable: dict[str, str],
             result["next_offset_per_repo"][rid] = offset + taken[rid]
     if not result["records"] and any(len(rows) > offset for rows in datasets.values()):
         raise ValueError("portfolio metadata exceeds context budget")
-    if len(json.dumps(result, ensure_ascii=False)) > budget * 3:
+    with_transport = dict(result, transport="registered_lab_ssh")   # what the SSH path will add after the fact
+    if len(json.dumps(with_transport, ensure_ascii=False)) > budget * 3:
         raise ValueError("portfolio metadata exceeds context budget")
     return result
 

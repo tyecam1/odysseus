@@ -1128,6 +1128,8 @@ def test_every_response_the_real_producer_emits_is_accepted_by_the_receiver(tmp_
             "seed": seed, "offset": offset, "per_repo": per_repo, "budget": budget,
             "counts": remote["counts"], "records": [(r["ref"], r.get("priority")) for r in remote["records"]],
             "next": remote["next_offset_per_repo"]}
+        remote["transport"] = "registered_lab_ssh"                        # what the SSH path adds after the fact
+        assert len(json.dumps(remote, ensure_ascii=False)) <= budget * 3, "producer output + transport exceeds budget"
         checked += 1
     assert checked >= 3, "the producer refused too often for this seed to test anything"
 
@@ -1158,3 +1160,71 @@ def test_r12_1_a_genuine_page_with_the_same_shape_is_still_accepted(monkeypatch)
     env["records"] = [codex, claude]
     env["next_offset_per_repo"] = {"misumi": 2}
     assert _ask(monkeypatch, env, args=_frontier_args(per_repo=2))["transport"]
+
+
+# --- Review round 13: the producer's output must survive the transport and the receiver's own limits ---
+
+def _empty_estate(tmp_path, monkeypatch):
+    ody, misumi, phd = estate(tmp_path, monkeypatch)
+    for root in (ody, misumi, phd):
+        for old in root.rglob("*.md"):
+            old.unlink()
+    return ody
+
+
+def test_r13_1_an_empty_page_reserves_the_transport_field(tmp_path, monkeypatch):
+    ody = _empty_estate(tmp_path, monkeypatch)
+    roots, missing = ap.resolve_roots(ody, {})
+    produced_any = False
+    for tokens in range(150, 400):
+        try:
+            result = ap.frontier(roots, missing, 0, 4, tokens)
+        except ValueError:
+            continue                                                   # refused up front: correct
+        produced_any = True
+        result["transport"] = "registered_lab_ssh"                     # exactly what the SSH path appends
+        assert len(json.dumps(result, ensure_ascii=False)) <= tokens * 3, tokens
+    assert produced_any
+
+
+def test_r13_1_the_reviewers_empty_page_budget_is_now_refused_up_front(tmp_path, monkeypatch):
+    ody = _empty_estate(tmp_path, monkeypatch)
+    roots, missing = ap.resolve_roots(ody, {})
+    bare = len(json.dumps(ap.frontier(roots, missing, 0, 4, 2600), ensure_ascii=False))
+    with_transport = bare + len(', "transport": "registered_lab_ssh"')
+    tokens_between = [t for t in range(100, 2600) if bare <= t * 3 < with_transport]
+    assert tokens_between, "the window the reviewer found must exist for this layout"
+    for tokens in tokens_between:
+        with pytest.raises(ValueError, match="budget"):
+            ap.frontier(roots, missing, 0, 4, tokens)
+
+
+def test_r13_1_an_exhausted_offset_page_reserves_it_too(tmp_path, monkeypatch):
+    ody, _, _ = estate(tmp_path, monkeypatch)
+    roots, missing = ap.resolve_roots(ody, {})
+    for tokens in range(150, 700):
+        try:
+            result = ap.frontier(roots, missing, 50, 4, tokens)        # far past every queue: an empty page
+        except ValueError:
+            continue
+        result["transport"] = "registered_lab_ssh"
+        assert len(json.dumps(result, ensure_ascii=False)) <= tokens * 3, tokens
+
+
+def test_r13_2_an_oversized_bucket_is_refused_by_the_producer_not_rejected_later(tmp_path, monkeypatch):
+    ody, misumi, _ = estate(tmp_path, monkeypatch)
+    monkeypatch.setattr(ap, "MAX_BUCKET_CARDS", 3)
+    folder = ody / "automation" / "review" / "agent-tasks" / "ready"
+    for i in range(6):
+        make_card(ody, "automation/review/agent-tasks/ready/big%d.md" % i, "T%d" % i, raw_status="ready")
+    rows, counts, warnings = ap.collect("odysseus", ody)
+    assert counts["ready"] == 0 and not rows
+    assert "odysseus:ready:bucket_too_large" in warnings and ap._valid_warning("odysseus:ready:bucket_too_large")
+    roots, missing = ap.resolve_roots(ody, {})
+    produced = ap.frontier(roots, missing, 0, 4, 2600)
+    args = argparse.Namespace(stage="frontier", ref=None, tier="contract", max_tokens=2600, offset=0, per_repo=4)
+    assert ap._valid_remote_frontier(json.loads(json.dumps(produced)), args)
+
+
+def test_r13_2_the_producer_cap_keeps_every_count_within_the_receiver_limit():
+    assert ap.MAX_BUCKET_CARDS * max(len(buckets) for _, buckets in ap.LAYOUT.values()) <= ap.MAX_OFFSET
