@@ -17,12 +17,16 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
+from fractions import Fraction
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Iterable, Mapping, Optional, Sequence
 
 PACKET_CLASSES = ("decision", "verification", "collision", "gate")
 VERIFICATION_VERDICTS = ("PASS", "REVISE", "ESCALATE")
+MAX_TOKENS = 10 ** 12  # no real token count is larger; bounding it keeps integer arithmetic and formatting safe
+HASH_FORMAT = re.compile(r"[0-9a-f]{64}")
 NO_DEADLINE = "none"  # the explicit no-deadline value; a missing deadline is NOT assumed to be none
 
 BATCH = "BATCH"
@@ -97,8 +101,9 @@ class Group:
 # ---------- strict primitives ----------
 
 def _is_int(value, minimum: int = 0) -> bool:
-    # Exact built-in int: bool and int subclasses (which can override comparisons) are refused.
-    return type(value) is int and value >= minimum
+    # Exact built-in int within a sane bound: bool and int subclasses (which can override comparisons)
+    # are refused, and huge values cannot reach arithmetic or formatting.
+    return type(value) is int and minimum <= value <= MAX_TOKENS
 
 
 def _is_number(value, minimum: Optional[float] = None) -> bool:
@@ -112,11 +117,12 @@ def _is_number(value, minimum: Optional[float] = None) -> bool:
 
 
 def _is_text(value) -> bool:
-    return isinstance(value, str) and bool(value.strip())
+    # Exact built-in str: a subclass can lie about strip(), __eq__ or __hash__.
+    return type(value) is str and bool(value.strip())
 
 
 def _is_texts(value, nonempty: bool) -> bool:
-    return (isinstance(value, (tuple, list)) and (bool(value) or not nonempty)
+    return (type(value) in (tuple, list) and (bool(value) or not nonempty)
             and all(_is_text(element) for element in value))
 
 
@@ -138,9 +144,9 @@ def _offset(moment):
 
 def parse_deadline(value) -> Optional[datetime]:
     """None for NO_DEADLINE; ValueError for a missing, malformed or timezone-less value."""
-    if value == NO_DEADLINE:
+    if type(value) is str and value == NO_DEADLINE:
         return None
-    if not isinstance(value, str) or not value:
+    if type(value) is not str or not value:
         raise ValueError("deadline must be an ISO-8601 timestamp or the explicit value 'none'")
     parsed = datetime.fromisoformat(value)
     if _offset(parsed) is None:
@@ -157,7 +163,7 @@ def validate_item(item) -> list:
                  "consequence", "protocol"):
         if not _is_text(getattr(item, name)):
             problems.append("missing_" + name)
-    if item.packet_class not in PACKET_CLASSES:
+    if type(item.packet_class) is not str or item.packet_class not in PACKET_CLASSES:
         problems.append("unknown_packet_class")
     for name in ("evidence_pointers", "acceptance_criteria", "allowed_verdicts"):
         if not _is_texts(getattr(item, name), nonempty=True):
@@ -180,9 +186,11 @@ def validate_item(item) -> list:
     for name in ("shared_context_key", "context_manifest_hash", "question_id"):
         if not _maybe_text(getattr(item, name)):
             problems.append("invalid_" + name)
-    for name in ("context_tokens", "unique_tokens", "output_reserve_tokens"):
+    for name in ("context_tokens", "unique_tokens"):
         if not _maybe_int(getattr(item, name)):
             problems.append("invalid_" + name)
+    if item.output_reserve_tokens is not None and not _is_int(item.output_reserve_tokens, 1):
+        problems.append("invalid_output_reserve_tokens")   # every item owes a result, so a reserve of 0 is invalid
     try:
         parse_deadline(item.deadline)
     except (ValueError, TypeError):
@@ -196,9 +204,11 @@ def _policy_problems(policy) -> list:
     if not isinstance(policy, Policy):
         return ["not_a_policy"]
     problems = []
-    for name in ("min_net_reuse_tokens", "wrapper_overhead_tokens", "max_input_tokens",
-                 "max_output_tokens", "headroom_tokens"):
+    for name in ("min_net_reuse_tokens", "wrapper_overhead_tokens", "headroom_tokens"):
         if not _maybe_int(getattr(policy, name)):
+            problems.append("invalid_" + name)
+    for name in ("max_input_tokens", "max_output_tokens"):   # a limit below 1 token can never hold a result
+        if getattr(policy, name) is not None and not _is_int(getattr(policy, name), 1):
             problems.append("invalid_" + name)
     if policy.max_items is not None and not _is_int(policy.max_items, 1):
         problems.append("invalid_max_items")
@@ -208,21 +218,26 @@ def _policy_problems(policy) -> list:
             problems.append("invalid_" + name)
     if policy.max_wait_seconds is not None and not _is_number(policy.max_wait_seconds, 0):
         problems.append("invalid_max_wait_seconds")
-    if not isinstance(policy.role_equivalence, Mapping) or not all(
+    if type(policy.role_equivalence) is not dict or not all(
             _is_text(k) and _is_text(v) for k, v in policy.role_equivalence.items()):
         problems.append("invalid_role_equivalence")
     return problems
 
 
+_UNREADABLE = object()  # stands for "the certificates could not be read": _certificate_set refuses it
+
+
 def _materialise(certificates):
     """A list of the certificates (so a one-shot generator can be inspected twice), or the object
-    itself when it is not iterable, which _certificate_set then refuses."""
+    itself when it is not iterable, or a refusal marker if reading it raises."""
     if isinstance(certificates, (str, bytes)):
         return certificates
     try:
         return list(certificates)
     except TypeError:
         return certificates
+    except Exception:  # a generator that raises must refuse, not escape
+        return _UNREADABLE
 
 
 def _certificate_set(certificates) -> Optional[set]:
@@ -272,6 +287,8 @@ def manifest_hash(item: Item) -> str:
         "verdicts": sorted(item.allowed_verdicts), "context_hash": item.context_manifest_hash,
         "context_key": item.shared_context_key, "independence": item.independence_required,
         "fresh": item.fresh_context_required, "separate": item.separate_adjudication_required,
+        "parent": item.parent_task, "open": item.open_judgment,
+        "depends_on": sorted(item.depends_on), "exposes": sorted(item.exposes_label_of),
     }, ensure_ascii=True, sort_keys=True)  # ASCII escapes: a lone surrogate hashes instead of raising
     return hashlib.sha256(body.encode("ascii")).hexdigest()
 
@@ -282,6 +299,15 @@ def _single(reason: str, *detail: str) -> Decision:
 
 def admit(group: Sequence, policy: Policy, certificates: Iterable,
           now: datetime, wait_seconds: Optional[float]) -> Decision:
+    """Public boundary: any unexpected failure while examining untrusted input refuses (fail closed)."""
+    try:
+        return _admit(group, policy, certificates, now, wait_seconds)
+    except Exception:
+        return Decision(NEEDS_PREPARATION, "input_not_processable")
+
+
+def _admit(group: Sequence, policy: Policy, certificates: Iterable,
+           now: datetime, wait_seconds: Optional[float]) -> Decision:
     """The six conjunctive admission tests for a candidate group of two or more items.
 
     `certificates` holds two-id pairs certified non-contaminating, each backed by evidence the
@@ -368,15 +394,24 @@ def admit(group: Sequence, policy: Policy, certificates: Iterable,
         return _single("wait_not_justified", "wait_seconds must be a finite number >= 0")
     if wait_seconds > policy.max_wait_seconds or policy.wait_benefit_lower_bound <= policy.urgency_cost_upper_bound:
         return _single("wait_not_justified")
-    try:
-        needed = timedelta(seconds=wait_seconds)   # exact timedelta comparison: no float rounding of the margin
-    except (OverflowError, ValueError):
+    needed = _margin(wait_seconds)
+    if needed is None:
         return _single("wait_not_justified", "wait_seconds out of range")
     for item in items:
         deadline = parse_deadline(item.deadline)
         if deadline is not None and deadline - now < needed:
             return _single("wait_not_justified", "deadline_before_dispatch", item.decision_id)
     return Decision(BATCH, "all_admission_tests_passed", ("policy=" + str(policy.evidence_version),))
+
+
+def _margin(wait_seconds) -> Optional[timedelta]:
+    """The wait as an exact timedelta, rounded UP to the next microsecond so a positive wait can
+    never be shortened into fitting a deadline; None if it does not fit a timedelta."""
+    try:
+        microseconds = math.ceil(Fraction(wait_seconds) * 1_000_000)   # Fraction(float) is exact
+        return timedelta(microseconds=microseconds)
+    except (OverflowError, ValueError, TypeError):
+        return None
 
 
 def _sort_key(item: Item):
@@ -391,6 +426,15 @@ def _sort_key(item: Item):
 
 def plan(items: Sequence, policy: Policy, certificates: Iterable,
          now: datetime, wait_seconds: Optional[float]) -> list:
+    """Public boundary: an unexpected failure while examining untrusted input refuses (fail closed)."""
+    try:
+        return _plan(items, policy, certificates, now, wait_seconds)
+    except Exception:
+        return [Group((), Decision(NEEDS_PREPARATION, "input_not_processable"))]
+
+
+def _plan(items: Sequence, policy: Policy, certificates: Iterable,
+          now: datetime, wait_seconds: Optional[float]) -> list:
     """Deterministic grouping in the specified order (deadline, then id; no-deadline last).
 
     One ordered pass: groups are CONTIGUOUS runs of that order, and preparation decisions appear in
@@ -538,6 +582,11 @@ def parse_results(group: Sequence, raw: str) -> dict:
         seen.add(ident)
         refs = entry.get("evidence_refs")
         unresolved = entry.get("unresolved") is True
+        if ("unresolved" in entry and not isinstance(entry["unresolved"], bool)) or isinstance(entry, _Ambiguous) \
+                or (unresolved and "verdict" in entry) \
+                or (unresolved is False and "unresolved" in entry and "verdict" not in entry):
+            out[ident] = "malformed_result"
+            continue
         if (isinstance(entry, _Ambiguous) or (unresolved and "verdict" in entry)
                 or (not unresolved and entry.get("verdict") not in allowed[ident])
                 or not isinstance(entry.get("rationale"), str) or not entry["rationale"].strip()
@@ -558,6 +607,14 @@ FOLLOW_UP_TRIGGERS = ("malformed_packet", "new_evidence", "consequential_defect"
 
 
 def needs_new_call(item: Item, prior_manifest_hash: Optional[str], triggers: Iterable = ()) -> Decision:
+    """Public boundary: an unexpected failure while examining untrusted input refuses (fail closed)."""
+    try:
+        return _needs_new_call(item, prior_manifest_hash, triggers)
+    except Exception:
+        return Decision(NEEDS_PREPARATION, "input_not_processable")
+
+
+def _needs_new_call(item: Item, prior_manifest_hash: Optional[str], triggers: Iterable = ()) -> Decision:
     """Follow-up suppression: an unchanged question reuses its prior conclusion unless a
     declared trigger fired. A required independent, fresh or separate check is never suppressed,
     an unestablished independence setting is never assumed safe, and a malformed or unknown
@@ -565,8 +622,11 @@ def needs_new_call(item: Item, prior_manifest_hash: Optional[str], triggers: Ite
     problems = validate_item(item)
     if problems:
         return Decision(NEEDS_PREPARATION, "item_not_decision_ready", tuple(problems))
-    if not isinstance(triggers, (list, tuple, set, frozenset)) or not all(
-            isinstance(t, str) and t in FOLLOW_UP_TRIGGERS for t in triggers):
+    if prior_manifest_hash is not None and (type(prior_manifest_hash) is not str
+                                            or not HASH_FORMAT.fullmatch(prior_manifest_hash)):
+        return Decision(NEEDS_PREPARATION, "prior_hash_invalid")
+    if type(triggers) not in (list, tuple, set, frozenset) or not all(
+            type(t) is str and t in FOLLOW_UP_TRIGGERS for t in triggers):
         return Decision(NEEDS_PREPARATION, "triggers_invalid")
     if item.independence_required is True or item.fresh_context_required or item.separate_adjudication_required:
         return Decision(SINGLE, "independent_check_still_required")

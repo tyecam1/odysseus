@@ -598,3 +598,160 @@ def test_r2_11_the_prompt_never_invites_a_forbidden_verdict_and_unresolved_is_de
     assert spc.parse_results(items, json.dumps({"results": [both]}))["a"] == "malformed_result"
     verification = [make("a", packet_class="verification", allowed_verdicts=spc.VERIFICATION_VERDICTS)]
     assert "ESCALATE" in spc.compile_packet(verification, "pk", "c", [])      # listed, so it may appear
+
+
+# ---------- independent review round 3 (gpt-6.1-sol): one regression per finding ----------
+
+class _AlwaysEqual:
+    def __eq__(self, other):
+        return True
+
+    def __hash__(self):
+        return 1
+
+
+class _RaisingEq:
+    def __eq__(self, other):
+        raise RuntimeError("boom")
+
+    __hash__ = object.__hash__
+
+
+class _LyingStr(str):
+    """An empty str whose strip() claims to have content."""
+    def strip(self, *args):
+        return "x"
+
+
+class _Unhashable(str):
+    __hash__ = None
+
+
+def test_s1_every_field_the_compiled_request_carries_changes_the_hash():
+    base = make("a", candidate_options=("YES", "NO"))
+    for change in ({"parent_task": "other"}, {"open_judgment": True}, {"depends_on": ("z",)},
+                   {"exposes_label_of": ("z",)}):
+        changed = replace(base, **change)
+        assert spc.manifest_hash(changed) != spc.manifest_hash(base), change
+        assert spc.needs_new_call(changed, spc.manifest_hash(base)).outcome != spc.REUSE, change
+
+
+@pytest.mark.parametrize("prior", [_AlwaysEqual(), _RaisingEq(), "abc", "A" * 64, b"0" * 64, 5, ["x"], "0" * 63])
+def test_s2_the_prior_hash_must_be_a_real_digest(prior):
+    verdict = spc.needs_new_call(make("a"), prior)
+    assert verdict.outcome == spc.NEEDS_PREPARATION and verdict.reason == "prior_hash_invalid"
+
+
+def test_s2_none_and_a_genuine_digest_still_work():
+    item = make("a")
+    assert spc.needs_new_call(item, None).reason == "no_prior_or_changed_question"
+    assert spc.needs_new_call(item, spc.manifest_hash(item)).outcome == spc.REUSE
+
+
+def test_s3_an_unknown_packet_class_object_cannot_batch():
+    weird = _AlwaysEqual()
+    items = [make("a", packet_class=weird, question_id="Q", allowed_verdicts=spc.VERIFICATION_VERDICTS),
+             make("b", packet_class=weird, question_id="Q", allowed_verdicts=spc.VERIFICATION_VERDICTS)]
+    assert "unknown_packet_class" in spc.validate_item(items[0])
+    assert admit(items).outcome == spc.NEEDS_PREPARATION
+
+
+@pytest.mark.parametrize("over", [{"evidence_pointers": (_LyingStr(""),)}, {"question": _LyingStr("")},
+                                  {"acceptance_criteria": [_LyingStr("")]}, {"allowed_verdicts": (_LyingStr(""),)},
+                                  {"decision_id": _LyingStr("")}, {"shared_context_key": _LyingStr("")}])
+def test_s3_str_subclasses_cannot_pass_text_validation(over):
+    assert spc.validate_item(make("a", **over)), over
+    assert admit([make("a", **over), make("b")]).outcome == spc.NEEDS_PREPARATION
+
+
+def test_s3_container_subclasses_are_refused():
+    class MyTuple(tuple):
+        pass
+    assert spc.validate_item(make("a", evidence_pointers=MyTuple(("e",))))
+    never_batches([make("a"), make("b")], policy=replace(POLICY, role_equivalence=type("D", (dict,), {})()))
+
+
+def test_s4_a_positive_wait_is_never_rounded_down_to_fit_a_deadline():
+    at_now = NOW.isoformat()
+    policy = replace(POLICY, max_wait_seconds=10.0)
+    for wait in (0.0000004, 1e-9, 0.000001000001):
+        verdict = admit([make("a", deadline=at_now), make("b", deadline=at_now)], policy=policy, wait=wait)
+        assert verdict.reason == "wait_not_justified", wait
+    one_second = (NOW + timedelta(seconds=1)).isoformat()
+    far = (NOW + timedelta(days=2)).isoformat()
+    assert admit([make("a", deadline=one_second), make("b", deadline=far)], policy=policy, wait=1.0000000000000002).reason == "wait_not_justified"
+    assert admit([make("a", deadline=one_second), make("b", deadline=far)], policy=policy, wait=1.0).outcome == spc.BATCH
+
+
+@pytest.mark.parametrize("field_name", ["wrapper_overhead_tokens", "min_net_reuse_tokens", "headroom_tokens",
+                                        "max_input_tokens", "max_output_tokens"])
+def test_s5_huge_integers_are_invalid_not_exceptions(field_name):
+    verdict = admit([make("a"), make("b")], policy=replace(POLICY, **{field_name: 10 ** 5000}))
+    assert verdict.outcome == spc.NEEDS_PREPARATION and verdict.reason == "policy_invalid"
+
+
+@pytest.mark.parametrize("field_name", ["context_tokens", "unique_tokens", "output_reserve_tokens"])
+def test_s5_huge_item_sizes_are_invalid_not_exceptions(field_name):
+    verdict = admit([make("a", **{field_name: 10 ** 5000}), make("b")])
+    assert verdict.outcome == spc.NEEDS_PREPARATION
+    assert spc.plan([make("a", **{field_name: 10 ** 5000})], POLICY, [], NOW, 0.0)[0].decision.outcome == spc.NEEDS_PREPARATION
+
+
+def test_s6_unhashable_ids_raising_generators_and_flapping_clocks_refuse_instead_of_raising():
+    a, b = make("a"), make("b")
+    bad = replace(a, decision_id=_Unhashable("a"))
+    for group in ([bad, b], [b, bad]):
+        assert spc.admit(group, POLICY, pairs("a", "b"), NOW, 600.0).outcome != spc.BATCH
+    groups = spc.plan([bad, b], POLICY, [], NOW, 600.0)
+    assert groups and all(isinstance(g, spc.Group) for g in groups)
+
+    def exploding():
+        yield frozenset(("a", "b"))
+        raise RuntimeError("boom")
+    assert spc.admit([a, b], POLICY, exploding(), NOW, 600.0).outcome != spc.BATCH
+    assert spc.plan([a, b], POLICY, exploding(), NOW, 600.0)[0].decision.outcome in (spc.SINGLE, spc.NEEDS_PREPARATION)
+
+    class Flapping(tzinfo):
+        calls = 0
+
+        def utcoffset(self, dt):
+            Flapping.calls += 1
+            if Flapping.calls > 2:
+                raise RuntimeError("clock failed")
+            return timedelta(0)
+
+        def dst(self, dt):
+            return None
+
+        def tzname(self, dt):
+            return "x"
+    flapping_now = datetime(2026, 11, 3, 12, 0, tzinfo=Flapping())
+    assert spc.admit([a, b], POLICY, pairs("a", "b"), flapping_now, 600.0).outcome != spc.BATCH
+    assert isinstance(spc.needs_new_call(bad, None), spc.Decision)
+
+
+def test_s7_a_zero_result_reserve_is_invalid_even_for_a_singleton():
+    zero = make("a", output_reserve_tokens=0)
+    assert "invalid_output_reserve_tokens" in spc.validate_item(zero)
+    groups = spc.plan([zero], replace(POLICY, max_output_tokens=1), [], NOW, 600.0)
+    assert groups[0].decision.outcome == spc.NEEDS_PREPARATION
+    assert admit([make("a"), make("b")], policy=replace(POLICY, max_output_tokens=0)).reason == "policy_invalid"
+    assert admit([make("a"), make("b")], policy=replace(POLICY, max_input_tokens=0)).reason == "policy_invalid"
+
+
+@pytest.mark.parametrize("flag", ["true", 1, 0, None, "", [], {}])
+def test_s8_the_unresolved_flag_must_be_a_real_bool_when_present(flag):
+    items = [make("a")]
+    entry = good("a")
+    entry["unresolved"] = flag
+    assert spc.parse_results(items, json.dumps({"results": [entry]}))["a"] == "malformed_result", flag
+
+
+def test_s8_explicit_false_with_a_verdict_and_true_without_one_still_work():
+    items = [make("a")]
+    ok = good("a")
+    ok["unresolved"] = False
+    assert isinstance(spc.parse_results(items, json.dumps({"results": [ok]}))["a"], spc.ItemResult)
+    gone = {"decision_id": "a", "unresolved": True, "rationale": "r", "evidence_refs": [],
+            "uncertainty": "u", "another_strong_call_could_change": True}
+    assert spc.parse_results(items, json.dumps({"results": [gone]}))["a"] == "unresolved_by_model"
