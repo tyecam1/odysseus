@@ -300,9 +300,14 @@ def _role(item: Item, policy: Policy) -> str:
     return policy.role_equivalence.get(item.role_required, item.role_required)
 
 
-def manifest_hash(item: Item) -> str:
+def _constraints_ok(global_constraints) -> bool:
+    return type(global_constraints) in (list, tuple) and all(_is_text(c) for c in global_constraints)
+
+
+def manifest_hash(item: Item, global_constraints: Sequence = ()) -> str:
     """Hash of the COMPLETE semantic request (role, protocol, class, identity, question, evidence,
-    options, criteria, verdicts, context and independence settings), with the ORDER of every sequence
+    options, criteria, verdicts, context and independence settings, and the ordered GLOBAL CONSTRAINTS the
+    packet will carry), with the ORDER of every sequence
     preserved exactly as compile_packet presents it. An unchanged hash means an unchanged question, so its
     conclusion may be reused; anything that changes the request changes it. Erring toward a new call is safe;
     reusing a conclusion for a reordered question is not."""
@@ -316,6 +321,7 @@ def manifest_hash(item: Item) -> str:
         "fresh": item.fresh_context_required, "separate": item.separate_adjudication_required,
         "id": item.decision_id, "parent": item.parent_task, "open": item.open_judgment,
         "depends_on": list(item.depends_on), "exposes": list(item.exposes_label_of),
+        "constraints": list(global_constraints),   # compile_packet presents them, so they are part of the request
     }, ensure_ascii=True, sort_keys=True)  # ASCII escapes: a lone surrogate hashes instead of raising
     return hashlib.sha256(body.encode("ascii")).hexdigest()
 
@@ -657,15 +663,17 @@ def parse_results(group: Sequence, raw: str) -> dict:
 FOLLOW_UP_TRIGGERS = ("malformed_packet", "new_evidence", "consequential_defect", "ambiguity_over_threshold")
 
 
-def needs_new_call(item: Item, prior_manifest_hash: Optional[str], triggers: Iterable = ()) -> Decision:
+def needs_new_call(item: Item, prior_manifest_hash: Optional[str], triggers: Iterable = (),
+                   global_constraints: Sequence = ()) -> Decision:
     """Public boundary: an unexpected failure while examining untrusted input refuses (fail closed)."""
     try:
-        return _needs_new_call(item, prior_manifest_hash, triggers)
+        return _needs_new_call(item, prior_manifest_hash, triggers, global_constraints)
     except Exception:
         return Decision(NEEDS_PREPARATION, "input_not_processable")
 
 
-def _needs_new_call(item: Item, prior_manifest_hash: Optional[str], triggers: Iterable = ()) -> Decision:
+def _needs_new_call(item: Item, prior_manifest_hash: Optional[str], triggers: Iterable = (),
+                    global_constraints: Sequence = ()) -> Decision:
     """Follow-up suppression: an unchanged question reuses its prior conclusion unless a
     declared trigger fired. A required independent, fresh or separate check is never suppressed,
     an unestablished independence setting is never assumed safe, and a malformed or unknown
@@ -679,12 +687,14 @@ def _needs_new_call(item: Item, prior_manifest_hash: Optional[str], triggers: It
     if type(triggers) not in (list, tuple, set, frozenset) or not all(
             type(t) is str and t in FOLLOW_UP_TRIGGERS for t in triggers):
         return Decision(NEEDS_PREPARATION, "triggers_invalid")
+    if not _constraints_ok(global_constraints):
+        return Decision(NEEDS_PREPARATION, "constraints_invalid")
     if item.independence_required is True or item.fresh_context_required or item.separate_adjudication_required:
         return Decision(SINGLE, "independent_check_still_required")
     if item.independence_required is None:
         return Decision(SINGLE, "independence_unestablished")
     if triggers:
         return Decision(SINGLE, "follow_up_trigger", tuple(sorted(triggers)))
-    if prior_manifest_hash is not None and prior_manifest_hash == manifest_hash(item):
+    if prior_manifest_hash is not None and prior_manifest_hash == manifest_hash(item, global_constraints):
         return Decision(REUSE, "unchanged_conclusion")
     return Decision(SINGLE, "no_prior_or_changed_question")

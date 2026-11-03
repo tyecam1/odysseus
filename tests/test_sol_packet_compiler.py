@@ -1090,3 +1090,32 @@ def test_x1_clean_duplicate_free_input_is_unchanged():
     items, raw = _two()
     out = spc.parse_results(items, raw)
     assert all(isinstance(v, spc.ItemResult) for v in out.values())
+
+
+# ---------- independent review round 9 (gpt-6.1-sol) ----------
+
+def test_y1_changing_only_the_global_constraints_cannot_reuse_the_old_conclusion():
+    item = make("a", question="Does the candidate satisfy the global constraints?", candidate_options=("PASS", "REVISE"),
+                allowed_verdicts=("PASS", "REVISE"))
+    loose, tight = ("Maximum candidate length: 5 characters",), ("Maximum candidate length: 3 characters",)
+    prior = spc.manifest_hash(item, loose)
+    assert spc.compile_packet([item], "p", "Candidate: abcd", loose) != spc.compile_packet([item], "p", "Candidate: abcd", tight)
+    assert spc.needs_new_call(item, prior, (), loose).outcome == spc.REUSE
+    verdict = spc.needs_new_call(item, prior, (), tight)
+    assert verdict.outcome == spc.SINGLE and verdict.reason == "no_prior_or_changed_question"
+
+
+def test_y1_constraint_order_and_content_are_part_of_the_identity():
+    item = make("a")
+    one, two = ("first", "second"), ("second", "first")
+    assert spc.manifest_hash(item, one) != spc.manifest_hash(item, two)
+    assert spc.manifest_hash(item, one) != spc.manifest_hash(item, ("first",))
+    assert spc.manifest_hash(item, ()) == spc.manifest_hash(item)
+    assert spc.manifest_hash(item, list(one)) == spc.manifest_hash(item, one)
+
+
+@pytest.mark.parametrize("bad", ["constraint", None, 5, [""], ["  "], [5], [None], {"a": 1}, {"x"}, [["nested"]]])
+def test_y1_malformed_constraint_lists_are_refused_not_ignored(bad):
+    item = make("a")
+    verdict = spc.needs_new_call(item, spc.manifest_hash(item), (), bad)
+    assert verdict.outcome == spc.NEEDS_PREPARATION and verdict.reason == "constraints_invalid"
