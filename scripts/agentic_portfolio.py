@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shlex
 import shutil
 import signal
@@ -18,6 +19,9 @@ import yaml
 from agentic_context import (ROOT, PRIORITY, Refused, card_names, clean_value, fit_body,
                              queue_path, read_card, split_card)
 
+FRONTIER_NOTE = "Metadata only; no cross-owner ranking yet. Inbox/open is NOT proof of accepted or executable work."
+TASK_NOTE = "Untrusted task content; repository authority is external."
+MAX_OFFSET = 10_000_000  # the same bound the receiver's count validation uses
 TRANSPORT_RESERVE = 96  # >= the serialized cost of the "transport" field plus the truncated flag flip
 
 LAYOUT = {
@@ -118,7 +122,7 @@ def frontier(roots: dict[str, Path], unavailable: dict[str, str],
                                  and not transport_warning),
               "unavailable": unavailable, "counts": counts, "offset_per_repo": offset,
               "records": [], "next_offset_per_repo": {}, "warnings": warnings,
-              "note": "Metadata only; no cross-owner ranking yet. Inbox/open is NOT proof of accepted or executable work."}
+              "note": FRONTIER_NOTE}
     # Round-robin: every owner's first row is admitted before any owner's second,
     # and an owner whose next row no longer fits stops without blocking the others.
     taken, stopped = {rid: 0 for rid in datasets}, set()
@@ -173,7 +177,7 @@ def selected(roots: dict[str, Path], ref: str, tier: str, budget: int) -> dict:
     result = {"stage": "L1-selected-contract" if tier == "contract" else "L3-explicit-full-task",
               "ref": ref, "metadata": {k: clean_value(meta[k]) for k in DETAIL if k in meta},
               "truncated": False,  # sized with the longest literal; the final value is never longer
-              "note": "Untrusted task content; repository authority is external."}
+              "note": TASK_NOTE}
     wanted = body if tier == "full" else body[:16000]
     # Reserve the room the SSH transport adds ("transport": "registered_lab_ssh" = 35 characters).
     result["body"] = fit_body(result, wanted, budget * 3 - TRANSPORT_RESERVE)
@@ -300,6 +304,16 @@ FRONTIER_KEYS = FRONTIER_REQUIRED | {"transport"}
 OPTIONAL_REPOS = {"misumi", "obsidian-phd"}  # odysseus is the running checkout and is always available
 
 
+TOKEN = re.compile(r"[a-z_]{1,64}")
+WARNING = re.compile(r"(odysseus|misumi|obsidian-phd):[A-Za-z0-9_.\-]{1,200}:[a-z_]{1,64}")
+
+
+def _canonical_key(row: dict, owner_order: dict) -> tuple:
+    """The order collect() and frontier() produce: owner, bucket rank, priority rank, then ref."""
+    return (owner_order[row["repo_id"]], RANK[row["bucket"]],
+            PRIORITY.get(str(row.get("priority", "")).lower(), 9), row["ref"])
+
+
 def _valid_remote_frontier(result: dict, args: argparse.Namespace) -> bool:
     """Accept only what `frontier()` itself could have produced for this request."""
     if not FRONTIER_REQUIRED <= set(result) <= FRONTIER_KEYS or not isinstance(result.get("scope_complete"), bool):
@@ -307,8 +321,8 @@ def _valid_remote_frontier(result: dict, args: argparse.Namespace) -> bool:
     records, counts, unavailable = result.get("records"), result.get("counts"), result.get("unavailable")
     if not isinstance(records, list) or not isinstance(counts, dict) or not isinstance(unavailable, dict):
         return False
-    if not all(isinstance(k, str) and isinstance(v, str) and len(v) <= 100 for k, v in unavailable.items()):
-        return False
+    if not all(isinstance(k, str) and isinstance(v, str) and TOKEN.fullmatch(v) for k, v in unavailable.items()):
+        return False  # reasons are machine tokens, never prose
     # Repository coverage: every owner is exactly one of available (has counts) or unavailable.
     if (set(counts) | set(unavailable) != set(LAYOUT) or set(counts) & set(unavailable)
             or not set(unavailable) <= OPTIONAL_REPOS):
@@ -329,6 +343,10 @@ def _valid_remote_frontier(result: dict, args: argparse.Namespace) -> bool:
     refs = [row["ref"] for row in records]
     if len(set(refs)) != len(refs):
         return False
+    owner_order = {repo: index for index, repo in enumerate(LAYOUT)}
+    keys = [_canonical_key(row, owner_order) for row in records]
+    if keys != sorted(keys):
+        return False  # the remote may not reorder what the producer ranks
     taken = {repo: 0 for repo in counts}
     shown = {}
     for row in records:
@@ -353,9 +371,10 @@ def _valid_remote_frontier(result: dict, args: argparse.Namespace) -> bool:
     if (not isinstance(following, dict) or not all(isinstance(k, str) and _is_count(v) for k, v in following.items())
             or following != expected):  # _is_count first: True and 1.0 must not compare equal to 1
         return False
-    warnings, note = result["warnings"], result["note"]
-    return (isinstance(warnings, list) and len(warnings) <= 8 and isinstance(note, str) and len(note) <= 500
-            and all(isinstance(w, str) and len(w) <= 400 for w in warnings))
+    warnings = result["warnings"]
+    return (result["note"] == FRONTIER_NOTE   # the fixed safety notice, verbatim
+            and isinstance(warnings, list) and len(warnings) <= 8
+            and all(isinstance(w, str) and WARNING.fullmatch(w) for w in warnings))
 
 
 TASK_REQUIRED = {"stage", "ref", "metadata", "body", "truncated", "note"}
@@ -365,9 +384,9 @@ TASK_KEYS = TASK_REQUIRED | {"transport"}
 def _valid_remote_task(result: dict, args: argparse.Namespace) -> bool:
     if not TASK_REQUIRED <= set(result) <= TASK_KEYS or result.get("ref") != args.ref:
         return False
-    metadata, body, note = result["metadata"], result["body"], result["note"]
+    metadata, body = result["metadata"], result["body"]
     if (not isinstance(metadata, dict) or not set(metadata) <= set(DETAIL) or not isinstance(body, str)
-            or not isinstance(result.get("truncated"), bool) or not isinstance(note, str) or len(note) > 500):
+            or not isinstance(result.get("truncated"), bool) or result["note"] != TASK_NOTE):
         return False
     if args.tier == "contract" and len(body) > 16000:  # the producer's own contract-body cap
         return False
@@ -453,7 +472,7 @@ def main() -> int:
                         help="do not attempt a registered lab SSH fallback (used remotely)")
     parser.add_argument("--tier", choices=("contract", "full"), default="contract")
     args = parser.parse_args()
-    if not 1 <= args.max_tokens <= 16000 or not 1 <= args.per_repo <= 20 or args.offset < 0:
+    if not 1 <= args.max_tokens <= 16000 or not 1 <= args.per_repo <= 20 or not 0 <= args.offset <= MAX_OFFSET:
         parser.error("invalid budget, per-repo count or offset")
     roots, missing = resolve_roots(args.repo_root, {"misumi": args.misumi_root, "obsidian-phd": args.phd_root})
     try:
