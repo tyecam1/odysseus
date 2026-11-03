@@ -122,9 +122,9 @@ def test_lab_ssh_fallback_uses_registered_transport_without_local_clone(tmp_path
     def fake_run(cmd, **kwargs):
         observed["cmd"] = cmd
         remote = {"stage": "L0-three-repository-frontier", "scope_complete": True,
-                  "records": [], "unavailable": {}}
+                  "records": [], "counts": {}, "unavailable": {}}
         return subprocess.CompletedProcess(cmd, 0, json.dumps(remote), "")
-    monkeypatch.setattr(ap.subprocess, "run", fake_run)
+    monkeypatch.setattr(ap, "_ssh_run", fake_run)
     args = argparse.Namespace(stage="frontier", ref=None, tier="contract",
                               max_tokens=2500, offset=0, per_repo=4)
     result = ap.lab_frontier_over_ssh(args)
@@ -140,7 +140,7 @@ def test_lab_ssh_failure_is_not_reported_as_complete(monkeypatch):
     monkeypatch.setenv("AOTERU_LAB_REPO_ROOT", "/registered/lab/odysseus")
     def denied(cmd, **kwargs):
         return subprocess.CompletedProcess(cmd, 255, "", "host key verification failed")
-    monkeypatch.setattr(ap.subprocess, "run", denied)
+    monkeypatch.setattr(ap, "_ssh_run", denied)
     args = argparse.Namespace(stage="frontier", ref=None, tier="contract",
                               max_tokens=2500, offset=0, per_repo=4)
     with pytest.raises(ValueError, match="lab_ssh_execution_failed"):
@@ -175,7 +175,7 @@ def test_task_read_does_not_need_ssh_when_its_own_repo_is_available(tmp_path, mo
 
     def boom(*a, **k):
         raise AssertionError("ssh must not be attempted for an available local task")
-    monkeypatch.setattr(ap.subprocess, "run", boom)
+    monkeypatch.setattr(ap, "_ssh_run", boom)
     monkeypatch.setattr(sys, "argv", ["agentic_portfolio.py", "task", "--repo-root", str(ody),
                                       "--ref", "odysseus:ready/o.md"])
     assert ap.main() == 0
@@ -187,13 +187,13 @@ def test_task_read_does_not_need_ssh_when_its_own_repo_is_available(tmp_path, mo
     ({"stage": "L0-three-repository-frontier", "records": "nope", "scope_complete": True}, "malformed"),
     ({"stage": "L0-three-repository-frontier", "records": [], "scope_complete": "yes"}, "malformed"),
     ({"stage": "L0-three-repository-frontier", "records": [{}] * 50, "scope_complete": True}, "malformed"),
-    ({"stage": "L0-three-repository-frontier", "records": [], "scope_complete": True, "pad": "x" * 20000},
+    ({"stage": "L0-three-repository-frontier", "records": [], "scope_complete": True, "counts": {}, "unavailable": {}, "pad": "x" * 20000},
      "oversized|exceeds_budget"),
 ])
 def test_malformed_or_overlarge_remote_frontier_is_rejected(monkeypatch, remote, reason):
     monkeypatch.setenv("AOTERU_LAB_SSH_TARGET", "lab-worker")
     monkeypatch.setenv("AOTERU_LAB_REPO_ROOT", "/registered/lab/odysseus")
-    monkeypatch.setattr(ap.subprocess, "run",
+    monkeypatch.setattr(ap, "_ssh_run",
                         lambda cmd, **k: subprocess.CompletedProcess(cmd, 0, json.dumps(remote), ""))
     args = argparse.Namespace(stage="frontier", ref=None, tier="contract", max_tokens=2500, offset=0, per_repo=4)
     with pytest.raises(ValueError, match=reason):
@@ -208,7 +208,7 @@ def test_malformed_or_overlarge_remote_frontier_is_rejected(monkeypatch, remote,
 def test_remote_task_answer_must_match_the_request(monkeypatch, remote):
     monkeypatch.setenv("AOTERU_LAB_SSH_TARGET", "lab-worker")
     monkeypatch.setenv("AOTERU_LAB_REPO_ROOT", "/registered/lab/odysseus")
-    monkeypatch.setattr(ap.subprocess, "run",
+    monkeypatch.setattr(ap, "_ssh_run",
                         lambda cmd, **k: subprocess.CompletedProcess(cmd, 0, json.dumps(remote), ""))
     args = argparse.Namespace(stage="task", ref="misumi:inbox/m.md", tier="contract",
                               max_tokens=2500, offset=0, per_repo=4)
@@ -251,3 +251,91 @@ def test_date_valued_title_does_not_break_the_portfolio(tmp_path, monkeypatch):
     result = ap.frontier(roots, missing, 0, 4, 2600)
     json.dumps(result)
     assert any(r.get("title") == "2026-11-02" for r in result["records"])
+
+
+GOOD_RECORD = {"ref": "misumi:inbox/m.md", "repo_id": "misumi", "bucket": "inbox", "title": "t", "eligible": "unverified"}
+
+
+def _remote_frontier(records, **extra):
+    base = {"stage": "L0-three-repository-frontier", "scope_complete": True,
+            "counts": {}, "unavailable": {}, "records": records}
+    base.update(extra)
+    return base
+
+
+def _ask_remote(monkeypatch, remote):
+    monkeypatch.setenv("AOTERU_LAB_SSH_TARGET", "lab-worker")
+    monkeypatch.setenv("AOTERU_LAB_REPO_ROOT", "/registered/lab/odysseus")
+    monkeypatch.setattr(ap, "_ssh_run", lambda cmd, **k: subprocess.CompletedProcess(cmd, 0, json.dumps(remote), ""))
+    args = argparse.Namespace(stage="frontier", ref=None, tier="contract", max_tokens=2500, offset=0, per_repo=4)
+    return ap.lab_frontier_over_ssh(args)
+
+
+def test_valid_remote_frontier_is_accepted(monkeypatch):
+    assert _ask_remote(monkeypatch, _remote_frontier([GOOD_RECORD]))["transport"] == "registered_lab_ssh"
+
+
+@pytest.mark.parametrize("bad", [
+    None, "string", [], {**GOOD_RECORD, "body": "FULL TASK BODY"}, {**GOOD_RECORD, "repo_id": "evil"},
+    {**GOOD_RECORD, "bucket": "../escape"}, {**GOOD_RECORD, "ref": "misumi:inbox/sub/m.md"},
+    {**GOOD_RECORD, "ref": "obsidian-phd:inbox/m.md"}, {**GOOD_RECORD, "ref": "misumi:done/m.md"},
+    {**GOOD_RECORD, "title": {"a": {"b": {"c": {"d": 1}}}}},
+])
+def test_remote_frontier_records_are_validated_individually(monkeypatch, bad):
+    with pytest.raises(ValueError, match="malformed"):
+        _ask_remote(monkeypatch, _remote_frontier([GOOD_RECORD, bad]))
+
+
+@pytest.mark.parametrize("missing", ["counts", "unavailable"])
+def test_remote_frontier_requires_its_envelope_fields(monkeypatch, missing):
+    remote = _remote_frontier([GOOD_RECORD])
+    del remote[missing]
+    with pytest.raises(ValueError, match="malformed"):
+        _ask_remote(monkeypatch, remote)
+
+
+def test_ssh_error_warning_is_inside_the_budgeted_envelope(tmp_path, monkeypatch):
+    ody, _, _ = estate(tmp_path, monkeypatch)
+    for i in range(6):
+        make_card(ody, f"automation/review/agent-tasks/ready/w{i}.md", "W" * 400 + str(i), raw_status="ready")
+    roots, missing = ap.resolve_roots(ody, {})
+    for budget in (700, 900, 1200, 2600):
+        try:
+            result = ap.frontier(roots, missing, 0, 4, budget, transport_warning="lab_ssh_transport_failure: " + "E" * 400)
+        except ValueError as exc:
+            assert "budget" in str(exc)
+            continue
+        assert len(json.dumps(result, ensure_ascii=False)) <= budget * 3
+        assert result["scope_complete"] is False and result["warnings"][-1].startswith("lab_ssh_transport_failure")
+
+
+def test_pagination_is_budgeted_before_it_is_filled(tmp_path, monkeypatch):
+    ody, _, _ = estate(tmp_path, monkeypatch)
+    for i in range(30):
+        make_card(ody, f"automation/review/agent-tasks/ready/p{i:02d}.md", "P" * 90 + str(i), raw_status="ready")
+    roots, missing = ap.resolve_roots(ody, {})
+    for budget in range(500, 1100, 7):
+        try:
+            result = ap.frontier(roots, missing, 0, 6, budget)
+        except ValueError as exc:
+            assert "budget" in str(exc)
+            continue
+        assert len(json.dumps(result, ensure_ascii=False)) <= budget * 3, budget
+
+
+def test_ssh_runner_stops_a_flooding_remote_instead_of_buffering_it():
+    import sys
+    flood = [sys.executable, "-c", "import sys\nwhile True: sys.stdout.write('x' * 65536)"]
+    with pytest.raises(ValueError, match="lab_ssh_output_exceeded"):
+        ap._ssh_run(flood, timeout=20, max_out=200_000, max_err=4096)
+    noisy_err = [sys.executable, "-c", "import sys\nwhile True: sys.stderr.write('e' * 65536)"]
+    with pytest.raises(ValueError, match="lab_ssh_output_exceeded"):
+        ap._ssh_run(noisy_err, timeout=20, max_out=200_000, max_err=4096)
+
+
+def test_ssh_runner_returns_normal_output_and_enforces_timeout():
+    import sys
+    done = ap._ssh_run([sys.executable, "-c", "print('ok')"], timeout=20, max_out=1000, max_err=1000)
+    assert done.returncode == 0 and done.stdout.strip() == "ok"
+    with pytest.raises(subprocess.TimeoutExpired):
+        ap._ssh_run([sys.executable, "-c", "import time; time.sleep(30)"], timeout=1, max_out=1000, max_err=1000)

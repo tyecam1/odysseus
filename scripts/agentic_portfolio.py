@@ -7,6 +7,7 @@ import json
 import os
 import shlex
 import subprocess
+import threading
 from pathlib import Path, PurePosixPath
 
 import yaml
@@ -94,7 +95,7 @@ def collect(repo_id: str, root: Path) -> tuple[list[dict], dict, list[str]]:
 
 
 def frontier(roots: dict[str, Path], unavailable: dict[str, str],
-             offset: int, per_repo: int, budget: int) -> dict:
+             offset: int, per_repo: int, budget: int, transport_warning: str | None = None) -> dict:
     """Bounded sampling per repo prevents one queue from hiding the other two."""
     datasets, counts, warnings = {}, {}, []
     for rid in LAYOUT:
@@ -104,10 +105,14 @@ def frontier(roots: dict[str, Path], unavailable: dict[str, str],
         datasets[rid] = rows
         counts[rid] = {"total": len(rows), "buckets": buckets}
         warnings.extend(issues[:3])
+    warnings = warnings[:6]
+    if transport_warning:
+        warnings.append(transport_warning[:300])
     result = {"stage": "L0-three-repository-frontier",
-              "scope_complete": len(unavailable) == 0 and len(datasets) == len(LAYOUT),
+              "scope_complete": (len(unavailable) == 0 and len(datasets) == len(LAYOUT)
+                                 and not transport_warning),
               "unavailable": unavailable, "counts": counts, "offset_per_repo": offset,
-              "records": [], "next_offset_per_repo": {}, "warnings": warnings[:6],
+              "records": [], "next_offset_per_repo": {}, "warnings": warnings,
               "note": "Metadata only; no cross-owner ranking yet. Inbox/open is NOT proof of accepted or executable work."}
     # Round-robin: every owner's first row is admitted before any owner's second,
     # and an owner whose next row no longer fits stops without blocking the others.
@@ -118,6 +123,8 @@ def frontier(roots: dict[str, Path], unavailable: dict[str, str],
                 continue
             tentative = dict(result)
             tentative["records"] = result["records"] + [rows[offset + step]]
+            # Pagination is filled in after admission, so size it at its upper bound now.
+            tentative["next_offset_per_repo"] = {r: offset + len(d) for r, d in datasets.items()}
             if len(json.dumps(tentative, ensure_ascii=False)) > budget * 3:
                 stopped.add(rid)
                 continue
@@ -160,6 +167,61 @@ def selected(roots: dict[str, Path], ref: str, tier: str, budget: int) -> dict:
 
 
 
+def _ssh_run(cmd: list[str], timeout: float, max_out: int, max_err: int) -> subprocess.CompletedProcess:
+    """Run `cmd`, reading both streams under hard caps; kill it the moment either is exceeded."""
+    proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    buffers = {"out": bytearray(), "err": bytearray()}
+    exceeded = threading.Event()
+
+    def pump(stream, key: str, cap: int) -> None:
+        while True:
+            chunk = stream.read(65536)
+            if not chunk:
+                return
+            if len(buffers[key]) + len(chunk) > cap:
+                exceeded.set()
+                proc.kill()
+                return
+            buffers[key].extend(chunk)
+
+    threads = [threading.Thread(target=pump, args=(proc.stdout, "out", max_out), daemon=True),
+               threading.Thread(target=pump, args=(proc.stderr, "err", max_err), daemon=True)]
+    for thread in threads:
+        thread.start()
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        raise
+    finally:
+        for thread in threads:
+            thread.join(5)
+    if exceeded.is_set():
+        raise ValueError("lab_ssh_output_exceeded")
+    return subprocess.CompletedProcess(cmd, proc.returncode,
+                                       buffers["out"].decode("utf-8", "replace"),
+                                       buffers["err"].decode("utf-8", "replace"))
+
+
+def _valid_remote_record(row) -> bool:
+    """A frontier record is metadata only: known owner and bucket, matching ref, scalar-ish fields."""
+    allowed = {"ref", "repo_id", "bucket", "eligible", *META}
+    if not isinstance(row, dict) or not set(row) <= allowed:
+        return False
+    repo, bucket, ref = row.get("repo_id"), row.get("bucket"), row.get("ref")
+    if repo not in LAYOUT or bucket not in LAYOUT[repo][1] or not isinstance(ref, str):
+        return False
+    if not ref.startswith(repo + ":" + bucket + "/") or not ref.endswith(".md") or ref.count("/") != 1:
+        return False
+    try:
+        for key, value in row.items():
+            clean_value(value)
+    except ValueError:
+        return False
+    return True
+
+
 def lab_frontier_over_ssh(args: argparse.Namespace) -> dict | None:
     """SSH transport to the *same* read-only portfolio tool on the registered lab.
 
@@ -182,20 +244,18 @@ def lab_frontier_over_ssh(args: argparse.Namespace) -> dict | None:
     task_args += ["--max-tokens", str(args.max_tokens), "--local-only"]
     cmd = ("cd " + shlex.quote(remote_root) +
            " && python3 scripts/agentic_portfolio.py " + shlex.join(task_args))
+    limit = args.max_tokens * 3
     try:
-        proc = subprocess.run(
+        proc = _ssh_run(
             ["ssh", "-n", "-T", "-o", "BatchMode=yes",
              "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=8", target, cmd],
-            capture_output=True, text=True, timeout=30, check=False
+            timeout=30, max_out=limit * 4 + 4096, max_err=4096
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise ValueError("lab_ssh_transport_failure: " + type(exc).__name__) from exc
     if proc.returncode != 0:
         raise ValueError("lab_ssh_execution_failed: exit=" + str(proc.returncode) +
                          "; " + proc.stderr.strip()[:250])
-    limit = args.max_tokens * 3
-    if len(proc.stdout) > limit * 4 + 4096:  # refuse before parsing anything this large
-        raise ValueError("lab_ssh_oversized_portfolio_result")
     try:
         result = json.loads(proc.stdout)
     except json.JSONDecodeError as exc:
@@ -208,7 +268,10 @@ def lab_frontier_over_ssh(args: argparse.Namespace) -> dict | None:
     if args.stage == "frontier":
         records = result.get("records")
         if (not isinstance(records, list) or len(records) > args.per_repo * len(LAYOUT)
-                or not isinstance(result.get("scope_complete"), bool)):
+                or not isinstance(result.get("scope_complete"), bool)
+                or not isinstance(result.get("counts"), dict)
+                or not isinstance(result.get("unavailable"), dict)
+                or not all(_valid_remote_record(row) for row in records)):
             raise ValueError("lab_ssh_malformed_portfolio_result")
     elif (result.get("ref") != args.ref or not isinstance(result.get("metadata"), dict)
             or not isinstance(result.get("body"), str)):
@@ -257,10 +320,8 @@ def main() -> int:
                 print(json.dumps(remote, ensure_ascii=False))
                 return 0
         if args.stage == "frontier":
-            result = frontier(roots, missing, args.offset, args.per_repo, args.max_tokens)
-            if ssh_error:
-                result["warnings"].append(ssh_error[:300])
-                result["scope_complete"] = False
+            result = frontier(roots, missing, args.offset, args.per_repo, args.max_tokens,
+                              transport_warning=ssh_error)
         else:
             if not args.ref:
                 parser.error("task requires --ref from frontier")
