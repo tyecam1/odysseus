@@ -1143,3 +1143,38 @@ def test_z1_every_model_visible_input_is_still_bound_into_the_identity():
     assert spc.manifest_hash(replace(item, context_manifest_hash="other"), ("c1",)) != spc.manifest_hash(item, ("c1",))
     assert spc.compile_packet([item], "p", "ctx", ("c2",)) != base             # global constraints: bound via the hash argument
     assert spc.manifest_hash(item, ("c2",)) != spc.manifest_hash(item, ("c1",))
+
+
+# ---------- independent review round 11 (gpt-6.1-sol) ----------
+
+def test_aa1_reuse_requires_an_established_context_identity():
+    item = make("a", question="Return PASS iff the shared measurement is 1; otherwise REVISE.",
+                context_manifest_hash=None, shared_context_key=None, context_tokens=100, unique_tokens=100,
+                allowed_verdicts=("PASS", "REVISE"), candidate_options=("PASS", "REVISE"))
+    assert spc.validate_item(item) == [], "an item may legitimately carry no context identity"
+    verdict = spc.needs_new_call(item, spc.manifest_hash(item))
+    assert verdict.outcome == spc.SINGLE and verdict.reason == "context_identity_unestablished"
+
+
+def test_aa1_shared_context_text_cannot_be_compiled_for_an_item_without_an_identity():
+    item = make("a", context_manifest_hash=None, shared_context_key=None)
+    with pytest.raises(ValueError, match="established context_manifest_hash"):
+        spc.compile_packet([item], "p", "measurement = 1", ())
+    with pytest.raises(ValueError, match="established context_manifest_hash"):
+        spc.compile_packet([make("a"), item], "p", "measurement = 2", ())      # one item without one is enough
+    assert spc.compile_packet([item], "p", "", ()) and spc.compile_packet([item], "p", "   ", ())   # no context text: fine
+
+
+def test_aa1_an_item_with_an_identity_still_reuses_and_a_changed_identity_does_not():
+    item = make("a", context_manifest_hash="sha-of-the-measurement-file")
+    prior = spc.manifest_hash(item)
+    assert spc.needs_new_call(item, prior).outcome == spc.REUSE
+    moved = replace(item, context_manifest_hash="sha-of-a-different-file")
+    assert spc.needs_new_call(moved, prior).outcome == spc.SINGLE
+    assert spc.compile_packet([item], "p", "measurement = 1", ())
+
+
+@pytest.mark.parametrize("bad", [None, 5, b"x", ["x"]])
+def test_aa1_shared_context_must_be_a_str(bad):
+    with pytest.raises(ValueError, match="shared_context must be a str"):
+        spc.compile_packet([make("a")], "p", bad, ())

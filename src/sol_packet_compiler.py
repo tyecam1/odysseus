@@ -563,6 +563,10 @@ def compile_packet(group: Sequence, packet_id: str, shared_context: str, global_
     """
     if not group or not all(type(item) is Item for item in group):
         raise ValueError("cannot compile an empty packet or non-items")
+    if type(shared_context) is not str:
+        raise ValueError("shared_context must be a str")
+    if shared_context.strip() and any(item.context_manifest_hash is None for item in group):
+        raise ValueError("shared context requires an established context_manifest_hash on every item")
     first = group[0]
     envelope = {
         "class": first.packet_class, "protocol": first.protocol,
@@ -696,6 +700,8 @@ def _needs_new_call(item: Item, prior_manifest_hash: Optional[str], triggers: It
         return Decision(SINGLE, "independent_check_still_required")
     if item.independence_required is None:
         return Decision(SINGLE, "independence_unestablished")
+    if item.context_manifest_hash is None:   # the shared text is model-visible, so reuse needs a stable identity for it
+        return Decision(SINGLE, "context_identity_unestablished")
     if triggers:
         return Decision(SINGLE, "follow_up_trigger", tuple(sorted(triggers)))
     if prior_manifest_hash is not None and prior_manifest_hash == manifest_hash(item, global_constraints):
