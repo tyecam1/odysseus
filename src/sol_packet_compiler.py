@@ -554,6 +554,9 @@ def _singleton_decision(item: Item, policy: Policy, refusal: Decision) -> Decisi
 def compile_packet(group: Sequence, packet_id: str, shared_context: str, global_constraints: Sequence) -> str:
     """The structured request: shared context and constraints once, then each item whole.
 
+    `packet_id` is administrative (the caller uses it to correlate the result) and is deliberately NOT shown to
+    the model: anything the model can see must be part of the reuse identity, and a packet id is not.
+
     Everything variable is carried as JSON data (escaped strings, arrays), so delimiters or newlines
     inside a question, option or pointer can never forge a boundary, and every semantic field the
     admission tests used (protocol, role, identity, type, consequence, parent) reaches the model.
@@ -562,7 +565,7 @@ def compile_packet(group: Sequence, packet_id: str, shared_context: str, global_
         raise ValueError("cannot compile an empty packet or non-items")
     first = group[0]
     envelope = {
-        "packet_id": packet_id, "class": first.packet_class, "protocol": first.protocol,
+        "class": first.packet_class, "protocol": first.protocol,
         "role": first.role_required, "global_constraints": list(global_constraints),
         "shared_context": shared_context,
         "items": [{

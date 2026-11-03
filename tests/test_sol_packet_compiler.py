@@ -1119,3 +1119,27 @@ def test_y1_malformed_constraint_lists_are_refused_not_ignored(bad):
     item = make("a")
     verdict = spc.needs_new_call(item, spc.manifest_hash(item), (), bad)
     assert verdict.outcome == spc.NEEDS_PREPARATION and verdict.reason == "constraints_invalid"
+
+
+# ---------- independent review round 10 (gpt-6.1-sol) ----------
+
+def test_z1_the_packet_id_is_administrative_and_never_shown_to_the_model():
+    item = make("a", question='Return PASS iff envelope.packet_id equals "A"; otherwise REVISE.',
+                allowed_verdicts=("PASS", "REVISE"), candidate_options=("PASS", "REVISE"))
+    first = spc.compile_packet([item], "A", "ctx", ())
+    second = spc.compile_packet([item], "B", "ctx", ())
+    assert first == second, "everything the model sees must be part of the reuse identity; a packet id is not"
+    envelope = json.loads(first[first.index("\n{\n") + 1:])
+    assert "packet_id" not in envelope and envelope.keys() >= {"class", "items", "shared_context", "protocol"}
+    prior = spc.manifest_hash(item, ())
+    assert spc.needs_new_call(item, prior, (), ()).outcome == spc.REUSE
+
+
+def test_z1_every_model_visible_input_is_still_bound_into_the_identity():
+    # a guard for the whole class: any compile_packet input that changes the text must be reflected in what REUSE checks
+    item = make("a")
+    base = spc.compile_packet([item], "p", "ctx", ("c1",))
+    assert spc.compile_packet([item], "p", "other-ctx", ("c1",)) != base       # shared context: bound via context_manifest_hash
+    assert spc.manifest_hash(replace(item, context_manifest_hash="other"), ("c1",)) != spc.manifest_hash(item, ("c1",))
+    assert spc.compile_packet([item], "p", "ctx", ("c2",)) != base             # global constraints: bound via the hash argument
+    assert spc.manifest_hash(item, ("c2",)) != spc.manifest_hash(item, ("c1",))
