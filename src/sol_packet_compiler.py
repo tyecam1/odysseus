@@ -27,6 +27,7 @@ PACKET_CLASSES = ("decision", "verification", "collision", "gate")
 VERIFICATION_VERDICTS = ("PASS", "REVISE", "ESCALATE")
 MAX_TOKENS = 10 ** 12  # no real token count is larger; bounding it keeps integer arithmetic and formatting safe
 HASH_FORMAT = re.compile(r"[0-9a-f]{64}")
+ZONE_SUFFIX = re.compile(r"(?:Z|[+-][01]\d:[0-5]\d)\Z")
 NO_DEADLINE = "none"  # the explicit no-deadline value; a missing deadline is NOT assumed to be none
 
 BATCH = "BATCH"
@@ -148,7 +149,11 @@ def parse_deadline(value) -> Optional[datetime]:
         return None
     if type(value) is not str or not value:
         raise ValueError("deadline must be an ISO-8601 timestamp or the explicit value 'none'")
-    parsed = datetime.fromisoformat(value)
+    # Only `Z` or a whole-minute `+HH:MM`/`-HH:MM`: other offset syntax (seconds, fractions) is silently
+    # truncated by some Python versions, which would move a deadline without any error.
+    if not ZONE_SUFFIX.search(value):
+        raise ValueError("deadline timezone must be Z or +/-HH:MM")
+    parsed = datetime.fromisoformat(value[:-1] + "+00:00" if value.endswith("Z") else value)
     if _offset(parsed) is None:
         raise ValueError("deadline must carry a timezone")
     return parsed
@@ -156,7 +161,7 @@ def parse_deadline(value) -> Optional[datetime]:
 
 def validate_item(item) -> list:
     """Reasons an item is not decision-ready; empty means it may be considered."""
-    if not isinstance(item, Item):
+    if type(item) is not Item:   # exact class: a subclass can answer differently on each attribute read
         return ["not_an_item"]
     problems = []
     for name in ("decision_id", "parent_task", "role_required", "question", "decision_type",
@@ -172,7 +177,8 @@ def validate_item(item) -> list:
         problems.append("invalid_candidate_options")
     elif not item.candidate_options and item.open_judgment is not True:
         problems.append("missing_candidate_options")
-    if item.packet_class == "verification" and "invalid_allowed_verdicts" not in problems \
+    if type(item.packet_class) is str and item.packet_class == "verification" \
+            and "invalid_allowed_verdicts" not in problems \
             and set(item.allowed_verdicts) != set(VERIFICATION_VERDICTS):
         problems.append("verification_verdicts_must_be_pass_revise_escalate")
     for name in ("open_judgment", "fresh_context_required", "separate_adjudication_required", "urgent", "blocking"):
@@ -195,13 +201,13 @@ def validate_item(item) -> list:
         parse_deadline(item.deadline)
     except (ValueError, TypeError):
         problems.append("deadline_not_explicit")
-    if item.packet_class in ("collision", "gate") and not _is_text(item.question_id):
+    if type(item.packet_class) is str and item.packet_class in ("collision", "gate") and not _is_text(item.question_id):
         problems.append("missing_question_id")
     return problems
 
 
 def _policy_problems(policy) -> list:
-    if not isinstance(policy, Policy):
+    if type(policy) is not Policy:
         return ["not_a_policy"]
     problems = []
     for name in ("min_net_reuse_tokens", "wrapper_overhead_tokens", "headroom_tokens"):
@@ -327,7 +333,7 @@ def _admit(group: Sequence, policy: Policy, certificates: Iterable,
         problems = validate_item(item)
         if problems:
             return Decision(NEEDS_PREPARATION, "item_not_decision_ready",
-                            (getattr(item, "decision_id", "?") if isinstance(item, Item) else "?", *problems))
+                            (item.decision_id if type(item) is Item else "?", *problems))
     ids = [item.decision_id for item in items]
     if len(set(ids)) != len(ids):
         return Decision(NEEDS_PREPARATION, "duplicate_decision_id")
@@ -428,13 +434,13 @@ def plan(items: Sequence, policy: Policy, certificates: Iterable,
          now: datetime, wait_seconds: Optional[float]) -> list:
     """Public boundary: an unexpected failure while examining untrusted input refuses (fail closed)."""
     try:
-        return _plan(items, policy, certificates, now, wait_seconds)
+        kept = list(items)      # materialised ONCE: a one-shot iterator is consumed here and never re-read
     except Exception:
-        try:                                   # keep every input visible rather than erasing the plan
-            kept = list(items)
-        except Exception:
-            return [Group((), Decision(NEEDS_PREPARATION, "input_not_processable"))]
-        return [Group((entry,) if isinstance(entry, Item) else (), Decision(NEEDS_PREPARATION, "input_not_processable"))
+        return [Group((), Decision(NEEDS_PREPARATION, "items_not_iterable"))]
+    try:
+        return _plan(kept, policy, certificates, now, wait_seconds)
+    except Exception:           # keep every input visible rather than erasing the plan
+        return [Group((entry,) if type(entry) is Item else (), Decision(NEEDS_PREPARATION, "input_not_processable"))
                 for entry in kept]
 
 
@@ -453,9 +459,9 @@ def _plan(items: Sequence, policy: Policy, certificates: Iterable,
         pending_items = list(items)
     except TypeError:
         return [Group((), Decision(NEEDS_PREPARATION, "items_not_iterable"))]
-    real = [item for item in pending_items if isinstance(item, Item)]
+    real = [item for item in pending_items if type(item) is Item]
     groups = [Group((), Decision(NEEDS_PREPARATION, "not_an_item"))
-              for item in pending_items if not isinstance(item, Item)]
+              for item in pending_items if type(item) is not Item]
     seen, duplicated = set(), set()
     for item in real:
         if type(item.decision_id) is str:     # exact str only: a subclass may be unhashable or lie about equality
@@ -499,7 +505,7 @@ def _close(current: list, policy: Policy, certificates, now, wait_seconds, last_
 
 def _singleton_decision(item: Item, policy: Policy, refusal: Decision) -> Decision:
     """A lone item is sent alone with the recorded reason, unless it cannot safely fit at all."""
-    if not isinstance(policy, Policy):
+    if type(policy) is not Policy:
         return Decision(SINGLE, refusal.reason if refusal.outcome == SINGLE else "no_compatible_pending", refusal.detail)
     too_big_in = (_is_int(policy.max_input_tokens) and _is_int(item.context_tokens) and _is_int(item.unique_tokens)
                   and item.context_tokens + item.unique_tokens > policy.max_input_tokens)
@@ -517,7 +523,7 @@ def compile_packet(group: Sequence, packet_id: str, shared_context: str, global_
     inside a question, option or pointer can never forge a boundary, and every semantic field the
     admission tests used (protocol, role, identity, type, consequence, parent) reaches the model.
     """
-    if not group or not all(isinstance(item, Item) for item in group):
+    if not group or not all(type(item) is Item for item in group):
         raise ValueError("cannot compile an empty packet or non-items")
     first = group[0]
     envelope = {

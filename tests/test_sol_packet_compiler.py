@@ -811,3 +811,109 @@ def test_t4_a_hostile_str_subclass_cannot_run_code_inside_the_decoder():
     for raw in (b'{"results": []}', None, 5, ["x"]):
         assert set(spc.parse_results(items, raw).values()) == {"unparsable_packet_output"}
     assert set(spc.parse_results(items, '{"results": []}').values()) == {"missing_result"}
+
+
+# ---------- independent review round 5 (gpt-6.1-sol): one regression per finding ----------
+
+def test_u1_an_item_subclass_with_stateful_attribute_reads_is_refused():
+    class Flip(spc.Item):
+        def __getattribute__(self, name):
+            if name == "independence_required":
+                state = object.__getattribute__(self, "__dict__")
+                state["_reads"] = state.get("_reads", 0) + 1
+                return state["_reads"] not in (3, 4)
+            return super().__getattribute__(name)
+
+    fields = {name: getattr(make("a", independence_required=True), name) for name in make("a").__dataclass_fields__}
+    prior = spc.manifest_hash(spc.Item(**fields))
+    flipper = Flip(**fields)
+    assert spc.validate_item(flipper) == ["not_an_item"]
+    verdict = spc.needs_new_call(flipper, prior)
+    assert verdict.outcome == spc.NEEDS_PREPARATION and verdict.outcome != spc.REUSE
+    other = make("b")
+    for group in ([flipper, other], [other, flipper]):
+        assert spc.admit(group, POLICY, pairs("a", "b"), NOW, 600.0).outcome != spc.BATCH
+    groups = spc.plan([flipper, other], POLICY, pairs("a", "b"), NOW, 600.0)
+    assert [g.decision.outcome for g in groups].count(spc.BATCH) == 0
+
+
+def test_u1_a_policy_subclass_is_refused():
+    class Sneaky(spc.Policy):
+        def __getattribute__(self, name):
+            return super().__getattribute__(name)
+
+    sneaky = Sneaky(**{n: getattr(POLICY, n) for n in POLICY.__dataclass_fields__})
+    verdict = spc.admit([make("a"), make("b")], sneaky, pairs("a", "b"), NOW, 600.0)
+    assert verdict.outcome == spc.NEEDS_PREPARATION and verdict.reason == "policy_invalid"
+
+
+def test_u2_a_one_shot_iterator_is_not_lost_when_planning_fails():
+    class Boom:
+        def __eq__(self, other):
+            raise RuntimeError("boom")
+
+        __hash__ = object.__hash__
+
+    a = make("a")
+    bad_b = replace(make("b"), packet_class=Boom())
+    groups = spc.plan(iter([a, bad_b]), POLICY, pairs("a", "b"), NOW, 0.0)
+    assert len(groups) == 2, "every consumed input must still be reported"
+    assert {g.items[0].decision_id for g in groups if g.items} == {"a", "b"}
+    assert all(g.decision.outcome == spc.NEEDS_PREPARATION for g in groups if g.items and g.items[0] is bad_b)
+
+
+def test_u2_hostile_packet_class_equality_is_never_invoked():
+    class Boom:
+        def __eq__(self, other):
+            raise RuntimeError("boom")
+
+        __hash__ = object.__hash__
+
+    bad = replace(make("b"), packet_class=Boom())
+    assert "unknown_packet_class" in spc.validate_item(bad)       # reports instead of raising
+    assert spc.admit([make("a"), bad], POLICY, pairs("a", "b"), NOW, 600.0).outcome == spc.NEEDS_PREPARATION
+
+
+def test_u2_planning_from_a_generator_still_works_normally():
+    groups = spc.plan((i for i in [make("a"), make("b")]), POLICY, pairs("a", "b"), NOW, 600.0)
+    assert [len(g.items) for g in groups] == [2] and groups[0].decision.outcome == spc.BATCH
+
+
+@pytest.mark.parametrize("deadline", [
+    "2026-11-03T12:00:00+00:00:00.500000", "2026-11-03T12:00:00+00:00:30", "2026-11-03T12:00:00+0000",
+    "2026-11-03T12:00:00+00", "2026-11-03T12:00:00 UTC", "2026-11-03T12:00:00z", "2026-11-03T12:00:00+24:00",
+    "2026-11-03T12:00:00-00:60", "2026-11-03T12:00:00+05:30:15",
+])
+def test_u3_only_lossless_timezone_syntax_is_accepted(deadline):
+    assert "deadline_not_explicit" in spc.validate_item(make("a", deadline=deadline)), deadline
+
+
+def test_u3_the_reviewers_fractional_offset_cannot_defeat_a_deadline():
+    now = datetime(2026, 11, 3, 11, 59, 59, 750000, tzinfo=timezone.utc)
+    sneaky = "2026-11-03T12:00:00+00:00:00.500000"
+    far = (now + timedelta(days=2)).isoformat()
+    verdict = spc.admit([make("a", deadline=sneaky), make("b", deadline=far)], POLICY, pairs("a", "b"), now, 0.125)
+    assert verdict.outcome == spc.NEEDS_PREPARATION and verdict.detail[0] == "a"
+
+
+@pytest.mark.parametrize("deadline", ["2026-11-05T12:00:00Z", "2026-11-05T12:00:00+00:00", "2026-11-05T12:00:00-05:30",
+                                      "2026-11-05T12:00:00.250000+01:00", spc.NO_DEADLINE])
+def test_u3_ordinary_deadlines_still_parse(deadline):
+    assert spc.validate_item(make("a", deadline=deadline)) == []
+
+
+def test_u3_z_means_utc_exactly():
+    assert spc.parse_deadline("2026-11-05T12:00:00Z") == spc.parse_deadline("2026-11-05T12:00:00+00:00")
+    assert spc.parse_deadline("2026-11-05T13:00:00+01:00") == spc.parse_deadline("2026-11-05T12:00:00Z")
+
+
+def test_u2_recovery_after_a_forced_failure_keeps_every_item_from_a_one_shot_iterator(monkeypatch):
+    a, b = make("a"), make("b")
+
+    def consume_then_fail(items, *args, **kw):
+        list(items)                       # the real failure mode: the iterator is already exhausted
+        raise RuntimeError("boom")
+    monkeypatch.setattr(spc, "_plan", consume_then_fail)
+    groups = spc.plan(iter([a, b, None]), POLICY, (), NOW, 0.0)
+    assert [g.items for g in groups] == [(a,), (b,), ()]
+    assert all(g.decision.reason == "input_not_processable" for g in groups)
