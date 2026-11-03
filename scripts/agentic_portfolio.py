@@ -203,6 +203,11 @@ def _kill_group(proc: subprocess.Popen) -> None:
         pass
 
 
+def _printable(text: str, limit: int = 250) -> str:
+    """Remote text made safe for a terminal: printable ASCII only, so no escape sequences survive."""
+    return "".join(c if " " <= c <= "~" else "?" for c in text.strip())[:limit]
+
+
 def _ssh_run(cmd: list[str], timeout: float, max_out: int, max_err: int) -> subprocess.CompletedProcess:
     """Run our own `ssh` toward the operator's lab with output captured to private temp FILES.
 
@@ -213,11 +218,20 @@ def _ssh_run(cmd: list[str], timeout: float, max_out: int, max_err: int) -> subp
     itself into another process group or session, hostile signal handlers or threaded callers
     running during spawn, and a child stuck in uninterruptible kernel sleep.
 
+    Disk bound: where `prlimit` exists the caller runs ssh under a kernel write cap. Elsewhere
+    (Windows) the only bound is polling every 5 ms, so a flooding remote can write at most its link
+    throughput times 5 ms (tens of MB on a fast link) before the child is killed and the private
+    temp directory removed. That residual overshoot is bounded and accepted, not eliminated.
+
     In scope: no reader threads or pipes; size is polled and capped, with one extra byte read at
     the end so a late write cannot be silently truncated into success; the deadline is enforced
     on the completion path too; overflow, the deadline or any exception kills the process group
     while the leader is still an unreaped zombie; the temp directory is always removed.
     """
+    if os.name != "nt" and not hasattr(os, "waitid"):
+        # Without waitid(WNOWAIT) the leader would be reaped before its group could be signalled,
+        # which can orphan helpers or hit a recycled id. Refuse rather than guess.
+        raise ValueError("lab_ssh_unsupported_platform")
     deadline = time.monotonic() + timeout
     proc = None
     with tempfile.TemporaryDirectory(prefix="agentic-ssh-") as tmp:
@@ -231,7 +245,7 @@ def _ssh_run(cmd: list[str], timeout: float, max_out: int, max_err: int) -> subp
                         raise ValueError("lab_ssh_output_exceeded")
                     if time.monotonic() >= deadline:
                         raise subprocess.TimeoutExpired(cmd, timeout)
-                    time.sleep(0.02)
+                    time.sleep(0.005)
                 _kill_group(proc)  # the leader is an unreaped zombie here: the group id is still ours
                 returncode = proc.wait(timeout=5)
             if time.monotonic() > deadline:
@@ -278,41 +292,56 @@ def _valid_remote_record(row) -> bool:
 
 FRONTIER_KEYS = {"stage", "scope_complete", "unavailable", "counts", "offset_per_repo", "records",
                  "next_offset_per_repo", "warnings", "note", "transport"}
+OPTIONAL_REPOS = {"misumi", "obsidian-phd"}  # odysseus is the running checkout and is always available
 
 
 def _valid_remote_frontier(result: dict, args: argparse.Namespace) -> bool:
+    """Accept only what `frontier()` itself could have produced for this request."""
     if not set(result) <= FRONTIER_KEYS or not isinstance(result.get("scope_complete"), bool):
         return False
-    records = result.get("records")
-    if not isinstance(records, list) or len(records) > args.per_repo * len(LAYOUT):
+    records, counts, unavailable = result.get("records"), result.get("counts"), result.get("unavailable")
+    if not isinstance(records, list) or not isinstance(counts, dict) or not isinstance(unavailable, dict):
         return False
+    if not all(isinstance(k, str) and isinstance(v, str) and len(v) <= 100 for k, v in unavailable.items()):
+        return False
+    # Repository coverage: every owner is exactly one of available (has counts) or unavailable.
+    if (set(counts) | set(unavailable) != set(LAYOUT) or set(counts) & set(unavailable)
+            or not set(unavailable) <= OPTIONAL_REPOS):
+        return False
+    if result["scope_complete"] != (not unavailable):  # complete iff nothing was unavailable
+        return False
+    totals = {}
+    for repo, entry in counts.items():
+        buckets = entry.get("buckets") if isinstance(entry, dict) else None
+        if (not isinstance(entry, dict) or not _is_count(entry.get("total")) or not isinstance(buckets, dict)
+                or not set(buckets) <= set(LAYOUT[repo][1]) or not all(_is_count(v) for v in buckets.values())
+                or entry["total"] > sum(buckets.values())):  # unreadable cards make total <= bucket sum
+            return False
+        totals[repo] = entry["total"]
     if not all(_valid_remote_record(row) for row in records):
         return False
     refs = [row["ref"] for row in records]
     if len(set(refs)) != len(refs):
         return False
-    for repo in LAYOUT:  # the per-owner sampling contract, not just the aggregate
-        if sum(1 for row in records if row["repo_id"] == repo) > args.per_repo:
+    taken = {repo: 0 for repo in counts}
+    for row in records:
+        if row["repo_id"] not in counts:
             return False
-    counts, unavailable = result.get("counts"), result.get("unavailable")
-    if not isinstance(counts, dict) or not set(counts) <= set(LAYOUT):
-        return False
-    for entry in counts.values():
-        if (not isinstance(entry, dict) or not _is_count(entry.get("total"))
-                or not isinstance(entry.get("buckets"), dict)
-                or not all(isinstance(k, str) and _is_count(v) for k, v in entry["buckets"].items())):
+        taken[row["repo_id"]] += 1
+    for repo, n in taken.items():
+        # An owner whose total is below the requested offset shows nothing (an empty slice is valid);
+        # one that shows records cannot show more than it has past that offset.
+        if n > args.per_repo or (n > 0 and args.offset + n > totals[repo]):
             return False
-    if (not isinstance(unavailable, dict)
-            or not all(isinstance(k, str) and isinstance(v, str) and len(v) <= 100 for k, v in unavailable.items())):
-        return False
     if result.get("offset_per_repo", args.offset) != args.offset:
         return False
-    following = result.get("next_offset_per_repo", {})
-    if (not isinstance(following, dict) or not set(following) <= set(LAYOUT)
-            or not all(_is_count(v) and v > args.offset for v in following.values())):
+    # Pagination is DERIVED, not trusted: each owner continues exactly after what it showed.
+    expected = {repo: args.offset + n for repo, n in taken.items() if args.offset + n < totals[repo]}
+    if result.get("next_offset_per_repo", {}) != expected:
         return False
     warnings = result.get("warnings", [])
-    return (isinstance(warnings, list) and len(warnings) <= 8
+    note = result.get("note", "")
+    return (isinstance(warnings, list) and len(warnings) <= 8 and isinstance(note, str) and len(note) <= 500
             and all(isinstance(w, str) and len(w) <= 400 for w in warnings))
 
 
@@ -322,10 +351,11 @@ TASK_KEYS = {"stage", "ref", "metadata", "body", "truncated", "note", "transport
 def _valid_remote_task(result: dict, args: argparse.Namespace) -> bool:
     if not set(result) <= TASK_KEYS or result.get("ref") != args.ref:
         return False
-    metadata = result.get("metadata")
-    if (not isinstance(metadata, dict) or not set(metadata) <= set(DETAIL)
-            or not isinstance(result.get("body"), str)
-            or not isinstance(result.get("truncated", False), bool)):
+    metadata, body, note = result.get("metadata"), result.get("body"), result.get("note", "")
+    if (not isinstance(metadata, dict) or not set(metadata) <= set(DETAIL) or not isinstance(body, str)
+            or not isinstance(result.get("truncated"), bool) or not isinstance(note, str) or len(note) > 500):
+        return False
+    if args.tier == "contract" and len(body) > 16000:  # the producer's own contract-body cap
         return False
     try:
         for value in metadata.values():
@@ -370,7 +400,7 @@ def lab_frontier_over_ssh(args: argparse.Namespace) -> dict | None:
         raise ValueError("lab_ssh_transport_failure: " + type(exc).__name__) from exc
     if proc.returncode != 0:
         raise ValueError("lab_ssh_execution_failed: exit=" + str(proc.returncode) +
-                         "; " + proc.stderr.strip()[:250])
+                         "; " + _printable(proc.stderr))
     try:
         result = json.loads(proc.stdout)
     except (ValueError, RecursionError) as exc:  # JSONDecodeError is a ValueError; deep nesting recurses
