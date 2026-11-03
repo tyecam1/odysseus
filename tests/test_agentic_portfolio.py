@@ -1073,3 +1073,88 @@ def test_r11_2_real_producer_warnings_are_valid(warning):
                                      "odysseus:codex:x"])
 def test_r11_2_prose_filenames_and_foreign_buckets_are_not_valid_warnings(warning):
     assert not ap._valid_warning(warning)
+
+
+# --- Soundness: whatever the REAL producer emits, the receiver must accept ---------------------------------
+# A false reject silently discards a good lab frontier, so this is the property that matters most. The
+# plausibility checks (order, positions, pagination) are necessary conditions only: sound, deliberately not
+# complete, and not authentication (priorities and refs are remote-supplied and could be made coherent).
+
+PRIORITIES = ["critical", "high", "medium", "low", "CRITICAL", "weird", None, ""]
+
+
+def _random_estate(tmp_path, monkeypatch, rng, label):
+    ody, misumi, phd = estate(tmp_path, monkeypatch)
+    layout = {ody: ("automation/review/agent-tasks", ap.LAYOUT["odysseus"][1], "ready"),
+              misumi: ("agent-tasks", ap.LAYOUT["misumi"][1], "open"),
+              phd: ("automation/review/agent-tasks", ap.LAYOUT["obsidian-phd"][1], "ready")}
+    for root, (rel, buckets, status) in layout.items():
+        for old in (root / rel).rglob("*.md"):
+            old.unlink()
+        for bucket in buckets:
+            (root / rel / bucket).mkdir(parents=True, exist_ok=True)
+            for i in range(rng.choice([0, 0, 1, 2, 3, 5])):
+                name = "%s-%s-%d%s.md" % (label, bucket, i, rng.choice(["", " x", "é"]))
+                if rng.random() < 0.15:                                    # an unreadable card
+                    (root / rel / bucket / name).write_bytes(b"\xff\xfe not frontmatter")
+                    continue
+                front = {"title": "t%d" % rng.randint(0, 99), "status": status}
+                priority = rng.choice(PRIORITIES)
+                if priority is not None:
+                    front["priority"] = priority
+                (root / rel / bucket / name).write_text("---\n" + yaml.safe_dump(front) + "---\nbody\n", encoding="utf-8")
+    return ody
+
+
+@pytest.mark.parametrize("seed", range(60))
+def test_every_response_the_real_producer_emits_is_accepted_by_the_receiver(tmp_path, monkeypatch, seed):
+    import random
+    rng = random.Random(seed)
+    ody = _random_estate(tmp_path, monkeypatch, rng, "s%d" % seed)
+    roots, missing = ap.resolve_roots(ody, {})
+    if rng.random() < 0.3:
+        monkeypatch.delenv("PHD_ROOT")                                    # an unavailable owner
+        roots, missing = ap.resolve_roots(ody, {})
+    checked = 0
+    for _ in range(6):
+        offset, per_repo, budget = rng.randint(0, 6), rng.randint(1, 5), rng.choice([1500, 2600, 6000])
+        try:
+            produced = ap.frontier(roots, missing, offset, per_repo, budget)
+        except ValueError:
+            continue                                                       # the producer itself refuses (budget): nothing to accept
+        remote = json.loads(json.dumps(produced, ensure_ascii=False))
+        args = argparse.Namespace(stage="frontier", ref=None, tier="contract", max_tokens=budget, offset=offset, per_repo=per_repo)
+        assert ap._valid_remote_frontier(remote, args), {
+            "seed": seed, "offset": offset, "per_repo": per_repo, "budget": budget,
+            "counts": remote["counts"], "records": [(r["ref"], r.get("priority")) for r in remote["records"]],
+            "next": remote["next_offset_per_repo"]}
+        checked += 1
+    assert checked >= 3, "the producer refused too often for this seed to test anything"
+
+
+def test_r12_1_the_reviewers_displayed_card_counterexample_is_rejected(monkeypatch):
+    # misumi total 3: claude=1, codex=1, odysseus=1 (all rank 3); offset 1, two records shown:
+    # codex (best priority) then claude (worst). The claude card is shown AFTER codex, so it cannot be a
+    # predecessor; the only hidden card (odysseus) sorts after codex even at the best priority. So codex
+    # must sit at position 0, not 1.
+    codex = _rec(1, repo="misumi", bucket="codex", priority="critical")
+    claude = _rec(2, repo="misumi", bucket="claude")                       # priority omitted -> worst
+    claude.pop("priority", None)
+    env = _envelope([codex, claude], {"odysseus": 0, "misumi": 3, "obsidian-phd": 0}, offset_per_repo=1)
+    env["counts"]["misumi"]["buckets"] = {**{n: 0 for n in ap.LAYOUT["misumi"][1]}, "claude": 1, "codex": 1, "odysseus": 1}
+    env["records"] = [codex, claude]
+    env["next_offset_per_repo"] = {}
+    with pytest.raises(ValueError, match="malformed"):
+        _ask(monkeypatch, env, args=_frontier_args(per_repo=2, offset=1))
+
+
+def test_r12_1_a_genuine_page_with_the_same_shape_is_still_accepted(monkeypatch):
+    # the same counts, but at offset 0 the page (codex, claude) is perfectly possible
+    codex = _rec(1, repo="misumi", bucket="codex", priority="critical")
+    claude = _rec(2, repo="misumi", bucket="claude")
+    claude.pop("priority", None)
+    env = _envelope([codex, claude], {"odysseus": 0, "misumi": 3, "obsidian-phd": 0})
+    env["counts"]["misumi"]["buckets"] = {**{n: 0 for n in ap.LAYOUT["misumi"][1]}, "claude": 1, "codex": 1, "odysseus": 1}
+    env["records"] = [codex, claude]
+    env["next_offset_per_repo"] = {"misumi": 2}
+    assert _ask(monkeypatch, env, args=_frontier_args(per_repo=2))["transport"]

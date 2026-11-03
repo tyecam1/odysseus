@@ -330,7 +330,12 @@ def _canonical_key(row: dict, owner_order: dict) -> tuple:
 
 
 def _valid_remote_frontier(result: dict, args: argparse.Namespace) -> bool:
-    """Accept only what `frontier()` itself could have produced for this request."""
+    """Accept only what `frontier()` itself could have produced for this request.
+
+    The schema, fixed notices, token-only text, size and count rules are firm. The order and position
+    checks are PLAUSIBILITY conditions: they are SOUND (the real producer's output always passes, which
+    a randomized test enforces) but deliberately not COMPLETE (an impossible yet harmless page may pass),
+    and they are not authentication, because a remote controls the priorities and refs they reason about."""
     if not FRONTIER_REQUIRED <= set(result) <= FRONTIER_KEYS or not isinstance(result.get("scope_complete"), bool):
         return False
     records, counts, unavailable = result.get("records"), result.get("counts"), result.get("unavailable")
@@ -387,8 +392,13 @@ def _valid_remote_frontier(result: dict, args: argparse.Namespace) -> bool:
             mine = repo + ":" + row["bucket"] + "/"
             peers = [b for b in buckets if RANK[b] == rank and b != row["bucket"]]
             tie_before = sum(buckets[b] for b in peers if priority == 9 and repo + ":" + b + "/" < mine)
-            tie_after = sum(buckets[b] for b in peers if priority == 0 and repo + ":" + b + "/" > mine)
-            if position < before + tie_before - unreadable or position > through - 1 - tie_after:
+            forced_after = {b for b in peers if priority == 0 and repo + ":" + b + "/" > mine}
+            tie_after = sum(buckets[b] for b in forced_after)
+            # Cards shown AFTER this record are known to rank after it, so they are not candidates to
+            # rank before it (skip those already counted by the tie rule, to never subtract twice).
+            known_after = sum(1 for later in shown_here[index + 1:]
+                              if RANK[later["bucket"]] <= rank and later["bucket"] not in forced_after)
+            if position < before + tie_before - unreadable or position > through - 1 - tie_after - known_after:
                 return False                                   # cannot occupy that place in a real page
     for repo, n in taken.items():
         # An owner whose total is below the requested offset shows nothing (an empty slice is valid);
