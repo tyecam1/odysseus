@@ -1424,3 +1424,46 @@ def test_r17_2_a_raw_byte_ref_on_the_command_line_is_a_clean_error_not_a_traceba
 def test_r17_2_ordinary_references_still_parse():
     assert ap.parse_ref("misumi:inbox/m.md") == ("misumi", "inbox", "m.md")
     assert ap.parse_ref("misumi:inbox/café.md") == ("misumi", "inbox", "café.md")
+
+
+# --- Review round 18: wire validity is not local eligibility ---------------------------------------------------
+
+def test_r18_a_non_utf8_host_still_accepts_what_the_remote_legitimately_lists(monkeypatch):
+    monkeypatch.setattr(ap, "FS_IS_UTF8", False)
+    cafe = _rec(1, repo="odysseus", bucket="ready")
+    cafe["ref"] = "odysseus:ready/café.md"
+    env = _envelope([cafe], {"odysseus": 1, "misumi": 0, "obsidian-phd": 0})
+    assert ap._valid_remote_record(cafe), "the wire form is valid whatever THIS host's filesystem encoding is"
+    assert _ask(monkeypatch, env)["transport"] == "registered_lab_ssh"
+
+
+def test_r18_but_this_host_will_not_read_or_send_a_name_it_cannot_encode(tmp_path, monkeypatch):
+    ody, misumi, _ = estate(tmp_path, monkeypatch)
+    (misumi / "agent-tasks" / "inbox" / "café.md").write_text("---\ntitle: c\nstatus: open\n---\nb\n", encoding="utf-8")
+    roots, _ = ap.resolve_roots(ody, {})
+    assert ap.selected(roots, "misumi:inbox/café.md", "contract", 1200)["ref"] == "misumi:inbox/café.md"   # UTF-8 host
+    monkeypatch.setattr(ap, "FS_IS_UTF8", False)
+    with pytest.raises(ValueError, match="invalid task reference"):
+        ap.selected(roots, "misumi:inbox/café.md", "contract", 1200)                                       # cannot read it unchanged
+    monkeypatch.setenv("AOTERU_LAB_SSH_TARGET", "lab-worker")
+    monkeypatch.setenv("AOTERU_LAB_REPO_ROOT", "/registered/lab/odysseus")
+    monkeypatch.setattr(ap, "_ssh_run", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not send")))
+    args = argparse.Namespace(stage="task", ref="misumi:inbox/café.md", tier="contract", max_tokens=2500, offset=0, per_repo=4)
+    with pytest.raises(ValueError, match="lab_ssh_ref_not_transportable"):
+        ap.lab_frontier_over_ssh(args)
+
+
+def test_r18_ascii_references_still_travel_from_a_non_utf8_host(monkeypatch):
+    monkeypatch.setattr(ap, "FS_IS_UTF8", False)
+    remote = {"stage": "L1-selected-contract", "ref": "misumi:inbox/m.md", "metadata": {"title": "t"}, "body": "b",
+              "truncated": False, "note": ap.TASK_NOTE}
+    args = argparse.Namespace(stage="task", ref="misumi:inbox/m.md", tier="contract", max_tokens=2500, offset=0, per_repo=4)
+    assert _ask(monkeypatch, remote, args=args)["ref"] == "misumi:inbox/m.md"
+
+
+def test_r18_the_producer_still_refuses_to_list_what_this_host_cannot_read(tmp_path, monkeypatch):
+    ody, misumi, _ = estate(tmp_path, monkeypatch)
+    (misumi / "agent-tasks" / "inbox" / "café.md").write_text("---\ntitle: c\nstatus: open\n---\nb\n", encoding="utf-8")
+    monkeypatch.setattr(ap, "FS_IS_UTF8", False)
+    rows, _, warnings = ap.collect("misumi", misumi)
+    assert not any("café" in row["ref"] for row in rows) and "misumi:inbox:unsupported_filename" in warnings

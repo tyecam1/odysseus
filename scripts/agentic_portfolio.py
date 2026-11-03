@@ -82,17 +82,22 @@ def resolve_roots(odysseus_root: Path, overrides: dict[str, Path | None]) -> tup
 FS_IS_UTF8 = sys.getfilesystemencoding().lower().replace("-", "").replace("_", "") == "utf8"
 
 
-def _referenceable(name: str) -> bool:
-    """A filename the receiver, parse_ref() and selected() can all use unchanged: no colon (the reference
-    separator) and strictly encodable as UTF-8, so raw non-UTF-8 bytes (which Python surfaces as lone
-    surrogates) are not carried into a reference that the SSH hop would silently rewrite."""
-    if ":" in name or (not FS_IS_UTF8 and not name.isascii()):
+def _wire_ok(name: str) -> bool:
+    """Valid in a reference ON THE WIRE, independent of any host: no colon (the reference separator) and strictly
+    encodable as UTF-8, so raw non-UTF-8 bytes (which Python surfaces as lone surrogates) are never carried."""
+    if ":" in name:
         return False
     try:
         name.encode("utf-8")
     except UnicodeEncodeError:
         return False
     return True
+
+
+def _referenceable(name: str) -> bool:
+    """A name THIS host can list and read unchanged: valid on the wire, and either the filesystem is UTF-8 or the
+    name is ASCII (a non-UTF-8 filesystem encoding would silently mangle anything else)."""
+    return _wire_ok(name) and (FS_IS_UTF8 or name.isascii())
 
 
 def collect(repo_id: str, root: Path) -> tuple[list[dict], dict, list[str]]:
@@ -192,7 +197,7 @@ def parse_ref(ref) -> tuple[str, str, str]:
     parts = local.split("/")
     if (len(parts) != 2 or parts[0] not in LAYOUT[rid][1] or not parts[1].endswith(".md")
             or parts[1].startswith(".") or "\\" in parts[1] or "\x00" in parts[1]
-            or not _referenceable(parts[1])):     # the same test the producer applies before it lists a card
+            or not _wire_ok(parts[1])):           # wire validity only; local readability is checked where a file is read
         raise ValueError("invalid task reference")
     return rid, parts[0], parts[1]
 
@@ -200,6 +205,8 @@ def parse_ref(ref) -> tuple[str, str, str]:
 def selected(roots: dict[str, Path], ref: str, tier: str, budget: int) -> dict:
     """Load only the exact L0-selected file after validating its repository and path."""
     rid, bucket, name = parse_ref(ref)
+    if not _referenceable(name):
+        raise ValueError("invalid task reference")   # valid on the wire, but this host cannot read that name unchanged
     if rid not in roots:
         raise ValueError("unknown or unavailable repository")
     queue = queue_path(roots[rid], Path(LAYOUT[rid][0]))
@@ -487,6 +494,8 @@ def lab_frontier_over_ssh(args: argparse.Namespace) -> dict | None:
         return None
     if args.stage == "task":
         parse_ref(args.ref)  # a malformed or unknown reference never leaves this machine
+        if not FS_IS_UTF8 and not args.ref.isascii():
+            raise ValueError("lab_ssh_ref_not_transportable")   # argv would be encoded with this host's non-UTF-8 encoding
     if target.startswith("-") or any(c.isspace() for c in target):
         raise ValueError("lab_ssh_target_invalid")
     if not PurePosixPath(remote_root).is_absolute():  # the lab is POSIX whatever this host is
