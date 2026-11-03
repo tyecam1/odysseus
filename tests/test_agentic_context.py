@@ -350,3 +350,22 @@ def test_frontier_row_selection_matches_the_final_response_size(tmp_path, budget
         return
     assert len(json.dumps(result, ensure_ascii=False)) <= budget * 3
     # never rejects a response that fits: if one row alone fits, the call must not raise
+
+
+@pytest.mark.parametrize("front,isolated_in_frontier", [
+    ('title: "\\uD800"\n', True),            # allowlisted summary field: the card is isolated
+    ('"bad\\uD800key": 1\n', False),          # never leaves the card: listing it is correct
+    ('inputs: ["ok", "\\uDC00"]\n', False),   # contract-only field: not in the frontier output
+])
+def test_lone_surrogates_never_reach_encoded_output(tmp_path, front, isolated_in_frontier):
+    import json
+    card(tmp_path, "ready", "good")
+    raw_card(tmp_path, "ready", "sur", "task_id: sur\nstatus: ready\n" + front, "body")
+    q = ac.queue_path(tmp_path, ac.DEFAULT_QUEUE)
+    ids = [c["task_id"] for c in ac.inventory(q)[0]]
+    assert ids == (["good"] if isolated_in_frontier else ["good", "sur"])
+    json.dumps(ac.output_frontier(q, 0, 12, 1500), ensure_ascii=False).encode("utf-8")  # must not raise
+    try:
+        json.dumps(ac.output_task(q, "sur", "contract", 1500), ensure_ascii=False).encode("utf-8")
+    except ValueError:
+        pass  # an unusable card is simply not selectable

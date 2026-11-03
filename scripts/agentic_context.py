@@ -216,6 +216,15 @@ def split_card(text: str) -> tuple[dict, str]:
     raise ValueError("unterminated frontmatter")
 
 
+def _text(value: str) -> str:
+    """Bounded text that is guaranteed encodable: a lone surrogate would crash UTF-8 output later."""
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError("invalid unicode in frontmatter") from exc
+    return value[:MAX_FIELD_CHARS]
+
+
 def clean_value(value, depth: int = 0):
     """Bounded, JSON-safe copy of one frontmatter value; unsupported shapes isolate the card."""
     if value is None or isinstance(value, bool):
@@ -229,13 +238,13 @@ def clean_value(value, depth: int = 0):
     if isinstance(value, (_dt.datetime, _dt.date)):
         return value.isoformat()
     if isinstance(value, str):
-        return value[:MAX_FIELD_CHARS]
+        return _text(value)
     if depth >= MAX_DEPTH:
         raise ValueError("frontmatter value nested too deeply")
     if isinstance(value, (list, tuple)):
         return [clean_value(item, depth + 1) for item in list(value)[:MAX_ITEMS]]
     if isinstance(value, dict):
-        return {str(k)[:MAX_FIELD_CHARS]: clean_value(v, depth + 1) for k, v in list(value.items())[:MAX_ITEMS]}
+        return {_text(str(k)): clean_value(v, depth + 1) for k, v in list(value.items())[:MAX_ITEMS]}
     raise ValueError("unsupported frontmatter value type")
 
 
