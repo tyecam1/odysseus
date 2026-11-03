@@ -14,11 +14,6 @@ from pathlib import Path, PurePosixPath
 
 import yaml
 
-try:
-    import resource
-except ImportError:  # Windows
-    resource = None
-
 from agentic_context import (ROOT, PRIORITY, Refused, card_names, clean_value, fit_body,
                              queue_path, read_card, split_card)
 
@@ -175,19 +170,21 @@ def selected(roots: dict[str, Path], ref: str, tier: str, budget: int) -> dict:
 
 
 def _exited_unreaped(proc: subprocess.Popen) -> bool:
-    """True once the child has exited, WITHOUT reaping it, so its pid/pgid stay reserved
-    (a zombie leader keeps the group id from being recycled) until we have signalled the group."""
+    """True once the child has exited. Where `waitid` exists the child is NOT reaped, so its
+    pid/pgid stay reserved (a zombie leader keeps the group id from being recycled) until we
+    have signalled the group. Elsewhere `poll()` reaps it and `_kill_group` then does nothing."""
     if hasattr(os, "waitid"):
         try:
             return os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
-        except ChildProcessError:
-            return True
+        except ChildProcessError as exc:  # something else reaped our child: ownership is lost
+            raise ValueError("lab_ssh_child_ownership_lost") from exc
     return proc.poll() is not None
 
 
 def _kill_group(proc: subprocess.Popen) -> None:
-    """Best-effort kill of the child and its same-session descendants; callers hold the child
-    unreaped. A descendant that deliberately starts a new session is out of scope."""
+    """Best-effort kill of the child's process group while the child is still unreaped."""
+    if proc.returncode is not None:  # already reaped: its pid may be recycled, so signal nothing
+        return
     try:
         if os.name != "nt":
             os.killpg(proc.pid, signal.SIGKILL)
@@ -198,13 +195,19 @@ def _kill_group(proc: subprocess.Popen) -> None:
 
 
 def _ssh_run(cmd: list[str], timeout: float, max_out: int, max_err: int) -> subprocess.CompletedProcess:
-    """Run `cmd` with its output captured to private temp FILES, not pipes.
+    """Run our own `ssh` toward the operator's lab with output captured to private temp FILES.
 
-    No reader threads, no EOF ambiguity and nothing a lingering descendant can block on. Sizes
-    are polled and enforced (and on POSIX also capped by RLIMIT_FSIZE); overflow or the deadline
-    kills the process group, and every exit path kills and reaps it. Contract: returns or raises
-    within `timeout` plus a few seconds of teardown; a child stuck in uninterruptible kernel
-    sleep cannot be forced and is reported, not waited on forever.
+    Threat model: the REMOTE is untrusted, but only its output stream is, so memory and disk use
+    must stay bounded and the call must finish. The local `ssh` binary and anything it spawns are
+    not adversarial. Deliberately OUT OF SCOPE, because defending them needs OS containment
+    (cgroups / Job Objects) that this 30-second call does not justify: a descendant that moves
+    itself into another process group or session, hostile signal handlers or threaded callers
+    running during spawn, and a child stuck in uninterruptible kernel sleep.
+
+    In scope: no reader threads or pipes; size is polled and capped, with one extra byte read at
+    the end so a late write cannot be silently truncated into success; the deadline is enforced
+    on the completion path too; overflow, the deadline or any exception kills the process group
+    while the leader is still an unreaped zombie; the temp directory is always removed.
     """
     deadline = time.monotonic() + timeout
     proc = None
@@ -212,12 +215,8 @@ def _ssh_run(cmd: list[str], timeout: float, max_out: int, max_err: int) -> subp
         out_path, err_path = os.path.join(tmp, "out"), os.path.join(tmp, "err")
         try:
             with open(out_path, "wb") as out_file, open(err_path, "wb") as err_file:
-                extra = {}
-                if os.name != "nt":
-                    limit = max(max_out, max_err) + (1 << 20)
-                    extra = {"start_new_session": True,
-                             "preexec_fn": lambda: resource.setrlimit(resource.RLIMIT_FSIZE, (limit, limit))}
-                proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=out_file, stderr=err_file, **extra)
+                proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=out_file, stderr=err_file,
+                                        start_new_session=(os.name != "nt"))
                 while not _exited_unreaped(proc):
                     if os.path.getsize(out_path) > max_out or os.path.getsize(err_path) > max_err:
                         raise ValueError("lab_ssh_output_exceeded")
@@ -226,13 +225,14 @@ def _ssh_run(cmd: list[str], timeout: float, max_out: int, max_err: int) -> subp
                     time.sleep(0.02)
                 _kill_group(proc)  # the leader is an unreaped zombie here: the group id is still ours
                 returncode = proc.wait(timeout=5)
-            if os.path.getsize(out_path) > max_out or os.path.getsize(err_path) > max_err:
-                raise ValueError("lab_ssh_output_exceeded")
             if time.monotonic() > deadline:
                 raise subprocess.TimeoutExpired(cmd, timeout)
             with open(out_path, "rb") as out_file, open(err_path, "rb") as err_file:
-                return subprocess.CompletedProcess(cmd, returncode, out_file.read(max_out).decode("utf-8", "replace"),
-                                                   err_file.read(max_err).decode("utf-8", "replace"))
+                out, err = out_file.read(max_out + 1), err_file.read(max_err + 1)
+            if len(out) > max_out or len(err) > max_err:
+                raise ValueError("lab_ssh_output_exceeded")
+            return subprocess.CompletedProcess(cmd, returncode, out.decode("utf-8", "replace"),
+                                               err.decode("utf-8", "replace"))
         finally:
             if proc is not None and proc.returncode is None:
                 _kill_group(proc)

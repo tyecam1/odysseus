@@ -447,3 +447,19 @@ def test_normal_runs_still_return_complete_output():
     assert done.returncode == 0 and len(done.stdout) == 5000 and len(done.stderr) == 50
     failing = ap._ssh_run([sys.executable, "-c", "import sys\nsys.exit(7)"], timeout=20, max_out=100, max_err=100)
     assert failing.returncode == 7
+
+
+def test_output_exactly_at_the_cap_passes_and_one_byte_over_never_becomes_success():
+    import sys
+    exact = ap._ssh_run([sys.executable, "-c", "import sys\nsys.stdout.write('a' * 100)"], timeout=20, max_out=100, max_err=100)
+    assert len(exact.stdout) == 100
+    with pytest.raises(ValueError, match="lab_ssh_output_exceeded"):
+        ap._ssh_run([sys.executable, "-c", "import sys\nsys.stdout.write('a' * 101)"], timeout=20, max_out=100, max_err=100)
+    with pytest.raises(ValueError, match="lab_ssh_output_exceeded"):
+        ap._ssh_run([sys.executable, "-c", "import sys\nsys.stderr.write('e' * 101)"], timeout=20, max_out=100, max_err=100)
+
+
+def test_a_child_that_exits_just_after_the_deadline_is_not_a_success():
+    import sys
+    with pytest.raises(subprocess.TimeoutExpired):
+        ap._ssh_run([sys.executable, "-c", "import time\ntime.sleep(5)"], timeout=1, max_out=100, max_err=100)
