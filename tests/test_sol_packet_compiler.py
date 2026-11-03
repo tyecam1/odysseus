@@ -1178,3 +1178,57 @@ def test_aa1_an_item_with_an_identity_still_reuses_and_a_changed_identity_does_n
 def test_aa1_shared_context_must_be_a_str(bad):
     with pytest.raises(ValueError, match="shared_context must be a str"):
         spc.compile_packet([make("a")], "p", bad, ())
+
+
+# ---------- independent review round 12 (gpt-6.1-sol) ----------
+
+def test_bb1_one_items_model_visible_text_does_not_depend_on_another_items_raw_role():
+    roles = {"alpha": "reviewer", "beta": "reviewer"}
+    policy = replace(POLICY, role_equivalence=roles)
+    question = 'Return PASS if the envelope top-level role equals "alpha"; otherwise return REVISE.'
+    b = make("b", role_required="beta", question=question, allowed_verdicts=("PASS", "REVISE"),
+             candidate_options=("PASS", "REVISE"))
+    a_alpha, a_beta = make("a", role_required="alpha"), make("a", role_required="beta")
+    assert spc.admit([a_alpha, b], policy, pairs("a", "b"), NOW, 600.0).outcome == spc.BATCH    # equivalent roles batch
+    assert spc.admit([a_beta, b], policy, pairs("a", "b"), NOW, 600.0).outcome == spc.BATCH
+
+    def section(group):
+        body = json.loads(spc.compile_packet(group, "p", "ctx", ())[spc.compile_packet(group, "p", "ctx", ()).index("\n{\n") + 1:])
+        return next(i for i in body["items"] if i["decision_id"] == "b"), body
+
+    section_one, envelope_one = section([a_alpha, b])
+    section_two, envelope_two = section([a_beta, b])
+    assert section_one == section_two, "b's own entry must not change when only a's role changes"
+    assert "role" not in envelope_one and "role" not in envelope_two, "no batch-level role: it would be a's raw role shown to b"
+    assert section_one["role"] == "beta"
+    assert spc.needs_new_call(b, spc.manifest_hash(b)).outcome == spc.REUSE      # and b's identity really covers what it sees
+
+
+def test_bb1_each_item_shows_exactly_its_own_hashed_role():
+    a, b = make("a", role_required="alpha"), make("b", role_required="beta")
+    packet = spc.compile_packet([a, b], "p", "c", ())
+    body = json.loads(packet[packet.index("\n{\n") + 1:])
+    assert [(i["decision_id"], i["role"]) for i in body["items"]] == [("a", "alpha"), ("b", "beta")]
+    assert spc.manifest_hash(a) != spc.manifest_hash(replace(a, role_required="beta"))
+
+
+def test_bb2_a_clock_whose_snapshot_fails_is_refused_at_the_boundary():
+    class Stateful(tzinfo):
+        calls = 0
+
+        def utcoffset(self, dt):
+            Stateful.calls += 1
+            return (None, timedelta(0), timedelta(hours=10))[min(Stateful.calls - 1, 2)]
+
+        def dst(self, dt):
+            return None
+
+        def tzname(self, dt):
+            return "s"
+    noon = datetime(2026, 11, 3, 12, tzinfo=Stateful())
+    a, b = make("a", deadline="2026-11-03T12:01:00Z"), make("b", deadline="2026-11-03T12:01:00Z")
+    verdict = spc.admit([a, b], POLICY, pairs("a", "b"), noon, 120.0)
+    assert verdict.outcome == spc.NEEDS_PREPARATION and verdict.reason == "now_not_timezone_aware"
+    Stateful.calls = 0
+    groups = spc.plan([a, b], POLICY, pairs("a", "b"), noon, 120.0)
+    assert all(g.decision.outcome != spc.BATCH for g in groups)

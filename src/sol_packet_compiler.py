@@ -143,6 +143,9 @@ def _offset(moment):
         return None
 
 
+_UNUSABLE_CLOCK = object()   # stands for "the clock could not be snapshotted": never a datetime, never read
+
+
 def _snapshot(moment) -> Optional[datetime]:
     """An immutable fixed-offset copy of an exact, timezone-aware datetime, or None.
 
@@ -334,7 +337,10 @@ def admit(group: Sequence, policy: Policy, certificates: Iterable,
           now: datetime, wait_seconds: Optional[float]) -> Decision:
     """Public boundary: any unexpected failure while examining untrusted input refuses (fail closed)."""
     try:
-        return _admit(group, policy, certificates, _snapshot(now) or now, wait_seconds)
+        clock = _snapshot(now)
+        if clock is None:
+            return Decision(NEEDS_PREPARATION, "now_not_timezone_aware")
+        return _admit(group, policy, certificates, clock, wait_seconds)
     except Exception:
         return Decision(NEEDS_PREPARATION, "input_not_processable")
 
@@ -470,7 +476,10 @@ def plan(items: Sequence, policy: Policy, certificates: Iterable,
         return [Group((entry,) if type(entry) is Item else (), Decision(NEEDS_PREPARATION, "input_not_processable"))
                 for entry in kept] + [Group((), Decision(NEEDS_PREPARATION, "items_not_iterable"))]
     try:
-        return _plan(kept, policy, certificates, _snapshot(now) or now, wait_seconds)
+        clock = _snapshot(now)
+        # an unusable clock is replaced by an inert sentinel: _plan then reports every item with the reason and the
+        # original (possibly stateful) object is never read again
+        return _plan(kept, policy, certificates, clock if clock is not None else _UNUSABLE_CLOCK, wait_seconds)
     except Exception:           # keep every input visible rather than erasing the plan
         return [Group((entry,) if type(entry) is Item else (), Decision(NEEDS_PREPARATION, "input_not_processable"))
                 for entry in kept]
@@ -555,7 +564,10 @@ def compile_packet(group: Sequence, packet_id: str, shared_context: str, global_
     """The structured request: shared context and constraints once, then each item whole.
 
     `packet_id` is administrative (the caller uses it to correlate the result) and is deliberately NOT shown to
-    the model: anything the model can see must be part of the reuse identity, and a packet id is not.
+    the model: anything the model can see must be part of the reuse identity, and a packet id is not. For the same
+    reason each item carries its OWN role (admission only requires roles to be equivalent, so a batch-level role
+    would be one item's raw role shown to all); the batch-level class and protocol are equal across a batch by
+    admission, so they are equal to every item's own hashed value.
 
     Everything variable is carried as JSON data (escaped strings, arrays), so delimiters or newlines
     inside a question, option or pointer can never forge a boundary, and every semantic field the
@@ -570,10 +582,11 @@ def compile_packet(group: Sequence, packet_id: str, shared_context: str, global_
     first = group[0]
     envelope = {
         "class": first.packet_class, "protocol": first.protocol,
-        "role": first.role_required, "global_constraints": list(global_constraints),
+        "global_constraints": list(global_constraints),
         "shared_context": shared_context,
         "items": [{
-            "decision_id": item.decision_id, "parent_task": item.parent_task, "decision_type": item.decision_type,
+            "decision_id": item.decision_id, "role": item.role_required, "parent_task": item.parent_task,
+            "decision_type": item.decision_type,
             "consequence": item.consequence, "question_id": item.question_id, "question": item.question,
             "evidence_pointers": list(item.evidence_pointers), "candidate_options": list(item.candidate_options),
             "open_judgment": item.open_judgment, "acceptance_criteria": list(item.acceptance_criteria),
