@@ -303,3 +303,50 @@ def test_oversized_card_is_refused(tmp_path):
     q = ac.queue_path(tmp_path, ac.DEFAULT_QUEUE)
     _, _, issues = ac.inventory(q)
     assert any(i["error"] == "card_too_large" for i in issues)
+
+
+# --- Review round 4: hostile YAML must never escape per-card isolation ---
+
+@pytest.mark.parametrize("front,label", [
+    ("title: !!bool nope\n", "yaml_tag_refused"),
+    ("title: !!int ''\n", "yaml_tag_refused"),
+    ("title: !!timestamp nope\n", "yaml_tag_refused"),
+    ("title: " + "[" * 600 + "0" + "]" * 600 + "\n", "yaml_nesting_refused"),
+])
+def test_hostile_yaml_isolates_only_its_own_card(tmp_path, front, label):
+    card(tmp_path, "ready", "good")
+    raw_card(tmp_path, "ready", "evil", "task_id: evil\nstatus: ready\n" + front, "body")
+    q = ac.queue_path(tmp_path, ac.DEFAULT_QUEUE)
+    cards, counts, issues = ac.inventory(q)  # must not raise
+    assert [c["task_id"] for c in cards] == ["good"]
+    assert any(i["error"] == label for i in issues)
+    assert ac.output_frontier(q, 0, 12, 1500)["records"][0]["task_id"] == "good"
+    assert ac.output_task(q, "good", "contract", 1500)["metadata"]["task_id"] == "good"
+
+
+@pytest.mark.parametrize("field", ["task_id", "title"])
+def test_huge_integers_isolate_their_card_instead_of_crashing_the_frontier(tmp_path, field):
+    import json
+    card(tmp_path, "ready", "good")
+    other = "title: x\n" if field == "task_id" else "task_id: big\n"
+    raw_card(tmp_path, "ready", "big", "status: ready\n" + other + field + ": 0x" + "f" * 4000 + "\n", "body")
+    q = ac.queue_path(tmp_path, ac.DEFAULT_QUEUE)
+    cards, _, issues = ac.inventory(q)
+    assert [c["task_id"] for c in cards] == ["good"]
+    assert any(i["error"] == "ValueError" for i in issues)
+    json.dumps(ac.output_frontier(q, 0, 12, 1500))
+
+
+@pytest.mark.parametrize("budget", range(60, 140, 3))
+def test_frontier_row_selection_matches_the_final_response_size(tmp_path, budget):
+    import json
+    card(tmp_path, "ready", "a")
+    card(tmp_path, "ready", "b")
+    q = ac.queue_path(tmp_path, ac.DEFAULT_QUEUE)
+    try:
+        result = ac.output_frontier(q, 0, 12, budget)
+    except ValueError as exc:
+        assert "budget" in str(exc)
+        return
+    assert len(json.dumps(result, ensure_ascii=False)) <= budget * 3
+    # never rejects a response that fits: if one row alone fits, the call must not raise

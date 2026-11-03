@@ -28,6 +28,8 @@ MAX_CARD_BYTES = 512_000
 MAX_FIELD_CHARS = 1000
 MAX_ITEMS = 100
 MAX_DEPTH = 3
+MAX_PARSE_DEPTH = 8
+MAX_INT_BITS = 64
 SAFE_SUMMARY = ("task_id", "title", "status", "priority", "risk_level",
                 "approval_required", "verification_route", "repo", "execution_host")
 SAFE_CONTRACT = SAFE_SUMMARY + ("task_type", "execution_mode", "executor",
@@ -172,13 +174,26 @@ def read_card(queue: Path, bucket: str, name: str) -> str:
 
 
 def _load_header(header: str) -> dict:
+    # Pre-screen the (iterative) event stream so nothing hostile ever reaches the recursive,
+    # exception-happy constructor: no aliases/anchors (expansion), no explicit tags (`!!int ''`
+    # and friends raise non-YAML errors), and bounded collection depth (RecursionError).
+    depth = 0
     try:
         for event in yaml.parse(header):
-            # Aliases can expand a few hundred bytes into megabytes; cards never need them.
             if isinstance(event, yaml.AliasEvent) or getattr(event, "anchor", None):
                 raise Refused("yaml_alias_refused")
+            if getattr(event, "tag", None) is not None:
+                raise Refused("yaml_tag_refused")
+            if isinstance(event, (yaml.MappingStartEvent, yaml.SequenceStartEvent)):
+                depth += 1
+                if depth > MAX_PARSE_DEPTH:
+                    raise Refused("yaml_nesting_refused")
+            elif isinstance(event, (yaml.MappingEndEvent, yaml.SequenceEndEvent)):
+                depth -= 1
         value = yaml.safe_load(header)
-    except yaml.YAMLError as exc:
+    except Refused:
+        raise
+    except Exception as exc:  # constructor failures are not all YAMLError; a bad card must stay one bad card
         raise ValueError("invalid YAML frontmatter") from exc
     if not isinstance(value, dict):
         raise ValueError("frontmatter must be a mapping")
@@ -203,7 +218,11 @@ def split_card(text: str) -> tuple[dict, str]:
 
 def clean_value(value, depth: int = 0):
     """Bounded, JSON-safe copy of one frontmatter value; unsupported shapes isolate the card."""
-    if value is None or isinstance(value, (bool, int)):
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        if value.bit_length() > MAX_INT_BITS:  # huge ints break str()/json.dumps (4300-digit limit)
+            raise ValueError("integer too large")
         return value
     if isinstance(value, float):
         return value if math.isfinite(value) else str(value)
@@ -260,10 +279,11 @@ def inventory(queue: Path) -> tuple[list[dict], dict, list[dict]]:
                     errors.append({"file": name, "error": "directory_status_mismatch"})
                 row = safe(meta, SAFE_SUMMARY)
                 row["file"] = status + "/" + name
+                json.dumps(row, ensure_ascii=False)  # a card that cannot be serialised is one bad card
                 cards.append(row)
             except Refused as exc:
                 errors.append({"file": name, "error": exc.label})
-            except (OSError, ValueError) as exc:
+            except (OSError, ValueError, TypeError) as exc:
                 errors.append({"file": name, "error": type(exc).__name__})
     cards.sort(key=lambda row: (STATUSES.index(row.get("status")) if row.get("status") in STATUSES else 9,
                                 PRIORITY.get(str(row.get("priority", "")).lower(), 9),
@@ -273,21 +293,24 @@ def inventory(queue: Path) -> tuple[list[dict], dict, list[dict]]:
 
 def output_frontier(queue: Path, offset: int, limit: int, budget: int) -> dict:
     cards, counts, errors = inventory(queue)
+
+    def shape(records: list[dict]) -> dict:
+        # The exact response that would be returned for these records; rows are admitted
+        # against THIS shape, so selection and the final size check can never disagree.
+        return {"stage": "L0-frontmatter-only", "counts": counts, "total": len(cards),
+                "offset": offset, "records": records,
+                "next_offset": offset + len(records) if offset + len(records) < len(cards) else None,
+                "warnings": errors[:5],
+                "note": "No task body, memory, source files or history was loaded. Metadata is not execution authorisation."}
+
     visible = []
     for row in cards[offset:offset + limit]:
-        candidate = {"stage": "L0-frontmatter-only", "counts": counts, "total": len(cards),
-                     "offset": offset, "records": visible + [row], "warnings": errors[:5],
-                     "note": "Unranked metadata candidates, not approved/eligible work. Confirm live dependencies and authority."}
-        if len(json.dumps(candidate, ensure_ascii=False)) > budget * 3:
+        if len(json.dumps(shape(visible + [row]), ensure_ascii=False)) > budget * 3:
             break
         visible.append(row)
     if not visible and offset < len(cards):
         raise ValueError("frontier row exceeds context budget; increase --max-tokens")
-    result = {"stage": "L0-frontmatter-only", "counts": counts, "total": len(cards),
-              "offset": offset, "records": visible,
-              "next_offset": offset + len(visible) if offset + len(visible) < len(cards) else None,
-              "warnings": errors[:5],
-              "note": "No task body, memory, source files or history was loaded. Metadata is not execution authorisation."}
+    result = shape(visible)
     if len(json.dumps(result, ensure_ascii=False)) > budget * 3:
         raise ValueError("frontier metadata exceeds context budget; increase --max-tokens")
     return result
