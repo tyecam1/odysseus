@@ -258,19 +258,35 @@ def test_date_valued_title_does_not_break_the_portfolio(tmp_path, monkeypatch):
 GOOD_RECORD = {"ref": "misumi:inbox/m.md", "repo_id": "misumi", "bucket": "inbox", "title": "t", "eligible": "unverified"}
 
 
-def _remote_frontier(records, **extra):
-    # A producer-consistent envelope: every owner available, totals equal to what the records show.
-    counts = {repo: {"total": 0, "buckets": {}} for repo in ("odysseus", "misumi", "obsidian-phd")}
-    for row in records:
-        if (isinstance(row, dict) and isinstance(row.get("repo_id"), str) and row["repo_id"] in counts
-                and isinstance(row.get("bucket"), str)):
-            entry = counts[row["repo_id"]]
-            entry["total"] += 1
-            entry["buckets"][row["bucket"]] = entry["buckets"].get(row["bucket"], 0) + 1
-    base = {"stage": "L0-three-repository-frontier", "scope_complete": True,
-            "counts": counts, "unavailable": {}, "records": records}
+def _producer_envelope(records, totals=None, unavailable=None, offset=0, **extra):
+    """What frontier() itself would emit: complete bucket sets, derived pagination, every required key."""
+    repos = ("odysseus", "misumi", "obsidian-phd")
+    unavailable = unavailable or {}
+    totals = dict(totals or {})
+    counts, taken = {}, {}
+    for repo in repos:
+        if repo in unavailable:
+            continue
+        buckets = {name: 0 for name in ap.LAYOUT[repo][1]}
+        n = 0
+        for row in records:
+            if isinstance(row, dict) and row.get("repo_id") == repo and row.get("bucket") in buckets:
+                buckets[row["bucket"]] += 1
+                n += 1
+        total = max(totals.get(repo, n), n)
+        buckets[ap.LAYOUT[repo][1][0]] += total - n        # unseen records live in the owner's first bucket
+        counts[repo] = {"total": total, "buckets": buckets}
+        taken[repo] = n
+    following = {repo: offset + n for repo, n in taken.items() if offset + n < counts[repo]["total"]}
+    base = {"stage": "L0-three-repository-frontier", "scope_complete": not unavailable, "counts": counts,
+            "unavailable": unavailable, "offset_per_repo": offset, "records": records,
+            "next_offset_per_repo": following, "warnings": [], "note": "n"}
     base.update(extra)
     return base
+
+
+def _remote_frontier(records, **extra):
+    return _producer_envelope(records, **extra)
 
 
 def _ask_remote(monkeypatch, remote):
@@ -523,11 +539,9 @@ def test_pagination_counts_and_envelope_fields_are_validated(monkeypatch, extra)
 
 
 def test_a_well_formed_full_remote_envelope_is_accepted(monkeypatch):
-    remote = _remote_frontier([_rec(1), _rec(2)], scope_complete=False, offset_per_repo=0,
-                              next_offset_per_repo={"misumi": 2}, warnings=["note"],
-                              counts={"odysseus": {"total": 0, "buckets": {}},
-                                      "misumi": {"total": 5, "buckets": {"inbox": 5}}},
-                              unavailable={"obsidian-phd": "root_environment_unset"}, note="n")
+    remote = _producer_envelope([_rec(1), _rec(2)], totals={"misumi": 5},
+                                unavailable={"obsidian-phd": "root_environment_unset"}, warnings=["note"])
+    assert remote["next_offset_per_repo"] == {"misumi": 2} and remote["scope_complete"] is False
     assert _ask(monkeypatch, remote)["transport"] == "registered_lab_ssh"
 
 
@@ -581,7 +595,7 @@ def test_main_rejects_an_unknown_ref_before_trying_ssh(tmp_path, monkeypatch):
     ({"title": "ok", "evil_field": "x"}, "malformed"), ([], "malformed"), ({"title": {"a": {"b": {"c": {"d": 1}}}}}, "malformed"),
 ])
 def test_remote_task_metadata_is_validated(monkeypatch, bad_meta, reason):
-    remote = {"stage": "L1-selected-contract", "ref": "misumi:inbox/m.md", "metadata": bad_meta, "body": "b", "truncated": False}
+    remote = {"stage": "L1-selected-contract", "ref": "misumi:inbox/m.md", "metadata": bad_meta, "body": "b", "truncated": False, "note": "n"}
     args = argparse.Namespace(stage="task", ref="misumi:inbox/m.md", tier="contract", max_tokens=2500, offset=0, per_repo=4)
     with pytest.raises(ValueError, match=reason):
         _ask(monkeypatch, remote, args=args)
@@ -609,12 +623,8 @@ def test_ssh_runs_under_a_kernel_write_cap_when_prlimit_exists(monkeypatch):
 
 def _envelope(records, totals, unavailable=None, **extra):
     """An envelope with explicit per-owner totals (as frontier() reports them)."""
-    counts = {repo: {"total": total, "buckets": {ap.LAYOUT[repo][1][0]: total}}
-              for repo, total in totals.items()}
-    base = {"stage": "L0-three-repository-frontier", "scope_complete": not unavailable, "counts": counts,
-            "unavailable": unavailable or {}, "records": records}
-    base.update(extra)
-    return base
+    return _producer_envelope(records, totals=totals, unavailable=unavailable,
+                              offset=extra.pop("offset_per_repo", 0), **extra)
 
 
 ALL = ("odysseus", "misumi", "obsidian-phd")
@@ -671,15 +681,17 @@ def test_counts_must_name_real_buckets_and_add_up(monkeypatch):
     for env in (bad_bucket, low_sum):
         with pytest.raises(ValueError, match="malformed"):
             _ask(monkeypatch, env)
-    unreadable = _envelope([], dict.fromkeys(ALL, 0), next_offset_per_repo={"misumi": 0})
-    unreadable["counts"]["misumi"] = {"total": 1, "buckets": {"inbox": 3}}   # unreadable cards: total below bucket sum
+    unreadable = _envelope(_recs("odysseus", "ready", 1), {"odysseus": 1, "misumi": 0, "obsidian-phd": 0},
+                           next_offset_per_repo={"misumi": 0})
+    zero = {name: 0 for name in ap.LAYOUT["misumi"][1]}
+    unreadable["counts"]["misumi"] = {"total": 1, "buckets": {**zero, "inbox": 3}}   # unreadable cards: total below bucket sum
     assert _ask(monkeypatch, unreadable)["transport"]
 
 
 def test_remote_contract_body_cannot_exceed_the_producer_cap(monkeypatch):
     args = argparse.Namespace(stage="task", ref="misumi:inbox/m.md", tier="contract", max_tokens=16000, offset=0, per_repo=4)
     over = {"stage": "L1-selected-contract", "ref": "misumi:inbox/m.md", "metadata": {"title": "t"},
-            "body": "b" * 16001, "truncated": False}
+            "body": "b" * 16001, "truncated": False, "note": "n"}
     with pytest.raises(ValueError, match="malformed"):
         _ask(monkeypatch, over, args=args)
     full = dict(over, stage="L3-explicit-full-task")
@@ -711,3 +723,108 @@ def test_a_posix_runtime_without_waitid_fails_closed(monkeypatch):
     monkeypatch.delattr(ap.os, "waitid", raising=False)
     with pytest.raises(ValueError, match="lab_ssh_unsupported_platform"):
         ap._ssh_run([sys.executable, "-c", "print(1)"], timeout=5, max_out=100, max_err=100)
+
+
+# --- Review round 8: transport budget, remote encoding, advancing pages, bucket truth, required keys ---
+
+def test_task_responses_still_fit_after_the_ssh_transport_field_is_added(tmp_path, monkeypatch):
+    ody, misumi, _ = estate(tmp_path, monkeypatch)
+    roots, _ = ap.resolve_roots(ody, {})
+    (misumi / "agent-tasks" / "inbox" / "big.md").write_text(
+        "---\ntitle: big\nstatus: open\n---\n" + "x" * 90000, encoding="utf-8")
+    for tier, budget in (("contract", 1200), ("contract", 2500), ("full", 1200), ("full", 4000)):
+        produced = ap.selected(roots, "misumi:inbox/big.md", tier, budget)
+        produced["transport"] = "registered_lab_ssh"       # exactly what the SSH path appends
+        assert len(json.dumps(produced, ensure_ascii=False)) <= budget * 3, (tier, budget)
+
+
+def test_frontier_leaves_room_for_the_ssh_transport_field(tmp_path, monkeypatch):
+    ody, _, _ = estate(tmp_path, monkeypatch)
+    for i in range(12):
+        make_card(ody, "automation/review/agent-tasks/ready/f%02d.md" % i, "F" * 60 + str(i), raw_status="ready")
+    roots, missing = ap.resolve_roots(ody, {})
+    for budget in range(420, 900, 11):
+        try:
+            result = ap.frontier(roots, missing, 0, 6, budget)
+        except ValueError:
+            continue
+        result["transport"] = "registered_lab_ssh"
+        assert len(json.dumps(result, ensure_ascii=False)) <= budget * 3, budget
+
+
+@pytest.mark.parametrize("where", ["body", "note", "warning"])
+def test_remote_lone_surrogates_are_rejected_not_allowed_to_crash_output(monkeypatch, where):
+    args = argparse.Namespace(stage="task", ref="misumi:inbox/m.md", tier="contract", max_tokens=2500, offset=0, per_repo=4)
+    task = {"stage": "L1-selected-contract", "ref": "misumi:inbox/m.md", "metadata": {"title": "t"},
+            "body": "b", "truncated": False, "note": "n"}
+    if where == "body":
+        raw = json.dumps(task).replace('"b"', '"\\ud800"')
+        with pytest.raises(ValueError, match="malformed"):
+            _ask(monkeypatch, None, args=args, raw=raw)
+    elif where == "note":
+        raw = json.dumps(_remote_frontier([_rec(1)])).replace('"n"', '"\\ud800"')
+        with pytest.raises(ValueError, match="malformed"):
+            _ask(monkeypatch, None, raw=raw)
+    else:
+        remote = _remote_frontier([_rec(1)], warnings=["w"])
+        raw = json.dumps(remote).replace('"w"', '"\\udfff"')
+        with pytest.raises(ValueError, match="malformed"):
+            _ask(monkeypatch, None, raw=raw)
+
+
+def test_an_empty_page_that_could_never_advance_is_rejected(monkeypatch):
+    stuck = _envelope([], {"odysseus": 1, "misumi": 0, "obsidian-phd": 0}, next_offset_per_repo={"odysseus": 0})
+    with pytest.raises(ValueError, match="malformed"):
+        _ask(monkeypatch, stuck)
+    # nothing left past the offset: an empty page is the legitimate end
+    done = _envelope([], {"odysseus": 2, "misumi": 0, "obsidian-phd": 0}, offset_per_repo=5, next_offset_per_repo={})
+    assert _ask(monkeypatch, done, args=_frontier_args(offset=5))["transport"]
+    assert _ask(monkeypatch, _envelope([], dict.fromkeys(ALL, 0)))["transport"]
+
+
+def test_records_must_agree_with_the_bucket_counts_the_response_declares(monkeypatch):
+    env = _envelope(_recs("odysseus", "ready", 1), {"odysseus": 1, "misumi": 0, "obsidian-phd": 0})
+    env["counts"]["odysseus"]["buckets"] = {"ready": 0, "inbox": 1, "blocked": 0}   # says inbox, shows ready
+    with pytest.raises(ValueError, match="malformed"):
+        _ask(monkeypatch, env)
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda e: e["counts"]["misumi"].pop("buckets"),
+    lambda e: e["counts"]["misumi"]["buckets"].pop("odysseus"),
+    lambda e: e["counts"]["misumi"].update(body="LEAKED TASK BODY"),
+    lambda e: e["counts"]["misumi"]["buckets"].update(extra=0),
+])
+def test_count_entries_must_have_exactly_the_producer_keys(monkeypatch, mutate):
+    env = _envelope(_recs("odysseus", "ready", 1), {"odysseus": 1, "misumi": 0, "obsidian-phd": 0})
+    mutate(env)
+    with pytest.raises(ValueError, match="malformed"):
+        _ask(monkeypatch, env)
+
+
+@pytest.mark.parametrize("key", ["offset_per_repo", "next_offset_per_repo", "warnings", "note", "counts", "unavailable"])
+def test_producer_required_frontier_keys_cannot_be_omitted(monkeypatch, key):
+    env = _envelope(_recs("odysseus", "ready", 1), {"odysseus": 1, "misumi": 0, "obsidian-phd": 0})
+    del env[key]
+    with pytest.raises(ValueError, match="malformed"):
+        _ask(monkeypatch, env)
+
+
+def test_task_note_is_required_and_pagination_must_be_real_integers(monkeypatch):
+    args = argparse.Namespace(stage="task", ref="misumi:inbox/m.md", tier="contract", max_tokens=2500, offset=0, per_repo=4)
+    task = {"stage": "L1-selected-contract", "ref": "misumi:inbox/m.md", "metadata": {"title": "t"},
+            "body": "b", "truncated": False}
+    with pytest.raises(ValueError, match="malformed"):
+        _ask(monkeypatch, task, args=args)                      # note missing
+    assert _ask(monkeypatch, dict(task, note="n"), args=args)["ref"] == "misumi:inbox/m.md"
+    for off in (0.0, False):
+        with pytest.raises(ValueError, match="malformed"):
+            _ask(monkeypatch, _envelope(_recs("odysseus", "ready", 1), {"odysseus": 1, "misumi": 0, "obsidian-phd": 0},
+                                        offset_per_repo=off) | {"offset_per_repo": off})
+    env = _envelope(_recs("odysseus", "ready", 1), {"odysseus": 3, "misumi": 0, "obsidian-phd": 0})
+    env["next_offset_per_repo"] = {"odysseus": 1.0}
+    with pytest.raises(ValueError, match="malformed"):
+        _ask(monkeypatch, env)
+    env["next_offset_per_repo"] = {"odysseus": True}
+    with pytest.raises(ValueError, match="malformed"):
+        _ask(monkeypatch, env)

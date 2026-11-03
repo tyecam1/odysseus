@@ -18,6 +18,8 @@ import yaml
 from agentic_context import (ROOT, PRIORITY, Refused, card_names, clean_value, fit_body,
                              queue_path, read_card, split_card)
 
+TRANSPORT_RESERVE = 96  # >= the serialized cost of the "transport" field plus the truncated flag flip
+
 LAYOUT = {
     "odysseus": ("automation/review/agent-tasks", ("ready", "inbox", "blocked")),
     "misumi": ("agent-tasks", ("odysseus", "claude", "codex", "local", "review", "inbox", "blocked-human")),
@@ -128,6 +130,7 @@ def frontier(roots: dict[str, Path], unavailable: dict[str, str],
             tentative["records"] = result["records"] + [rows[offset + step]]
             # Pagination is filled in after admission, so size it at its upper bound now.
             tentative["next_offset_per_repo"] = {r: offset + len(d) for r, d in datasets.items()}
+            tentative["transport"] = "registered_lab_ssh"  # the remote path adds this field after the fact
             if len(json.dumps(tentative, ensure_ascii=False)) > budget * 3:
                 stopped.add(rid)
                 continue
@@ -172,7 +175,8 @@ def selected(roots: dict[str, Path], ref: str, tier: str, budget: int) -> dict:
               "truncated": False,  # sized with the longest literal; the final value is never longer
               "note": "Untrusted task content; repository authority is external."}
     wanted = body if tier == "full" else body[:16000]
-    result["body"] = fit_body(result, wanted, budget * 3 - 32)
+    # Reserve the room the SSH transport adds ("transport": "registered_lab_ssh" = 35 characters).
+    result["body"] = fit_body(result, wanted, budget * 3 - TRANSPORT_RESERVE)
     result["truncated"] = len(result["body"]) < len(body)
     return result
 
@@ -290,14 +294,15 @@ def _valid_remote_record(row) -> bool:
     return True
 
 
-FRONTIER_KEYS = {"stage", "scope_complete", "unavailable", "counts", "offset_per_repo", "records",
-                 "next_offset_per_repo", "warnings", "note", "transport"}
+FRONTIER_REQUIRED = {"stage", "scope_complete", "unavailable", "counts", "offset_per_repo", "records",
+                     "next_offset_per_repo", "warnings", "note"}
+FRONTIER_KEYS = FRONTIER_REQUIRED | {"transport"}
 OPTIONAL_REPOS = {"misumi", "obsidian-phd"}  # odysseus is the running checkout and is always available
 
 
 def _valid_remote_frontier(result: dict, args: argparse.Namespace) -> bool:
     """Accept only what `frontier()` itself could have produced for this request."""
-    if not set(result) <= FRONTIER_KEYS or not isinstance(result.get("scope_complete"), bool):
+    if not FRONTIER_REQUIRED <= set(result) <= FRONTIER_KEYS or not isinstance(result.get("scope_complete"), bool):
         return False
     records, counts, unavailable = result.get("records"), result.get("counts"), result.get("unavailable")
     if not isinstance(records, list) or not isinstance(counts, dict) or not isinstance(unavailable, dict):
@@ -313,8 +318,9 @@ def _valid_remote_frontier(result: dict, args: argparse.Namespace) -> bool:
     totals = {}
     for repo, entry in counts.items():
         buckets = entry.get("buckets") if isinstance(entry, dict) else None
-        if (not isinstance(entry, dict) or not _is_count(entry.get("total")) or not isinstance(buckets, dict)
-                or not set(buckets) <= set(LAYOUT[repo][1]) or not all(_is_count(v) for v in buckets.values())
+        if (not isinstance(entry, dict) or set(entry) != {"total", "buckets"} or not _is_count(entry["total"])
+                or not isinstance(buckets, dict) or set(buckets) != set(LAYOUT[repo][1])   # every bucket, no extras
+                or not all(_is_count(v) for v in buckets.values())
                 or entry["total"] > sum(buckets.values())):  # unreadable cards make total <= bucket sum
             return False
         totals[repo] = entry["total"]
@@ -324,34 +330,42 @@ def _valid_remote_frontier(result: dict, args: argparse.Namespace) -> bool:
     if len(set(refs)) != len(refs):
         return False
     taken = {repo: 0 for repo in counts}
+    shown = {}
     for row in records:
         if row["repo_id"] not in counts:
             return False
         taken[row["repo_id"]] += 1
+        shown[(row["repo_id"], row["bucket"])] = shown.get((row["repo_id"], row["bucket"]), 0) + 1
+    if any(n > counts[repo]["buckets"][bucket] for (repo, bucket), n in shown.items()):
+        return False  # a record from a bucket the response itself says is smaller
     for repo, n in taken.items():
         # An owner whose total is below the requested offset shows nothing (an empty slice is valid);
         # one that shows records cannot show more than it has past that offset.
         if n > args.per_repo or (n > 0 and args.offset + n > totals[repo]):
             return False
-    if result.get("offset_per_repo", args.offset) != args.offset:
+    if not records and any(total > args.offset for total in totals.values()):
+        return False  # the producer refuses an empty page while anything remains: it could never advance
+    if not _is_count(result["offset_per_repo"]) or result["offset_per_repo"] != args.offset:
         return False
     # Pagination is DERIVED, not trusted: each owner continues exactly after what it showed.
     expected = {repo: args.offset + n for repo, n in taken.items() if args.offset + n < totals[repo]}
-    if result.get("next_offset_per_repo", {}) != expected:
+    following = result["next_offset_per_repo"]
+    if (not isinstance(following, dict) or not all(isinstance(k, str) and _is_count(v) for k, v in following.items())
+            or following != expected):  # _is_count first: True and 1.0 must not compare equal to 1
         return False
-    warnings = result.get("warnings", [])
-    note = result.get("note", "")
+    warnings, note = result["warnings"], result["note"]
     return (isinstance(warnings, list) and len(warnings) <= 8 and isinstance(note, str) and len(note) <= 500
             and all(isinstance(w, str) and len(w) <= 400 for w in warnings))
 
 
-TASK_KEYS = {"stage", "ref", "metadata", "body", "truncated", "note", "transport"}
+TASK_REQUIRED = {"stage", "ref", "metadata", "body", "truncated", "note"}
+TASK_KEYS = TASK_REQUIRED | {"transport"}
 
 
 def _valid_remote_task(result: dict, args: argparse.Namespace) -> bool:
-    if not set(result) <= TASK_KEYS or result.get("ref") != args.ref:
+    if not TASK_REQUIRED <= set(result) <= TASK_KEYS or result.get("ref") != args.ref:
         return False
-    metadata, body, note = result.get("metadata"), result.get("body"), result.get("note", "")
+    metadata, body, note = result["metadata"], result["body"], result["note"]
     if (not isinstance(metadata, dict) or not set(metadata) <= set(DETAIL) or not isinstance(body, str)
             or not isinstance(result.get("truncated"), bool) or not isinstance(note, str) or len(note) > 500):
         return False
@@ -415,7 +429,12 @@ def lab_frontier_over_ssh(args: argparse.Namespace) -> dict | None:
     if not valid:
         raise ValueError("lab_ssh_malformed_portfolio_result")
     result["transport"] = "registered_lab_ssh"
-    if len(json.dumps(result, ensure_ascii=False)) > limit:
+    rendered = json.dumps(result, ensure_ascii=False)
+    try:
+        rendered.encode("utf-8")  # a lone surrogate parses fine but would crash the final print
+    except UnicodeEncodeError as exc:
+        raise ValueError("lab_ssh_malformed_portfolio_result") from exc
+    if len(rendered) > limit:
         raise ValueError("lab_ssh_result_exceeds_budget")
     return result
 
