@@ -339,3 +339,88 @@ def test_ssh_runner_returns_normal_output_and_enforces_timeout():
     assert done.returncode == 0 and done.stdout.strip() == "ok"
     with pytest.raises(subprocess.TimeoutExpired):
         ap._ssh_run([sys.executable, "-c", "import time; time.sleep(30)"], timeout=1, max_out=1000, max_err=1000)
+
+
+# --- Review round 3: the bounded runner under adversarial children ---
+
+def _alive(pid):
+    import os
+    if os.name == "nt":
+        out = subprocess.run(["tasklist", "/FI", "PID eq %d" % pid], capture_output=True, text=True).stdout
+        return str(pid) in out
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def _wait_dead(pid, seconds=10):
+    import time
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        if not _alive(pid):
+            return True
+        time.sleep(0.1)
+    return not _alive(pid)
+
+
+def test_overflow_is_detected_promptly_even_when_the_child_then_stalls():
+    import sys
+    import time
+    stall = [sys.executable, "-c", "import sys,time\nsys.stdout.write('xx'); sys.stdout.flush(); time.sleep(60)"]
+    started = time.monotonic()
+    with pytest.raises(ValueError, match="lab_ssh_output_exceeded"):
+        ap._ssh_run(stall, timeout=30, max_out=1, max_err=1000)
+    assert time.monotonic() - started < 15
+
+
+def test_timeout_leaves_no_surviving_child(tmp_path):
+    import sys
+    pidfile = tmp_path / "pid"
+    code = "import os,time\nopen(%r,'w').write(str(os.getpid()))\ntime.sleep(60)" % str(pidfile)
+    with pytest.raises(subprocess.TimeoutExpired):
+        ap._ssh_run([sys.executable, "-c", code], timeout=2, max_out=1000, max_err=1000)
+    assert _wait_dead(int(pidfile.read_text())), "the timed-out child must be killed and reaped"
+
+
+def test_interrupt_during_the_wait_still_kills_the_child(tmp_path, monkeypatch):
+    import sys
+    pidfile = tmp_path / "pid"
+    code = "import os,time\nopen(%r,'w').write(str(os.getpid()))\ntime.sleep(60)" % str(pidfile)
+    real_sleep = ap.time.sleep
+    calls = {"n": 0}
+
+    def interrupting(seconds):
+        calls["n"] += 1
+        if calls["n"] > 60 and pidfile.exists():
+            raise KeyboardInterrupt
+        real_sleep(seconds)
+    monkeypatch.setattr(ap.time, "sleep", interrupting)
+    with pytest.raises(KeyboardInterrupt):
+        ap._ssh_run([sys.executable, "-c", code], timeout=30, max_out=1000, max_err=1000)
+    assert _wait_dead(int(pidfile.read_text()))
+
+
+def test_a_descendant_holding_the_pipe_is_not_reported_as_success(tmp_path):
+    import os
+    import sys
+    if os.name == "nt":
+        pytest.skip("process-group semantics are POSIX")
+    pidfile = tmp_path / "grandchild"
+    code = ("import subprocess,sys\n"
+            "g = subprocess.Popen([sys.executable,'-c','import os,time\\nopen(%r,\"w\").write(str(os.getpid()))\\ntime.sleep(60)'], "
+            "stdout=sys.stdout, stderr=sys.stderr)\n"
+            "sys.stdout.write('hi'); sys.stdout.flush()\n" % str(pidfile))
+    with pytest.raises(subprocess.TimeoutExpired):
+        ap._ssh_run([sys.executable, "-c", code], timeout=3, max_out=1000, max_err=1000)
+    assert pidfile.exists() and _wait_dead(int(pidfile.read_text())), "the whole process group must be killed"
+
+
+def test_normal_runs_still_return_complete_output():
+    import sys
+    done = ap._ssh_run([sys.executable, "-c", "import sys\nsys.stdout.write('o'*5000); sys.stderr.write('e'*50)"],
+                       timeout=20, max_out=10000, max_err=100)
+    assert done.returncode == 0 and len(done.stdout) == 5000 and len(done.stderr) == 50
+    failing = ap._ssh_run([sys.executable, "-c", "import sys\nsys.exit(7)"], timeout=20, max_out=100, max_err=100)
+    assert failing.returncode == 7

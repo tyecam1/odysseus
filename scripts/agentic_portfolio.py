@@ -6,8 +6,10 @@ import argparse
 import json
 import os
 import shlex
+import signal
 import subprocess
 import threading
+import time
 from pathlib import Path, PurePosixPath
 
 import yaml
@@ -167,41 +169,80 @@ def selected(roots: dict[str, Path], ref: str, tier: str, budget: int) -> dict:
 
 
 
+def _kill_tree(proc: subprocess.Popen, pipe_open: bool = False) -> None:
+    """Kill the child and, where the platform allows, everything in its process group.
+
+    A reaped child's pid may be recycled, so the group is only signalled while the child is
+    unreaped or a pipe is still open (an open pipe means some group member is still alive).
+    """
+    if proc.returncode is not None and not pipe_open:
+        return
+    try:
+        if os.name != "nt":
+            os.killpg(proc.pid, signal.SIGKILL)  # the child leads its own session (see _ssh_run)
+        else:
+            proc.kill()
+    except (OSError, ProcessLookupError):
+        pass
+
+
 def _ssh_run(cmd: list[str], timeout: float, max_out: int, max_err: int) -> subprocess.CompletedProcess:
-    """Run `cmd`, reading both streams under hard caps; kill it the moment either is exceeded."""
-    proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    """Run `cmd` reading both streams under hard caps.
+
+    Overflow kills the child at once (short `read1` reads, one byte past the cap is enough
+    to know); success requires the child to have exited AND both readers to have reached
+    EOF within the deadline, so a descendant still holding a pipe cannot masquerade as a
+    clean finish; any exit path, including interrupts, kills and reaps the process group.
+    """
+    deadline = time.monotonic() + timeout
+    proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            start_new_session=(os.name != "nt"))
     buffers = {"out": bytearray(), "err": bytearray()}
     exceeded = threading.Event()
 
     def pump(stream, key: str, cap: int) -> None:
         while True:
-            chunk = stream.read(65536)
+            chunk = stream.read1(min(65536, cap - len(buffers[key]) + 1))
             if not chunk:
                 return
             if len(buffers[key]) + len(chunk) > cap:
                 exceeded.set()
-                proc.kill()
+                _kill_tree(proc, pipe_open=True)
                 return
             buffers[key].extend(chunk)
 
     threads = [threading.Thread(target=pump, args=(proc.stdout, "out", max_out), daemon=True),
                threading.Thread(target=pump, args=(proc.stderr, "err", max_err), daemon=True)]
-    for thread in threads:
-        thread.start()
     try:
-        proc.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.wait()
+        for thread in threads:
+            thread.start()
+        while proc.poll() is None and not exceeded.is_set():
+            if time.monotonic() >= deadline:
+                raise subprocess.TimeoutExpired(cmd, timeout)
+            time.sleep(0.02)
+        for thread in threads:
+            thread.join(max(0.0, deadline - time.monotonic()))
+        if exceeded.is_set():
+            raise ValueError("lab_ssh_output_exceeded")
+        if any(thread.is_alive() for thread in threads):
+            raise subprocess.TimeoutExpired(cmd, timeout)  # a descendant still holds a pipe open
+        return subprocess.CompletedProcess(cmd, proc.wait(timeout=5),
+                                           buffers["out"].decode("utf-8", "replace"),
+                                           buffers["err"].decode("utf-8", "replace"))
+    except BaseException:
+        _kill_tree(proc, pipe_open=any(thread.is_alive() for thread in threads))
         raise
     finally:
-        for thread in threads:
-            thread.join(5)
-    if exceeded.is_set():
-        raise ValueError("lab_ssh_output_exceeded")
-    return subprocess.CompletedProcess(cmd, proc.returncode,
-                                       buffers["out"].decode("utf-8", "replace"),
-                                       buffers["err"].decode("utf-8", "replace"))
+        _kill_tree(proc, pipe_open=any(thread.is_alive() for thread in threads))
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+        for stream in (proc.stdout, proc.stderr):
+            try:
+                stream.close()
+            except OSError:
+                pass
 
 
 def _valid_remote_record(row) -> bool:
