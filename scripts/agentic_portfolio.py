@@ -10,6 +10,7 @@ import shlex
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path, PurePosixPath
@@ -291,8 +292,11 @@ def _ssh_run(cmd: list[str], timeout: float, max_out: int, max_err: int) -> subp
                 out, err = out_file.read(max_out + 1), err_file.read(max_err + 1)
             if len(out) > max_out or len(err) > max_err:
                 raise ValueError("lab_ssh_output_exceeded")
-            return subprocess.CompletedProcess(cmd, returncode, out.decode("utf-8", "replace"),
-                                               err.decode("utf-8", "replace"))
+            try:
+                text = out.decode("utf-8")     # strict: replacement characters would silently rewrite a filename
+            except UnicodeDecodeError as exc:
+                raise ValueError("lab_ssh_invalid_encoding") from exc
+            return subprocess.CompletedProcess(cmd, returncode, text, err.decode("utf-8", "replace"))
         finally:
             if proc is not None and proc.returncode is None:
                 _kill_group(proc)
@@ -524,6 +528,13 @@ def lab_frontier_over_ssh(args: argparse.Namespace) -> dict | None:
     return result
 
 
+def _emit(payload: dict) -> None:
+    """Write the JSON as UTF-8 bytes regardless of PYTHONIOENCODING or the locale, so a reference can
+    never be re-encoded by the environment before it crosses the SSH hop."""
+    sys.stdout.buffer.write((json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"))
+    sys.stdout.buffer.flush()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("stage", choices=("frontier", "task"))
@@ -563,7 +574,7 @@ def main() -> int:
                 ssh_error = _transport_token(str(exc))
                 remote = None
             if remote is not None:
-                print(json.dumps(remote, ensure_ascii=False))
+                _emit(remote)
                 return 0
         if args.stage == "frontier":
             result = frontier(roots, missing, args.offset, args.per_repo, args.max_tokens,
@@ -574,7 +585,7 @@ def main() -> int:
             result = selected(roots, args.ref, args.tier, args.max_tokens)
     except (OSError, ValueError) as exc:
         parser.error(str(exc))
-    print(json.dumps(result, ensure_ascii=False))
+    _emit(result)
     return 0
 
 

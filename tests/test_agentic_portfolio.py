@@ -1308,3 +1308,64 @@ def test_r15_every_reference_that_is_listed_survives_the_transport_unchanged(tmp
 def test_r15_referenceable_names():
     assert ap._referenceable("fine.md") and ap._referenceable("with space é.md")
     assert not ap._referenceable("a:b.md") and not ap._referenceable("bad\udcff.md")
+
+
+# --- Review round 16: UTF-8 is enforced on output and strictly verified on receipt ----------------------------
+
+SCRIPTS = Path(ap.__file__).resolve().parent
+
+
+def _run_script(script, args, env_extra):
+    env = dict(os.environ)
+    env.update(env_extra)
+    return subprocess.run([sys.executable, str(SCRIPTS / script), *args], capture_output=True, env=env)
+
+
+def test_r16_1_the_producer_emits_utf8_even_when_the_environment_says_otherwise(tmp_path, monkeypatch):
+    ody, misumi, _ = estate(tmp_path, monkeypatch)
+    (misumi / "agent-tasks" / "inbox" / "café.md").write_text("---\ntitle: café\nstatus: open\n---\nb\n", encoding="utf-8")
+    for encoding in ("latin-1", "cp1252", "ascii", "utf-8"):
+        done = _run_script("agentic_portfolio.py", ["frontier", "--repo-root", str(ody), "--per-repo", "8"],
+                           {"PYTHONIOENCODING": encoding, "PYTHONUTF8": "0"})
+        assert done.returncode == 0, (encoding, done.stderr[:400])
+        text = done.stdout.decode("utf-8")                          # strictly valid UTF-8, never latin-1
+        assert b"caf\xc3\xa9.md" in done.stdout and "caf�" not in text
+        refs = [r["ref"] for r in json.loads(text)["records"]]
+        assert "misumi:inbox/café.md" in refs, encoding
+
+
+def test_r16_1_the_context_reader_emits_utf8_too(tmp_path):
+    folder = tmp_path / "automation" / "review" / "agent-tasks" / "ready"
+    folder.mkdir(parents=True)
+    (folder / "ü.md").write_text("---\ntask_id: ü\ntitle: café\nstatus: ready\n---\nb\n", encoding="utf-8")
+    done = _run_script("agentic_context.py", ["frontier", "--repo-root", str(tmp_path)], {"PYTHONIOENCODING": "latin-1"})
+    assert done.returncode == 0, done.stderr[:400]
+    assert "café" in done.stdout.decode("utf-8") and b"caf\xc3\xa9" in done.stdout
+
+
+def test_r16_2_non_utf8_ssh_output_is_rejected_not_silently_rewritten():
+    child = [sys.executable, "-c", "import sys\nsys.stdout.buffer.write(b'{\"x\": \"caf\\xe9\"}')"]
+    with pytest.raises(ValueError, match="lab_ssh_invalid_encoding"):
+        ap._ssh_run(child, timeout=20, max_out=1000, max_err=1000)
+
+
+def test_r16_2_valid_utf8_passes_through_unchanged_and_stderr_stays_tolerant():
+    child = [sys.executable, "-c",
+             "import sys\nsys.stdout.buffer.write('caf\\u00e9'.encode('utf-8'))\nsys.stderr.buffer.write(b'bad\\xff')"]
+    done = ap._ssh_run(child, timeout=20, max_out=1000, max_err=1000)
+    assert done.stdout == "café" and "�" in done.stderr
+
+
+def test_r16_2_an_invalid_encoding_from_the_lab_falls_back_with_a_fixed_token(tmp_path, monkeypatch, capsysbinary):
+    ody, _, _ = estate(tmp_path, monkeypatch)
+    monkeypatch.delenv("PHD_ROOT")
+    monkeypatch.setenv("AOTERU_LAB_SSH_TARGET", "lab-worker")
+    monkeypatch.setenv("AOTERU_LAB_REPO_ROOT", "/registered/lab/odysseus")
+
+    def bad_encoding(cmd, **kwargs):
+        raise ValueError("lab_ssh_invalid_encoding")
+    monkeypatch.setattr(ap, "_ssh_run", bad_encoding)
+    monkeypatch.setattr(sys, "argv", ["agentic_portfolio.py", "frontier", "--repo-root", str(ody)])
+    assert ap.main() == 0
+    output = json.loads(capsysbinary.readouterr().out.decode("utf-8"))
+    assert output["warnings"][-1] == "lab_ssh_invalid_encoding" and output["scope_complete"] is False

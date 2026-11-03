@@ -15,6 +15,7 @@ import json
 import math
 import os
 import stat
+import sys
 from pathlib import Path
 
 import yaml
@@ -379,7 +380,8 @@ def main() -> int:
     except (OSError, ValueError) as exc:
         parser.error(str(exc))
     text = json.dumps(payload, ensure_ascii=False, indent=None)
-    print(text)
+    sys.stdout.buffer.write((text + "\n").encode("utf-8"))   # UTF-8 whatever PYTHONIOENCODING or the locale says
+    sys.stdout.buffer.flush()
     return 0
 
 
