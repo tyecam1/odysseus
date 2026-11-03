@@ -1104,6 +1104,8 @@ def _random_estate(tmp_path, monkeypatch, rng, label):
                 if priority is not None:
                     front["priority"] = priority
                 (root / rel / bucket / name).write_text("---\n" + yaml.safe_dump(front) + "---\nbody\n", encoding="utf-8")
+            if os.name != "nt" and rng.random() < 0.2:                      # a raw non-UTF-8 filename (POSIX only)
+                _write_raw(root / rel / bucket, b"raw%d\xff.md" % rng.randint(0, 9))
     return ody
 
 
@@ -1261,3 +1263,48 @@ def test_r14_every_listed_reference_round_trips_through_parse_ref_and_selected(t
     for row in rows:
         assert ap.parse_ref(row["ref"])[0] == "misumi"
         assert ap.selected(roots, row["ref"], "contract", 1200)["ref"] == row["ref"]
+
+
+# --- Review round 15: raw non-UTF-8 filenames must never become references that the transport would rewrite ---
+
+def _write_raw(directory, raw_name, text=b"---\ntitle: raw\nstatus: open\n---\nbody\n"):
+    with open(os.fsencode(str(directory)) + b"/" + raw_name, "wb") as handle:
+        handle.write(text)
+
+
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="raw non-UTF-8 filenames are a POSIX concern")
+@pytest.mark.parametrize("raw_name", [b"bad\xff.md", b"\xc3\x28.md", b"lone\xed\xa0\x80.md", b"tail\x80.md"])
+def test_r15_a_non_utf8_filename_is_never_listed_and_the_output_stays_encodable(tmp_path, monkeypatch, raw_name):
+    ody, misumi, _ = estate(tmp_path, monkeypatch)
+    _write_raw(misumi / "agent-tasks" / "inbox", raw_name)
+    rows, counts, warnings = ap.collect("misumi", misumi)
+    assert "misumi:inbox:unsupported_filename" in warnings
+    for row in rows:
+        row["ref"].encode("utf-8")                                   # strictly encodable
+        assert ap.parse_ref(row["ref"])
+    roots, missing = ap.resolve_roots(ody, {})
+    produced = ap.frontier(roots, missing, 0, 4, 2600)
+    text = json.dumps(produced, ensure_ascii=False)
+    text.encode("utf-8")                                              # the final print cannot fail
+    assert "\ufffd" not in text and not any(0xD800 <= ord(c) <= 0xDFFF for c in text)
+    args = argparse.Namespace(stage="frontier", ref=None, tier="contract", max_tokens=2600, offset=0, per_repo=4)
+    assert ap._valid_remote_frontier(json.loads(text), args)
+
+
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="raw non-UTF-8 filenames are a POSIX concern")
+def test_r15_every_reference_that_is_listed_survives_the_transport_unchanged(tmp_path, monkeypatch):
+    ody, misumi, _ = estate(tmp_path, monkeypatch)
+    inbox = misumi / "agent-tasks" / "inbox"
+    _write_raw(inbox, b"bad\xff.md")
+    (inbox / "ordinary.md").write_text("---\ntitle: ok\nstatus: open\n---\nb\n", encoding="utf-8")
+    roots, missing = ap.resolve_roots(ody, {})
+    produced = ap.frontier(roots, missing, 0, 4, 2600)
+    wire = json.dumps(produced, ensure_ascii=False).encode("utf-8").decode("utf-8", "replace")   # what _ssh_run does
+    assert json.loads(wire) == json.loads(json.dumps(produced, ensure_ascii=False))
+    for row in json.loads(wire)["records"]:
+        assert ap.selected(roots, row["ref"], "contract", 1200)["ref"] == row["ref"]
+
+
+def test_r15_referenceable_names():
+    assert ap._referenceable("fine.md") and ap._referenceable("with space é.md")
+    assert not ap._referenceable("a:b.md") and not ap._referenceable("bad\udcff.md")

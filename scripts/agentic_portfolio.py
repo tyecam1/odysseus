@@ -75,6 +75,19 @@ def resolve_roots(odysseus_root: Path, overrides: dict[str, Path | None]) -> tup
     return roots, unavailable
 
 
+def _referenceable(name: str) -> bool:
+    """A filename the receiver, parse_ref() and selected() can all use unchanged: no colon (the reference
+    separator) and strictly encodable as UTF-8, so raw non-UTF-8 bytes (which Python surfaces as lone
+    surrogates) are not carried into a reference that the SSH hop would silently rewrite."""
+    if ":" in name:
+        return False
+    try:
+        name.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 def collect(repo_id: str, root: Path) -> tuple[list[dict], dict, list[str]]:
     qrel, buckets = LAYOUT[repo_id]
     queue = queue_path(root, Path(qrel))
@@ -92,7 +105,7 @@ def collect(repo_id: str, root: Path) -> tuple[list[dict], dict, list[str]]:
             continue
         counts[bucket] = len(names)
         for name in names:
-            if ":" in name:                      # cannot be referenced as repo:bucket/file.md
+            if not _referenceable(name):         # cannot be referenced as repo:bucket/file.md and survive transport
                 warnings.append(repo_id + ":" + bucket + ":unsupported_filename")
                 continue
             try:
