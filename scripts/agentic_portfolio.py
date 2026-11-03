@@ -8,11 +8,16 @@ import os
 import shlex
 import signal
 import subprocess
-import threading
+import tempfile
 import time
 from pathlib import Path, PurePosixPath
 
 import yaml
+
+try:
+    import resource
+except ImportError:  # Windows
+    resource = None
 
 from agentic_context import (ROOT, PRIORITY, Refused, card_names, clean_value, fit_body,
                              queue_path, read_card, split_card)
@@ -169,80 +174,72 @@ def selected(roots: dict[str, Path], ref: str, tier: str, budget: int) -> dict:
 
 
 
-def _kill_tree(proc: subprocess.Popen, pipe_open: bool = False) -> None:
-    """Kill the child and, where the platform allows, everything in its process group.
+def _exited_unreaped(proc: subprocess.Popen) -> bool:
+    """True once the child has exited, WITHOUT reaping it, so its pid/pgid stay reserved
+    (a zombie leader keeps the group id from being recycled) until we have signalled the group."""
+    if hasattr(os, "waitid"):
+        try:
+            return os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
+        except ChildProcessError:
+            return True
+    return proc.poll() is not None
 
-    A reaped child's pid may be recycled, so the group is only signalled while the child is
-    unreaped or a pipe is still open (an open pipe means some group member is still alive).
-    """
-    if proc.returncode is not None and not pipe_open:
-        return
+
+def _kill_group(proc: subprocess.Popen) -> None:
+    """Best-effort kill of the child and its same-session descendants; callers hold the child
+    unreaped. A descendant that deliberately starts a new session is out of scope."""
     try:
         if os.name != "nt":
-            os.killpg(proc.pid, signal.SIGKILL)  # the child leads its own session (see _ssh_run)
+            os.killpg(proc.pid, signal.SIGKILL)
         else:
-            proc.kill()
-    except (OSError, ProcessLookupError):
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
         pass
 
 
 def _ssh_run(cmd: list[str], timeout: float, max_out: int, max_err: int) -> subprocess.CompletedProcess:
-    """Run `cmd` reading both streams under hard caps.
+    """Run `cmd` with its output captured to private temp FILES, not pipes.
 
-    Overflow kills the child at once (short `read1` reads, one byte past the cap is enough
-    to know); success requires the child to have exited AND both readers to have reached
-    EOF within the deadline, so a descendant still holding a pipe cannot masquerade as a
-    clean finish; any exit path, including interrupts, kills and reaps the process group.
+    No reader threads, no EOF ambiguity and nothing a lingering descendant can block on. Sizes
+    are polled and enforced (and on POSIX also capped by RLIMIT_FSIZE); overflow or the deadline
+    kills the process group, and every exit path kills and reaps it. Contract: returns or raises
+    within `timeout` plus a few seconds of teardown; a child stuck in uninterruptible kernel
+    sleep cannot be forced and is reported, not waited on forever.
     """
     deadline = time.monotonic() + timeout
-    proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            start_new_session=(os.name != "nt"))
-    buffers = {"out": bytearray(), "err": bytearray()}
-    exceeded = threading.Event()
-
-    def pump(stream, key: str, cap: int) -> None:
-        while True:
-            chunk = stream.read1(min(65536, cap - len(buffers[key]) + 1))
-            if not chunk:
-                return
-            if len(buffers[key]) + len(chunk) > cap:
-                exceeded.set()
-                _kill_tree(proc, pipe_open=True)
-                return
-            buffers[key].extend(chunk)
-
-    threads = [threading.Thread(target=pump, args=(proc.stdout, "out", max_out), daemon=True),
-               threading.Thread(target=pump, args=(proc.stderr, "err", max_err), daemon=True)]
-    try:
-        for thread in threads:
-            thread.start()
-        while proc.poll() is None and not exceeded.is_set():
-            if time.monotonic() >= deadline:
-                raise subprocess.TimeoutExpired(cmd, timeout)
-            time.sleep(0.02)
-        for thread in threads:
-            thread.join(max(0.0, deadline - time.monotonic()))
-        if exceeded.is_set():
-            raise ValueError("lab_ssh_output_exceeded")
-        if any(thread.is_alive() for thread in threads):
-            raise subprocess.TimeoutExpired(cmd, timeout)  # a descendant still holds a pipe open
-        return subprocess.CompletedProcess(cmd, proc.wait(timeout=5),
-                                           buffers["out"].decode("utf-8", "replace"),
-                                           buffers["err"].decode("utf-8", "replace"))
-    except BaseException:
-        _kill_tree(proc, pipe_open=any(thread.is_alive() for thread in threads))
-        raise
-    finally:
-        _kill_tree(proc, pipe_open=any(thread.is_alive() for thread in threads))
+    proc = None
+    with tempfile.TemporaryDirectory(prefix="agentic-ssh-") as tmp:
+        out_path, err_path = os.path.join(tmp, "out"), os.path.join(tmp, "err")
         try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            pass
-        for stream in (proc.stdout, proc.stderr):
-            try:
-                stream.close()
-            except OSError:
-                pass
+            with open(out_path, "wb") as out_file, open(err_path, "wb") as err_file:
+                extra = {}
+                if os.name != "nt":
+                    limit = max(max_out, max_err) + (1 << 20)
+                    extra = {"start_new_session": True,
+                             "preexec_fn": lambda: resource.setrlimit(resource.RLIMIT_FSIZE, (limit, limit))}
+                proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=out_file, stderr=err_file, **extra)
+                while not _exited_unreaped(proc):
+                    if os.path.getsize(out_path) > max_out or os.path.getsize(err_path) > max_err:
+                        raise ValueError("lab_ssh_output_exceeded")
+                    if time.monotonic() >= deadline:
+                        raise subprocess.TimeoutExpired(cmd, timeout)
+                    time.sleep(0.02)
+                _kill_group(proc)  # the leader is an unreaped zombie here: the group id is still ours
+                returncode = proc.wait(timeout=5)
+            if os.path.getsize(out_path) > max_out or os.path.getsize(err_path) > max_err:
+                raise ValueError("lab_ssh_output_exceeded")
+            if time.monotonic() > deadline:
+                raise subprocess.TimeoutExpired(cmd, timeout)
+            with open(out_path, "rb") as out_file, open(err_path, "rb") as err_file:
+                return subprocess.CompletedProcess(cmd, returncode, out_file.read(max_out).decode("utf-8", "replace"),
+                                                   err_file.read(max_err).decode("utf-8", "replace"))
+        finally:
+            if proc is not None and proc.returncode is None:
+                _kill_group(proc)
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    pass
 
 
 def _valid_remote_record(row) -> bool:

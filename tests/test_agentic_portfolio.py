@@ -389,11 +389,12 @@ def test_interrupt_during_the_wait_still_kills_the_child(tmp_path, monkeypatch):
     pidfile = tmp_path / "pid"
     code = "import os,time\nopen(%r,'w').write(str(os.getpid()))\ntime.sleep(60)" % str(pidfile)
     real_sleep = ap.time.sleep
-    calls = {"n": 0}
+    calls = {"n": 0, "fired": False}
 
     def interrupting(seconds):
         calls["n"] += 1
-        if calls["n"] > 60 and pidfile.exists():
+        if calls["n"] > 60 and pidfile.exists() and not calls["fired"]:
+            calls["fired"] = True  # exactly once: time.sleep is the shared global, not only ap's
             raise KeyboardInterrupt
         real_sleep(seconds)
     monkeypatch.setattr(ap.time, "sleep", interrupting)
@@ -402,19 +403,41 @@ def test_interrupt_during_the_wait_still_kills_the_child(tmp_path, monkeypatch):
     assert _wait_dead(int(pidfile.read_text()))
 
 
-def test_a_descendant_holding_the_pipe_is_not_reported_as_success(tmp_path):
+def test_a_leftover_descendant_is_killed_and_cannot_block_or_fake_anything(tmp_path):
     import os
     import sys
+    import time
     if os.name == "nt":
         pytest.skip("process-group semantics are POSIX")
-    pidfile = tmp_path / "grandchild"
-    code = ("import subprocess,sys\n"
-            "g = subprocess.Popen([sys.executable,'-c','import os,time\\nopen(%r,\"w\").write(str(os.getpid()))\\ntime.sleep(60)'], "
-            "stdout=sys.stdout, stderr=sys.stderr)\n"
-            "sys.stdout.write('hi'); sys.stdout.flush()\n" % str(pidfile))
-    with pytest.raises(subprocess.TimeoutExpired):
-        ap._ssh_run([sys.executable, "-c", code], timeout=3, max_out=1000, max_err=1000)
+    pidfile = tmp_path / "grandchild.pid"
+    grandchild = tmp_path / "grandchild.py"
+    grandchild.write_text("import os, sys, time\nopen(sys.argv[1], 'w').write(str(os.getpid()))\ntime.sleep(60)\n")
+    parent = tmp_path / "parent.py"
+    parent.write_text("import os, subprocess, sys, time\n"
+                      "subprocess.Popen([sys.executable, sys.argv[1], sys.argv[2]], stdout=sys.stdout, stderr=sys.stderr)\n"
+                      "for _ in range(200):\n"
+                      "    if os.path.exists(sys.argv[2]) and open(sys.argv[2]).read():\n"
+                      "        break\n"
+                      "    time.sleep(0.05)\n"
+                      "sys.stdout.write('hi'); sys.stdout.flush()\n")
+    started = time.monotonic()
+    done = ap._ssh_run([sys.executable, str(parent), str(grandchild), str(pidfile)],
+                       timeout=20, max_out=1000, max_err=1000)
+    assert done.returncode == 0 and done.stdout == "hi"
+    assert time.monotonic() - started < 15, "a descendant holding the output must not delay the result"
+    for _ in range(50):
+        if pidfile.exists() and pidfile.read_text():
+            break
+        time.sleep(0.1)
     assert pidfile.exists() and _wait_dead(int(pidfile.read_text())), "the whole process group must be killed"
+
+
+def test_output_is_captured_in_private_files_and_cleaned_up(tmp_path, monkeypatch):
+    import sys
+    import tempfile
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    ap._ssh_run([sys.executable, "-c", "print('x')"], timeout=20, max_out=100, max_err=100)
+    assert list(tmp_path.iterdir()) == [], "temporary capture directory must be removed"
 
 
 def test_normal_runs_still_return_complete_output():
