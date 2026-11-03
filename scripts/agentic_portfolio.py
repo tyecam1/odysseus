@@ -211,6 +211,13 @@ def _kill_group(proc: subprocess.Popen) -> None:
         pass
 
 
+def _transport_token(message: str) -> str:
+    """A fixed machine token for a fallback failure. Remote-influenced text never enters the JSON
+    warning channel; a diagnostic, if shown at all, is labelled untrusted and kept on stderr."""
+    found = re.match(r"(lab_ssh_[a-z_]+)", message)
+    return found.group(1) if found else "lab_ssh_failure"
+
+
 def _printable(text: str, limit: int = 250) -> str:
     """Remote text made safe for a terminal: printable ASCII only, so no escape sequences survive."""
     return "".join(c if " " <= c <= "~" else "?" for c in text.strip())[:limit]
@@ -356,6 +363,17 @@ def _valid_remote_frontier(result: dict, args: argparse.Namespace) -> bool:
         shown[(row["repo_id"], row["bucket"])] = shown.get((row["repo_id"], row["bucket"]), 0) + 1
     if any(n > counts[repo]["buckets"][bucket] for (repo, bucket), n in shown.items()):
         return False  # a record from a bucket the response itself says is smaller
+    for repo in counts:
+        shown_here = [row for row in records if row["repo_id"] == repo]
+        buckets = counts[repo]["buckets"]
+        unreadable = sum(buckets.values()) - totals[repo]      # at most this many cards were skipped
+        for index, row in enumerate(shown_here):
+            rank = RANK[row["bucket"]]
+            before = sum(c for b, c in buckets.items() if RANK[b] < rank)     # rows that must rank earlier
+            through = sum(c for b, c in buckets.items() if RANK[b] <= rank)   # rows that could rank no later
+            position = args.offset + index                      # this record's index in the owner's ranked rows
+            if position < before - unreadable or position > through - 1:
+                return False                                   # cannot occupy that place in a real page
     for repo, n in taken.items():
         # An owner whose total is below the requested offset shows nothing (an empty slice is valid);
         # one that shows records cannot show more than it has past that offset.
@@ -411,9 +429,9 @@ def lab_frontier_over_ssh(args: argparse.Namespace) -> dict | None:
     if args.stage == "task":
         parse_ref(args.ref)  # a malformed or unknown reference never leaves this machine
     if target.startswith("-") or any(c.isspace() for c in target):
-        raise ValueError("invalid lab SSH target")
+        raise ValueError("lab_ssh_target_invalid")
     if not PurePosixPath(remote_root).is_absolute():  # the lab is POSIX whatever this host is
-        raise ValueError("lab remote checkout path must be absolute")
+        raise ValueError("lab_ssh_root_not_absolute")
     task_args = ["task", "--ref", args.ref, "--tier", args.tier] if args.stage == "task" else [
         "frontier", "--offset", str(args.offset), "--per-repo", str(args.per_repo)
     ]
@@ -433,7 +451,7 @@ def lab_frontier_over_ssh(args: argparse.Namespace) -> dict | None:
         raise ValueError("lab_ssh_transport_failure: " + type(exc).__name__) from exc
     if proc.returncode != 0:
         raise ValueError("lab_ssh_execution_failed: exit=" + str(proc.returncode) +
-                         "; " + _printable(proc.stderr))
+                         "; remote stderr (untrusted): " + _printable(proc.stderr))
     try:
         result = json.loads(proc.stdout)
     except (ValueError, RecursionError) as exc:  # JSONDecodeError is a ValueError; deep nesting recurses
@@ -494,7 +512,7 @@ def main() -> int:
             except ValueError as exc:
                 if args.stage == "task":
                     raise
-                ssh_error = str(exc)
+                ssh_error = _transport_token(str(exc))
                 remote = None
             if remote is not None:
                 print(json.dumps(remote, ensure_ascii=False))
