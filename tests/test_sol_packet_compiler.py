@@ -726,7 +726,8 @@ def test_s6_unhashable_ids_raising_generators_and_flapping_clocks_refuse_instead
         def tzname(self, dt):
             return "x"
     flapping_now = datetime(2026, 11, 3, 12, 0, tzinfo=Flapping())
-    assert spc.admit([a, b], POLICY, pairs("a", "b"), flapping_now, 600.0).outcome != spc.BATCH
+    # the clock is read ONCE into a fixed snapshot, so a tzinfo that fails later cannot change the answer
+    assert spc.admit([a, b], POLICY, pairs("a", "b"), flapping_now, 600.0) == spc.admit([a, b], POLICY, pairs("a", "b"), NOW, 600.0)
     assert isinstance(spc.needs_new_call(bad, None), spc.Decision)
 
 
@@ -917,3 +918,97 @@ def test_u2_recovery_after_a_forced_failure_keeps_every_item_from_a_one_shot_ite
     groups = spc.plan(iter([a, b, None]), POLICY, (), NOW, 0.0)
     assert [g.items for g in groups] == [(a,), (b,), ()]
     assert all(g.decision.reason == "input_not_processable" for g in groups)
+
+
+# ---------- independent review round 6 (gpt-6.1-sol): one regression per finding ----------
+
+def test_v1_a_stateful_tzinfo_cannot_manufacture_deadline_margin():
+    class FlipTZ(tzinfo):
+        reads = 0
+
+        def utcoffset(self, dt):
+            self.reads += 1
+            return timedelta(hours=0 if self.reads == 1 else 1)
+
+        def dst(self, dt):
+            return timedelta(0)
+
+        def tzname(self, dt):
+            return "flip"
+
+    expired = "2026-11-03T11:30:00Z"
+    a, b = make("a", deadline=expired), make("b", deadline=expired)
+    flipping = datetime(2026, 11, 3, 12, tzinfo=FlipTZ())
+    verdict = spc.admit([a, b], POLICY, pairs("a", "b"), flipping, 1.0)
+    assert verdict.outcome != spc.BATCH and verdict.reason == "wait_not_justified"   # judged against UTC, once
+    stable = datetime(2026, 11, 3, 12, tzinfo=timezone.utc)
+    assert verdict == spc.admit([a, b], POLICY, pairs("a", "b"), stable, 1.0)
+    fresh = datetime(2026, 11, 3, 12, tzinfo=FlipTZ())     # a stateful tzinfo is per-call: use a fresh one
+    assert spc.plan([a, b], POLICY, pairs("a", "b"), fresh, 1.0)[0].decision.outcome != spc.BATCH
+
+
+def test_v1_the_snapshot_is_exact_and_normalises_the_offset():
+    plus_two = datetime(2026, 11, 3, 14, 0, 0, 123456, tzinfo=timezone(timedelta(hours=2)))
+    snap = spc._snapshot(plus_two)
+    assert snap == plus_two and snap.utcoffset() == timedelta(hours=2) and snap.microsecond == 123456
+    assert spc._snapshot(datetime(2026, 11, 3)) is None and spc._snapshot("2026-11-03") is None
+    class Raising(tzinfo):
+        def utcoffset(self, dt):
+            raise RuntimeError("boom")
+    assert spc._snapshot(datetime(2026, 11, 3, tzinfo=Raising())) is None
+
+
+def test_v2_a_failure_part_way_through_an_iterator_keeps_what_was_consumed():
+    a, b = make("a"), make("b")
+
+    def broken():
+        yield a
+        yield b
+        raise RuntimeError("read failed")
+    groups = spc.plan(broken(), POLICY, pairs("a", "b"), NOW, 0.0)
+    assert [g.items for g in groups] == [(a,), (b,), ()]
+    assert [g.decision.reason for g in groups] == ["input_not_processable", "input_not_processable", "items_not_iterable"]
+    assert all(g.decision.outcome == spc.NEEDS_PREPARATION for g in groups)
+
+
+def test_v3_singleton_capacity_includes_wrapper_overhead_and_headroom():
+    policy = replace(POLICY, wrapper_overhead_tokens=20, max_input_tokens=100, headroom_tokens=0, max_output_tokens=1000)
+    item = make("a", context_tokens=40, unique_tokens=50)                     # 90 raw, 110 with the envelope
+    groups = spc.plan([item], policy, [], NOW, 0.0)
+    assert groups[0].decision.outcome == spc.NEEDS_PREPARATION and groups[0].decision.reason == "singleton_exceeds_capacity"
+    fits = spc.plan([make("a", context_tokens=40, unique_tokens=40)], policy, [], NOW, 0.0)   # 100 exactly
+    assert fits[0].decision.outcome == spc.SINGLE
+    roomy = replace(policy, max_input_tokens=130, headroom_tokens=15)                       # 40+50+20+15 = 125 <= 130
+    assert spc.plan([item], roomy, [], NOW, 0.0)[0].decision.outcome == spc.SINGLE
+    tight = replace(policy, max_input_tokens=124, headroom_tokens=15)                       # 125 > 124
+    assert spc.plan([item], tight, [], NOW, 0.0)[0].decision.outcome == spc.NEEDS_PREPARATION
+
+
+def test_v3_singleton_output_capacity_includes_headroom():
+    policy = replace(POLICY, max_output_tokens=100, headroom_tokens=50, max_input_tokens=60000)
+    over = make("a", output_reserve_tokens=60)                                  # 60 + 50 headroom > 100
+    assert spc.plan([over], policy, [], NOW, 0.0)[0].decision.reason == "singleton_exceeds_capacity"
+    assert spc.plan([make("a", output_reserve_tokens=50)], policy, [], NOW, 0.0)[0].decision.outcome == spc.SINGLE
+
+
+def test_v4_the_evidence_version_must_be_a_real_nonblank_string():
+    class FlakyVersion:
+        reads = 0
+
+        def __str__(self):
+            self.reads += 1
+            if self.reads % 2 == 0:
+                raise ValueError("changed answer")
+            return "v1"
+
+    for version in (FlakyVersion(), 5, "", "   ", b"v1", ["v1"], True):
+        verdict = admit([make("a"), make("b")], policy=replace(POLICY, evidence_version=version))
+        assert verdict.outcome == spc.NEEDS_PREPARATION and verdict.reason == "policy_invalid", version
+
+
+def test_v4_thresholds_must_name_their_evidence():
+    verdict = admit([make("a"), make("b")], policy=replace(POLICY, evidence_version=None))
+    assert verdict.outcome == spc.SINGLE and verdict.reason == "policy_unversioned"
+    assert admit([make("a"), make("b")]).detail == ("policy=test-v1",)
+    first = admit([make("a"), make("b")])
+    assert first == admit([make("a"), make("b")]), "the same input must give the same decision every time"

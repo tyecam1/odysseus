@@ -143,6 +143,23 @@ def _offset(moment):
         return None
 
 
+def _snapshot(moment) -> Optional[datetime]:
+    """An immutable fixed-offset copy of an exact, timezone-aware datetime, or None.
+
+    The tzinfo is asked for its offset exactly ONCE; everything downstream uses the copy, so a stateful
+    tzinfo cannot report different offsets to validation and to deadline arithmetic."""
+    if type(moment) is not datetime:
+        return None
+    try:
+        offset = moment.utcoffset()
+        if offset is None:
+            return None
+        return datetime(moment.year, moment.month, moment.day, moment.hour, moment.minute, moment.second,
+                        moment.microsecond, tzinfo=timezone(offset))
+    except Exception:       # a hostile tzinfo, or an offset outside +/-24h, refuses
+        return None
+
+
 def parse_deadline(value) -> Optional[datetime]:
     """None for NO_DEADLINE; ValueError for a missing, malformed or timezone-less value."""
     if type(value) is str and value == NO_DEADLINE:
@@ -224,6 +241,8 @@ def _policy_problems(policy) -> list:
             problems.append("invalid_" + name)
     if policy.max_wait_seconds is not None and not _is_number(policy.max_wait_seconds, 0):
         problems.append("invalid_max_wait_seconds")
+    if policy.evidence_version is not None and not _is_text(policy.evidence_version):
+        problems.append("invalid_evidence_version")   # exact nonblank str: never coerce an arbitrary object
     if type(policy.role_equivalence) is not dict or not all(
             _is_text(k) and _is_text(v) for k, v in policy.role_equivalence.items()):
         problems.append("invalid_role_equivalence")
@@ -266,7 +285,7 @@ def _certificate_set(certificates) -> Optional[set]:
 
 def _global_problem(policy, certificates, now, wait_seconds) -> Optional[tuple]:
     """Caller-argument problems shared by admit and plan: (reason, detail) or None."""
-    if type(now) is not datetime or _offset(now) is None:   # exact class: subclasses can override arithmetic
+    if _snapshot(now) is None:   # exact datetime with a stable, valid offset
         return ("now_not_timezone_aware", ())
     problems = _policy_problems(policy)
     if problems:
@@ -307,7 +326,7 @@ def admit(group: Sequence, policy: Policy, certificates: Iterable,
           now: datetime, wait_seconds: Optional[float]) -> Decision:
     """Public boundary: any unexpected failure while examining untrusted input refuses (fail closed)."""
     try:
-        return _admit(group, policy, certificates, now, wait_seconds)
+        return _admit(group, policy, certificates, _snapshot(now) or now, wait_seconds)
     except Exception:
         return Decision(NEEDS_PREPARATION, "input_not_processable")
 
@@ -355,6 +374,8 @@ def _admit(group: Sequence, policy: Policy, certificates: Iterable,
         return _single("context_reuse_unestablished", "no identical versioned context manifest")
     if policy.min_net_reuse_tokens is None or policy.wrapper_overhead_tokens is None:
         return _single("context_reuse_unestablished", "no evidence-backed reuse threshold")
+    if policy.evidence_version is None:   # thresholds are meant to be evidence-backed, so they must name their evidence
+        return _single("policy_unversioned", "thresholds carry no evidence_version")
     context_tokens = items[0].context_tokens
     net_reuse = (len(items) - 1) * context_tokens - policy.wrapper_overhead_tokens
     if net_reuse <= 0 or net_reuse < policy.min_net_reuse_tokens:
@@ -407,7 +428,7 @@ def _admit(group: Sequence, policy: Policy, certificates: Iterable,
         deadline = parse_deadline(item.deadline)
         if deadline is not None and deadline - now < needed:
             return _single("wait_not_justified", "deadline_before_dispatch", item.decision_id)
-    return Decision(BATCH, "all_admission_tests_passed", ("policy=" + str(policy.evidence_version),))
+    return Decision(BATCH, "all_admission_tests_passed", ("policy=" + policy.evidence_version,))
 
 
 def _margin(wait_seconds) -> Optional[timedelta]:
@@ -433,12 +454,15 @@ def _sort_key(item: Item):
 def plan(items: Sequence, policy: Policy, certificates: Iterable,
          now: datetime, wait_seconds: Optional[float]) -> list:
     """Public boundary: an unexpected failure while examining untrusted input refuses (fail closed)."""
+    kept: list = []
     try:
-        kept = list(items)      # materialised ONCE: a one-shot iterator is consumed here and never re-read
-    except Exception:
-        return [Group((), Decision(NEEDS_PREPARATION, "items_not_iterable"))]
+        for entry in items:     # materialised ONCE, entry by entry: a one-shot iterator is never re-read
+            kept.append(entry)
+    except Exception:           # iteration failed part-way: report what was consumed, plus the failure
+        return [Group((entry,) if type(entry) is Item else (), Decision(NEEDS_PREPARATION, "input_not_processable"))
+                for entry in kept] + [Group((), Decision(NEEDS_PREPARATION, "items_not_iterable"))]
     try:
-        return _plan(kept, policy, certificates, now, wait_seconds)
+        return _plan(kept, policy, certificates, _snapshot(now) or now, wait_seconds)
     except Exception:           # keep every input visible rather than erasing the plan
         return [Group((entry,) if type(entry) is Item else (), Decision(NEEDS_PREPARATION, "input_not_processable"))
                 for entry in kept]
@@ -507,10 +531,13 @@ def _singleton_decision(item: Item, policy: Policy, refusal: Decision) -> Decisi
     """A lone item is sent alone with the recorded reason, unless it cannot safely fit at all."""
     if type(policy) is not Policy:
         return Decision(SINGLE, refusal.reason if refusal.outcome == SINGLE else "no_compatible_pending", refusal.detail)
+    overhead = (policy.wrapper_overhead_tokens if _is_int(policy.wrapper_overhead_tokens) else 0) \
+        + (policy.headroom_tokens if _is_int(policy.headroom_tokens) else 0)
+    headroom = policy.headroom_tokens if _is_int(policy.headroom_tokens) else 0
     too_big_in = (_is_int(policy.max_input_tokens) and _is_int(item.context_tokens) and _is_int(item.unique_tokens)
-                  and item.context_tokens + item.unique_tokens > policy.max_input_tokens)
+                  and item.context_tokens + item.unique_tokens + overhead > policy.max_input_tokens)
     too_big_out = (_is_int(policy.max_output_tokens) and _is_int(item.output_reserve_tokens)
-                   and item.output_reserve_tokens > policy.max_output_tokens)
+                   and item.output_reserve_tokens + headroom > policy.max_output_tokens)
     if too_big_in or too_big_out:
         return Decision(NEEDS_PREPARATION, "singleton_exceeds_capacity")
     return Decision(SINGLE, refusal.reason if refusal.outcome == SINGLE else "no_compatible_pending", refusal.detail)
