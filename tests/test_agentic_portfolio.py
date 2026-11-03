@@ -129,7 +129,10 @@ def test_lab_ssh_fallback_uses_registered_transport_without_local_clone(tmp_path
                               max_tokens=2500, offset=0, per_repo=4)
     result = ap.lab_frontier_over_ssh(args)
     assert result["scope_complete"] and result["transport"] == "registered_lab_ssh"
-    assert observed["cmd"][:3] == ["ssh", "-n", "-T"]
+    ssh_at = observed["cmd"].index("ssh")  # a kernel write cap (prlimit) may wrap the command
+    assert observed["cmd"][ssh_at:ssh_at + 3] == ["ssh", "-n", "-T"]
+    assert all(part == "ssh" or part.startswith("--fsize=") or part in ("--", observed["cmd"][0])
+               for part in observed["cmd"][:ssh_at])
     assert "BatchMode=yes" in observed["cmd"]
     assert "StrictHostKeyChecking=yes" in observed["cmd"]
     assert "--local-only" in observed["cmd"][-1]
@@ -188,7 +191,7 @@ def test_task_read_does_not_need_ssh_when_its_own_repo_is_available(tmp_path, mo
     ({"stage": "L0-three-repository-frontier", "records": [], "scope_complete": "yes"}, "malformed"),
     ({"stage": "L0-three-repository-frontier", "records": [{}] * 50, "scope_complete": True}, "malformed"),
     ({"stage": "L0-three-repository-frontier", "records": [], "scope_complete": True, "counts": {}, "unavailable": {}, "pad": "x" * 20000},
-     "oversized|exceeds_budget"),
+     "malformed"),   # unknown top-level keys are not accepted from a remote
 ])
 def test_malformed_or_overlarge_remote_frontier_is_rejected(monkeypatch, remote, reason):
     monkeypatch.setenv("AOTERU_LAB_SSH_TARGET", "lab-worker")
@@ -463,3 +466,132 @@ def test_a_child_that_exits_just_after_the_deadline_is_not_a_success():
     import sys
     with pytest.raises(subprocess.TimeoutExpired):
         ap._ssh_run([sys.executable, "-c", "import time\ntime.sleep(5)"], timeout=1, max_out=100, max_err=100)
+
+
+# --- Review round 6: remote-result schema, ref validation, write bounding ---
+
+def _frontier_args(per_repo=4, offset=0):
+    return argparse.Namespace(stage="frontier", ref=None, tier="contract", max_tokens=2500, offset=offset, per_repo=per_repo)
+
+
+def _ask(monkeypatch, remote, args=None, raw=None):
+    monkeypatch.setenv("AOTERU_LAB_SSH_TARGET", "lab-worker")
+    monkeypatch.setenv("AOTERU_LAB_REPO_ROOT", "/registered/lab/odysseus")
+    body = raw if raw is not None else json.dumps(remote)
+    monkeypatch.setattr(ap, "_ssh_run", lambda cmd, **k: subprocess.CompletedProcess(cmd, 0, body, ""))
+    return ap.lab_frontier_over_ssh(args or _frontier_args())
+
+
+def _rec(i, repo="misumi", bucket="inbox", **over):
+    row = {"ref": "%s:%s/m%d.md" % (repo, bucket, i), "repo_id": repo, "bucket": bucket, "eligible": "unverified"}
+    row.update(over)
+    return row
+
+
+@pytest.mark.parametrize("bad", [
+    {"repo_id": []}, {"repo_id": {"a": 1}}, {"bucket": None}, {"ref": 5}, {"eligible": "yes"}, {"eligible": None},
+])
+def test_non_string_or_wrong_marker_records_are_rejected_without_a_crash(monkeypatch, bad):
+    with pytest.raises(ValueError, match="malformed"):
+        _ask(monkeypatch, _remote_frontier([_rec(1, **bad)]))
+
+
+def test_remote_may_not_exceed_the_per_owner_sampling_contract(monkeypatch):
+    three = [_rec(i, repo="odysseus", bucket="ready") for i in range(3)]
+    with pytest.raises(ValueError, match="malformed"):
+        _ask(monkeypatch, _remote_frontier(three), args=_frontier_args(per_repo=1))
+    assert _ask(monkeypatch, _remote_frontier(three[:1]), args=_frontier_args(per_repo=1))["transport"]
+
+
+@pytest.mark.parametrize("extra", [
+    {"next_offset_per_repo": {"misumi": -1}}, {"next_offset_per_repo": {"evil": 4}},
+    {"next_offset_per_repo": {"misumi": "x"}}, {"offset_per_repo": 9}, {"warnings": "x"},
+    {"warnings": ["w"] * 20}, {"counts": {"misumi": {"total": "x", "buckets": {}}}},
+    {"counts": {"evil": {"total": 1, "buckets": {}}}}, {"unavailable": {"misumi": 5}},
+    {"unknown_key": 1},
+])
+def test_pagination_counts_and_envelope_fields_are_validated(monkeypatch, extra):
+    with pytest.raises(ValueError, match="malformed"):
+        _ask(monkeypatch, _remote_frontier([_rec(1)], **extra))
+
+
+def test_a_well_formed_full_remote_envelope_is_accepted(monkeypatch):
+    remote = _remote_frontier([_rec(1), _rec(2)], offset_per_repo=0,
+                              next_offset_per_repo={"misumi": 2}, warnings=["note"],
+                              counts={"misumi": {"total": 5, "buckets": {"inbox": 5}}},
+                              unavailable={"obsidian-phd": "root_environment_unset"}, note="n")
+    assert _ask(monkeypatch, remote)["transport"] == "registered_lab_ssh"
+
+
+def test_duplicate_remote_refs_are_rejected(monkeypatch):
+    with pytest.raises(ValueError, match="malformed"):
+        _ask(monkeypatch, _remote_frontier([_rec(1), _rec(1)]))
+
+
+def test_overlarge_remote_frontier_is_rejected_as_over_budget(monkeypatch):
+    long_titles = ([_rec(i, repo="odysseus", bucket="ready", title="T" * 900) for i in range(4)]
+                   + [_rec(i, repo="misumi", bucket="inbox", title="T" * 900) for i in range(4)]
+                   + [_rec(i, repo="obsidian-phd", bucket="ready", title="T" * 900) for i in range(4)])
+    with pytest.raises(ValueError, match="exceeds_budget|oversized"):
+        _ask(monkeypatch, _remote_frontier(long_titles))
+
+
+def test_deeply_nested_remote_json_is_a_controlled_failure(monkeypatch):
+    raw = "[" * 5000 + "]" * 5000
+    # Older interpreters raise RecursionError while parsing (translated to invalid_json); newer ones
+    # parse it and the wrong-shape check refuses it. Either way: a controlled ValueError, never a crash.
+    with pytest.raises(ValueError, match="lab_ssh_invalid_portfolio_json|lab_ssh_unexpected_portfolio_result"):
+        _ask(monkeypatch, None, raw=raw)
+
+
+@pytest.mark.parametrize("ref", ["unknown", "unknown:inbox/m.md", "misumi:../m.md", "misumi:inbox/sub/m.md",
+                                 "misumi:done/m.md", "misumi:inbox/.m.md", "misumi:inbox/m.txt", "a:b:c", None, 5])
+def test_unknown_or_malformed_refs_never_reach_the_remote(monkeypatch, ref):
+    monkeypatch.setenv("AOTERU_LAB_SSH_TARGET", "lab-worker")
+    monkeypatch.setenv("AOTERU_LAB_REPO_ROOT", "/registered/lab/odysseus")
+
+    def boom(*a, **k):
+        raise AssertionError("a bad reference must be rejected locally")
+    monkeypatch.setattr(ap, "_ssh_run", boom)
+    args = argparse.Namespace(stage="task", ref=ref, tier="contract", max_tokens=2500, offset=0, per_repo=4)
+    with pytest.raises(ValueError):
+        ap.lab_frontier_over_ssh(args)
+
+
+def test_main_rejects_an_unknown_ref_before_trying_ssh(tmp_path, monkeypatch):
+    ody, _, _ = estate(tmp_path, monkeypatch)
+    monkeypatch.setenv("AOTERU_LAB_SSH_TARGET", "lab-worker")
+    monkeypatch.setenv("AOTERU_LAB_REPO_ROOT", "/registered/lab/odysseus")
+    monkeypatch.setattr(ap, "_ssh_run", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no ssh")))
+    monkeypatch.setattr(sys, "argv", ["agentic_portfolio.py", "task", "--repo-root", str(ody), "--ref", "unknown"])
+    with pytest.raises(SystemExit) as caught:
+        ap.main()
+    assert caught.value.code == 2
+
+
+@pytest.mark.parametrize("bad_meta,reason", [
+    ({"title": "ok", "evil_field": "x"}, "malformed"), ([], "malformed"), ({"title": {"a": {"b": {"c": {"d": 1}}}}}, "malformed"),
+])
+def test_remote_task_metadata_is_validated(monkeypatch, bad_meta, reason):
+    remote = {"stage": "L1-selected-contract", "ref": "misumi:inbox/m.md", "metadata": bad_meta, "body": "b", "truncated": False}
+    args = argparse.Namespace(stage="task", ref="misumi:inbox/m.md", tier="contract", max_tokens=2500, offset=0, per_repo=4)
+    with pytest.raises(ValueError, match=reason):
+        _ask(monkeypatch, remote, args=args)
+    remote["metadata"] = {"title": "ok"}
+    assert _ask(monkeypatch, remote, args=args)["ref"] == "misumi:inbox/m.md"
+
+
+def test_ssh_runs_under_a_kernel_write_cap_when_prlimit_exists(monkeypatch):
+    import shutil
+    if shutil.which("prlimit") is None or sys.platform.startswith("win"):
+        pytest.skip("prlimit unavailable")
+    monkeypatch.setenv("AOTERU_LAB_SSH_TARGET", "lab-worker")
+    monkeypatch.setenv("AOTERU_LAB_REPO_ROOT", "/registered/lab/odysseus")
+    seen = {}
+
+    def fake(cmd, **k):
+        seen["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, json.dumps(_remote_frontier([_rec(1)])), "")
+    monkeypatch.setattr(ap, "_ssh_run", fake)
+    ap.lab_frontier_over_ssh(_frontier_args())
+    assert seen["cmd"][0].endswith("prlimit") and any(part.startswith("--fsize=") for part in seen["cmd"])

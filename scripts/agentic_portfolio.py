@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import shlex
+import shutil
 import signal
 import subprocess
 import tempfile
@@ -144,20 +145,28 @@ def frontier(roots: dict[str, Path], unavailable: dict[str, str],
     return result
 
 
+def parse_ref(ref) -> tuple[str, str, str]:
+    """(repo_id, bucket, filename) of a well-formed `repo_id:bucket/file.md`, else ValueError.
+    Checked BEFORE any transport is chosen, so an unknown reference can never reach the remote."""
+    if not isinstance(ref, str) or ref.count(":") != 1:
+        raise ValueError("expected repo_id:bucket/file.md reference")
+    rid, local = ref.split(":", 1)
+    if rid not in LAYOUT:
+        raise ValueError("unknown or unavailable repository")
+    parts = local.split("/")
+    if (len(parts) != 2 or parts[0] not in LAYOUT[rid][1] or not parts[1].endswith(".md")
+            or parts[1].startswith(".") or "\\" in parts[1] or "\x00" in parts[1]):
+        raise ValueError("invalid task reference")
+    return rid, parts[0], parts[1]
+
+
 def selected(roots: dict[str, Path], ref: str, tier: str, budget: int) -> dict:
     """Load only the exact L0-selected file after validating its repository and path."""
-    try:
-        rid, local = ref.split(":", 1)
-    except ValueError as exc:
-        raise ValueError("expected repo_id:bucket/file.md reference") from exc
-    if rid not in LAYOUT or rid not in roots:
+    rid, bucket, name = parse_ref(ref)
+    if rid not in roots:
         raise ValueError("unknown or unavailable repository")
-    rel, buckets = LAYOUT[rid]
-    queue = queue_path(roots[rid], Path(rel))
-    parts = Path(local).parts
-    if len(parts) != 2 or parts[0] not in buckets or not local.endswith(".md"):
-        raise ValueError("invalid task reference")
-    meta, body = split_card(read_card(queue, parts[0], parts[1]))
+    queue = queue_path(roots[rid], Path(LAYOUT[rid][0]))
+    meta, body = split_card(read_card(queue, bucket, name))
     result = {"stage": "L1-selected-contract" if tier == "contract" else "L3-explicit-full-task",
               "ref": ref, "metadata": {k: clean_value(meta[k]) for k in DETAIL if k in meta},
               "truncated": False,  # sized with the longest literal; the final value is never longer
@@ -242,18 +251,84 @@ def _ssh_run(cmd: list[str], timeout: float, max_out: int, max_err: int) -> subp
                     pass
 
 
+def _is_count(value) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 10_000_000
+
+
 def _valid_remote_record(row) -> bool:
-    """A frontier record is metadata only: known owner and bucket, matching ref, scalar-ish fields."""
+    """A frontier record is metadata only: known owner and bucket, matching ref, the literal
+    `unverified` eligibility marker, and bounded JSON-safe fields."""
     allowed = {"ref", "repo_id", "bucket", "eligible", *META}
     if not isinstance(row, dict) or not set(row) <= allowed:
         return False
     repo, bucket, ref = row.get("repo_id"), row.get("bucket"), row.get("ref")
-    if repo not in LAYOUT or bucket not in LAYOUT[repo][1] or not isinstance(ref, str):
+    if not all(isinstance(v, str) for v in (repo, bucket, ref)):
         return False
-    if not ref.startswith(repo + ":" + bucket + "/") or not ref.endswith(".md") or ref.count("/") != 1:
+    if repo not in LAYOUT or bucket not in LAYOUT[repo][1] or row.get("eligible") != "unverified":
         return False
     try:
-        for key, value in row.items():
+        if parse_ref(ref) != (repo, bucket, ref.split("/", 1)[1]):
+            return False
+        for value in row.values():
+            clean_value(value)
+    except ValueError:
+        return False
+    return True
+
+
+FRONTIER_KEYS = {"stage", "scope_complete", "unavailable", "counts", "offset_per_repo", "records",
+                 "next_offset_per_repo", "warnings", "note", "transport"}
+
+
+def _valid_remote_frontier(result: dict, args: argparse.Namespace) -> bool:
+    if not set(result) <= FRONTIER_KEYS or not isinstance(result.get("scope_complete"), bool):
+        return False
+    records = result.get("records")
+    if not isinstance(records, list) or len(records) > args.per_repo * len(LAYOUT):
+        return False
+    if not all(_valid_remote_record(row) for row in records):
+        return False
+    refs = [row["ref"] for row in records]
+    if len(set(refs)) != len(refs):
+        return False
+    for repo in LAYOUT:  # the per-owner sampling contract, not just the aggregate
+        if sum(1 for row in records if row["repo_id"] == repo) > args.per_repo:
+            return False
+    counts, unavailable = result.get("counts"), result.get("unavailable")
+    if not isinstance(counts, dict) or not set(counts) <= set(LAYOUT):
+        return False
+    for entry in counts.values():
+        if (not isinstance(entry, dict) or not _is_count(entry.get("total"))
+                or not isinstance(entry.get("buckets"), dict)
+                or not all(isinstance(k, str) and _is_count(v) for k, v in entry["buckets"].items())):
+            return False
+    if (not isinstance(unavailable, dict)
+            or not all(isinstance(k, str) and isinstance(v, str) and len(v) <= 100 for k, v in unavailable.items())):
+        return False
+    if result.get("offset_per_repo", args.offset) != args.offset:
+        return False
+    following = result.get("next_offset_per_repo", {})
+    if (not isinstance(following, dict) or not set(following) <= set(LAYOUT)
+            or not all(_is_count(v) and v > args.offset for v in following.values())):
+        return False
+    warnings = result.get("warnings", [])
+    return (isinstance(warnings, list) and len(warnings) <= 8
+            and all(isinstance(w, str) and len(w) <= 400 for w in warnings))
+
+
+TASK_KEYS = {"stage", "ref", "metadata", "body", "truncated", "note", "transport"}
+
+
+def _valid_remote_task(result: dict, args: argparse.Namespace) -> bool:
+    if not set(result) <= TASK_KEYS or result.get("ref") != args.ref:
+        return False
+    metadata = result.get("metadata")
+    if (not isinstance(metadata, dict) or not set(metadata) <= set(DETAIL)
+            or not isinstance(result.get("body"), str)
+            or not isinstance(result.get("truncated", False), bool)):
+        return False
+    try:
+        for value in metadata.values():
             clean_value(value)
     except ValueError:
         return False
@@ -270,8 +345,8 @@ def lab_frontier_over_ssh(args: argparse.Namespace) -> dict | None:
     remote_root = os.environ.get("AOTERU_LAB_REPO_ROOT", "").strip()
     if not target or not remote_root:
         return None
-    if args.stage == "task" and not args.ref:
-        raise ValueError("task requires an exact selected --ref")
+    if args.stage == "task":
+        parse_ref(args.ref)  # a malformed or unknown reference never leaves this machine
     if target.startswith("-") or any(c.isspace() for c in target):
         raise ValueError("invalid lab SSH target")
     if not PurePosixPath(remote_root).is_absolute():  # the lab is POSIX whatever this host is
@@ -283,12 +358,14 @@ def lab_frontier_over_ssh(args: argparse.Namespace) -> dict | None:
     cmd = ("cd " + shlex.quote(remote_root) +
            " && python3 scripts/agentic_portfolio.py " + shlex.join(task_args))
     limit = args.max_tokens * 3
+    max_out, max_err = limit * 4 + 4096, 4096
+    ssh_cmd = ["ssh", "-n", "-T", "-o", "BatchMode=yes",
+               "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=8", target, cmd]
+    prlimit = shutil.which("prlimit") if os.name != "nt" else None
+    if prlimit:  # kernel-enforced cap on what the child can write (generous margin for ssh's own files)
+        ssh_cmd = [prlimit, "--fsize=%d" % (max(max_out, max_err) + (1 << 20)), "--"] + ssh_cmd
     try:
-        proc = _ssh_run(
-            ["ssh", "-n", "-T", "-o", "BatchMode=yes",
-             "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=8", target, cmd],
-            timeout=30, max_out=limit * 4 + 4096, max_err=4096
-        )
+        proc = _ssh_run(ssh_cmd, timeout=30, max_out=max_out, max_err=max_err)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise ValueError("lab_ssh_transport_failure: " + type(exc).__name__) from exc
     if proc.returncode != 0:
@@ -296,23 +373,16 @@ def lab_frontier_over_ssh(args: argparse.Namespace) -> dict | None:
                          "; " + proc.stderr.strip()[:250])
     try:
         result = json.loads(proc.stdout)
-    except json.JSONDecodeError as exc:
+    except (ValueError, RecursionError) as exc:  # JSONDecodeError is a ValueError; deep nesting recurses
         raise ValueError("lab_ssh_invalid_portfolio_json") from exc
     # The remote is only trusted to answer the exact question that was asked.
     expected = ("L0-three-repository-frontier" if args.stage == "frontier" else
                 "L1-selected-contract" if args.tier == "contract" else "L3-explicit-full-task")
     if not isinstance(result, dict) or result.get("stage") != expected:
         raise ValueError("lab_ssh_unexpected_portfolio_result")
-    if args.stage == "frontier":
-        records = result.get("records")
-        if (not isinstance(records, list) or len(records) > args.per_repo * len(LAYOUT)
-                or not isinstance(result.get("scope_complete"), bool)
-                or not isinstance(result.get("counts"), dict)
-                or not isinstance(result.get("unavailable"), dict)
-                or not all(_valid_remote_record(row) for row in records)):
-            raise ValueError("lab_ssh_malformed_portfolio_result")
-    elif (result.get("ref") != args.ref or not isinstance(result.get("metadata"), dict)
-            or not isinstance(result.get("body"), str)):
+    valid = (_valid_remote_frontier(result, args) if args.stage == "frontier"
+             else _valid_remote_task(result, args))
+    if not valid:
         raise ValueError("lab_ssh_malformed_portfolio_result")
     result["transport"] = "registered_lab_ssh"
     if len(json.dumps(result, ensure_ascii=False)) > limit:
@@ -343,7 +413,11 @@ def main() -> int:
         # lab's own registry/checkout rather than treating a laptop clone as mandatory.
         # Selected-task reads fall back only when that task's own repository is
         # unavailable; an unrelated missing sibling must not abort a local read.
-        ref_repo = args.ref.split(":", 1)[0] if args.stage == "task" and args.ref else None
+        ref_repo = None
+        if args.stage == "task":
+            if not args.ref:
+                parser.error("task requires --ref from frontier")
+            ref_repo = parse_ref(args.ref)[0]  # malformed refs fail here, before any transport
         need_remote = bool(missing) if args.stage == "frontier" else (
             ref_repo is not None and ref_repo not in roots)
         if not args.local_only and need_remote:
