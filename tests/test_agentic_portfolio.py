@@ -153,3 +153,101 @@ def test_no_ssh_config_returns_none(monkeypatch):
     args = argparse.Namespace(stage="frontier", ref=None, tier="contract",
                               max_tokens=2500, offset=0, per_repo=4)
     assert ap.lab_frontier_over_ssh(args) is None
+
+
+# --- Review round 1 (independent Sol review, 2026-11-02): portfolio regressions ---
+
+def test_budget_is_shared_fairly_when_an_early_owner_has_large_records(tmp_path, monkeypatch):
+    ody, _, _ = estate(tmp_path, monkeypatch)
+    for i in range(15):
+        make_card(ody, f"automation/review/agent-tasks/ready/big{i}.md", "B" * 700 + str(i), raw_status="ready")
+    roots, missing = ap.resolve_roots(ody, {})
+    result = ap.frontier(roots, missing, 0, 4, 900)
+    assert {r["repo_id"] for r in result["records"]} == set(roots)
+    assert len(json.dumps(result, ensure_ascii=False)) <= 900 * 3
+
+
+def test_task_read_does_not_need_ssh_when_its_own_repo_is_available(tmp_path, monkeypatch, capsys):
+    ody, _, _ = estate(tmp_path, monkeypatch)
+    monkeypatch.delenv("PHD_ROOT")  # an unrelated sibling is missing
+    monkeypatch.setenv("AOTERU_LAB_SSH_TARGET", "lab-worker")
+    monkeypatch.setenv("AOTERU_LAB_REPO_ROOT", "/registered/lab/odysseus")
+
+    def boom(*a, **k):
+        raise AssertionError("ssh must not be attempted for an available local task")
+    monkeypatch.setattr(ap.subprocess, "run", boom)
+    monkeypatch.setattr(sys, "argv", ["agentic_portfolio.py", "task", "--repo-root", str(ody),
+                                      "--ref", "odysseus:ready/o.md"])
+    assert ap.main() == 0
+    assert json.loads(capsys.readouterr().out)["ref"] == "odysseus:ready/o.md"
+
+
+@pytest.mark.parametrize("remote,reason", [
+    ({"stage": "L3-explicit-full-task", "ref": "x", "metadata": {}, "body": "FULL"}, "unexpected"),
+    ({"stage": "L0-three-repository-frontier", "records": "nope", "scope_complete": True}, "malformed"),
+    ({"stage": "L0-three-repository-frontier", "records": [], "scope_complete": "yes"}, "malformed"),
+    ({"stage": "L0-three-repository-frontier", "records": [{}] * 50, "scope_complete": True}, "malformed"),
+    ({"stage": "L0-three-repository-frontier", "records": [], "scope_complete": True, "pad": "x" * 20000},
+     "oversized|exceeds_budget"),
+])
+def test_malformed_or_overlarge_remote_frontier_is_rejected(monkeypatch, remote, reason):
+    monkeypatch.setenv("AOTERU_LAB_SSH_TARGET", "lab-worker")
+    monkeypatch.setenv("AOTERU_LAB_REPO_ROOT", "/registered/lab/odysseus")
+    monkeypatch.setattr(ap.subprocess, "run",
+                        lambda cmd, **k: subprocess.CompletedProcess(cmd, 0, json.dumps(remote), ""))
+    args = argparse.Namespace(stage="frontier", ref=None, tier="contract", max_tokens=2500, offset=0, per_repo=4)
+    with pytest.raises(ValueError, match=reason):
+        ap.lab_frontier_over_ssh(args)
+
+
+@pytest.mark.parametrize("remote", [
+    {"stage": "L3-explicit-full-task", "ref": "misumi:inbox/m.md", "metadata": {}, "body": "FULL"},  # tier mismatch
+    {"stage": "L1-selected-contract", "ref": "misumi:inbox/other.md", "metadata": {}, "body": "x"},  # wrong task
+    {"stage": "L1-selected-contract", "ref": "misumi:inbox/m.md", "metadata": [], "body": "x"},
+])
+def test_remote_task_answer_must_match_the_request(monkeypatch, remote):
+    monkeypatch.setenv("AOTERU_LAB_SSH_TARGET", "lab-worker")
+    monkeypatch.setenv("AOTERU_LAB_REPO_ROOT", "/registered/lab/odysseus")
+    monkeypatch.setattr(ap.subprocess, "run",
+                        lambda cmd, **k: subprocess.CompletedProcess(cmd, 0, json.dumps(remote), ""))
+    args = argparse.Namespace(stage="task", ref="misumi:inbox/m.md", tier="contract",
+                              max_tokens=2500, offset=0, per_repo=4)
+    with pytest.raises(ValueError, match="lab_ssh_"):
+        ap.lab_frontier_over_ssh(args)
+
+
+def test_selected_task_budget_counts_serialised_size(tmp_path, monkeypatch):
+    ody, misumi, _ = estate(tmp_path, monkeypatch)
+    path = misumi / "agent-tasks" / "inbox" / "esc.md"
+    path.write_text("---\ntitle: esc\nstatus: open\n---\n" + '"\\\n\x01' * 5000, encoding="utf-8")
+    roots, _ = ap.resolve_roots(ody, {})
+    result = ap.selected(roots, "misumi:inbox/esc.md", "contract", 500)
+    assert len(json.dumps(result, ensure_ascii=False)) <= 500 * 3
+
+
+def test_symlinked_card_or_bucket_cannot_be_selected(tmp_path, monkeypatch):
+    ody, misumi, _ = estate(tmp_path, monkeypatch)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "x.md").write_text("---\ntitle: EXTERNAL\n---\nEXTERNAL_BODY\n", encoding="utf-8")
+    try:
+        (misumi / "agent-tasks" / "codex").symlink_to(outside, target_is_directory=True)
+        (misumi / "agent-tasks" / "inbox" / "link.md").symlink_to(outside / "x.md")
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks unavailable")
+    roots, _ = ap.resolve_roots(ody, {})
+    for ref in ("misumi:codex/x.md", "misumi:inbox/link.md"):
+        with pytest.raises(ValueError):
+            ap.selected(roots, ref, "full", 2000)
+
+
+def test_date_valued_title_does_not_break_the_portfolio(tmp_path, monkeypatch):
+    import datetime
+    ody, misumi, _ = estate(tmp_path, monkeypatch)
+    (misumi / "agent-tasks" / "inbox" / "d.md").write_text(
+        "---\n" + yaml.safe_dump({"title": datetime.date(2026, 11, 2), "status": "open"}) + "---\nbody\n",
+        encoding="utf-8")
+    roots, missing = ap.resolve_roots(ody, {})
+    result = ap.frontier(roots, missing, 0, 4, 2600)
+    json.dumps(result)
+    assert any(r.get("title") == "2026-11-02" for r in result["records"])

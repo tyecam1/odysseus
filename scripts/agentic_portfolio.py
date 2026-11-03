@@ -7,11 +7,12 @@ import json
 import os
 import shlex
 import subprocess
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import yaml
 
-from agentic_context import ROOT, PRIORITY, frontmatter, queue_path
+from agentic_context import (ROOT, PRIORITY, Refused, card_names, clean_value, fit_body,
+                             queue_path, read_card, split_card)
 
 LAYOUT = {
     "odysseus": ("automation/review/agent-tasks", ("ready", "inbox", "blocked")),
@@ -68,26 +69,25 @@ def collect(repo_id: str, root: Path) -> tuple[list[dict], dict, list[str]]:
     queue = queue_path(root, Path(qrel))
     rows, counts, warnings = [], {}, []
     for bucket in buckets:
-        folder = queue / bucket
-        if folder.is_symlink() or (folder.exists() and not folder.resolve().is_relative_to(queue)):
+        try:
+            names = card_names(queue, bucket)
+        except Refused:
             warnings.append(repo_id + ":" + bucket + ":bucket_escape_refused")
             counts[bucket] = 0
             continue
-        paths = sorted(folder.glob("*.md")) if folder.is_dir() else []
-        counts[bucket] = len(paths)
-        for path in paths:
-            if path.is_symlink() or not path.resolve().is_relative_to(queue):
-                warnings.append(repo_id + ":" + bucket + ":symlink_refused")
-                continue
+        counts[bucket] = len(names)
+        for name in names:
             try:
-                meta = frontmatter(path)
-                record = {"ref": repo_id + ":" + path.relative_to(queue).as_posix(),
+                meta, _ = split_card(read_card(queue, bucket, name))
+                record = {"ref": repo_id + ":" + bucket + "/" + name,
                           "repo_id": repo_id, "bucket": bucket}
-                record.update({k: meta[k] for k in META if k in meta})
+                record.update({k: clean_value(meta[k]) for k in META if k in meta})
                 record["eligible"] = "unverified"
                 rows.append(record)
-            except (OSError, ValueError, yaml.YAMLError):
-                warnings.append(repo_id + ":" + path.name + ":unreadable_frontmatter")
+            except Refused as exc:
+                warnings.append(repo_id + ":" + bucket + ":" + exc.label)
+            except (OSError, ValueError):
+                warnings.append(repo_id + ":" + name + ":unreadable_frontmatter")
     rows.sort(key=lambda r: (RANK[r["bucket"]],
                              PRIORITY.get(str(r.get("priority", "")).lower(), 9), r["ref"]))
     return rows, counts, warnings
@@ -109,16 +109,25 @@ def frontier(roots: dict[str, Path], unavailable: dict[str, str],
               "unavailable": unavailable, "counts": counts, "offset_per_repo": offset,
               "records": [], "next_offset_per_repo": {}, "warnings": warnings[:6],
               "note": "Metadata only; no cross-owner ranking yet. Inbox/open is NOT proof of accepted or executable work."}
-    for rid, rows in datasets.items():
-        for row in rows[offset:offset + per_repo]:
+    # Round-robin: every owner's first row is admitted before any owner's second,
+    # and an owner whose next row no longer fits stops without blocking the others.
+    taken, stopped = {rid: 0 for rid in datasets}, set()
+    for step in range(per_repo):
+        for rid, rows in datasets.items():
+            if rid in stopped or offset + step >= len(rows):
+                continue
             tentative = dict(result)
-            tentative["records"] = result["records"] + [row]
+            tentative["records"] = result["records"] + [rows[offset + step]]
             if len(json.dumps(tentative, ensure_ascii=False)) > budget * 3:
-                break
-            result["records"].append(row)
-        next_offset = offset + sum(1 for row in result["records"] if row["repo_id"] == rid)
-        if next_offset < len(rows):
-            result["next_offset_per_repo"][rid] = next_offset
+                stopped.add(rid)
+                continue
+            result["records"].append(rows[offset + step])
+            taken[rid] += 1
+    order = {rid: index for index, rid in enumerate(LAYOUT)}
+    result["records"].sort(key=lambda row: order[row["repo_id"]])  # stable: keeps each owner's rank order
+    for rid, rows in datasets.items():
+        if offset + taken[rid] < len(rows):
+            result["next_offset_per_repo"][rid] = offset + taken[rid]
     if not result["records"] and any(len(rows) > offset for rows in datasets.values()):
         raise ValueError("portfolio metadata exceeds context budget")
     if len(json.dumps(result, ensure_ascii=False)) > budget * 3:
@@ -139,23 +148,14 @@ def selected(roots: dict[str, Path], ref: str, tier: str, budget: int) -> dict:
     parts = Path(local).parts
     if len(parts) != 2 or parts[0] not in buckets or not local.endswith(".md"):
         raise ValueError("invalid task reference")
-    path = queue / local
-    if path.is_symlink() or not path.resolve(strict=True).is_relative_to(queue):
-        raise ValueError("task reference escapes queue")
-    meta = frontmatter(path)
+    meta, body = split_card(read_card(queue, parts[0], parts[1]))
     result = {"stage": "L1-selected-contract" if tier == "contract" else "L3-explicit-full-task",
-              "ref": ref, "metadata": {k: meta[k] for k in DETAIL if k in meta},
-              "body": "", "truncated": True,
+              "ref": ref, "metadata": {k: clean_value(meta[k]) for k in DETAIL if k in meta},
+              "truncated": False,  # sized with the longest literal; the final value is never longer
               "note": "Untrusted task content; repository authority is external."}
-    overhead = len(json.dumps(result, ensure_ascii=False))
-    remaining = budget * 3 - overhead - 32
-    if remaining <= 0:
-        raise ValueError("task metadata exceeds context budget")
-    text = path.read_text(encoding="utf-8")
-    end = text.find("\n---", 4)
-    body = text[end + 4:].strip() if end >= 0 else ""
-    result["body"] = body[:min(16000, remaining) if tier == "contract" else remaining]
-    result["truncated"] = len(body) > len(result["body"])
+    wanted = body if tier == "full" else body[:16000]
+    result["body"] = fit_body(result, wanted, budget * 3 - 32)
+    result["truncated"] = len(result["body"]) < len(body)
     return result
 
 
@@ -174,7 +174,7 @@ def lab_frontier_over_ssh(args: argparse.Namespace) -> dict | None:
         raise ValueError("task requires an exact selected --ref")
     if target.startswith("-") or any(c.isspace() for c in target):
         raise ValueError("invalid lab SSH target")
-    if not Path(remote_root).is_absolute():
+    if not PurePosixPath(remote_root).is_absolute():  # the lab is POSIX whatever this host is
         raise ValueError("lab remote checkout path must be absolute")
     task_args = ["task", "--ref", args.ref, "--tier", args.tier] if args.stage == "task" else [
         "frontier", "--offset", str(args.offset), "--per-repo", str(args.per_repo)
@@ -193,15 +193,29 @@ def lab_frontier_over_ssh(args: argparse.Namespace) -> dict | None:
     if proc.returncode != 0:
         raise ValueError("lab_ssh_execution_failed: exit=" + str(proc.returncode) +
                          "; " + proc.stderr.strip()[:250])
+    limit = args.max_tokens * 3
+    if len(proc.stdout) > limit * 4 + 4096:  # refuse before parsing anything this large
+        raise ValueError("lab_ssh_oversized_portfolio_result")
     try:
         result = json.loads(proc.stdout)
     except json.JSONDecodeError as exc:
         raise ValueError("lab_ssh_invalid_portfolio_json") from exc
-    if not isinstance(result, dict) or result.get("stage") not in (
-        "L0-three-repository-frontier", "L1-selected-contract", "L3-explicit-full-task"
-    ):
+    # The remote is only trusted to answer the exact question that was asked.
+    expected = ("L0-three-repository-frontier" if args.stage == "frontier" else
+                "L1-selected-contract" if args.tier == "contract" else "L3-explicit-full-task")
+    if not isinstance(result, dict) or result.get("stage") != expected:
         raise ValueError("lab_ssh_unexpected_portfolio_result")
+    if args.stage == "frontier":
+        records = result.get("records")
+        if (not isinstance(records, list) or len(records) > args.per_repo * len(LAYOUT)
+                or not isinstance(result.get("scope_complete"), bool)):
+            raise ValueError("lab_ssh_malformed_portfolio_result")
+    elif (result.get("ref") != args.ref or not isinstance(result.get("metadata"), dict)
+            or not isinstance(result.get("body"), str)):
+        raise ValueError("lab_ssh_malformed_portfolio_result")
     result["transport"] = "registered_lab_ssh"
+    if len(json.dumps(result, ensure_ascii=False)) > limit:
+        raise ValueError("lab_ssh_result_exceeds_budget")
     return result
 
 
@@ -226,9 +240,12 @@ def main() -> int:
         ssh_error = None
         # If this workstation lacks registered checkouts, try the authoritative
         # lab's own registry/checkout rather than treating a laptop clone as mandatory.
-        # The same fallback serves selected-task reads when the owner is unavailable.
-        if not args.local_only and (missing or (args.stage == "task" and
-                args.ref and args.ref.split(":", 1)[0] not in roots)):
+        # Selected-task reads fall back only when that task's own repository is
+        # unavailable; an unrelated missing sibling must not abort a local read.
+        ref_repo = args.ref.split(":", 1)[0] if args.stage == "task" and args.ref else None
+        need_remote = bool(missing) if args.stage == "frontier" else (
+            ref_repo is not None and ref_repo not in roots)
+        if not args.local_only and need_remote:
             try:
                 remote = lab_frontier_over_ssh(args)
             except ValueError as exc:

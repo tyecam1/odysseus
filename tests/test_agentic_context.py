@@ -118,3 +118,111 @@ def test_lazy_usage_is_only_operator_skill_and_has_usage_autonomy_contract():
     prompt = (ROOT / "docs" / "initialising-prompts" / "estate-queue-priority-execution-v2.md").read_text(encoding="utf-8")
     for required in ("Claude", "Codex", "GLM", "SSH", "independently verify", "outward-facing"):
         assert required in prompt
+
+
+# --- Review round 1 (independent Sol review, 2026-11-02): hostile-card regressions ---
+
+def raw_card(root, status, ident, front, body):
+    folder = root / "automation" / "review" / "agent-tasks" / status
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / (ident + ".agent-task.md")
+    path.write_text("---\n" + front + "---\n" + body, encoding="utf-8")
+    return path
+
+
+def test_date_valued_frontmatter_does_not_break_the_frontier(tmp_path):
+    import datetime
+    import json
+    card(tmp_path, "ready", "plain")
+    card(tmp_path, "ready", "dated", title=datetime.date(2026, 11, 2))
+    q = ac.queue_path(tmp_path, ac.DEFAULT_QUEUE)
+    result = ac.output_frontier(q, 0, 12, 1500)
+    json.dumps(result)  # must be serialisable
+    assert {r["task_id"] for r in result["records"]} == {"plain", "dated"}
+    assert next(r for r in result["records"] if r["task_id"] == "dated")["title"] == "2026-11-02"
+
+
+def test_yaml_aliases_are_refused_and_isolate_only_that_card(tmp_path):
+    card(tmp_path, "ready", "good")
+    bomb = "task_id: bomb\nstatus: ready\na: &a [x, x, x, x, x, x, x, x, x, x]\ntitle: *a\n"
+    raw_card(tmp_path, "ready", "bomb", bomb, "body")
+    q = ac.queue_path(tmp_path, ac.DEFAULT_QUEUE)
+    cards, counts, issues = ac.inventory(q)
+    assert [c["task_id"] for c in cards] == ["good"]
+    assert any(i["error"] == "yaml_alias_refused" for i in issues)
+
+
+def test_body_uses_the_same_delimiter_rule_as_frontmatter(tmp_path):
+    front = "task_id: z\ntitle: z\nstatus: ready\n---private: SECRET_FIELD\n"
+    raw_card(tmp_path, "ready", "z", front, "REAL_BODY\n  ---\nstill body\n")
+    q = ac.queue_path(tmp_path, ac.DEFAULT_QUEUE)
+    result = ac.output_task(q, "z", "full", 4000)
+    assert "SECRET_FIELD" not in str(result)
+    assert result["body"].startswith("REAL_BODY") and "still body" in result["body"]
+
+
+def test_indented_closing_delimiter_ends_frontmatter_for_both_readers(tmp_path):
+    folder = tmp_path / "automation" / "review" / "agent-tasks" / "ready"
+    folder.mkdir(parents=True)
+    (folder / "i.agent-task.md").write_text(
+        "---\ntask_id: i\nstatus: ready\n  ---\nBODY_AFTER\n", encoding="utf-8")
+    q = ac.queue_path(tmp_path, ac.DEFAULT_QUEUE)
+    assert ac.output_task(q, "i", "full", 4000)["body"] == "BODY_AFTER"
+    assert [c["task_id"] for c in ac.inventory(q)[0]] == ["i"]
+
+
+@pytest.mark.parametrize("tier,budget", [("contract", 400), ("contract", 1500), ("full", 600), ("full", 3000)])
+def test_task_output_respects_budget_after_json_escaping(tmp_path, tier, budget):
+    import json
+    card(tmp_path, "ready", "esc", body=('"\\\n\x01\t' * 5000))
+    q = ac.queue_path(tmp_path, ac.DEFAULT_QUEUE)
+    result = ac.output_task(q, "esc", tier, budget)
+    assert len(json.dumps(result, ensure_ascii=False)) <= budget * 3
+    assert result["truncated"] is True and result["body"]
+
+
+def test_symlinked_bucket_is_never_followed(tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "leak.agent-task.md").write_text(
+        "---\ntask_id: leak\nstatus: ready\ntitle: EXTERNAL\n---\nEXTERNAL_BODY\n", encoding="utf-8")
+    queue = tmp_path / "automation" / "review" / "agent-tasks"
+    queue.mkdir(parents=True)
+    try:
+        (queue / "ready").symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks unavailable")
+    q = ac.queue_path(tmp_path, ac.DEFAULT_QUEUE)
+    cards, counts, issues = ac.inventory(q)
+    assert cards == [] and counts["ready"] == 0
+    assert any(i["error"] == "bucket_symlink_refused" for i in issues)
+    with pytest.raises(ValueError, match="missing or ambiguous"):
+        ac.output_task(q, "leak", "full", 4000)
+
+
+def test_symlinked_queue_component_is_refused(tmp_path):
+    outside = tmp_path / "outside" / "agent-tasks"
+    (outside / "ready").mkdir(parents=True)
+    repo = tmp_path / "repo"
+    (repo / "automation").mkdir(parents=True)
+    try:
+        (repo / "automation" / "review").symlink_to(outside.parent, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks unavailable")
+    with pytest.raises(ValueError, match="symlink"):
+        ac.queue_path(repo, ac.DEFAULT_QUEUE)
+
+
+def test_read_card_refuses_a_file_swapped_for_a_symlink_after_listing(tmp_path):
+    path = card(tmp_path, "ready", "swap")
+    secret = tmp_path / "secret.md"
+    secret.write_text("---\ntask_id: s\n---\nSECRET\n", encoding="utf-8")
+    q = ac.queue_path(tmp_path, ac.DEFAULT_QUEUE)
+    name = ac.card_names(q, "ready")[0]  # listed as an ordinary file
+    path.unlink()
+    try:
+        path.symlink_to(secret)  # swapped between listing and reading
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks unavailable")
+    with pytest.raises(ac.Refused):
+        ac.read_card(q, "ready", name)
