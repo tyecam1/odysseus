@@ -97,7 +97,7 @@ def collect(repo_id: str, root: Path) -> tuple[list[dict], dict, list[str]]:
             except Refused as exc:
                 warnings.append(repo_id + ":" + bucket + ":" + exc.label)
             except (OSError, ValueError):
-                warnings.append(repo_id + ":" + name + ":unreadable_frontmatter")
+                warnings.append(repo_id + ":" + bucket + ":unreadable_frontmatter")  # bucket, never a filename
     rows.sort(key=lambda r: (RANK[r["bucket"]],
                              PRIORITY.get(str(r.get("priority", "")).lower(), 9), r["ref"]))
     return rows, counts, warnings
@@ -312,7 +312,15 @@ OPTIONAL_REPOS = {"misumi", "obsidian-phd"}  # odysseus is the running checkout 
 
 
 TOKEN = re.compile(r"[a-z_]{1,64}")
-WARNING = re.compile(r"(odysseus|misumi|obsidian-phd):[A-Za-z0-9_.\-]{1,200}:[a-z_]{1,64}")
+LABEL = re.compile(r"[a-z_]{1,64}")
+
+
+def _valid_warning(value) -> bool:
+    """`repo:bucket:label` with a known owner and one of that owner's real buckets: producer-shaped, never prose."""
+    if not isinstance(value, str) or value.count(":") != 2:
+        return False
+    repo, bucket, label = value.split(":")
+    return repo in LAYOUT and bucket in LAYOUT[repo][1] and LABEL.fullmatch(label) is not None
 
 
 def _canonical_key(row: dict, owner_order: dict) -> tuple:
@@ -372,7 +380,15 @@ def _valid_remote_frontier(result: dict, args: argparse.Namespace) -> bool:
             before = sum(c for b, c in buckets.items() if RANK[b] < rank)     # rows that must rank earlier
             through = sum(c for b, c in buckets.items() if RANK[b] <= rank)   # rows that could rank no later
             position = args.offset + index                      # this record's index in the owner's ranked rows
-            if position < before - unreadable or position > through - 1:
+            # Buckets of EQUAL rank interleave by priority, then ref. At the extreme priorities the
+            # side is forced: with the worst priority every hidden card in a lexicographically earlier
+            # equal-rank bucket ranks first; with the best, every card in a later one ranks after.
+            priority = PRIORITY.get(str(row.get("priority", "")).lower(), 9)
+            mine = repo + ":" + row["bucket"] + "/"
+            peers = [b for b in buckets if RANK[b] == rank and b != row["bucket"]]
+            tie_before = sum(buckets[b] for b in peers if priority == 9 and repo + ":" + b + "/" < mine)
+            tie_after = sum(buckets[b] for b in peers if priority == 0 and repo + ":" + b + "/" > mine)
+            if position < before + tie_before - unreadable or position > through - 1 - tie_after:
                 return False                                   # cannot occupy that place in a real page
     for repo, n in taken.items():
         # An owner whose total is below the requested offset shows nothing (an empty slice is valid);
@@ -392,7 +408,7 @@ def _valid_remote_frontier(result: dict, args: argparse.Namespace) -> bool:
     warnings = result["warnings"]
     return (result["note"] == FRONTIER_NOTE   # the fixed safety notice, verbatim
             and isinstance(warnings, list) and len(warnings) <= 8
-            and all(isinstance(w, str) and WARNING.fullmatch(w) for w in warnings))
+            and all(_valid_warning(w) for w in warnings))
 
 
 TASK_REQUIRED = {"stage", "ref", "metadata", "body", "truncated", "note"}

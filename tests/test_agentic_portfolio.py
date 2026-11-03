@@ -994,3 +994,82 @@ def test_r10_2_every_position_a_real_page_could_show_is_accepted(monkeypatch, of
     if offset + 1 < 6:
         env["next_offset_per_repo"] = {"odysseus": offset + 1}
     assert _ask(monkeypatch, env, args=_frontier_args(per_repo=1, offset=offset))["transport"]
+
+
+# --- Review round 11: equal-rank bucket ties, and producer warnings the receiver must accept ---
+
+def _misumi_env(buckets, shown_bucket, priority=None, per_repo=1):
+    shown = _rec(1, repo="misumi", bucket=shown_bucket)
+    if priority is not None:
+        shown["priority"] = priority
+    env = _envelope([shown], {"odysseus": 0, "misumi": sum(buckets.values()), "obsidian-phd": 0})
+    full = {name: 0 for name in ap.LAYOUT["misumi"][1]}
+    full.update(buckets)
+    env["counts"]["misumi"]["buckets"] = full
+    env["next_offset_per_repo"] = {"misumi": 1} if sum(buckets.values()) > 1 else {}
+    return env
+
+
+def test_r11_1_the_reviewers_equal_rank_counterexample_is_rejected(monkeypatch):
+    # claude=1, odysseus=1 (both rank 3), nothing unreadable. Showing only the odysseus card at position 0
+    # with the worst priority is impossible: the hidden claude card ranks first (same rank, <= priority, earlier ref).
+    env = _misumi_env({"claude": 1, "odysseus": 1}, "odysseus", priority="low-ish-unknown")
+    assert ap.PRIORITY.get("low-ish-unknown", 9) == 9
+    with pytest.raises(ValueError, match="malformed"):
+        _ask(monkeypatch, env)
+
+
+def test_r11_1_the_symmetric_case_for_the_best_priority(monkeypatch):
+    # Showing the claude card with the BEST priority at position 1 is impossible: the odysseus card, in a later
+    # equal-rank bucket, must rank after it, so claude cannot be last.
+    one = _misumi_env({"claude": 1, "odysseus": 1}, "claude", priority="critical")
+    one["next_offset_per_repo"] = {}
+    env = dict(one, offset_per_repo=1)
+    env["next_offset_per_repo"] = {}
+    with pytest.raises(ValueError, match="malformed"):
+        _ask(monkeypatch, env, args=_frontier_args(per_repo=1, offset=1))
+    assert _ask(monkeypatch, _misumi_env({"claude": 1, "odysseus": 1}, "claude", priority="critical"))["transport"]
+
+
+@pytest.mark.parametrize("shown,priority,accepted", [
+    ("claude", None, True),        # earlier bucket, unknown (worst) priority: first is correct
+    ("odysseus", "high", True),    # a hidden claude card could have an even better priority, or a worse one
+    ("odysseus", "critical", True),   # best priority puts the shown card first
+    ("odysseus", None, False),     # worst priority: every hidden earlier-bucket card ranks first
+])
+def test_r11_1_only_the_forced_ties_are_enforced(monkeypatch, shown, priority, accepted):
+    env = _misumi_env({"claude": 1, "odysseus": 1}, shown, priority=priority)
+    if accepted:
+        assert _ask(monkeypatch, env)["transport"]
+    else:
+        with pytest.raises(ValueError, match="malformed"):
+            _ask(monkeypatch, env)
+
+
+@pytest.mark.parametrize("filename", ["révision.md", "two words.md", "a" * 250 + ".md", "名前.md", "semi;colon.md"])
+def test_r11_2_an_unreadable_card_with_any_filename_yields_a_warning_the_receiver_accepts(tmp_path, monkeypatch, filename):
+    ody, misumi, _ = estate(tmp_path, monkeypatch)
+    (misumi / "agent-tasks" / "inbox" / filename).write_bytes(b"\xff\xfe not yaml frontmatter at all")
+    roots, missing = ap.resolve_roots(ody, {})
+    produced = ap.frontier(roots, missing, 0, 4, 2600)
+    warnings = produced["warnings"]
+    assert warnings and all(ap._valid_warning(w) for w in warnings), warnings
+    assert all(filename not in w for w in warnings), "a filename must never appear in a warning"
+    assert "misumi:inbox:unreadable_frontmatter" in warnings
+    monkeypatch.setenv("AOTERU_LAB_SSH_TARGET", "lab-worker")
+    monkeypatch.setenv("AOTERU_LAB_REPO_ROOT", "/registered/lab/odysseus")
+    monkeypatch.setattr(ap, "_ssh_run", lambda cmd, **k: subprocess.CompletedProcess(cmd, 0, json.dumps(produced), ""))
+    assert ap.lab_frontier_over_ssh(_frontier_args())["transport"] == "registered_lab_ssh"
+
+
+@pytest.mark.parametrize("warning", ["misumi:inbox:unreadable_frontmatter", "odysseus:ready:symlink_refused",
+                                     "obsidian-phd:blocked:bucket_escape_refused"])
+def test_r11_2_real_producer_warnings_are_valid(warning):
+    assert ap._valid_warning(warning)
+
+
+@pytest.mark.parametrize("warning", ["misumi:not-a-bucket:x", "misumi:inbox", "misumi:inbox:Label", "evil:inbox:x",
+                                     "misumi:révision.md:unreadable_frontmatter", "a:b:c:d", "", None, 5,
+                                     "odysseus:codex:x"])
+def test_r11_2_prose_filenames_and_foreign_buckets_are_not_valid_warnings(warning):
+    assert not ap._valid_warning(warning)
