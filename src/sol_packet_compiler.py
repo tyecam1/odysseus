@@ -302,18 +302,20 @@ def _role(item: Item, policy: Policy) -> str:
 
 def manifest_hash(item: Item) -> str:
     """Hash of the COMPLETE semantic request (role, protocol, class, identity, question, evidence,
-    ordered options, criteria, verdicts, context and independence settings). An unchanged hash means
-    an unchanged question, so its conclusion may be reused; anything that changes the request changes it."""
+    options, criteria, verdicts, context and independence settings), with the ORDER of every sequence
+    preserved exactly as compile_packet presents it. An unchanged hash means an unchanged question, so its
+    conclusion may be reused; anything that changes the request changes it. Erring toward a new call is safe;
+    reusing a conclusion for a reordered question is not."""
     body = json.dumps({
         "role": item.role_required, "protocol": item.protocol, "type": item.decision_type,
         "consequence": item.consequence, "class": item.packet_class, "qid": item.question_id,
-        "question": item.question, "evidence": sorted(item.evidence_pointers),
-        "options": list(item.candidate_options), "criteria": sorted(item.acceptance_criteria),
-        "verdicts": sorted(item.allowed_verdicts), "context_hash": item.context_manifest_hash,
+        "question": item.question, "evidence": list(item.evidence_pointers),
+        "options": list(item.candidate_options), "criteria": list(item.acceptance_criteria),
+        "verdicts": list(item.allowed_verdicts), "context_hash": item.context_manifest_hash,
         "context_key": item.shared_context_key, "independence": item.independence_required,
         "fresh": item.fresh_context_required, "separate": item.separate_adjudication_required,
         "id": item.decision_id, "parent": item.parent_task, "open": item.open_judgment,
-        "depends_on": sorted(item.depends_on), "exposes": sorted(item.exposes_label_of),
+        "depends_on": list(item.depends_on), "exposes": list(item.exposes_label_of),
     }, ensure_ascii=True, sort_keys=True)  # ASCII escapes: a lone surrogate hashes instead of raising
     return hashlib.sha256(body.encode("ascii")).hexdigest()
 

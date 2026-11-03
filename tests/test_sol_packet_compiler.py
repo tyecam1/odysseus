@@ -389,10 +389,13 @@ def test_f8_a_narrowed_verdict_set_no_longer_reuses_an_old_pass():
     assert spc.needs_new_call(replace(old, allowed_verdicts=("REVISE",)), prior).outcome == spc.SINGLE
 
 
-def test_f8_evidence_order_is_immaterial_but_option_order_is_not():
-    a = make("a", evidence_pointers=("e1", "e2"), acceptance_criteria=("x", "y"))
-    b = make("a", evidence_pointers=("e2", "e1"), acceptance_criteria=("y", "x"))
-    assert spc.manifest_hash(a) == spc.manifest_hash(b)
+def test_f8_the_order_of_every_sequence_is_part_of_the_request():
+    # the compiled request preserves these sequences and a question may refer to positions, so a reorder is a change
+    base = make("a", evidence_pointers=("e1", "e2"), acceptance_criteria=("x", "y"), allowed_verdicts=("YES", "NO"))
+    for change in ({"evidence_pointers": ("e2", "e1")}, {"acceptance_criteria": ("y", "x")},
+                   {"allowed_verdicts": ("NO", "YES")}, {"candidate_options": ("NO", "YES")}):
+        assert spc.manifest_hash(replace(base, **change)) != spc.manifest_hash(base), change
+    assert spc.manifest_hash(base) == spc.manifest_hash(replace(base))
 
 
 def test_f9_duplicate_json_members_are_ambiguous_not_last_wins():
@@ -1012,3 +1015,28 @@ def test_v4_thresholds_must_name_their_evidence():
     assert admit([make("a"), make("b")]).detail == ("policy=test-v1",)
     first = admit([make("a"), make("b")])
     assert first == admit([make("a"), make("b")]), "the same input must give the same decision every time"
+
+
+# ---------- independent review round 7 (gpt-6.1-sol) ----------
+
+def test_w1_the_reviewers_reversed_criteria_cannot_reuse_the_old_conclusion():
+    question = "Choose the preferred option; acceptance criteria are listed in descending priority."
+    old = make("a", question=question, candidate_options=("A", "B"), allowed_verdicts=("A", "B"),
+               acceptance_criteria=("Prefer A over B.", "Prefer B over A."))
+    new = replace(old, acceptance_criteria=tuple(reversed(old.acceptance_criteria)))
+    assert spc.compile_packet([old, make("b")], "pk", "c", []) != spc.compile_packet([new, make("b")], "pk", "c", [])
+    verdict = spc.needs_new_call(new, spc.manifest_hash(old))
+    assert verdict.outcome == spc.SINGLE and verdict.reason == "no_prior_or_changed_question"
+    assert spc.needs_new_call(old, spc.manifest_hash(old)).outcome == spc.REUSE
+
+
+def test_w1_whatever_changes_the_compiled_request_changes_the_hash():
+    base = make("a", evidence_pointers=("e1", "e2", "e3"), acceptance_criteria=("x", "y", "z"),
+                allowed_verdicts=("YES", "NO", "MAYBE"), depends_on=("p", "q"), exposes_label_of=("r", "s"))
+    packet = spc.compile_packet([base], "pk", "c", [])
+    for change in ({"evidence_pointers": ("e3", "e2", "e1")}, {"acceptance_criteria": ("z", "y", "x")},
+                   {"allowed_verdicts": ("MAYBE", "NO", "YES")}, {"depends_on": ("q", "p")}, {"exposes_label_of": ("s", "r")}):
+        changed = replace(base, **change)
+        assert spc.manifest_hash(changed) != spc.manifest_hash(base), change
+        if "depends_on" not in change and "exposes_label_of" not in change:
+            assert spc.compile_packet([changed], "pk", "c", []) != packet, change   # and the request really differs
