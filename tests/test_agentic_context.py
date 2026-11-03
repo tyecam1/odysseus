@@ -226,3 +226,80 @@ def test_read_card_refuses_a_file_swapped_for_a_symlink_after_listing(tmp_path):
         pytest.skip("symlinks unavailable")
     with pytest.raises(ac.Refused):
         ac.read_card(q, "ready", name)
+
+
+# --- Review round 3: path-safety core ---
+
+def test_fifo_card_is_refused_without_hanging(tmp_path):
+    import os
+    import threading
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("mkfifo unavailable")
+    card(tmp_path, "ready", "ok")
+    q = ac.queue_path(tmp_path, ac.DEFAULT_QUEUE)
+    os.mkfifo(q / "ready" / "trap.md")
+    box = {}
+    worker = threading.Thread(target=lambda: box.update(result=ac.inventory(q)), daemon=True)
+    worker.start()
+    worker.join(15)
+    assert not worker.is_alive(), "reading a FIFO card must not block"
+    cards, counts, issues = box["result"]
+    assert [c["task_id"] for c in cards] == ["ok"]
+    assert any(i["error"] == "not_a_regular_file" for i in issues)
+
+
+def test_ancestor_swapped_for_a_symlink_after_validation_is_refused(tmp_path):
+    import os
+    if os.name == "nt":
+        pytest.skip("POSIX no-follow descent")
+    card(tmp_path, "ready", "real")
+    q = ac.queue_path(tmp_path, ac.DEFAULT_QUEUE)  # validated while everything is ordinary
+    name = ac.card_names(q, "ready")[0]
+    decoy = tmp_path / "decoy" / "agent-tasks" / "ready"
+    decoy.mkdir(parents=True)
+    (decoy / name).write_text("---\ntask_id: evil\nstatus: ready\n---\nEXTERNAL_BODY\n", encoding="utf-8")
+    review = tmp_path / "automation" / "review"
+    review.rename(tmp_path / "automation" / "review_real")
+    try:
+        review.symlink_to(tmp_path / "decoy", target_is_directory=True)  # swap AFTER validation
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks unavailable")
+    with pytest.raises(ac.Refused):
+        ac.read_card(q, "ready", name)
+
+
+def test_windows_final_path_check_distinguishes_a_junction_from_the_real_directory(tmp_path):
+    import os
+    import subprocess
+    if os.name != "nt":
+        pytest.skip("Windows only")
+    real = tmp_path / "real"
+    real.mkdir()
+    (real / "c.md").write_text("x", encoding="utf-8")
+    link = tmp_path / "link"
+    made = subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(real)], capture_output=True, text=True)
+    if made.returncode != 0:
+        pytest.skip("junction unavailable")
+    fd_real = os.open(real / "c.md", os.O_RDONLY | os.O_BINARY)
+    fd_link = os.open(link / "c.md", os.O_RDONLY | os.O_BINARY)
+    try:
+        assert os.path.normcase(ac._windows_final_path(fd_real)) == os.path.normcase(str(real / "c.md"))
+        # opened THROUGH the junction, the handle's real path is the target, not the junction path
+        assert os.path.normcase(ac._windows_final_path(fd_link)) != os.path.normcase(str(link / "c.md"))
+    finally:
+        os.close(fd_real)
+        os.close(fd_link)
+
+
+def test_read_card_works_on_an_ordinary_card_on_every_platform(tmp_path):
+    card(tmp_path, "ready", "plain", body="HELLO")
+    q = ac.queue_path(tmp_path, ac.DEFAULT_QUEUE)
+    text = ac.read_card(q, "ready", ac.card_names(q, "ready")[0])
+    assert "HELLO" in text
+
+
+def test_oversized_card_is_refused(tmp_path):
+    card(tmp_path, "ready", "huge", body="Z" * (ac.MAX_CARD_BYTES + 10))
+    q = ac.queue_path(tmp_path, ac.DEFAULT_QUEUE)
+    _, _, issues = ac.inventory(q)
+    assert any(i["error"] == "card_too_large" for i in issues)

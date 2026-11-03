@@ -86,23 +86,59 @@ def card_names(queue: Path, bucket: str) -> list[str]:
     return sorted(p.name for p in folder.iterdir() if p.name.endswith(".md") and not p.name.startswith("."))
 
 
-def read_card(queue: Path, bucket: str, name: str) -> str:
-    """Read one card through a no-follow descent queue -> bucket -> file.
+def _open_dir_nofollow(path: Path) -> int:
+    """Descriptor for an absolute, already-resolved directory, descending EVERY component
+    without following symlinks, so no ancestor swapped after validation can redirect it."""
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    fd = os.open(path.anchor, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for part in path.parts[1:]:
+            child = os.open(part, flags, dir_fd=fd)
+            os.close(fd)
+            fd = child
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
 
-    Validation and reading are one operation, so a path swapped for a symlink
-    after it was listed is refused rather than followed out of the queue.
+
+def _windows_final_path(fd: int) -> str:
+    """The real path of the object an open descriptor refers to (reparse points resolved)."""
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GetFinalPathNameByHandleW.argtypes = [wintypes.HANDLE, wintypes.LPWSTR, wintypes.DWORD, wintypes.DWORD]
+    kernel32.GetFinalPathNameByHandleW.restype = wintypes.DWORD
+    buffer = ctypes.create_unicode_buffer(32768)
+    length = kernel32.GetFinalPathNameByHandleW(msvcrt.get_osfhandle(fd), buffer, len(buffer), 0)
+    if length == 0 or length >= len(buffer):
+        raise OSError("final path of opened card unavailable")
+    final = buffer.value
+    if final.startswith("\\\\?\\UNC\\"):
+        return "\\\\" + final[8:]
+    return final[4:] if final.startswith("\\\\?\\") else final
+
+
+def read_card(queue: Path, bucket: str, name: str) -> str:
+    """Read one card with validation and open as ONE operation.
+
+    POSIX: every component from the filesystem root is descended no-follow via directory
+    descriptors, so a path swapped for a symlink after it was listed is refused. Other
+    platforms: the opened handle's real final path must equal the expected path, which
+    catches a swapped junction/symlink without relying on a separate earlier check.
     """
     for part in (bucket, name):
         if part in ("", ".", "..") or "/" in part or "\\" in part or "\x00" in part:
             raise ValueError("invalid card reference")
     if hasattr(os, "O_NOFOLLOW") and hasattr(os, "O_DIRECTORY") and os.open in os.supports_dir_fd:
-        dflags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
         try:
-            qfd = os.open(queue, os.O_RDONLY | os.O_DIRECTORY)
+            qfd = _open_dir_nofollow(queue)
             try:
-                bfd = os.open(bucket, dflags, dir_fd=qfd)
+                bfd = os.open(bucket, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=qfd)
                 try:
-                    fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=bfd)
+                    # O_NONBLOCK: opening a FIFO must not wait for a writer; type is checked below.
+                    fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=bfd)
                 finally:
                     os.close(bfd)
             finally:
@@ -111,19 +147,22 @@ def read_card(queue: Path, bucket: str, name: str) -> str:
             if exc.errno in (errno.ELOOP, errno.ENOTDIR):
                 raise Refused("symlink_refused") from exc
             raise
+        verify = None
     else:
-        # No dir_fd support (Windows): reject links per component, then confirm
-        # the opened file is the one that was checked. Narrower, not race-free.
         path = queue / bucket / name
         for part in (queue / bucket, path):
             if _is_link(part.lstat()):
                 raise Refused("symlink_refused")
         fd = os.open(path, os.O_RDONLY | getattr(os, "O_BINARY", 0))
-        opened, checked = os.fstat(fd), path.lstat()
-        if (opened.st_ino, opened.st_dev) != (checked.st_ino, checked.st_dev) and opened.st_ino:
-            os.close(fd)
-            raise Refused("symlink_refused")
-    with os.fdopen(fd, "rb") as stream:
+        verify = path
+    with os.fdopen(fd, "rb") as stream:  # owns the descriptor from here: every exit closes it
+        if verify is not None:
+            try:
+                same = os.path.normcase(_windows_final_path(stream.fileno())) == os.path.normcase(str(verify))
+            except (OSError, ImportError, AttributeError):
+                same = False  # fail closed when the identity cannot be established
+            if not same:
+                raise Refused("path_identity_unverified")
         if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
             raise Refused("not_a_regular_file")
         data = stream.read(MAX_CARD_BYTES + 1)
