@@ -1369,3 +1369,58 @@ def test_r16_2_an_invalid_encoding_from_the_lab_falls_back_with_a_fixed_token(tm
     assert ap.main() == 0
     output = json.loads(capsysbinary.readouterr().out.decode("utf-8"))
     assert output["warnings"][-1] == "lab_ssh_invalid_encoding" and output["scope_complete"] is False
+
+
+# --- Review round 17: one encoding story on both machines; direct refs are validated like listed ones ---------
+
+def test_r17_1_the_remote_command_forces_utf8_mode(monkeypatch):
+    monkeypatch.setenv("AOTERU_LAB_SSH_TARGET", "lab-worker")
+    monkeypatch.setenv("AOTERU_LAB_REPO_ROOT", "/registered/lab/odysseus")
+    seen = {}
+
+    def fake(cmd, **kwargs):
+        seen["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, json.dumps(_remote_frontier([_rec(1)])), "")
+    monkeypatch.setattr(ap, "_ssh_run", fake)
+    ap.lab_frontier_over_ssh(_frontier_args())
+    assert "python3 -X utf8 scripts/agentic_portfolio.py" in seen["cmd"][-1]
+
+
+def test_r17_1_on_a_non_utf8_filesystem_only_ascii_names_are_referenceable(monkeypatch):
+    monkeypatch.setattr(ap, "FS_IS_UTF8", False)
+    assert ap._referenceable("plain.md") and ap._referenceable("with space.md")
+    assert not ap._referenceable("é.md") and not ap._referenceable("名前.md")
+    monkeypatch.setattr(ap, "FS_IS_UTF8", True)
+    assert ap._referenceable("é.md") and ap._referenceable("名前.md")
+
+
+def test_r17_1_a_non_utf8_host_never_lists_an_accented_card(tmp_path, monkeypatch):
+    ody, misumi, _ = estate(tmp_path, monkeypatch)
+    (misumi / "agent-tasks" / "inbox" / "é.md").write_text("---\ntitle: e\nstatus: open\n---\nb\n", encoding="utf-8")
+    (misumi / "agent-tasks" / "inbox" / "plain.md").write_text("---\ntitle: p\nstatus: open\n---\nb\n", encoding="utf-8")
+    monkeypatch.setattr(ap, "FS_IS_UTF8", False)
+    rows, _, warnings = ap.collect("misumi", misumi)
+    refs = [row["ref"] for row in rows]
+    assert "misumi:inbox/plain.md" in refs and not any("é" in ref for ref in refs)
+    assert "misumi:inbox:unsupported_filename" in warnings
+
+
+@pytest.mark.parametrize("ref", ["misumi:inbox/bad\udcff.md", "misumi:inbox/\udc80.md", "odysseus:ready/\ud800x.md"])
+def test_r17_2_parse_ref_rejects_names_the_producer_would_never_list(ref):
+    with pytest.raises(ValueError, match="invalid task reference"):
+        ap.parse_ref(ref)
+
+
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="raw non-UTF-8 argv bytes are a POSIX concern")
+def test_r17_2_a_raw_byte_ref_on_the_command_line_is_a_clean_error_not_a_traceback(tmp_path, monkeypatch):
+    ody, misumi, _ = estate(tmp_path, monkeypatch)
+    _write_raw(misumi / "agent-tasks" / "inbox", b"\xff.md")
+    done = subprocess.run([sys.executable, str(SCRIPTS / "agentic_portfolio.py"), "task", "--repo-root", str(ody),
+                           "--ref", b"misumi:inbox/\xff.md"], capture_output=True, env=dict(os.environ))
+    assert done.returncode == 2 and b"Traceback" not in done.stderr
+    assert b"invalid task reference" in done.stderr
+
+
+def test_r17_2_ordinary_references_still_parse():
+    assert ap.parse_ref("misumi:inbox/m.md") == ("misumi", "inbox", "m.md")
+    assert ap.parse_ref("misumi:inbox/café.md") == ("misumi", "inbox", "café.md")

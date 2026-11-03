@@ -76,11 +76,17 @@ def resolve_roots(odysseus_root: Path, overrides: dict[str, Path | None]) -> tup
     return roots, unavailable
 
 
+# Filenames cross the SSH hop as UTF-8 text, so both machines must read the filesystem as UTF-8. The remote command
+# forces UTF-8 mode (python3 -X utf8); locally, a non-UTF-8 filesystem encoding would silently mangle any non-ASCII
+# name, so on such a host only ASCII names are referenceable.
+FS_IS_UTF8 = sys.getfilesystemencoding().lower().replace("-", "").replace("_", "") == "utf8"
+
+
 def _referenceable(name: str) -> bool:
     """A filename the receiver, parse_ref() and selected() can all use unchanged: no colon (the reference
     separator) and strictly encodable as UTF-8, so raw non-UTF-8 bytes (which Python surfaces as lone
     surrogates) are not carried into a reference that the SSH hop would silently rewrite."""
-    if ":" in name:
+    if ":" in name or (not FS_IS_UTF8 and not name.isascii()):
         return False
     try:
         name.encode("utf-8")
@@ -185,7 +191,8 @@ def parse_ref(ref) -> tuple[str, str, str]:
         raise ValueError("unknown or unavailable repository")
     parts = local.split("/")
     if (len(parts) != 2 or parts[0] not in LAYOUT[rid][1] or not parts[1].endswith(".md")
-            or parts[1].startswith(".") or "\\" in parts[1] or "\x00" in parts[1]):
+            or parts[1].startswith(".") or "\\" in parts[1] or "\x00" in parts[1]
+            or not _referenceable(parts[1])):     # the same test the producer applies before it lists a card
         raise ValueError("invalid task reference")
     return rid, parts[0], parts[1]
 
@@ -489,7 +496,7 @@ def lab_frontier_over_ssh(args: argparse.Namespace) -> dict | None:
     ]
     task_args += ["--max-tokens", str(args.max_tokens), "--local-only"]
     cmd = ("cd " + shlex.quote(remote_root) +
-           " && python3 scripts/agentic_portfolio.py " + shlex.join(task_args))
+           " && python3 -X utf8 scripts/agentic_portfolio.py " + shlex.join(task_args))
     limit = args.max_tokens * 3
     max_out, max_err = limit * 4 + 4096, 4096
     ssh_cmd = ["ssh", "-n", "-T", "-o", "BatchMode=yes",
