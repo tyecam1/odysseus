@@ -92,6 +92,9 @@ def collect(repo_id: str, root: Path) -> tuple[list[dict], dict, list[str]]:
             continue
         counts[bucket] = len(names)
         for name in names:
+            if ":" in name:                      # cannot be referenced as repo:bucket/file.md
+                warnings.append(repo_id + ":" + bucket + ":unsupported_filename")
+                continue
             try:
                 meta, _ = split_card(read_card(queue, bucket, name))
                 record = {"ref": repo_id + ":" + bucket + "/" + name,

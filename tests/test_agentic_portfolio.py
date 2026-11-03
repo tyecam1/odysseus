@@ -1,4 +1,5 @@
 """Combined frontier must respect all three owners, source roots and stage boundaries."""
+import os
 import sys
 import argparse
 import json
@@ -1094,7 +1095,7 @@ def _random_estate(tmp_path, monkeypatch, rng, label):
         for bucket in buckets:
             (root / rel / bucket).mkdir(parents=True, exist_ok=True)
             for i in range(rng.choice([0, 0, 1, 2, 3, 5])):
-                name = "%s-%s-%d%s.md" % (label, bucket, i, rng.choice(["", " x", "é"]))
+                name = "%s-%s-%d%s.md" % (label, bucket, i, rng.choice(["", " x", "é"] + ([":c"] if os.name != "nt" else [])))
                 if rng.random() < 0.15:                                    # an unreadable card
                     (root / rel / bucket / name).write_bytes(b"\xff\xfe not frontmatter")
                     continue
@@ -1228,3 +1229,35 @@ def test_r13_2_an_oversized_bucket_is_refused_by_the_producer_not_rejected_later
 
 def test_r13_2_the_producer_cap_keeps_every_count_within_the_receiver_limit():
     assert ap.MAX_BUCKET_CARDS * max(len(buckets) for _, buckets in ap.LAYOUT.values()) <= ap.MAX_OFFSET
+
+
+# --- Review round 14: every reference the producer emits must be one the receiver and selected() accept ---
+
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="a colon in a filename is a stream separator on Windows")
+def test_r14_a_colon_in_a_filename_is_never_emitted_as_an_unusable_reference(tmp_path, monkeypatch):
+    ody, misumi, _ = estate(tmp_path, monkeypatch)
+    (misumi / "agent-tasks" / "inbox" / "a:b.md").write_text("---\ntitle: colon\nstatus: open\n---\nbody\n", encoding="utf-8")
+    (misumi / "agent-tasks" / "inbox" / "fine.md").write_text("---\ntitle: fine\nstatus: open\n---\nbody\n", encoding="utf-8")
+    rows, counts, warnings = ap.collect("misumi", misumi)
+    assert "misumi:inbox:unsupported_filename" in warnings and ap._valid_warning("misumi:inbox:unsupported_filename")
+    assert all(ap.parse_ref(row["ref"]) for row in rows), "every listed reference must parse"
+    assert not any("a:b" in row["ref"] for row in rows)
+    assert counts["inbox"] >= 3                                   # still counted, like an unreadable card
+    roots, missing = ap.resolve_roots(ody, {})
+    produced = ap.frontier(roots, missing, 0, 4, 2600)
+    args = argparse.Namespace(stage="frontier", ref=None, tier="contract", max_tokens=2600, offset=0, per_repo=4)
+    assert ap._valid_remote_frontier(json.loads(json.dumps(produced)), args)
+    for row in produced["records"]:
+        ap.selected(roots, row["ref"], "contract", 1200)          # every emitted reference is selectable
+
+
+def test_r14_every_listed_reference_round_trips_through_parse_ref_and_selected(tmp_path, monkeypatch):
+    ody, misumi, _ = estate(tmp_path, monkeypatch)
+    for name in ("plain.md", "with space.md", "ünï.md", "dots.in.name.md", "UPPER.MD.md"):
+        (misumi / "agent-tasks" / "inbox" / name).write_text("---\ntitle: t\nstatus: open\n---\nb\n", encoding="utf-8")
+    rows, _, _ = ap.collect("misumi", misumi)
+    roots, _ = ap.resolve_roots(ody, {})
+    assert len(rows) >= 5
+    for row in rows:
+        assert ap.parse_ref(row["ref"])[0] == "misumi"
+        assert ap.selected(roots, row["ref"], "contract", 1200)["ref"] == row["ref"]
