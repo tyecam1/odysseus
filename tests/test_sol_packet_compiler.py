@@ -19,7 +19,7 @@ LATER = (NOW + timedelta(days=2)).isoformat()
 def make(ident="a", **over):
     base = dict(
         decision_id=ident, parent_task="t", role_required="adjudicator", question="Q " + ident,
-        decision_type="choice", consequence="medium", packet_class="decision",
+        decision_type="choice", consequence="medium", packet_class="decision", protocol="p1",
         evidence_pointers=("e1", "e2"), acceptance_criteria=("c",), allowed_verdicts=("YES", "NO"),
         deadline=LATER, independence_required=False, candidate_options=("YES", "NO"),
         shared_context_key="ctx", context_manifest_hash="h1", context_tokens=5000,
@@ -123,15 +123,15 @@ def test_collision_and_gate_items_must_share_one_question_identity():
 def test_not_decision_ready_items_return_needs_preparation_not_a_blind_single():
     bad = make("a", evidence_pointers=())
     verdict = admit([bad, make("b")])
-    assert verdict.outcome == spc.NEEDS_PREPARATION and "missing_evidence_pointers" in verdict.detail
-    assert admit([make("a"), make("a")]).reason == "duplicate_decision_id"
+    assert verdict.outcome == spc.NEEDS_PREPARATION and "invalid_evidence_pointers" in verdict.detail
+    assert admit([make("a"), make("a")], certs=[]).reason == "duplicate_decision_id"
 
 
 @pytest.mark.parametrize("over,problem", [
     ({"question": " "}, "missing_question"),
     ({"packet_class": "bogus"}, "unknown_packet_class"),
-    ({"acceptance_criteria": ()}, "missing_acceptance_criteria"),
-    ({"allowed_verdicts": ()}, "missing_allowed_verdicts"),
+    ({"acceptance_criteria": ()}, "invalid_acceptance_criteria"),
+    ({"allowed_verdicts": ()}, "invalid_allowed_verdicts"),
     ({"candidate_options": ()}, "missing_candidate_options"),
     ({"deadline": None}, "deadline_not_explicit"),
     ({"deadline": "2026-11-05T00:00:00"}, "deadline_not_explicit"),
@@ -147,9 +147,9 @@ def test_open_judgment_may_omit_options_and_none_deadline_must_be_explicit():
     assert spc.validate_item(make("a", candidate_options=(), open_judgment=True, deadline=spc.NO_DEADLINE)) == []
 
 
-def test_naive_now_is_rejected():
-    with pytest.raises(ValueError):
-        spc.admit([make("a"), make("b")], POLICY, pairs("a", "b"), datetime(2026, 11, 3), 60.0)
+def test_naive_now_is_a_decision_not_an_exception():
+    verdict = spc.admit([make("a"), make("b")], POLICY, pairs("a", "b"), datetime(2026, 11, 3), 60.0)
+    assert verdict.outcome == spc.NEEDS_PREPARATION and verdict.reason == "now_not_timezone_aware"
 
 
 # ---------- plan ----------
@@ -273,3 +273,186 @@ def test_a_required_independent_check_is_never_suppressed():
     assert spc.needs_new_call(item, spc.manifest_hash(item)).reason == "independent_check_still_required"
     fresh = make("a", fresh_context_required=True)
     assert spc.needs_new_call(fresh, spc.manifest_hash(fresh)).outcome == spc.SINGLE
+
+
+# ---------- independent review round 1 (gpt-6.1-sol): one regression per finding ----------
+
+NAN = float("nan")
+INF = float("inf")
+
+
+def never_batches(items, policy=POLICY, certs=None, wait=600.0):
+    verdict = admit(items, policy=policy, certs=certs, wait=wait)
+    assert verdict.outcome != spc.BATCH, verdict
+    return verdict
+
+
+@pytest.mark.parametrize("wait", [NAN, INF, -INF, -60.0, True, "600", None])
+def test_f1_invalid_wait_seconds_never_admit(wait):
+    never_batches([make("a"), make("b")], wait=wait)
+
+
+def test_f1_expired_deadline_is_not_rescued_by_a_negative_wait():
+    expired = (NOW - timedelta(seconds=30)).isoformat()
+    never_batches([make("a", deadline=expired), make("b")], wait=-60.0)
+    never_batches([make("a", deadline=expired), make("b")], wait=0.0)
+
+
+@pytest.mark.parametrize("field_name,value", [
+    ("wait_benefit_lower_bound", NAN), ("urgency_cost_upper_bound", NAN), ("wait_benefit_lower_bound", INF),
+    ("max_wait_seconds", INF), ("max_wait_seconds", NAN), ("max_wait_seconds", -1.0), ("max_wait_seconds", True),
+    ("wait_benefit_lower_bound", True), ("min_net_reuse_tokens", True), ("min_net_reuse_tokens", -5),
+    ("max_input_tokens", True), ("max_items", 0), ("headroom_tokens", -1), ("wrapper_overhead_tokens", 1.5),
+])
+def test_f1_invalid_policy_numbers_are_reported_not_trusted(field_name, value):
+    verdict = never_batches([make("a"), make("b")], policy=replace(POLICY, **{field_name: value}))
+    assert verdict.reason == "policy_invalid"
+
+
+def test_f2_a_boolean_context_size_cannot_hide_behind_an_equal_integer():
+    for first, second in (("a", "b"), ("b", "a")):  # order must not matter
+        items = {"a": make("a", context_tokens=1), "b": make("b", context_tokens=True)}
+        never_batches([items[first], items[second]])
+    never_batches([make("a", context_tokens=5000), make("b", context_tokens=5000.0)])
+
+
+def test_f3_protocol_must_match_to_batch():
+    assert admit([make("a"), make("b")]).outcome == spc.BATCH
+    never_batches([make("a", protocol="review-v1"), make("b", protocol="review-v2")])
+    assert spc.validate_item(make("a", protocol=None)) == ["missing_protocol"]
+
+
+@pytest.mark.parametrize("over", [
+    {"evidence_pointers": ("",)}, {"acceptance_criteria": ("  ",)}, {"allowed_verdicts": ("",)},
+    {"allowed_verdicts": "PASS"}, {"evidence_pointers": "e1"}, {"candidate_options": ("A", "")},
+    {"shared_context_key": ""}, {"context_manifest_hash": ""}, {"question": "\n"},
+])
+def test_f4_blank_or_wrong_typed_attribution_and_context_are_not_decision_ready(over):
+    assert spc.validate_item(make("a", **over)), over
+    verdict = admit([make("a", **over), make("b")])
+    assert verdict.outcome == spc.NEEDS_PREPARATION
+
+
+@pytest.mark.parametrize("value", [0, "", [], 1, "no"])
+def test_f5_independence_flag_must_be_a_real_bool_or_none(value):
+    verdict = never_batches([make("a", independence_required=value), make("b")])
+    assert verdict.outcome == spc.NEEDS_PREPARATION
+    assert spc.needs_new_call(make("a", independence_required=value), None).outcome == spc.NEEDS_PREPARATION
+
+
+def test_f5_unestablished_or_separate_checks_are_never_suppressed():
+    unestablished = make("a", independence_required=None)
+    assert spc.needs_new_call(unestablished, spc.manifest_hash(unestablished)).outcome == spc.SINGLE
+    separate = make("a", separate_adjudication_required=True)
+    assert spc.needs_new_call(separate, spc.manifest_hash(separate)).reason == "independent_check_still_required"
+
+
+@pytest.mark.parametrize("certs", [["ab"], [("a",)], [("a", "a")], [("a", "b", "c")], [5], ["a b"], [(1, 2)],
+                                   [{"a": 1, "b": 2}.keys()], "ab", 7])
+def test_f6_malformed_certificates_are_not_proofs(certs):
+    verdict = admit([make("a"), make("b")], certs=certs)
+    assert verdict.outcome != spc.BATCH and verdict.reason == "certificates_invalid"
+
+
+def test_f6_well_formed_certificates_in_any_pair_container_are_accepted():
+    for pair in (("a", "b"), ["b", "a"], {"a", "b"}, frozenset(("a", "b"))):
+        assert admit([make("a"), make("b")], certs=[pair]).outcome == spc.BATCH
+
+
+def test_f7_duplicate_ids_anywhere_in_the_input_are_never_dispatched():
+    groups = spc.plan([make("a"), make("a", question="other"), make("b")], POLICY, pairs("a", "b"), NOW, 600.0)
+    by_id = {}
+    for g in groups:
+        for i in g.items:
+            by_id.setdefault(i.decision_id, []).append(g.decision)
+    assert all(d.outcome == spc.NEEDS_PREPARATION and d.reason == "duplicate_decision_id" for d in by_id["a"])
+    assert len(by_id["a"]) == 2 and by_id["b"][0].outcome == spc.SINGLE
+    only_dupes = spc.plan([make("a"), make("a", question="x")], POLICY, [], NOW, 600.0)
+    assert [g.decision.outcome for g in only_dupes] == [spc.NEEDS_PREPARATION, spc.NEEDS_PREPARATION]
+
+
+@pytest.mark.parametrize("change", [
+    {"allowed_verdicts": ("REVISE",)}, {"role_required": "other"}, {"decision_type": "other"},
+    {"consequence": "high"}, {"protocol": "p2"}, {"question_id": "Q9"}, {"candidate_options": ("NO", "YES")},
+    {"fresh_context_required": True}, {"context_manifest_hash": "h9"}, {"shared_context_key": "k9"},
+    {"separate_adjudication_required": True}, {"packet_class": "gate", "question_id": "g"},
+])
+def test_f8_any_change_to_the_request_changes_its_manifest_hash(change):
+    base = make("a", allowed_verdicts=("PASS", "REVISE"))
+    assert spc.manifest_hash(replace(base, **change)) != spc.manifest_hash(base)
+
+
+def test_f8_a_narrowed_verdict_set_no_longer_reuses_an_old_pass():
+    old = make("a", allowed_verdicts=("PASS", "REVISE"))
+    prior = spc.manifest_hash(old)
+    assert spc.needs_new_call(old, prior).outcome == spc.REUSE
+    assert spc.needs_new_call(replace(old, allowed_verdicts=("REVISE",)), prior).outcome == spc.SINGLE
+
+
+def test_f8_evidence_order_is_immaterial_but_option_order_is_not():
+    a = make("a", evidence_pointers=("e1", "e2"), acceptance_criteria=("x", "y"))
+    b = make("a", evidence_pointers=("e2", "e1"), acceptance_criteria=("y", "x"))
+    assert spc.manifest_hash(a) == spc.manifest_hash(b)
+
+
+def test_f9_duplicate_json_members_are_ambiguous_not_last_wins():
+    items = [make("a"), make("b")]
+    dup_member = ('{"results": [{"decision_id": "a", "verdict": "REVISE", "verdict": "YES", "rationale": "r", '
+                  '"evidence_refs": [], "uncertainty": "u", "another_strong_call_could_change": false}, '
+                  '{"decision_id": "b", "verdict": "NO", "rationale": "r", "evidence_refs": [], '
+                  '"uncertainty": "u", "another_strong_call_could_change": false}]}')
+    out = spc.parse_results(items, dup_member)
+    assert out["a"] == "malformed_result" and isinstance(out["b"], spc.ItemResult)
+    two_roots = '{"results": [], "results": [' + json.dumps(good("a")) + ']}'
+    assert set(spc.parse_results(items, two_roots).values()) == {"unparsable_packet_output"}
+
+
+def test_f10_hostile_inputs_never_raise():
+    a, b = make("a"), make("b")
+    for group in ([replace(a, decision_id=[]), b], [a, replace(b, allowed_verdicts=([],))], [None, b], 5, [a, "x"],
+                  [replace(a, packet_class="verification", allowed_verdicts=([],)), b]):
+        verdict = spc.admit(group, POLICY, pairs("a", "b"), NOW, 600.0)
+        assert isinstance(verdict, spc.Decision) and verdict.outcome != spc.BATCH
+    assert isinstance(spc.admit([a, b], POLICY, pairs("a", "b"), "not a datetime", 600.0), spc.Decision)
+    assert isinstance(spc.admit([a, b], "policy", pairs("a", "b"), NOW, 600.0), spc.Decision)
+    deep = "[" * 100000 + "]" * 100000
+    assert set(spc.parse_results([a], deep).values()) == {"unparsable_packet_output"}
+    spc.plan([a, None, 3, b], POLICY, pairs("a", "b"), NOW, 600.0)
+    assert spc.plan(5, POLICY, [], NOW, 600.0) == []
+    assert isinstance(spc.needs_new_call(replace(a, decision_id=[]), None), spc.Decision)
+
+
+def test_f11_plan_never_reorders_across_deadlines():
+    t = lambda d: (NOW + timedelta(days=d)).isoformat()
+    a = make("a", deadline=t(1))
+    b = make("b", deadline=t(2), role_required="other")      # incompatible with a and c
+    c = make("c", deadline=t(3))
+    groups = spc.plan([a, b, c], POLICY, pairs("a", "b", "c"), NOW, 600.0)
+    flattened = [i.decision_id for g in groups for i in g.items]
+    assert flattened == ["a", "b", "c"], flattened
+    assert [len(g.items) for g in groups] == [1, 1, 1]
+
+
+def test_f12_microsecond_deadlines_keep_their_order():
+    early = make("z-early", deadline="9999-01-01T00:00:00.000001+00:00")
+    late = make("a-late", deadline="9999-01-01T00:00:00.000002+00:00")
+    groups = spc.plan([late, early], replace(POLICY, wait_benefit_lower_bound=0.0), [], NOW, 0.0)
+    assert [g.items[0].decision_id for g in groups] == ["z-early", "a-late"]
+
+
+def test_f13_zero_output_budget_cannot_batch():
+    zero = [make("a", output_reserve_tokens=0), make("b", output_reserve_tokens=0)]
+    never_batches(zero, policy=replace(POLICY, max_output_tokens=0, headroom_tokens=0))
+    never_batches(zero)
+
+
+def test_f14_a_singleton_whose_known_output_cannot_fit_needs_preparation():
+    groups = spc.plan([make("a", output_reserve_tokens=100)], replace(POLICY, max_output_tokens=1), [], NOW, 600.0)
+    assert groups[0].decision.outcome == spc.NEEDS_PREPARATION and groups[0].decision.reason == "singleton_exceeds_capacity"
+
+
+def test_invalid_global_arguments_make_plan_send_everything_alone_with_the_reason():
+    for policy, certs, now in ((replace(POLICY, max_items=0), pairs("a", "b"), NOW), (POLICY, ["ab"], NOW),
+                               (POLICY, pairs("a", "b"), datetime(2026, 11, 3))):
+        groups = spc.plan([make("a"), make("b")], policy, certs, now, 600.0)
+        assert [len(g.items) for g in groups] == [1, 1] and all(g.decision.outcome == spc.SINGLE for g in groups)
