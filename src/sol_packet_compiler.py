@@ -260,7 +260,7 @@ def _certificate_set(certificates) -> Optional[set]:
 
 def _global_problem(policy, certificates, now, wait_seconds) -> Optional[tuple]:
     """Caller-argument problems shared by admit and plan: (reason, detail) or None."""
-    if not isinstance(now, datetime) or _offset(now) is None:
+    if type(now) is not datetime or _offset(now) is None:   # exact class: subclasses can override arithmetic
         return ("now_not_timezone_aware", ())
     problems = _policy_problems(policy)
     if problems:
@@ -287,7 +287,7 @@ def manifest_hash(item: Item) -> str:
         "verdicts": sorted(item.allowed_verdicts), "context_hash": item.context_manifest_hash,
         "context_key": item.shared_context_key, "independence": item.independence_required,
         "fresh": item.fresh_context_required, "separate": item.separate_adjudication_required,
-        "parent": item.parent_task, "open": item.open_judgment,
+        "id": item.decision_id, "parent": item.parent_task, "open": item.open_judgment,
         "depends_on": sorted(item.depends_on), "exposes": sorted(item.exposes_label_of),
     }, ensure_ascii=True, sort_keys=True)  # ASCII escapes: a lone surrogate hashes instead of raising
     return hashlib.sha256(body.encode("ascii")).hexdigest()
@@ -416,7 +416,7 @@ def _margin(wait_seconds) -> Optional[timedelta]:
 
 def _sort_key(item: Item):
     """Dated items by exact datetime, then explicit no-deadline, then unparseable; id breaks ties."""
-    ident = item.decision_id if isinstance(item.decision_id, str) else ""
+    ident = item.decision_id if type(item.decision_id) is str else ""
     try:
         deadline = parse_deadline(item.deadline)
     except (ValueError, TypeError):
@@ -430,7 +430,12 @@ def plan(items: Sequence, policy: Policy, certificates: Iterable,
     try:
         return _plan(items, policy, certificates, now, wait_seconds)
     except Exception:
-        return [Group((), Decision(NEEDS_PREPARATION, "input_not_processable"))]
+        try:                                   # keep every input visible rather than erasing the plan
+            kept = list(items)
+        except Exception:
+            return [Group((), Decision(NEEDS_PREPARATION, "input_not_processable"))]
+        return [Group((entry,) if isinstance(entry, Item) else (), Decision(NEEDS_PREPARATION, "input_not_processable"))
+                for entry in kept]
 
 
 def _plan(items: Sequence, policy: Policy, certificates: Iterable,
@@ -453,13 +458,13 @@ def _plan(items: Sequence, policy: Policy, certificates: Iterable,
               for item in pending_items if not isinstance(item, Item)]
     seen, duplicated = set(), set()
     for item in real:
-        if isinstance(item.decision_id, str):
+        if type(item.decision_id) is str:     # exact str only: a subclass may be unhashable or lie about equality
             (duplicated if item.decision_id in seen else seen).add(item.decision_id)
     refusal = _global_problem(policy, certificates, now, wait_seconds)
     out, current = [], []
     for item in sorted(real, key=_sort_key):
         problems = validate_item(item)
-        if isinstance(item.decision_id, str) and item.decision_id in duplicated:
+        if type(item.decision_id) is str and item.decision_id in duplicated:
             decision = Decision(NEEDS_PREPARATION, "duplicate_decision_id")
         elif problems:
             decision = Decision(NEEDS_PREPARATION, "item_not_decision_ready", tuple(problems))
@@ -564,9 +569,11 @@ def parse_results(group: Sequence, raw: str) -> dict:
     """One entry per requested id: an ItemResult, or the reason that id is unresolved.
     A bad, ambiguous or missing entry never invalidates the others."""
     out = {item.decision_id: "missing_result" for item in group}
+    if type(raw) is not str:                  # a str subclass could run its own code inside the decoder
+        return {key: "unparsable_packet_output" for key in out}
     try:
         payload = json.loads(raw, object_pairs_hook=_strict_object)
-    except (ValueError, TypeError, RecursionError):
+    except Exception:                         # any decoder failure is just an unparsable packet
         return {key: "unparsable_packet_output" for key in out}
     if not isinstance(payload, dict) or isinstance(payload, _Ambiguous) or not isinstance(payload.get("results"), list):
         return {key: "unparsable_packet_output" for key in out}

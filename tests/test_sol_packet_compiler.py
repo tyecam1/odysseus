@@ -755,3 +755,59 @@ def test_s8_explicit_false_with_a_verdict_and_true_without_one_still_work():
     gone = {"decision_id": "a", "unresolved": True, "rationale": "r", "evidence_refs": [],
             "uncertainty": "u", "another_strong_call_could_change": True}
     assert spc.parse_results(items, json.dumps({"results": [gone]}))["a"] == "unresolved_by_model"
+
+
+# ---------- independent review round 4 (gpt-6.1-sol): one regression per finding ----------
+
+def test_t1_a_datetime_subclass_cannot_fake_a_deadline_margin():
+    class FalseMargin(datetime):
+        def __rsub__(self, other):
+            return timedelta(days=1)
+
+    expired = "2026-11-02T00:00:00+00:00"
+    fake_now = FalseMargin(2026, 11, 3, tzinfo=timezone.utc)
+    a, b = make("a", deadline=expired), make("b", deadline=expired)
+    verdict = spc.admit([a, b], POLICY, pairs("a", "b"), fake_now, 0.0)
+    assert verdict.outcome == spc.NEEDS_PREPARATION and verdict.reason == "now_not_timezone_aware"
+    assert spc.plan([a, b], POLICY, pairs("a", "b"), fake_now, 0.0)[0].decision.outcome != spc.BATCH
+    real_now = datetime(2026, 11, 3, tzinfo=timezone.utc)                       # an exact datetime still refuses correctly
+    assert spc.admit([a, b], POLICY, pairs("a", "b"), real_now, 0.0).reason == "wait_not_justified"
+
+
+def test_t2_an_invalid_id_never_erases_the_valid_items_from_the_plan():
+    class UnhashableId(str):
+        __hash__ = None
+
+    a, b = make("a"), make("b")
+    bad = replace(a, decision_id=UnhashableId("bad"))
+    groups = spc.plan([bad, b], POLICY, (), NOW, 0.0)
+    by_outcome = {id(g.items[0]): g.decision for g in groups if g.items}
+    assert len(groups) == 2 and by_outcome[id(bad)].outcome == spc.NEEDS_PREPARATION
+    assert by_outcome[id(b)].outcome == spc.SINGLE, "the valid item must still be planned"
+
+
+def test_t2_even_a_total_failure_keeps_every_item_visible(monkeypatch):
+    a, b = make("a"), make("b")
+    monkeypatch.setattr(spc, "_plan", lambda *args, **kw: (_ for _ in ()).throw(RuntimeError("boom")))
+    groups = spc.plan([a, b, None], POLICY, (), NOW, 0.0)
+    assert [g.items for g in groups] == [(a,), (b,), ()]
+    assert all(g.decision.reason == "input_not_processable" for g in groups)
+
+
+def test_t3_decision_identity_is_part_of_the_request_hash():
+    a, b = make("a", question="Return the value for this item's decision_id"), make("b", question="Return the value for this item's decision_id")
+    assert spc.manifest_hash(a) != spc.manifest_hash(b)
+    assert spc.needs_new_call(b, spc.manifest_hash(a)).outcome != spc.REUSE
+
+
+def test_t4_a_hostile_str_subclass_cannot_run_code_inside_the_decoder():
+    class BadRaw(str):
+        def startswith(self, *args, **kwargs):
+            raise RuntimeError("boom")
+
+    items = [make("a"), make("b")]
+    out = spc.parse_results(items, BadRaw('{"results": []}'))
+    assert set(out.values()) == {"unparsable_packet_output"}
+    for raw in (b'{"results": []}', None, 5, ["x"]):
+        assert set(spc.parse_results(items, raw).values()) == {"unparsable_packet_output"}
+    assert set(spc.parse_results(items, '{"results": []}').values()) == {"missing_result"}
