@@ -137,7 +137,7 @@ def test_one_off_requests_are_denied_and_misumi_fiction_rerouted():
 def test_prompt_bump_supersedes_old_rows_not_duplicates(tmp_path, monkeypatch):
     z = _zip(tmp_path / "e.zip", [_conv("c1", "I decided on radar for my PhD sensing study")])
     ci.run_all(z, "imp", local=_local, strong=_strong, root=tmp_path)
-    monkeypatch.setattr(ci, "PROMPT_VERSION", "v3")
+    monkeypatch.setattr(ci, "PROMPT_VERSION", "v99")
     out = ci.extract("imp", _local, root=tmp_path)
     assert out["processed"] == 1
     latest = {}
