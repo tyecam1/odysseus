@@ -495,6 +495,41 @@ def report(import_id: str, *, root: Optional[Path] = None) -> dict:
             "ledger": str(work / "ledger.jsonl")}
 
 
+def digest(import_id: str, *, root: Optional[Path] = None, threshold: float = 0.4) -> dict:
+    """Private, grep-able review view: live rows clustered across conversations, ranked by how many conversations support them."""
+    work = _private((root or _data_root()) / import_id)
+    latest = {r["candidate_id"]: r for r in _read_jsonl(work / "ledger.jsonl")}
+    live = [r for r in latest.values() if r["active"] and r["review"] != "superseded" and r["domain"] != "quarantine"
+            and r.get("prompt") == PROMPT_VERSION]
+    live.sort(key=lambda r: (-r["confidence"], r["candidate_id"]))
+    clusters: list[dict] = []
+    for r in live:
+        tokens = _norm(r["description"])
+        home = next((c for c in clusters if c["domain"] == r["domain"] and _similar(tokens, c["tokens"]) >= threshold), None)
+        if home is None:
+            clusters.append({"domain": r["domain"], "tokens": tokens, "rep": r, "convs": {r["conversation_id"]}, "ids": [r["candidate_id"]]})
+        else:
+            home["convs"].add(r["conversation_id"])
+            home["ids"].append(r["candidate_id"])
+    clusters.sort(key=lambda c: (c["domain"], -len(c["convs"]), c["rep"]["kind"]))
+    lines, domain = [f"# ChatGPT import {import_id} - review digest ({len(clusters)} items from {len(live)} rows)\n"], None
+    for c in clusters:
+        r = c["rep"]
+        if c["domain"] != domain:
+            domain = c["domain"]
+            lines.append(f"\n## {domain} ({sum(1 for x in clusters if x['domain'] == domain)})\n")
+        flag = "GATE" if r["review"] == "human_gate" or r["sensitivity"] != "ordinary" else r["review"]
+        lines.append(f"- [{len(c['convs'])}x {r['kind']} {r['sensitivity'][:4]} {flag}] {r['description']} ({c['ids'][0][:8]})")
+    path = work / "digest.md"
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(lines) + "\n")
+    by_domain: dict[str, int] = {}
+    for c in clusters:
+        by_domain[c["domain"]] = by_domain.get(c["domain"], 0) + 1
+    return {"items": len(clusters), "rows": len(live), "by_domain": by_domain, "digest": str(path)}
+
+
 def run_all(zip_path: Path, import_id: str, *, local: Optional[Llm] = None, strong: Optional[Llm] = None,
             root: Optional[Path] = None, limit: Optional[int] = None) -> dict:
     t = time.monotonic()
@@ -502,7 +537,7 @@ def run_all(zip_path: Path, import_id: str, *, local: Optional[Llm] = None, stro
     e = extract(import_id, local, root=root)
     v = review(import_id, strong, root=root)
     h = handoff(import_id, root=root)
-    return {"stage": s, "extract": e, "review": v, "handoff": h, "report": report(import_id, root=root),
+    return {"stage": s, "extract": e, "review": v, "handoff": h, "digest": digest(import_id, root=root), "report": report(import_id, root=root),
             "seconds": int(time.monotonic() - t)}
 
 
@@ -519,7 +554,7 @@ def gate_status(root: Optional[Path] = None) -> dict:
 
 def _main(argv: Optional[list[str]] = None) -> int:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("command", choices=("gate", "run", "stage", "extract", "review", "handoff", "report"))
+    p.add_argument("command", choices=("gate", "run", "stage", "extract", "review", "handoff", "report", "digest"))
     p.add_argument("--synthetic", action="store_true", help="fixture data only; bypasses Gate A")
     p.add_argument("--zip")
     p.add_argument("--import-id", default="")
@@ -542,6 +577,8 @@ def _main(argv: Optional[list[str]] = None) -> int:
             result = review(a.import_id)
         elif a.command == "handoff":
             result = handoff(a.import_id)
+        elif a.command == "digest":
+            result = digest(a.import_id)
         else:
             result = report(a.import_id)
     except Exception as exc:       # counts and the exception type only; never echo export content

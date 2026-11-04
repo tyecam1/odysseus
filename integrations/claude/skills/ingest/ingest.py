@@ -25,8 +25,11 @@ def main():
     ap.add_argument("zip", nargs="?")
     ap.add_argument("--synthetic", action="store_true")
     ap.add_argument("--status")
+    ap.add_argument("--digest", help="build/print the path of the ranked review digest for IMPORT_ID")
     ap.add_argument("--limit", type=int)
     a = ap.parse_args()
+    if a.digest:
+        print(ssh(f"{RUN} digest --import-id {a.digest}")[1]); return 0
     if a.status:
         print(ssh(f"{RUN} report --import-id {a.status}")[1]); return 0
     z = Path(a.zip)

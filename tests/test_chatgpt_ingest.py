@@ -176,3 +176,12 @@ def test_source_has_no_control_characters():
     import pathlib
     text = pathlib.Path(ci.__file__).read_text(encoding="utf-8")
     assert not [c for c in text if ord(c) < 32 and c not in "\n\t\r"]     # a stray \b in a patch once became a backspace
+
+
+def test_digest_clusters_across_conversations_and_ranks_by_support(tmp_path):
+    z = _zip(tmp_path / "e.zip", [_conv("c1", "I decided on radar for my PhD sensing study"),
+                                  _conv("c2", "Again: radar for the PhD sensing study")])
+    ci.run_all(z, "imp", local=_local, strong=_strong, root=tmp_path)
+    out = ci.digest("imp", root=tmp_path)
+    text = (tmp_path / "imp" / "digest.md").read_text()
+    assert "[2x decision" in text and out["items"] < out["rows"]
