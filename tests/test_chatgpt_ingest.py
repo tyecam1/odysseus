@@ -128,9 +128,9 @@ def test_multiple_shards(tmp_path):
 
 
 def test_one_off_requests_are_denied_and_misumi_fiction_rerouted():
-    c = ci.postfilter({"description": "User requests MATLAB code to plot a workspace", "first_pass": "approve", "domain": "misumi"})
+    c = ci.postfilter({"description": "User requests MATLAB code to plot a workspace", "first_pass": "approve", "domain": "misumi", "speaker_basis": "user_first_person"})
     assert c["first_pass"] == "deny" and c["domain"] == "neutral"
-    keep = ci.postfilter({"description": "User prefers British English", "first_pass": "approve", "domain": "misumi"})
+    keep = ci.postfilter({"description": "User prefers British English", "first_pass": "approve", "domain": "misumi", "speaker_basis": "user_first_person"})
     assert keep["first_pass"] == "approve"
 
 
@@ -158,5 +158,21 @@ def test_stale_prompt_rows_are_not_reviewed_or_handed_off(tmp_path):
 
 def test_filter_does_not_overmatch_and_fiction_interest_is_kept():
     ok = ci.postfilter({"description": "User keeps developing a warp-drive worldbuilding idea as a creative interest, for example ion rings",
-                        "first_pass": "approve", "domain": "misumi"})
+                        "first_pass": "approve", "domain": "misumi", "speaker_basis": "user_first_person"})
     assert ok["first_pass"] == "approve" and ok["domain"] == "misumi"
+
+
+def test_unproven_attribution_and_sensitive_terms_never_auto_approve():
+    base = {"first_pass": "approve", "domain": "neutral", "sensitivity": "ordinary", "speaker_basis": "user_first_person"}
+    third = ci.postfilter({**base, "description": "Cllr Emma Cox seeks a legal opinion", "speaker_basis": "on_behalf_of_other"})
+    assert third["first_pass"] == "needs_stronger_model" and third["sensitivity"] == "restricted"
+    ident = ci.postfilter({**base, "description": "User identifies as the chair of a parish council"})
+    assert ident["first_pass"] == "needs_stronger_model"
+    fine = ci.postfilter({**base, "description": "User prefers concise bullet points"})
+    assert fine["first_pass"] == "approve" and fine["sensitivity"] == "ordinary"
+
+
+def test_source_has_no_control_characters():
+    import pathlib
+    text = pathlib.Path(ci.__file__).read_text(encoding="utf-8")
+    assert not [c for c in text if ord(c) < 32 and c not in "\n\t\r"]     # a stray \b in a patch once became a backspace
