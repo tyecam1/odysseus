@@ -565,6 +565,29 @@ def _release_spool(execution_id: str, resolution: str) -> None:
 # Reconciliation / observation surface
 # ---------------------------------------------------------------------
 
+def _unrecorded_provider_health(db, EstateExecution):
+    """Shared backlog selection for bounded replay and fail-closed health reads."""
+    from sqlalchemy import JSON, cast, type_coerce
+    from sqlalchemy.dialects.postgresql import JSONB
+    from core.database import RoutingDecision
+    # Both forms normalize empty objects, including whitespace inside braces.
+    result_json = (type_coerce(EstateExecution.result_json, JSON) if db.bind.dialect.name == "sqlite"
+                   else cast(EstateExecution.result_json, JSONB))
+    recorded = db.query(RoutingDecision.id).filter(
+        RoutingDecision.id == "provider-health:" + EstateExecution.id,
+        RoutingDecision.task_class == "provider_health_observation",
+        RoutingDecision.host_id == EstateExecution.host_id,
+        RoutingDecision.executor == EstateExecution.provider,
+    ).exists()
+    return db.query(EstateExecution).filter(
+        EstateExecution.lifecycle_state.in_(_TERMINAL),
+        EstateExecution.result_json.isnot(None),
+        result_json["provider_health"].as_string().isnot(None),
+        result_json["provider_health"].as_string() != "{}",
+        ~recorded,
+    )
+
+
 def reconcile_stale_estate_executions(db, EstateExecution) -> int:
     """Stage 6 reconciliation. Legacy rows (worker_handle_json NULL) keep
     the old os.kill path only on this host, else become `lost`. Stage-6
@@ -574,22 +597,8 @@ def reconcile_stale_estate_executions(db, EstateExecution) -> int:
     # Terminal result_json survives a crash before _record_outcome. Replay with
     # an execution-derived observation id; repeated/concurrent sweeps cannot
     # add a second observation or move its original observed_at forward.
-    from sqlalchemy import JSON, cast, type_coerce
-    from core.database import RoutingDecision
-    # SQLite extracts JSON from text directly; PostgreSQL requires a cast.
-    result_json = (type_coerce if db.bind.dialect.name == "sqlite" else cast)(EstateExecution.result_json, JSON)
-    recorded = db.query(RoutingDecision.id).filter(
-        RoutingDecision.id == "provider-health:" + EstateExecution.id,
-        RoutingDecision.task_class == "provider_health_observation",
-        RoutingDecision.host_id == EstateExecution.host_id,
-        RoutingDecision.executor == EstateExecution.provider,
-    ).exists()
-    terminals = db.query(EstateExecution).filter(
-        EstateExecution.lifecycle_state.in_(_TERMINAL),
-        EstateExecution.result_json.isnot(None),
-        result_json["provider_health"].as_string().isnot(None),
-        ~recorded,
-    ).order_by(EstateExecution.finished_at, EstateExecution.id).limit(PROVIDER_HEALTH_REPLAY_BATCH_SIZE).all()
+    terminals = _unrecorded_provider_health(db, EstateExecution).order_by(
+        EstateExecution.finished_at, EstateExecution.id).limit(PROVIDER_HEALTH_REPLAY_BATCH_SIZE).all()
     for row in terminals:
         result = json.loads(row.result_json)
         if result.get("provider_health"):

@@ -150,8 +150,14 @@ def provider_health(host_id: Optional[str], provider: str = "codex") -> dict:
                 return pending["failure"]
     health = {"provider": provider, "state": "unknown", "retry_after": None}
     try:
-        from core.database import RoutingDecision, get_db_session
+        from core.database import EstateExecution, RoutingDecision, get_db_session
+        from src.estate_write_lane import _unrecorded_provider_health
         with get_db_session() as db:
+            backlog = _unrecorded_provider_health(db, EstateExecution).filter(
+                EstateExecution.host_id == key[0], EstateExecution.provider == provider,
+            )
+            if db.query(backlog.exists()).scalar():
+                return _unreadable_provider_health(provider, "observation backlog")
             row = db.query(RoutingDecision).filter(
                 RoutingDecision.host_id == key[0],
                 RoutingDecision.executor == provider,

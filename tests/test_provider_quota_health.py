@@ -768,3 +768,67 @@ def test_terminal_replay_only_unrecorded_bounded_oldest_first(quota_lane, monkey
         rows = db.query(cdb.RoutingDecision).filter_by(task_class='provider_health_observation').all()
         assert len(rows) == 100 + unrecorded
         assert all(json.loads(row.provider_health_json)['observed_at'] == health['observed_at'] for row in rows)
+
+
+def test_replay_backlog_blocks_health_and_paid_admission(quota_lane, quota_write_lease, monkeypatch):
+    from src import estate_write_lane as lane
+    message, count, now = quota_lane
+    quota = router._quota_observation(message.read_text())
+    with cdb.get_db_session() as db:
+        # The quota failure is just beyond one replay batch of successful results.
+        for i in range(11):
+            health = quota if i == 10 else {
+                'provider': 'codex', 'state': 'ok', 'retry_after': None,
+                'observed_at': (now[0] - timedelta(seconds=11 - i)).isoformat(),
+                'reason': 'successful execution',
+            }
+            db.add(cdb.EstateExecution(id=f'backlog-{i:02}', objective='implement', executor='codex-write',
+                provider='codex', host_id='lab', repo_id='odysseus', lease_id='lease', branch='feat/test',
+                worktree_path='/w/test', lifecycle_state='failed' if i == 10 else 'succeeded',
+                worktree_resolution='finalized', finished_at=(now[0] + timedelta(seconds=i)).replace(tzinfo=None),
+                result_json=json.dumps({'ok': i < 10, 'provider_health': health})))
+    monkeypatch.setattr(lane, '_worker', lambda *a, **k: pytest.fail('write worker called'))
+    monkeypatch.setattr(client, 'call_worker', lambda *a, **k: pytest.fail('paid worker called'))
+    with cdb.get_db_session() as db:
+        lane.reconcile_stale_estate_executions(db, cdb.EstateExecution)
+    health = router.provider_health('lab')
+    assert health['state'] == 'unknown_unreadable' and not health['retry_allowed']
+    assert health['reason'] == 'observation backlog'
+    assert router.provider_health('other-worker')['state'] == 'unknown'
+    assert router.provider_health('lab', 'other-provider')['state'] == 'unknown'
+    assert _run_paid()['executed'] is False
+    assert router._dispatch_read_only('lab', 'codex', {'objective': 'review'})['executed'] is False
+    assert lane.execute_write_via_worker('implement', repo_id='odysseus', host_id='lab')['executed'] is False
+    assert not preflight.delegation_preflight([{'task_class': 'code_review'}])['snapshot']['codex']['available']
+    with cdb.get_db_session() as db:
+        assert db.query(cdb.RoutingDecision).filter_by(task_class='provider_health_observation').count() == 10
+        assert db.query(cdb.EstateExecution).count() == 11  # No new write admission.
+        lane.reconcile_stale_estate_executions(db, cdb.EstateExecution)
+    health = router.provider_health('lab')
+    assert health['state'] == 'quota_exhausted' and not health['retry_allowed']
+    assert health['retry_after'] == quota['retry_after']
+    assert not count.exists()
+
+
+def test_empty_terminal_payloads_cannot_starve_quota_replay(quota_lane, monkeypatch):
+    from src import estate_write_lane as lane
+    message, count, now = quota_lane
+    quota = router._quota_observation(message.read_text())
+    with cdb.get_db_session() as db:
+        for i in range(24):
+            # More than two batches of empty objects, including noncanonical whitespace.
+            payload = '{"provider_health": { \n }}' if i < 23 else json.dumps({'provider_health': quota})
+            db.add(cdb.EstateExecution(id=f'empty-{i:02}', objective='implement', executor='codex-write',
+                provider='codex', host_id='lab', repo_id='odysseus', lease_id='lease', branch='feat/test',
+                worktree_path='/w/test', lifecycle_state='failed', worktree_resolution='finalized',
+                finished_at=(now[0] + timedelta(seconds=i)).replace(tzinfo=None), result_json=payload))
+    monkeypatch.setattr(lane, '_worker', lambda *a, **k: pytest.fail('terminal replay called worker'))
+    with cdb.get_db_session() as db:
+        lane.reconcile_stale_estate_executions(db, cdb.EstateExecution)
+    with cdb.get_db_session() as db:
+        row = db.query(cdb.RoutingDecision).filter_by(task_class='provider_health_observation').one()
+        assert row.id == 'provider-health:empty-23'
+        assert json.loads(row.provider_health_json) == quota
+    health = router.provider_health('lab')
+    assert health['state'] == 'quota_exhausted' and not health['retry_allowed']
+    assert not count.exists()

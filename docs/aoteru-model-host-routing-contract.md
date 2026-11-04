@@ -572,6 +572,10 @@ an execution-derived observation id. Recovery preserves `observed_at` and
 is idempotent, including a crash after terminal commit but before telemetry.
 Each sweep replays at most 10 unrecorded observations, oldest terminal first;
 executions with a persisted observation are excluded before loading results.
+Empty observation objects do not occupy replay batches. While unrecorded
+observations remain for a host/provider, health reads fail closed as
+`unknown_unreadable` with reason `observation backlog`; paid admission waits
+for reconciliation to catch up.
 
 A qualified local read-only route may be recommended for its requested
 aliases when no reserved verification requirement is supplied. Write work
