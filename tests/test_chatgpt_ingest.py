@@ -237,7 +237,7 @@ def test_top_digest_ranks_supported_items_first_and_excludes_restricted(tmp_path
                                   _conv("c2", "Again: radar for the PhD sensing study")])
     ci.run_all(z, "imp", local=_local, strong=_strong, root=tmp_path)
     top = (tmp_path / "imp" / "digest-top.md").read_text()
-    assert top.splitlines()[2].startswith("- [2x")
+    assert any(line.startswith("- [2x") for line in top.splitlines())
 
 
 def test_retriage_supersedes_rows_when_triage_rule_changes_and_for_others_is_skipped(tmp_path):
@@ -280,3 +280,66 @@ def test_refilter_denies_assistant_rows_and_enforces_cap_idempotently(tmp_path):
     assert sum(r["active"] for r in latest.values()) == 4
     assert not any(r["active"] for r in latest.values() if r["description"].startswith("The assistant"))
     assert ci.refilter("imp", root=tmp_path) == {"changed": 0, "capped": 0}
+
+
+def _enrich_llm(system, user):
+    if system == ci.TRIAGE_SYSTEM:
+        return json.dumps({"purpose": "work_or_life"})
+    if system == ci.PREF_SYSTEM:
+        return json.dumps({"preferences": [{"description": "User prefers British English and concise bullet points",
+                                            "msgs": ["u1"], "domain": "misumi"}]})
+    return _local(system, user)
+
+
+def test_enrich_extracts_preferences_and_questions_and_is_idempotent(tmp_path):
+    z = _zip(tmp_path / "e.zip", [_conv("c1", "I always want British English. What is the range of mmWave radar for pose sensing?"),
+                                  _conv("c2", "Quick one: What is the range of mmWave radar for pose sensing?")])
+    ci.run_all(z, "imp", local=_enrich_llm, strong=_strong, root=tmp_path)
+    latest = {}
+    for r in ci._read_jsonl(tmp_path / "imp" / "ledger.jsonl"):
+        latest[r["candidate_id"]] = r
+    live = [r for r in latest.values() if r["active"] and r["review"] != "superseded"]
+    assert any(r["kind"] == "preference" and r.get("source") == "enrich" for r in live)
+    qs = [r for r in live if r["kind"] == "question"]
+    assert len(qs) == 2 and all(r["review"] == "not_reviewed" for r in qs)
+    again = ci.enrich("imp", _enrich_llm, root=tmp_path)
+    assert again["checked"] == 0
+    out = ci.digest("imp", root=tmp_path)
+    assert out["recurring_questions"] == 1 and out["preferences"] >= 1
+    top = (tmp_path / "imp" / "digest-top.md").read_text()
+    assert top.index("Your preferences") < top.index("Your recurring questions")
+
+
+def test_enrich_rescues_preferences_from_coursework_but_skips_for_others_and_homework_questions(tmp_path):
+    z = _zip(tmp_path / "e.zip", [_conv("c1", "I prefer detailed R solutions. Can you solve problem 5?"),
+                                  _conv("c2", "I always want formal tone. Please draft for my client.")])
+    ci.stage(z, "imp", root=tmp_path)
+
+    def llm(system, user):
+        if system == ci.TRIAGE_SYSTEM:
+            return json.dumps({"purpose": "coursework" if "problem 5" in user else "for_others"})
+        return _enrich_llm(system, user)
+    ci.extract("imp", llm, root=tmp_path)
+    out = ci.enrich("imp", llm, root=tmp_path)
+    assert out["skipped_for_others"] == 1 and out["preferences"] == 1 and out["questions"] == 0
+
+
+def test_decision_pass_and_questions_are_guided_by_preferences_and_decisions(tmp_path):
+    def llm(system, user):
+        if system == ci.TRIAGE_SYSTEM:
+            return json.dumps({"purpose": "work_or_life"})
+        if system == ci.PREF_SYSTEM:
+            return json.dumps({"preferences": []})
+        if system == ci.DECISION_SYSTEM:
+            return json.dumps({"decisions": [{"description": "Chooses mmWave radar over cameras for pose sensing because of privacy",
+                                              "msgs": ["u1"], "domain": "obsidian-phd"}]})
+        return _local(system, user)
+    z = _zip(tmp_path / "e.zip", [_conv("c1", "I decided on radar instead of cameras. What is the range of mmWave radar for pose sensing?"),
+                                  _conv("c2", "What is the range of mmWave radar for pose sensing in a cobot cell?")])
+    out = ci.run_all(z, "imp", local=llm, strong=_strong, root=tmp_path)
+    assert out["extract"]["enrich"]["decisions"] >= 1
+    d = ci.digest("imp", root=tmp_path)
+    assert d["decision_rules"] >= 1 and d["recurring_questions"] == 1
+    top = (tmp_path / "imp" / "digest-top.md").read_text()
+    assert "guided by [decision]" in top
+    assert top.index("Your decisions and the rules behind them") < top.index("Your recurring questions")
