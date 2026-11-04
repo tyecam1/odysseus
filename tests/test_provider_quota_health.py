@@ -832,3 +832,74 @@ def test_empty_terminal_payloads_cannot_starve_quota_replay(quota_lane, monkeypa
     health = router.provider_health('lab')
     assert health['state'] == 'quota_exhausted' and not health['retry_allowed']
     assert not count.exists()
+
+
+@pytest.mark.parametrize('payload', [
+    {'provider_health': value} for value in (
+        [], False, 0, '', {}, None, 'bad', 1, ['bad'], {'state': 'ok'},
+    )
+] + [{}, [], False, None, '{bad'])
+def test_unusable_terminal_replay_cannot_starve_another_host(quota_lane, monkeypatch, payload):
+    from src import estate_write_lane as lane
+    message, count, now = quota_lane
+    quota = router._quota_observation(message.read_text())
+    with cdb.get_db_session() as db:
+        for i in range(24):
+            result = {'provider_health': quota} if i == 23 else payload
+            db.add(cdb.EstateExecution(id=f'malformed-{i:02}', objective='implement', executor='codex-write',
+                provider='codex', host_id='lab' if i == 23 else 'bad-host', repo_id='odysseus',
+                lease_id='lease', branch='feat/test', worktree_path='/w/test', lifecycle_state='failed',
+                worktree_resolution='finalized', finished_at=(now[0] + timedelta(seconds=i)).replace(tzinfo=None),
+                result_json=result if result == '{bad' else json.dumps(result)))
+    monkeypatch.setattr(lane, '_worker', lambda *a, **k: pytest.fail('terminal replay called worker'))
+    for _ in range(3):
+        with cdb.get_db_session() as db:
+            lane.reconcile_stale_estate_executions(db, cdb.EstateExecution)
+        with cdb.get_db_session() as db:
+            observation = db.query(cdb.RoutingDecision).filter_by(task_class='provider_health_observation').one()
+            assert observation.id == 'provider-health:malformed-23'
+            assert json.loads(observation.provider_health_json) == quota
+            # Includes durable handling of unusable results, not just a transient skip.
+            assert db.query(cdb.RoutingDecision).filter_by(
+                task_class='provider_health_replay', escalation_reason='no_usable_observation',
+                host_id='bad-host', executor='codex',
+            ).count() == 23
+            assert lane._unrecorded_provider_health(db, cdb.EstateExecution).count() == 0
+        assert router.provider_health('bad-host')['state'] == 'unknown'
+        assert router.provider_health('lab')['state'] == 'quota_exhausted'
+        assert router.provider_health('lab')['reason'] != 'observation backlog'
+        assert router.provider_health('lab', 'other-provider')['state'] == 'unknown'
+    assert not count.exists()
+
+
+@pytest.mark.parametrize('conflict', ['state', 'retry_after'])
+def test_terminal_reconciliation_detects_recorded_payload_conflict(quota_lane, monkeypatch, conflict):
+    from src import estate_write_lane as lane
+    message, count, now = quota_lane
+    quota = router._quota_observation(message.read_text())
+    recorded = {**quota}
+    if conflict == 'state':
+        recorded.update(state='ok', retry_after=None)
+        recorded.pop('retry_after_source')
+    else:
+        recorded['retry_after'] = (now[0] + timedelta(minutes=20)).isoformat()
+    with cdb.get_db_session() as db:
+        db.add(cdb.RoutingDecision(id='provider-health:conflict-terminal',
+            task_class='provider_health_observation', host_id='lab', executor='codex',
+            status='complete', provider_health_json=json.dumps(recorded)))
+        db.add(cdb.EstateExecution(id='conflict-terminal', objective='implement', executor='codex-write',
+            provider='codex', host_id='lab', repo_id='odysseus', lease_id='lease', branch='feat/test',
+            worktree_path='/w/test', lifecycle_state='failed', worktree_resolution='finalized',
+            finished_at=now[0].replace(tzinfo=None), result_json=json.dumps({'provider_health': quota})))
+    monkeypatch.setattr(lane, '_worker', lambda *a, **k: pytest.fail('terminal replay called worker'))
+    with cdb.get_db_session() as db:
+        lane.reconcile_stale_estate_executions(db, cdb.EstateExecution)
+    # A restart must not restore the conflicting persisted success.
+    router._PROVIDER_HEALTH_WRITE_FAILURES.clear()
+    health = router.provider_health('lab')
+    assert health['state'] == 'unknown_unreadable' and not health['retry_allowed']
+    assert 'conflict' in health['reason']
+    assert _run_paid()['executed'] is False
+    assert router.provider_health('other-host')['state'] == 'unknown'
+    assert router.provider_health('lab', 'other-provider')['state'] == 'unknown'
+    assert not count.exists()

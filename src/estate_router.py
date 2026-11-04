@@ -151,13 +151,25 @@ def provider_health(host_id: Optional[str], provider: str = "codex") -> dict:
     health = {"provider": provider, "state": "unknown", "retry_after": None}
     try:
         from core.database import EstateExecution, RoutingDecision, get_db_session
-        from src.estate_write_lane import _unrecorded_provider_health
+        from src.estate_write_lane import (
+            _unrecorded_provider_health, _provider_health_replay_pages, _classify_provider_health_replay,
+        )
         with get_db_session() as db:
+            conflict = db.query(RoutingDecision).filter_by(
+                host_id=key[0], executor=provider, task_class="provider_health_replay",
+                escalation_reason="conflict",
+            ).first()
+            if conflict:
+                return _unreadable_provider_health(provider, "provider observation payload conflict")
             backlog = _unrecorded_provider_health(db, EstateExecution).filter(
                 EstateExecution.host_id == key[0], EstateExecution.provider == provider,
             )
-            if db.query(backlog.exists()).scalar():
-                return _unreadable_provider_health(provider, "observation backlog")
+            for terminal in _provider_health_replay_pages(backlog, EstateExecution):
+                disposition, _ = _classify_provider_health_replay(db, terminal)
+                if disposition == "conflict":
+                    return _unreadable_provider_health(provider, "provider observation payload conflict")
+                if disposition == "pending":
+                    return _unreadable_provider_health(provider, "observation backlog")
             row = db.query(RoutingDecision).filter(
                 RoutingDecision.host_id == key[0],
                 RoutingDecision.executor == provider,

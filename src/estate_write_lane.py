@@ -566,26 +566,75 @@ def _release_spool(execution_id: str, resolution: str) -> None:
 # ---------------------------------------------------------------------
 
 def _unrecorded_provider_health(db, EstateExecution):
-    """Shared backlog selection for bounded replay and fail-closed health reads."""
-    from sqlalchemy import JSON, cast, type_coerce
-    from sqlalchemy.dialects.postgresql import JSONB
+    """Terminal results awaiting Python classification, including legacy observations."""
     from core.database import RoutingDecision
-    # Both forms normalize empty objects, including whitespace inside braces.
-    result_json = (type_coerce(EstateExecution.result_json, JSON) if db.bind.dialect.name == "sqlite"
-                   else cast(EstateExecution.result_json, JSONB))
     recorded = db.query(RoutingDecision.id).filter(
-        RoutingDecision.id == "provider-health:" + EstateExecution.id,
-        RoutingDecision.task_class == "provider_health_observation",
+        RoutingDecision.id == "provider-health-replay:" + EstateExecution.id,
+        RoutingDecision.task_class == "provider_health_replay",
         RoutingDecision.host_id == EstateExecution.host_id,
         RoutingDecision.executor == EstateExecution.provider,
     ).exists()
     return db.query(EstateExecution).filter(
         EstateExecution.lifecycle_state.in_(_TERMINAL),
-        EstateExecution.result_json.isnot(None),
-        result_json["provider_health"].as_string().isnot(None),
-        result_json["provider_health"].as_string() != "{}",
         ~recorded,
     )
+
+
+def _provider_health_replay_pages(query, EstateExecution):
+    """Keyset pages stay stable as dispositions remove rows from selection."""
+    from datetime import datetime
+    from sqlalchemy import and_, func, or_
+    finished = func.coalesce(EstateExecution.finished_at, datetime.min)
+    cursor = None
+    while True:
+        page = query
+        if cursor is not None:
+            page = page.filter(or_(finished > cursor[0], and_(finished == cursor[0], EstateExecution.id > cursor[1])))
+        rows = page.order_by(finished, EstateExecution.id).limit(PROVIDER_HEALTH_REPLAY_BATCH_SIZE).all()
+        if not rows:
+            return
+        for row in rows:
+            yield row
+        cursor = (rows[-1].finished_at or datetime.min, rows[-1].id)
+
+
+def _classify_provider_health_replay(db, row):
+    from core.database import RoutingDecision
+    try:
+        result = json.loads(row.result_json)
+        health = result.get("provider_health")
+        _router._validate_provider_payload(health)
+        if health["provider"] != row.provider:
+            raise ValueError("provider observation scope mismatch")
+    except (ValueError, TypeError, KeyError, AttributeError):
+        return "no_usable_observation", None
+    recorded = db.query(RoutingDecision).filter_by(id=f"provider-health:{row.id}").first()
+    if recorded is None:
+        return "pending", result
+    try:
+        _router._validate_provider_observation(recorded, row.host_id, health)
+    except (ValueError, TypeError):
+        return "conflict", result
+    return "recorded", result
+
+
+def _record_provider_replay_disposition(row, disposition):
+    """Bounded, idempotent telemetry in the existing store; no lifecycle mutation."""
+    from sqlalchemy.exc import IntegrityError
+    from core.database import RoutingDecision, get_db_session
+    values = dict(id=f"provider-health-replay:{row.id}", task_class="provider_health_replay",
+                  host_id=row.host_id, executor=row.provider, escalation_reason=disposition,
+                  status="blocked" if disposition == "conflict" else "complete")
+    try:
+        with get_db_session() as db:
+            if db.query(RoutingDecision).filter_by(id=values["id"]).first() is None:
+                db.add(RoutingDecision(**values))
+    except IntegrityError:
+        pass  # A concurrent sweep may have committed the same disposition.
+    with get_db_session() as db:
+        recorded = db.query(RoutingDecision).filter_by(id=values["id"]).one()
+        if any(getattr(recorded, name) != value for name, value in values.items()):
+            raise ValueError("provider replay disposition conflicts")
 
 
 def reconcile_stale_estate_executions(db, EstateExecution) -> int:
@@ -597,12 +646,23 @@ def reconcile_stale_estate_executions(db, EstateExecution) -> int:
     # Terminal result_json survives a crash before _record_outcome. Replay with
     # an execution-derived observation id; repeated/concurrent sweeps cannot
     # add a second observation or move its original observed_at forward.
-    terminals = _unrecorded_provider_health(db, EstateExecution).order_by(
-        EstateExecution.finished_at, EstateExecution.id).limit(PROVIDER_HEALTH_REPLAY_BATCH_SIZE).all()
+    terminals = _provider_health_replay_pages(_unrecorded_provider_health(db, EstateExecution), EstateExecution)
+    replayed = 0
     for row in terminals:
-        result = json.loads(row.result_json)
-        if result.get("provider_health"):
+        disposition, result = _classify_provider_health_replay(db, row)
+        if disposition in ("pending", "conflict") and replayed >= PROVIDER_HEALTH_REPLAY_BATCH_SIZE:
+            break
+        if disposition == "pending":
             _record_outcome(row, row.lifecycle_state, row.host_id, result)
+            disposition, _ = _classify_provider_health_replay(db, row)
+            if disposition == "pending":
+                continue  # Persistence failed; keep only this provider's valid backlog closed.
+            replayed += 1
+        elif disposition == "conflict":
+            replayed += 1
+        # Unusable results and validated existing observations consume no replay
+        # budget. Persist their disposition so they can never starve later pages.
+        _record_provider_replay_disposition(row, disposition)
     reconciled = _reconcile_legacy(db, EstateExecution)
     now = _now()
     stale_before = now - timedelta(seconds=OBSERVATION_STALE_SECONDS)
