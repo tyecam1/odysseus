@@ -185,3 +185,13 @@ def test_digest_clusters_across_conversations_and_ranks_by_support(tmp_path):
     out = ci.digest("imp", root=tmp_path)
     text = (tmp_path / "imp" / "digest.md").read_text()
     assert "[2x decision" in text and out["items"] < out["rows"]
+
+
+def test_coursework_variants_are_denied():
+    base = {"first_pass": "approve", "domain": "obsidian-phd", "sensitivity": "ordinary", "speaker_basis": "user_first_person"}
+    for d in ("User is solving a set of probability problems, correcting problem 41 part c",
+              "User is working on ME 491 Programming Exercise 2 implementing policy iteration",
+              "User works on a tutorial sheet for control systems"):
+        assert ci.postfilter({**base, "description": d})["first_pass"] == "deny", d
+    keep = ci.postfilter({**base, "description": "User is writing a PhD literature review on safety standards"})
+    assert keep["first_pass"] == "approve"
