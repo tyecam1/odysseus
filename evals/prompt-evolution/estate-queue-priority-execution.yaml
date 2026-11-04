@@ -1,0 +1,32 @@
+schema_version: 1
+prompt_id: estate-queue-priority-execution
+active_head: prompt:v2
+nodes:
+  - id: prompt:v1
+    type: prompt_version
+    version: 1
+    path: docs/initialising-prompts/estate-queue-priority-execution-v1.md
+    status: superseded
+  - id: prompt:v2
+    type: prompt_version
+    version: 2
+    path: docs/initialising-prompts/estate-queue-priority-execution-v2.md
+    status: active
+edges:
+  - from: prompt:v1
+    to: prompt:v2
+    type: operator_feedback
+    reason: usage-aware-priority-autonomy-lab-ssh-and-skill-rename
+guardrail_validation:
+  prompt:v1:
+    repository_scope_preserved: true
+    authority_scope_preserved: true
+    evidence_and_verification_preserved: true
+    model_identity_discipline_preserved: true
+    prompt_application_trace_required: true
+  prompt:v2:
+    repository_scope_preserved: true
+    authority_scope_preserved: true
+    evidence_and_verification_preserved: true
+    model_identity_discipline_preserved: true
+    prompt_application_trace_required: true
