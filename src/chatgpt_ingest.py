@@ -94,7 +94,8 @@ def iter_conversations(zip_path: Path) -> Iterator[dict]:
             name = PurePosixPath(info.filename)
             if name.is_absolute() or ".." in name.parts or (info.external_attr >> 16) & 0o170000 == stat.S_IFLNK:
                 raise ValueError("unsafe archive member")
-        shards = sorted(i for i in infos if re.fullmatch(r"(?:.*/)?conversations(?:-\d+)?\.json", i.filename))
+        shards = sorted((i for i in infos if re.fullmatch(r"(?:.*/)?conversations(?:-\d+)?\.json", i.filename)),
+                        key=lambda i: i.filename)
         if not shards:
             raise ValueError("no conversations*.json in archive")
         for info in shards:

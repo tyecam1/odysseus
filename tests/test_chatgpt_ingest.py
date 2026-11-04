@@ -117,3 +117,11 @@ def test_unparseable_model_reply_is_retried_not_guessed(tmp_path):
     ci.stage(z, "imp", root=tmp_path)
     assert ci.extract("imp", lambda s, u: "not json", root=tmp_path)["failed"] == 1
     assert ci.extract("imp", _local, root=tmp_path)["processed"] == 1
+
+
+def test_multiple_shards(tmp_path):
+    p = tmp_path / "m.zip"
+    with zipfile.ZipFile(p, "w") as zf:
+        zf.writestr("conversations-001.json", json.dumps([_conv("c2", "two")]))
+        zf.writestr("conversations-000.json", json.dumps([_conv("c1", "one")]))
+    assert [c["conversation_id"] for c in ci.iter_conversations(p)] == ["c1", "c2"]

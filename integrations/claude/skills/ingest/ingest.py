@@ -8,9 +8,10 @@ import argparse, hashlib, json, subprocess, sys
 from pathlib import Path
 
 LAB = "agent@dmem-hp-z2-tower-g9-workstation-desktop-pc.tail171792.ts.net"  # resolve via `am where` if this changes
-REPO = "/home/agent/projects/odysseus-aoteru"
+REPO = "/home/agent/projects/odysseus-aoteru"   # data dir + venv
+CODE = "/home/agent/aoteru-worktrees/odysseus/chatgpt-ingest-20261104"  # until PR #218 merges; then use REPO
 PY = f"{REPO}/venv/bin/python"
-RUN = f"cd {REPO} && {PY} -m src.chatgpt_ingest"
+RUN = f"cd {CODE} && ODYSSEUS_DATA_DIR={REPO}/data PYTHONPATH={CODE} {PY} -m src.chatgpt_ingest"
 SSH = ["ssh", "-o", "BatchMode=yes", LAB]
 
 
@@ -45,15 +46,22 @@ def main():
     inbox = f"/home/agent/data/ingestion/chatgpt-inbox"
     dest = f"{inbox}/{import_id}.zip"
     ssh(f"mkdir -p {inbox} && chmod 700 {inbox}")
-    r = subprocess.run(["rsync", "-t", "--partial", "--chmod=F600", "-e", "ssh -o BatchMode=yes", str(z), f"{LAB}:{dest}"])
+    rc, size, _ = ssh(f"stat -c %s {dest} 2>/dev/null || echo 0")
+    off = int(size) if size.isdigit() and int(size) <= z.stat().st_size else 0
+    if off == 0:
+        ssh(f"rm -f {dest}")
+    with z.open("rb") as fh:
+        fh.seek(off)
+        r = subprocess.run(SSH + [f"umask 077; cat >> {dest}"], stdin=fh)  # resumes from the remote size on rerun
     if r.returncode != 0:
-        print(json.dumps({"ok": False, "error": "transfer failed", "import_id": import_id})); return 1
+        print(json.dumps({"ok": False, "error": "transfer failed; rerun to resume", "import_id": import_id})); return 1
     rc, remote_hash, _ = ssh(f"sha256sum {dest} | cut -c1-12")
     if remote_hash != import_id:
         print(json.dumps({"ok": False, "error": "hash mismatch after transfer"})); return 1
     lim = f" --limit {a.limit}" if a.limit else ""
-    rc, out, err = ssh(f"{RUN} run --zip {dest} --import-id {import_id}{flag}{lim}")
-    print(out or json.dumps({"ok": False, "error": err})); return rc
+    log = f"{inbox}/{import_id}.log"
+    ssh(f"nohup {RUN} run --zip {dest} --import-id {import_id}{flag}{lim} > {log} 2>&1 < /dev/null &")
+    print(json.dumps({"ok": True, "started": import_id, "log": log, "status": f"ingest.py --status {import_id}"})); return 0
 
 
 sys.exit(main())
