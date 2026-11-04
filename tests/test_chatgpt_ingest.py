@@ -125,3 +125,22 @@ def test_multiple_shards(tmp_path):
         zf.writestr("conversations-001.json", json.dumps([_conv("c2", "two")]))
         zf.writestr("conversations-000.json", json.dumps([_conv("c1", "one")]))
     assert [c["conversation_id"] for c in ci.iter_conversations(p)] == ["c1", "c2"]
+
+
+def test_one_off_requests_are_denied_and_misumi_fiction_rerouted():
+    c = ci.postfilter({"description": "User requests MATLAB code to plot a workspace", "first_pass": "approve", "domain": "misumi"})
+    assert c["first_pass"] == "deny" and c["domain"] == "neutral"
+    keep = ci.postfilter({"description": "User prefers British English", "first_pass": "approve", "domain": "misumi"})
+    assert keep["first_pass"] == "approve"
+
+
+def test_prompt_bump_supersedes_old_rows_not_duplicates(tmp_path, monkeypatch):
+    z = _zip(tmp_path / "e.zip", [_conv("c1", "I decided on radar for my PhD sensing study")])
+    ci.run_all(z, "imp", local=_local, strong=_strong, root=tmp_path)
+    monkeypatch.setattr(ci, "PROMPT_VERSION", "v3")
+    out = ci.extract("imp", _local, root=tmp_path)
+    assert out["processed"] == 1
+    latest = {}
+    for r in ci._read_jsonl(tmp_path / "imp" / "ledger.jsonl"):
+        latest[r["candidate_id"]] = r
+    assert sum(r["active"] for r in latest.values()) <= 1       # old active row superseded, not duplicated
