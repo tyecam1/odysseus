@@ -230,3 +230,11 @@ def test_digest_puts_restricted_rows_in_their_own_late_section(tmp_path):
     ci.digest("imp", root=tmp_path)
     text = (work / "digest.md").read_text()
     assert text.index("bullet points") < text.index("RESTRICTED") < text.index("health matter")
+
+
+def test_top_digest_ranks_supported_items_first_and_excludes_restricted(tmp_path):
+    z = _zip(tmp_path / "e.zip", [_conv("c1", "I decided on radar for my PhD sensing study"),
+                                  _conv("c2", "Again: radar for the PhD sensing study")])
+    ci.run_all(z, "imp", local=_local, strong=_strong, root=tmp_path)
+    top = (tmp_path / "imp" / "digest-top.md").read_text()
+    assert top.splitlines()[2].startswith("- [2x")

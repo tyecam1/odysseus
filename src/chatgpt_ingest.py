@@ -36,6 +36,7 @@ MAX_MEMBERS = 20000
 USER_CHARS = 6000                         # per conversation, user text sent to the model
 ASSIST_CHARS = 300                        # assistant text is context only, heavily truncated
 BATCH_REVIEW = 25
+TOP_N = 60
 DOMAINS = ("misumi", "obsidian-phd", "odysseus", "neutral", "quarantine")
 KINDS = ("preference", "decision", "goal", "open_loop", "procedure", "research_lead",
          "project_context", "historical_event", "resource_pointer")
@@ -271,8 +272,14 @@ def postfilter(c: dict) -> dict:
     return c
 
 
+STOP_WORDS = frozenset(
+    "the and for with that this their his her they them its from into onto using uses use user users also has have had are was were "
+    "been being will would can could should aims aim wants want plans plan intends intend prefers prefer requires require needs need "
+    "seeks seek wishes wish decided decides working works work based such than then when where which while about over under".split())
+
+
 def _norm(text: str) -> frozenset:
-    return frozenset(w for w in re.findall(r"[a-z0-9]{3,}", text.lower()))
+    return frozenset(w for w in re.findall(r"[a-z0-9]{3,}", text.lower()) if w not in STOP_WORDS)
 
 
 def _similar(a: frozenset, b: frozenset) -> float:
@@ -534,6 +541,14 @@ def report(import_id: str, *, root: Optional[Path] = None) -> dict:
             "ledger": str(work / "ledger.jsonl")}
 
 
+KIND_WEIGHT = {"decision": 3, "preference": 3, "goal": 2, "open_loop": 2, "project_context": 1, "procedure": 1}
+
+
+def _score(cluster: dict) -> float:
+    r = cluster["rep"]
+    return 2 * len(cluster["convs"]) + KIND_WEIGHT.get(r["kind"], 0) + r["confidence"]
+
+
 def digest(import_id: str, *, root: Optional[Path] = None, threshold: float = 0.4) -> dict:
     """Private, grep-able review view: live rows clustered across conversations, ranked by how many conversations support them."""
     work = _private((root or _data_root()) / import_id)
@@ -561,6 +576,12 @@ def digest(import_id: str, *, root: Optional[Path] = None, threshold: float = 0.
             lines.append(f"\n## {c['domain']}{' - RESTRICTED (human gate only; review last)' if section[0] else ''} ({count})\n")
         flag = "GATE" if r["review"] == "human_gate" or r["sensitivity"] != "ordinary" else r["review"]
         lines.append(f"- [{len(c['convs'])}x {r['kind']} {r['sensitivity'][:4]} {flag}] {r['description']} ({c['ids'][0][:8]})")
+    top = sorted((c for c in clusters if c["rep"]["sensitivity"] != "restricted"), key=lambda c: -_score(c))[:TOP_N]
+    top_lines = [f"# Start here: top {len(top)} of {len(clusters)} items (support, then kind), restricted rows excluded\n"]
+    top_lines += [f"- [{len(c['convs'])}x {c['rep']['kind']} {c['domain']}] {c['rep']['description']} ({c['ids'][0][:8]})" for c in top]
+    tfd = os.open(work / "digest-top.md", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(tfd, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(top_lines) + "\n")
     path = work / "digest.md"
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as fh:
@@ -568,7 +589,7 @@ def digest(import_id: str, *, root: Optional[Path] = None, threshold: float = 0.
     by_domain: dict[str, int] = {}
     for c in clusters:
         by_domain[c["domain"]] = by_domain.get(c["domain"], 0) + 1
-    return {"items": len(clusters), "rows": len(live), "by_domain": by_domain, "digest": str(path)}
+    return {"items": len(clusters), "rows": len(live), "by_domain": by_domain, "digest": str(path), "top": str(work / "digest-top.md")}
 
 
 def run_all(zip_path: Path, import_id: str, *, local: Optional[Llm] = None, strong: Optional[Llm] = None,
