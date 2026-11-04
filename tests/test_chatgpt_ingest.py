@@ -195,3 +195,26 @@ def test_coursework_variants_are_denied():
         assert ci.postfilter({**base, "description": d})["first_pass"] == "deny", d
     keep = ci.postfilter({**base, "description": "User is writing a PhD literature review on safety standards"})
     assert keep["first_pass"] == "approve"
+
+
+def test_triage_skips_coursework_without_extraction_and_fails_open(tmp_path):
+    calls = []
+
+    def llm(system, user):
+        calls.append(system)
+        if system == ci.TRIAGE_SYSTEM:
+            return json.dumps({"purpose": "coursework"})
+        return _local(system, user)
+    z = _zip(tmp_path / "e.zip", [_conv("c1", "solve problem 5 of my homework")])
+    ci.stage(z, "imp", root=tmp_path)
+    out = ci.extract("imp", llm, root=tmp_path)
+    assert out["triaged_out"] == 1 and out["candidates"] == 0 and ci.EXTRACT_SYSTEM not in calls
+    assert ci.triage(lambda s, u: "garbage", {"messages": [{"role": "user", "text": "x"}]}) is None   # fail open
+
+
+def test_numeric_and_submission_backstops():
+    base = {"first_pass": "approve", "domain": "neutral", "sensitivity": "ordinary", "speaker_basis": "user_first_person"}
+    for d in ("User requires pressures with force 1779 kN and height 0.1 m",
+              "User wants to submit compilable code to the autograder"):
+        assert ci.postfilter({**base, "description": d})["first_pass"] == "deny", d
+    assert ci.postfilter({**base, "description": "User reviews PR #157 on 2026-11-02"})["first_pass"] == "approve"
