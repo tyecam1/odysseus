@@ -259,3 +259,24 @@ def test_community_terms_are_restricted():
     base = {"first_pass": "approve", "domain": "misumi", "sensitivity": "ordinary", "speaker_basis": "user_first_person"}
     out = ci.postfilter({**base, "description": "User campaigns for safer parks in the ward"})
     assert out["sensitivity"] == "restricted"
+
+
+def test_refilter_denies_assistant_rows_and_enforces_cap_idempotently(tmp_path):
+    work = tmp_path / "imp"
+    work.mkdir()
+    def add(desc, kind, conf, cid="c1"):
+        row = ci._row("imp", cid, {"kind": kind, "description": desc, "msgs": [], "domain": "neutral", "validity": "unknown",
+                                   "sensitivity": "ordinary", "speaker_basis": "user_first_person", "confidence": conf,
+                                   "first_pass": "approve"}, "h")
+        ci._append(work / "ledger.jsonl", row)
+    add("The assistant suggests replugging the board", "procedure", 0.9)
+    for i in range(6):
+        add(f"User holds distinct standing preference number {i} alpha{i}", "preference", 0.5 + i / 20)
+    first = ci.refilter("imp", root=tmp_path)
+    assert first["capped"] == 2 and first["changed"] >= 3
+    latest = {}
+    for r in ci._read_jsonl(work / "ledger.jsonl"):
+        latest[r["candidate_id"]] = r
+    assert sum(r["active"] for r in latest.values()) == 4
+    assert not any(r["active"] for r in latest.values() if r["description"].startswith("The assistant"))
+    assert ci.refilter("imp", root=tmp_path) == {"changed": 0, "capped": 0}

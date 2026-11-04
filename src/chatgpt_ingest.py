@@ -260,6 +260,10 @@ def numeric_heavy(description: str) -> bool:
     return len(re.findall(r"\d+(?:[.,]\d+)?", body)) >= 3 or bool(UNIT_RE.search(body))
 
 
+ASSISTANT_RE = re.compile(r"(?i)^(the )?(assistant|chatgpt|ai|model)\b")
+PER_CONV_CAP = 4
+
+
 def postfilter(c: dict) -> dict:
     """Deterministic backstop for known extractor mistakes: one-off task requests are never durable context."""
     if SENSITIVE_RE.search(c["description"]) and c.get("sensitivity") in ("ordinary", "personal"):
@@ -268,6 +272,8 @@ def postfilter(c: dict) -> dict:
         c = {**c, "first_pass": "needs_stronger_model"}      # attribution is unproven: never auto-approve
     if IDENTITY_RE.search(c["description"]) and c.get("first_pass") == "approve":
         c = {**c, "first_pass": "needs_stronger_model"}
+    if ASSISTANT_RE.search(c["description"]):
+        c = {**c, "first_pass": "deny"}      # assistant statements are not facts about the user
     if ONE_OFF_RE.search(c["description"]) or SUBMIT_RE.search(c["description"]) or numeric_heavy(c["description"]):
         c = {**c, "first_pass": "deny", "domain": "neutral" if c["domain"] == "misumi" else c["domain"]}
     return c
@@ -626,11 +632,40 @@ def retriage(import_id: str, llm: Optional[Llm] = None, *, root: Optional[Path] 
     return counts
 
 
+def refilter(import_id: str, *, root: Optional[Path] = None) -> dict:
+    """Deterministic, idempotent pass over still-pending rows: apply the current backstops and the per-conversation cap.
+
+    Never touches reviewed rows; superseded/denied rows stay in the ledger as an audit trail, just inactive."""
+    work = _private((root or _data_root()) / import_id)
+    ledger = work / "ledger.jsonl"
+    latest = {r["candidate_id"]: r for r in _read_jsonl(ledger)}
+    pending = [r for r in latest.values() if r["review"] == "pending" and r.get("prompt") == PROMPT_VERSION
+               and r["domain"] != "quarantine" and r["review"] != "superseded"]
+    counts = {"changed": 0, "capped": 0}
+    by_conv: dict[str, list[dict]] = {}
+    for r in pending:
+        n = postfilter(dict(r))
+        by_conv.setdefault(r["conversation_id"], []).append(n)
+    for rows in by_conv.values():
+        rows.sort(key=lambda r: (r["first_pass"] == "deny", -KIND_WEIGHT.get(r["kind"], 0), -r["confidence"], r["candidate_id"]))
+        for i, n in enumerate(rows):
+            if i >= PER_CONV_CAP and n["first_pass"] != "deny":
+                n = {**n, "first_pass": "deny"}
+                counts["capped"] += 1
+            n["active"] = n["first_pass"] != "deny"
+            old = latest[n["candidate_id"]]
+            if any(n[k] != old[k] for k in ("first_pass", "domain", "sensitivity", "active")):
+                _append(ledger, {**n, "ts": _now()})
+                counts["changed"] += 1
+    return counts
+
+
 def run_all(zip_path: Path, import_id: str, *, local: Optional[Llm] = None, strong: Optional[Llm] = None,
             root: Optional[Path] = None, limit: Optional[int] = None) -> dict:
     t = time.monotonic()
     s = stage(zip_path, import_id, root=root, limit=limit)
     e = extract(import_id, local, root=root)
+    e["refilter"] = refilter(import_id, root=root)
     v = review(import_id, strong, root=root)
     h = handoff(import_id, root=root)
     return {"stage": s, "extract": e, "review": v, "handoff": h, "digest": digest(import_id, root=root), "report": report(import_id, root=root),
@@ -650,7 +685,7 @@ def gate_status(root: Optional[Path] = None) -> dict:
 
 def _main(argv: Optional[list[str]] = None) -> int:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("command", choices=("gate", "run", "stage", "extract", "review", "handoff", "report", "digest", "retriage"))
+    p.add_argument("command", choices=("gate", "run", "stage", "extract", "review", "handoff", "report", "digest", "retriage", "refilter"))
     p.add_argument("--synthetic", action="store_true", help="fixture data only; bypasses Gate A")
     p.add_argument("--zip")
     p.add_argument("--import-id", default="")
@@ -677,6 +712,8 @@ def _main(argv: Optional[list[str]] = None) -> int:
             result = digest(a.import_id)
         elif a.command == "retriage":
             result = retriage(a.import_id)
+        elif a.command == "refilter":
+            result = refilter(a.import_id)
         else:
             result = report(a.import_id)
     except Exception as exc:       # counts and the exception type only; never echo export content
