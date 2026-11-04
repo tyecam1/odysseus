@@ -514,6 +514,14 @@ def _capabilities_on_this_host(models, this_host):
     return out
 
 
+def _provider_health_on_this_host(this_host):
+    try:
+        from src.estate_router import provider_health
+        return {"codex": provider_health(this_host["id"])} if this_host else {}
+    except Exception as exc:
+        return {"error": f"provider health unavailable: {exc}"}
+
+
 def cmd_status(args):
     host_local = _load_host_local()
     live = _live_host_inventory()
@@ -537,6 +545,7 @@ def cmd_status(args):
             for s in estate.get("services", [])
         ],
         "capabilities": _capabilities_on_this_host(models, this_host),
+        "provider_health": _provider_health_on_this_host(this_host),
         "memory_sources": [
             {"id": s["id"], "status": s.get("status")} for s in memory_sources.get("sources", [])
         ],

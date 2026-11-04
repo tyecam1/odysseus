@@ -269,4 +269,7 @@ def test_s7r3_preflight_snapshot_names_its_probe_host_and_units_hosts(monkeypatc
                                                          "capabilities": ["code-strong"]}])
     codex = result["snapshot"]["codex"]
     assert codex["host_id"] == HOME                       # first ELIGIBLE host, not hosts[0]
-    assert codex["by_host"] == {HOME: {"available": True, "reason": "live"}}
+    assert codex["by_host"] == {HOME: {
+        "available": True, "reason": "live",
+        "provider_health": {"provider": "codex", "state": "unknown", "retry_after": None, "retry_allowed": True},
+    }}

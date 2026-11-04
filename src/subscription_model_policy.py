@@ -15,6 +15,12 @@ from typing import Any
 class SubscriptionModelError(RuntimeError):
     """A subscription model cannot be selected with sufficient evidence."""
 
+    def __init__(self, message: str, *, provider_error_text: str = ""):
+        super().__init__(message)
+        # Execution may classify quota evidence without logging catalogue
+        # output or changing this resolver's fail-closed model policy.
+        self.provider_error_text = provider_error_text
+
 # A minimum safety floor, NOT a model selection: prevents an old CLI/catalogue
 # from silently selecting a retired premium tier. Calibrated to the newest
 # release actually offered by the live authenticated catalogue (gpt-6.0,
@@ -71,7 +77,8 @@ def resolve_latest_codex_model(codex_binary: str, *, timeout: float = 30.0) -> s
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise SubscriptionModelError("Codex authenticated catalogue unavailable") from exc
     if check.returncode:
-        raise SubscriptionModelError("Codex catalogue command failed; upgrade/sign in to Codex")
+        raise SubscriptionModelError("Codex catalogue command failed; upgrade/sign in to Codex",
+                                     provider_error_text=f"{getattr(check, 'stderr', '') or ''}\n{check.stdout or ''}")
 
     candidates = []
     for item in _catalogue_models(check.stdout):

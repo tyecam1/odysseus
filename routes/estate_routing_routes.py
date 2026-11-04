@@ -196,6 +196,7 @@ class DelegationPreflightUnit(BaseModel):
     requested_route: Optional[Literal["controller_retained"]] = None
     retain_by_controller: bool = False
     nondelegation_reason: Optional[str] = None
+    verification: Dict[str, object] = Field(default_factory=dict)
 
 
 class DelegationPreflightEnvelope(BaseModel):

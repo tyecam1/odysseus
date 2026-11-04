@@ -28,6 +28,7 @@ invariant asks for).
 """
 from __future__ import annotations
 
+import json
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -372,6 +373,7 @@ def get_decision_by_id(decision_id: str) -> Optional[dict]:
             "recommended_route": row.recommended_route,
             "actual_route": row.actual_route,
             "executed_host_id": row.executed_host_id,
+            "provider_health": json.loads(row.provider_health_json) if row.provider_health_json else None,
             "status": row.status,
             "created_at": row.created_at.isoformat() if row.created_at else None,
             "updated_at": row.updated_at.isoformat() if row.updated_at else None,

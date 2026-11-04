@@ -78,6 +78,7 @@ def _unit_task(unit: dict, capabilities: list[str]) -> dict:
         "objective": unit.get("objective"),
         "requirements": {"capabilities": capabilities},
         "placement": unit.get("placement") or {},
+        "verification": unit.get("verification") or {},
     }
 
 
@@ -103,13 +104,16 @@ def delegation_preflight(units: Iterable[dict]) -> dict:
     preflight_host_id = next((h["host_id"] for h in hosts if h.get("eligible")), None)
     if preflight_host_id is None:
         codex_live, codex_detail = False, "no eligible host"
+        codex_provider_health = {}
     else:
         try:
             codex_health = worker_health(preflight_host_id).get("codex") or {}
-            codex_live = bool(codex_health.get("available"))
-            codex_detail = codex_health.get("detail")
+            summary = estate_router._codex_health(preflight_host_id, codex_health)
+            codex_live, codex_detail = summary["available"], summary["reason"]
+            codex_provider_health = summary["provider_health"]
         except WorkerTransportError as exc:
             codex_live, codex_detail = False, f"worker unreachable: {exc.code}: {exc}"
+            codex_provider_health = {}
     alias_resolutions: dict[str, dict] = {}
     codex_by_host: dict[str, dict] = {}
     recommendations = []
@@ -172,15 +176,22 @@ def delegation_preflight(units: Iterable[dict]) -> dict:
             unit_host = (route.get("route") or {}).get("host")
             if unit_host is None:
                 unit_codex_live, unit_codex_detail = False, "no routed host"
+                unit_provider_health = {}
             else:
                 try:
                     unit_health = worker_health(unit_host).get("codex") or {}
-                    unit_codex_live = bool(unit_health.get("available"))
-                    unit_codex_detail = unit_health.get("detail")
+                    summary = estate_router._codex_health(unit_host, unit_health)
+                    unit_provider_health = summary["provider_health"]
+                    # Cooldown expiry allows a recovery attempt, not a live claim.
+                    unit_codex_live = bool(unit_health.get("available")) and unit_provider_health["retry_allowed"]
+                    unit_codex_detail = summary["reason"]
                 except WorkerTransportError as exc:
                     unit_codex_live, unit_codex_detail = False, f"worker unreachable: {exc.code}: {exc}"
-                codex_by_host[unit_host] = {"available": unit_codex_live,
-                                            "reason": "live" if unit_codex_live else unit_codex_detail}
+                    unit_provider_health = {}
+                codex_by_host[unit_host] = {
+                    "available": unit_codex_live and unit_provider_health.get("state") != "quota_exhausted",
+                    "reason": unit_codex_detail, "provider_health": unit_provider_health,
+                }
             write_authority = None
             write_ready = True
             write_required = _requires_repo_write(unit)
@@ -225,14 +236,27 @@ def delegation_preflight(units: Iterable[dict]) -> dict:
             if write_authority and not write_ready:
                 evidence.append(write_authority["reason"])
             why = (
-                f"substantial separable code work; Codex is live on {(route.get('route') or {}).get('host')}"
+                ("Codex cooldown elapsed; recovery execution required" if unit_provider_health.get("state") == "quota_exhausted"
+                 else f"substantial separable code work; Codex is live on {(route.get('route') or {}).get('host')}")
                 if ok else "; ".join(evidence)
             )
+            quota_blocked = unit_provider_health.get("state") == "quota_exhausted" and not unit_provider_health.get("retry_allowed")
+            if quota_blocked:
+                why += "; no_qualified_fallback for the same write authority and verification floor"
+            alternative = (
+                quota_blocked and not write_required and route.get("ok")
+                and not _WRITE_CODE_PATTERN.search(_task_text(unit))
+                and (route.get("route") or {}).get("executor") == "local"
+                and not unit.get("verification")
+            )
+            if alternative:
+                ok = True
+                why = "Codex quota_exhausted; requested aliases resolve to a qualified local read-only route"
             recommendations.append({
                 "index": index,
                 "task_class": task["task_class"],
                 "classification": structural_lane,
-                "recommended_route": "codex-write" if write_required else "codex",
+                "recommended_route": "local" if alternative else None if quota_blocked else "codex-write" if write_required else "codex",
                 "ok": ok,
                 "requires_justification": False,
                 "nondelegation_reason": None,
@@ -240,6 +264,7 @@ def delegation_preflight(units: Iterable[dict]) -> dict:
                 "hosts_checked": route.get("hosts_checked") or hosts,
                 "capability_resolutions": route.get("capability_resolutions") or [],
                 "write_authority": write_authority,
+                "provider_health": unit_provider_health,
                 "reason": why,
             })
             continue
@@ -264,6 +289,7 @@ def delegation_preflight(units: Iterable[dict]) -> dict:
         "snapshot": {
             "eligible_hosts": hosts,
             "codex": {"available": codex_live, "reason": "live" if codex_live else codex_detail,
+                      "provider_health": codex_provider_health,
                       "host_id": preflight_host_id, "by_host": codex_by_host},
             "alias_resolutions": list(alias_resolutions.values()),
         },

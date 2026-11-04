@@ -948,6 +948,7 @@ class RoutingDecision(TimestampMixin, Base):
     recommended_route     = Column(String, nullable=True)
     actual_route          = Column(String, nullable=True)
     executed_host_id      = Column(String, nullable=True, index=True)  # attested host that actually ran the work; null if nothing executed
+    provider_health_json  = Column(Text, nullable=True)  # observed provider capacity, never host/lease authority
     status                = Column(String, nullable=False)  # complete | blocked | failed | needs_escalation
 
     __table_args__ = (
@@ -2399,6 +2400,11 @@ def _migrate_seed_email_account():
 # temporarily disabled around the migration workflow.
 def _migrate_add_routing_delegation_columns():
     """Add delegation telemetry without replacing historical decisions."""
+    if engine.dialect.name == "postgresql":
+        with engine.begin() as conn:
+            conn.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": _PG_MIGRATION_LOCK_KEY})
+            conn.execute(text("ALTER TABLE routing_decisions ADD COLUMN IF NOT EXISTS provider_health_json TEXT"))
+        return
     db_path = _sqlite_db_path(engine.url)
     if db_path is None or not os.path.exists(db_path):
         return
@@ -2408,7 +2414,7 @@ def _migrate_add_routing_delegation_columns():
         columns = [row[1] for row in conn.execute("PRAGMA table_info(routing_decisions)").fetchall()]
         if not columns:
             return
-        for name in ("nondelegation_reason", "recommended_route", "actual_route", "executed_host_id"):
+        for name in ("nondelegation_reason", "recommended_route", "actual_route", "executed_host_id", "provider_health_json"):
             if name not in columns:
                 conn.execute(f"ALTER TABLE routing_decisions ADD COLUMN {name} TEXT")
         conn.commit()

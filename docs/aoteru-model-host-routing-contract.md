@@ -528,6 +528,33 @@ Git, prompt text, logs or the backend config.
    qualified verifier or retain explicit Codex/Sol review debt until available.
    Routine deterministic tests are not a substitute for mandated high-risk
    independent review. Do not merge/deploy safety-sensitive unverified code.
+
+### Observed provider capacity
+
+`RoutingDecision.provider_health_json` records provider observations on the
+worker host; Codex read-only and write executors share that provider scope.
+Worker health and host eligibility are independent. Preflight, route/host
+explanations and `agent status` expose `unknown | ok | quota_exhausted`,
+`retry_after` (UTC), and the observation reason. Runtime presence alone
+leaves quota state `unknown`; quota exhaustion is never reported as live.
+
+The Codex usage-limit message is parsed before output truncation. An explicit
+ISO reset or a future clock time today is accepted; clock-only output uses
+the emitting worker's local timezone unless UTC/GMT is stated. A past,
+invalid or unrecognised reset uses a conservative **900-second backoff**,
+labelled `retry_after_source: bounded_backoff`, never a claimed provider
+reset. No date is rolled forward to guess tomorrow. Cooldown expiry permits
+a normal recovery execution; only success restores `ok`. Health reads do
+not spend provider calls. Known-dead dispatch is refused before CLI execution
+or durable write admission, with `provider_quota_exhausted` telemetry.
+
+A qualified local read-only route may be recommended for its requested
+aliases when no reserved verification requirement is supplied. Write work
+and reserved gates without an eligible equivalent fail closed with
+`no_qualified_fallback`; no candidate provider is promoted by quota failure.
+Workers remain database-free: they return observations in execution results,
+and the control plane persists them in routing telemetry. These observations
+grant no lease authority.
 8. Recheck Codex availability only when the recorded cooldown expires or a
    new authorised signal arrives, then restore the normal preferred route.
    A failed Codex first call must never cause an unbounded retry storm.

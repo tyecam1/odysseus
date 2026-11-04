@@ -31,6 +31,7 @@ import json
 import re
 import socket
 import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -52,6 +53,120 @@ from src.estate_worker_procs import (
 )
 
 _CONFIG_DIR = Path(get_app_root()) / "config"
+
+# A fallback cooldown is policy, not a claimed provider reset time.
+_QUOTA_BACKOFF_SECONDS = 900
+_USAGE_LIMIT = re.compile(r"you[’']ve\s+hit\s+your\s+usage\s+limit", re.I)
+
+
+def _provider_now() -> datetime:
+    return datetime.now().astimezone()
+
+
+def _quota_observation(text: str) -> Optional[dict]:
+    """Interpret Codex's rendered reset in the worker's local timezone.
+
+    A clock-only reset is accepted only when still ahead today. Never roll
+    a past clock into tomorrow or infer a date/timezone from unknown text.
+    """
+    text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", text)
+    if not _USAGE_LIMIT.search(text):
+        return None
+    now = _provider_now()
+    reset = None
+    source = "provider_time"
+    match = re.search(r"try\s+again\s+at\s+([^\n]+)", text, re.I)
+    if match:
+        value = match[1].strip().rstrip(".")
+        try:
+            if not re.search(r"\d[T ]\d{2}:\d{2}", value):
+                raise ValueError("no explicit ISO clock")
+            reset = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            if reset.tzinfo is None:
+                reset = reset.replace(tzinfo=now.tzinfo)
+        except ValueError:
+            clock = re.fullmatch(r"(\d{1,2}):(\d{2})\s*(AM|PM)(?:\s+(UTC|GMT))?", value, re.I)
+            if clock:
+                hour, minute = int(clock[1]), int(clock[2])
+                if 1 <= hour <= 12 and 0 <= minute < 60:
+                    zone = timezone.utc if clock[4] else now.tzinfo
+                    reset = now.astimezone(zone).replace(
+                        hour=hour % 12 + (12 if clock[3].upper() == "PM" else 0),
+                        minute=minute, second=0, microsecond=0,
+                    )
+    if reset is None or reset <= now:
+        reset = now + timedelta(seconds=_QUOTA_BACKOFF_SECONDS)
+        source = "bounded_backoff"
+    return {
+        "provider": "codex", "state": "quota_exhausted",
+        "observed_at": now.astimezone(timezone.utc).isoformat(),
+        "retry_after": reset.astimezone(timezone.utc).isoformat(),
+        "retry_after_source": source,
+        "reason": ("Codex usage limit; reset time unavailable or not future; conservative 900-second bounded backoff"
+                   if source == "bounded_backoff" else "Codex usage limit; provider reset time (worker local timezone unless stated)"),
+    }
+
+
+def provider_health(host_id: Optional[str], provider: str = "codex") -> dict:
+    """Latest capacity observation in existing routing telemetry, shared by
+    Codex read/write executors. Expiry permits a retry; it is not recovery.
+    """
+    from core.database import RoutingDecision, get_db_session
+    health = {"provider": provider, "state": "unknown", "retry_after": None}
+    try:
+        with get_db_session() as db:
+            row = db.query(RoutingDecision).filter(
+                RoutingDecision.host_id == (host_id or "none"),
+                RoutingDecision.executor == provider,
+                RoutingDecision.task_class == "provider_health_observation",
+            ).order_by(RoutingDecision.created_at.desc(), RoutingDecision.id.desc()).first()
+            if row and row.provider_health_json:
+                health = json.loads(row.provider_health_json)
+    except Exception:
+        import logging
+        logging.getLogger(__name__).exception("provider health telemetry read failed")
+        health["reason"] = "provider health telemetry unavailable"
+    return _provider_health_view(health)
+
+
+def _provider_health_view(health: dict) -> dict:
+    retry = health.get("retry_after")
+    retry_due = bool(retry and datetime.fromisoformat(retry) <= _provider_now())
+    return {**health, "retry_allowed": health.get("state") != "quota_exhausted" or retry_due}
+
+
+def _record_provider_health(host_id: Optional[str], health: dict) -> None:
+    from core.database import RoutingDecision, get_db_session
+    try:
+        with get_db_session() as db:
+            db.add(RoutingDecision(
+                id=str(uuid.uuid4()), task_class="provider_health_observation",
+                host_id=host_id or "none", executor=health["provider"],
+                created_at=datetime.fromisoformat(health["observed_at"]).astimezone(timezone.utc).replace(tzinfo=None),
+                provider_health_json=json.dumps(health),
+                escalation_reason="provider_quota_exhausted" if health["state"] == "quota_exhausted" else None,
+                status="blocked" if health["state"] == "quota_exhausted" else "complete",
+            ))
+    except Exception:
+        import logging
+        logging.getLogger(__name__).exception("provider health telemetry write failed")
+
+
+def _codex_health(host_id: str, runtime: dict) -> dict:
+    health = provider_health(host_id)
+    available = bool(runtime.get("available")) and health["state"] != "quota_exhausted"
+    reason = "live" if available else (
+        health.get("reason") if health["state"] == "quota_exhausted" else runtime.get("detail"))
+    return {"available": available, "reason": reason,
+            "provider_health": health}
+
+
+def _provider_refusal(health: dict) -> Optional[dict]:
+    if health.get("retry_allowed", True):
+        return None
+    return {"ok": False, "executed": False, "provider_health": health,
+            "escalation_reason": "provider_quota_exhausted",
+            "error": f"{health['provider']} quota_exhausted until {health['retry_after']}: {health.get('reason')}; no_qualified_fallback for the same authority and verification floor"}
 
 
 class RoutingConfigError(RuntimeError):
@@ -211,10 +326,12 @@ def eligible_hosts(repo_id: Optional[str] = None) -> list[dict]:
         state = host_static_state(host)
         reachable, reason = host_reachable(host, live_hostname)
         healthy = None
+        providers = {}
         if reachable:
             from src.estate_worker_client import WorkerTransportError, worker_health
             try:
-                worker_health(host["id"])
+                health = worker_health(host["id"])
+                providers["codex"] = _codex_health(host["id"], health.get("codex") or {})["provider_health"]
                 healthy = True
             except WorkerTransportError as exc:
                 healthy = False
@@ -230,6 +347,7 @@ def eligible_hosts(repo_id: Optional[str] = None) -> list[dict]:
             "healthy": healthy,
             "eligible": reachable,
             "reason": reason,
+            "providers": providers,
         }
         if reachable and repo_id:
             from src.estate_worker_client import WorkerTransportError, worker_repo_probe
@@ -815,6 +933,7 @@ def resolve_route(task: dict, *, record_decision: bool = True) -> dict:
         "alias_resolution": alias_result,
         "capability_resolutions": capability_resolutions,
         "decision_id": decision_id,
+        "providers": host.get("providers") or {},
     }
     if quality_floor_error:
         result["quality_floor_error"] = quality_floor_error
@@ -833,7 +952,8 @@ def _update_decision_outcome(decision_id: str, *, status: str, deterministic_gat
                              actual_route: Optional[str] = None,
                              verification_outcome: Optional[str] = None,
                              executed_host_id: Optional[str] = None,
-                             concrete_model: Optional[str] = None) -> None:
+                             concrete_model: Optional[str] = None,
+                             provider_health: Optional[dict] = None) -> None:
     """Execution happens after `resolve_route()` already wrote its
     decision row — update that same row with the real outcome rather than
     writing a second telemetry row for one routed task (`RoutingDecision`
@@ -850,6 +970,8 @@ def _update_decision_outcome(decision_id: str, *, status: str, deterministic_gat
             if row is not None:
                 row.status = status
                 row.deterministic_gate = deterministic_gate
+                if provider_health is not None:
+                    row.provider_health_json = json.dumps(provider_health)
                 if latency_ms is not None:
                     row.latency_ms = latency_ms
                 if escalation_reason is not None:
@@ -1039,6 +1161,11 @@ def _execute_codex_with_sandbox(objective: str, *, sandbox: str, provider: str,
         subscription_model = resolve_latest_codex_model(codex_binary)
         reasoning_effort = subscription_effort()
     except SubscriptionModelError as exc:
+        observed = _quota_observation(exc.provider_error_text or str(exc))
+        if observed:
+            return {"ok": False, "provider": provider, "error": observed["reason"], "model_policy": "fail_closed",
+                    "provider_health": _provider_health_view(observed),
+                    "escalation_reason": "provider_quota_exhausted"}
         return {"ok": False, "provider": provider, "model_policy": "fail_closed",
                 "error": str(exc)}
 
@@ -1078,13 +1205,20 @@ def _execute_codex_with_sandbox(objective: str, *, sandbox: str, provider: str,
             stdout, stderr = proc.communicate(timeout=timeout)
             latency_ms = int((time.monotonic() - started) * 1000)
             if proc.returncode != 0:
+                observed = _quota_observation(f"{stderr or ''}\n{stdout or ''}")
                 return {
                     "ok": False, "provider": provider, "latency_ms": latency_ms,
                     "error": f"codex exec exited {proc.returncode}: {(stderr or '')[-500:]}",
                     "codex_binary": codex_binary,
+                    **({"provider_health": _provider_health_view(observed),
+                        "escalation_reason": "provider_quota_exhausted"} if observed else {}),
                 }
             output = Path(out_path).read_text().strip() if Path(out_path).exists() else ""
+            observed = {"provider": "codex", "state": "ok", "retry_after": None,
+                        "observed_at": _provider_now().astimezone(timezone.utc).isoformat(),
+                        "reason": "successful execution"}
             return {"ok": True, "provider": provider, "output": output, "latency_ms": latency_ms,
+                    "provider_health": _provider_health_view(observed),
                     "codex_binary": codex_binary, "concrete_model": subscription_model,
                     "reasoning_effort": reasoning_effort,
                     "model_catalogue": "authenticated-codex-debug-models"}
@@ -1321,6 +1455,9 @@ def execute_codex_write_durable(objective: str, *, repo_id: str, host_id: str,
     and ran workspace-write in-process with no run decision or tracked unit.
     Every call is delegated to the Stage 6 worker lane, which re-validates
     the exact lease inside `lease_serialized_transaction`. Deleted in Stage 9."""
+    refusal = _provider_refusal(provider_health(host_id))
+    if refusal:
+        return refusal
     return execute_write_via_worker(objective, repo_id=repo_id, host_id=host_id, decision_id=decision_id,
                                     wait_timeout=wait_timeout, timeout=timeout)
 
@@ -1437,6 +1574,8 @@ def _dispatch_read_only(host_id: str, executor: str, task: dict, *, concrete_mod
     placement["executed_host"] = attested_host
     placement["attested"] = attested_host == host_id
     result["placement"] = placement
+    if executor == "codex" and result.get("provider_health"):
+        _record_provider_health(host_id, result["provider_health"])
     return result
 
 
@@ -1527,6 +1666,16 @@ def run_task(task: dict) -> dict:
             executor_name = provider_name
             paid_host = route["route"].get("host")
             paid_entry = next((h for h in (route.get("hosts_checked") or []) if h.get("host_id") == paid_host), None) or {}
+            health = (paid_entry.get("providers") or {}).get(provider_name) or provider_health(paid_host, provider_name)
+            refusal = _provider_refusal(health)
+            if refusal:
+                _update_decision_outcome(
+                    route["decision_id"], status="blocked", deterministic_gate="fail",
+                    escalation_reason="provider_quota_exhausted", verification_outcome="fail",
+                    executor=executor_name,
+                    provider_health=health,
+                )
+                return {**route, **refusal, "execution_error": refusal["error"], "reason": refusal["error"]}
             if not implementation_mode and "codex" not in (paid_entry.get("qualified_executors") or []):
                 # Stage 5 rule, enforced for the paid lane too (Stage 7
                 # finding 2): never dispatch an executor not qualified on
@@ -1574,6 +1723,12 @@ def run_task(task: dict) -> dict:
                     }
                 result = provider_fn(paid_objective, repo_id=repo_id, host_id=host_id,
                                       decision_id=route["decision_id"])
+                if result.get("escalation_reason") == "provider_quota_exhausted" and result.get("executed") is False:
+                    _update_decision_outcome(
+                        route["decision_id"], status="blocked", deterministic_gate="fail",
+                        escalation_reason="provider_quota_exhausted", provider_health=result.get("provider_health"),
+                    )
+                    return {**route, **result, "execution_error": result["error"], "reason": result["error"]}
                 if result.get("authority_denied"):
                     _update_decision_outcome(
                         route["decision_id"], status="blocked", deterministic_gate="fail",
@@ -1659,19 +1814,26 @@ def run_task(task: dict) -> dict:
                         "placement": result.get("placement"),
                     }
             gate = "pass" if result.get("ok") and (result.get("output") or "").strip() else "fail"
+            execution_health = result.get("provider_health") or (result.get("result") or {}).get("provider_health")
+            paid_escalation_reason = (
+                "insufficient_capability" if gate == "pass" else
+                "provider_quota_exhausted" if (execution_health or {}).get("state") == "quota_exhausted" else
+                "worker_failed"
+            )
             if not implementation_mode:
                 _update_decision_outcome(
                     route["decision_id"],
                     status="complete" if gate == "pass" else "failed",
                     deterministic_gate=gate,
                     latency_ms=result.get("latency_ms"),
-                    escalation_reason="insufficient_capability" if gate == "pass" else "worker_failed",
+                    escalation_reason=paid_escalation_reason,
                     executor=executor_name,
                     escalated=True,
                     actual_route=executor_name,
                     verification_outcome=gate,
                     executed_host_id=(result.get("placement") or {}).get("executed_host"),
                     concrete_model=result.get("concrete_model"),
+                    provider_health=result.get("provider_health"),
                 )
             # implementation_mode, terminal within execute_codex_write_durable's
             # wait_timeout: the decision outcome was already recorded by
@@ -1681,6 +1843,8 @@ def run_task(task: dict) -> dict:
                 f"local capability was insufficient; {executor_name} executed on "
                 f"{route['route']['host']}" + (" under the active repo lease" if implementation_mode else " read-only")
             )
+            if paid_escalation_reason == "provider_quota_exhausted":
+                reason = f"codex quota_exhausted; retry_after={execution_health['retry_after']}; {execution_health['reason']}"
             route = {
                 **route, "ok": gate == "pass", "reason": reason,
                 "route": {
@@ -1693,7 +1857,8 @@ def run_task(task: dict) -> dict:
                 **route, "executed": True, "execution": result,
                 "execution_id": result.get("execution_id"),
                 "deterministic_gate": gate, "verification_outcome": gate,
-                "escalation_reason": "insufficient_capability" if gate == "pass" else "worker_failed",
+                "escalation_reason": paid_escalation_reason,
+                "provider_health": execution_health,
                 "placement": result.get("placement"),
             }
         return {**route, "executed": False}

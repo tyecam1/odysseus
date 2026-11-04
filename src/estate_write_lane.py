@@ -150,6 +150,9 @@ def _merge_finalization(existing: Optional[str], **parts) -> str:
 
 
 def _record_outcome(row, state: str, host_id: str, result: Optional[dict] = None) -> None:
+    health = (result or {}).get("provider_health")
+    if health:
+        _router._record_provider_health(host_id, health)
     if not row.decision_id:
         return
     ok = state == "succeeded" and bool((result or {}).get("ok"))
@@ -157,10 +160,11 @@ def _record_outcome(row, state: str, host_id: str, result: Optional[dict] = None
     _router._update_decision_outcome(
         row.decision_id, status="complete" if gate == "pass" else "failed",
         deterministic_gate=gate, latency_ms=(result or {}).get("latency_ms"),
-        escalation_reason="insufficient_capability" if gate == "pass" else "worker_failed",
+        escalation_reason="insufficient_capability" if gate == "pass" else (result or {}).get("escalation_reason") or "worker_failed",
         executor="codex-write", escalated=True, actual_route="codex-write",
         verification_outcome=gate, executed_host_id=host_id,
         concrete_model=(result or {}).get("concrete_model"),
+        provider_health=health,
     )
 
 
