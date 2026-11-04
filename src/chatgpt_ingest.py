@@ -396,7 +396,8 @@ def review(import_id: str, llm: Optional[Llm] = None, *, root: Optional[Path] = 
     work = _private((root or _data_root()) / import_id)
     ledger = work / "ledger.jsonl"
     latest = {r["candidate_id"]: r for r in _read_jsonl(ledger)}
-    todo = [r for r in latest.values() if r["review"] == "pending" and r["domain"] != "quarantine"]
+    todo = [r for r in latest.values() if r["review"] == "pending" and r["domain"] != "quarantine"
+            and r.get("prompt") == PROMPT_VERSION]   # rows from an older prompt are never reviewed or handed off
     counts = {"reviewed": 0, "accepted": 0, "rejected": 0, "human_gate": 0, "failed": 0}
     llm = llm or default_strong_llm()
     inv = inv or (lambda d: inventory(d, root))
@@ -454,7 +455,7 @@ def handoff(import_id: str, *, root: Optional[Path] = None) -> dict:
     emitted = {(p.stem, rec["candidate_id"]) for p in out.glob("*.jsonl") for rec in _read_jsonl(p)}
     counts: dict[str, int] = {}
     for r in latest.values():
-        if r["review"] not in ("accepted_candidate", "human_gate") or not r["active"]:
+        if r["review"] not in ("accepted_candidate", "human_gate") or not r["active"] or r.get("prompt") != PROMPT_VERSION:
             continue
         if (r["domain"], r["candidate_id"]) in emitted:
             continue

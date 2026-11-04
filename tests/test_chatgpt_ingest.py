@@ -144,3 +144,13 @@ def test_prompt_bump_supersedes_old_rows_not_duplicates(tmp_path, monkeypatch):
     for r in ci._read_jsonl(tmp_path / "imp" / "ledger.jsonl"):
         latest[r["candidate_id"]] = r
     assert sum(r["active"] for r in latest.values()) <= 1       # old active row superseded, not duplicated
+
+
+def test_stale_prompt_rows_are_not_reviewed_or_handed_off(tmp_path):
+    work = tmp_path / "imp"
+    work.mkdir()
+    row = ci._row("imp", "c1", {"kind": "goal", "description": "old row", "msgs": [], "domain": "neutral", "validity": "unknown",
+                                "sensitivity": "ordinary", "confidence": 0.9, "first_pass": "approve"}, "h")
+    row["prompt"] = "v0"
+    ci._append(work / "ledger.jsonl", row)
+    assert ci.review("imp", _strong, root=tmp_path)["reviewed"] == 0
