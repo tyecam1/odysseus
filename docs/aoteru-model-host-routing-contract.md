@@ -570,6 +570,8 @@ keep admission closed until persistence succeeds.
 Terminal durable execution results are replayed during reconciliation using
 an execution-derived observation id. Recovery preserves `observed_at` and
 is idempotent, including a crash after terminal commit but before telemetry.
+Each sweep replays at most 10 unrecorded observations, oldest terminal first;
+executions with a persisted observation are excluded before loading results.
 
 A qualified local read-only route may be recommended for its requested
 aliases when no reserved verification requirement is supplied. Write work

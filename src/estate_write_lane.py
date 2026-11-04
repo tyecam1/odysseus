@@ -43,6 +43,7 @@ PLACEHOLDER = {"dispatch_state": "pending_start"}
 LOST_GRACE_SECONDS = 120            # execution_deadline_at + this, unobserved -> lost
 MONITOR_INTERVAL_SECONDS = 5.0
 OBSERVATION_STALE_SECONDS = 15      # reconcile re-observes rows older than this
+PROVIDER_HEALTH_REPLAY_BATCH_SIZE = 10
 _CLIENT_SIDE_CODES = frozenset({"worker_unreachable", "worker_protocol_error", "placement_mismatch"})
 # Worker error codes that can ONLY arise before a start/prepare claim
 # (validation, identity, prerequisites, pre-claim authority checks). Any
@@ -153,7 +154,7 @@ def _record_outcome(row, state: str, host_id: str, result: Optional[dict] = None
     health = (result or {}).get("provider_health")
     if health:
         health = _router._record_provider_health(host_id, health, observation_id=(
-            str(uuid.uuid5(uuid.NAMESPACE_URL, f"provider-health:{row.id}")) if getattr(row, "id", None) else None))
+            f"provider-health:{row.id}" if getattr(row, "id", None) else None))
     if not row.decision_id:
         return
     ok = state == "succeeded" and bool((result or {}).get("ok"))
@@ -573,10 +574,22 @@ def reconcile_stale_estate_executions(db, EstateExecution) -> int:
     # Terminal result_json survives a crash before _record_outcome. Replay with
     # an execution-derived observation id; repeated/concurrent sweeps cannot
     # add a second observation or move its original observed_at forward.
+    from sqlalchemy import JSON, cast, type_coerce
+    from core.database import RoutingDecision
+    # SQLite extracts JSON from text directly; PostgreSQL requires a cast.
+    result_json = (type_coerce if db.bind.dialect.name == "sqlite" else cast)(EstateExecution.result_json, JSON)
+    recorded = db.query(RoutingDecision.id).filter(
+        RoutingDecision.id == "provider-health:" + EstateExecution.id,
+        RoutingDecision.task_class == "provider_health_observation",
+        RoutingDecision.host_id == EstateExecution.host_id,
+        RoutingDecision.executor == EstateExecution.provider,
+    ).exists()
     terminals = db.query(EstateExecution).filter(
         EstateExecution.lifecycle_state.in_(_TERMINAL),
         EstateExecution.result_json.isnot(None),
-    ).all()
+        result_json["provider_health"].as_string().isnot(None),
+        ~recorded,
+    ).order_by(EstateExecution.finished_at, EstateExecution.id).limit(PROVIDER_HEALTH_REPLAY_BATCH_SIZE).all()
     for row in terminals:
         result = json.loads(row.result_json)
         if result.get("provider_health"):

@@ -610,3 +610,161 @@ def test_replayed_observation_id_must_match_payload_and_scope(quota_lane, confli
     result = router._record_provider_health('lab', health, observation_id='conflicting')
     assert result['state'] == 'unknown_unreadable'
     assert router.provider_health('lab')['retry_allowed'] is False
+
+
+def test_retry_cannot_delete_newer_pending_failure(quota_lane, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from contextlib import contextmanager
+    import threading
+
+    state, count, now = quota_lane
+    older = router._quota_observation(state.read_text())
+    now[0] += timedelta(hours=1)  # A's cooldown has expired; losing B would admit paid work.
+    newer = router._quota_observation(state.read_text())
+    key = ('lab', 'codex')
+    real_session = cdb.get_db_session
+    persisted = threading.Event()
+    replace = threading.Event()
+    replacement_ready = threading.Event()
+    real_lock = threading.Lock()
+
+    class ObservedLock:
+        def __enter__(self):
+            if threading.current_thread().name == 'newer-failure':
+                replacement_ready.set()  # B has failed its write and reached the latch.
+            real_lock.acquire()
+        def __exit__(self, *args):
+            real_lock.release()
+
+    class InterleavedPending(dict):
+        def get(self, k, default=None):
+            previous = super().get(k, default)
+            if threading.current_thread().name == 'retry' and persisted.is_set() and not replace.is_set():
+                replace.set()  # A captured previous; let B try replacing it before A pops.
+                assert replacement_ready.wait(5)
+            return previous
+        def __setitem__(self, k, value):
+            super().__setitem__(k, value)
+            if threading.current_thread().name == 'newer-failure':
+                replacement_ready.set()  # Unlocked implementation: B replaces before A pops.
+
+    pending = InterleavedPending({key: {
+        'observation': older, 'observation_id': 'retry-a',
+        'failure': router._unreadable_provider_health('codex', 'pending A'),
+    }})
+    monkeypatch.setattr(router, '_PROVIDER_HEALTH_WRITE_FAILURES', pending)
+    monkeypatch.setattr(router, '_PROVIDER_HEALTH_LOCK', ObservedLock(), raising=False)
+
+    @contextmanager
+    def interleaved_session():
+        if threading.current_thread().name == 'newer-failure':
+            raise OSError('B cannot persist')
+        with real_session() as db:
+            yield db
+        if threading.current_thread().name == 'retry':
+            persisted.set()
+    monkeypatch.setattr(cdb, 'get_db_session', interleaved_session)
+
+    def retry():
+        threading.current_thread().name = 'retry'
+        return router.provider_health('lab')
+    def fail_newer():
+        threading.current_thread().name = 'newer-failure'
+        assert replace.wait(5)
+        return router._record_provider_health('lab', newer, observation_id='failed-b')
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        retry_result = pool.submit(retry)
+        newer_result = pool.submit(fail_newer)
+        retry_result.result(timeout=10)
+        assert newer_result.result(timeout=10)['state'] == 'unknown_unreadable'
+    assert pending[key]['observation_id'] == 'failed-b'
+
+    @contextmanager
+    def still_unwritable():
+        raise OSError('B still cannot persist')
+        yield
+    monkeypatch.setattr(cdb, 'get_db_session', still_unwritable)
+    health = router.provider_health('lab')
+    assert health['state'] == 'unknown_unreadable' and not health['retry_allowed']
+    assert router._dispatch_read_only('lab', 'codex', {'objective': 'review'})['executed'] is False
+    assert not count.exists()
+
+
+@pytest.mark.parametrize('state, field', [
+    (state, field) for state, fields in [
+        ('ok', ('provider', 'state', 'observed_at', 'reason', 'retry_after')),
+        ('quota_exhausted', ('provider', 'state', 'observed_at', 'reason', 'retry_after', 'retry_after_source')),
+    ] for field in fields
+])
+def test_incomplete_observation_fails_closed(quota_lane, state, field):
+    message, count, now = quota_lane
+    health = router._quota_observation(message.read_text())
+    if state == 'ok':
+        health.update(state='ok', retry_after=None)
+        health.pop('retry_after_source')
+    del health[field]
+    with cdb.get_db_session() as db:
+        db.add(cdb.RoutingDecision(id='incomplete', task_class='provider_health_observation',
+            host_id='lab', executor='codex', status='complete', provider_health_json=json.dumps(health)))
+    health = router.provider_health('lab')
+    assert health['state'] == 'unknown_unreadable' and not health['retry_allowed']
+    assert _run_paid()['escalation_reason'] == 'provider_unknown_unreadable'
+    assert not preflight.delegation_preflight([{'task_class': 'code_review'}])['snapshot']['codex']['available']
+    assert not count.exists()
+
+
+@pytest.mark.parametrize('field, value', [
+    ('provider', None), ('provider', 1), ('state', ['ok']), ('state', 'unknown'),
+    ('state', 'unknown_unreadable'), ('state', 'invalid'), ('reason', None), ('reason', 1), ('reason', ''),
+    ('observed_at', None), ('observed_at', 1), ('observed_at', 'bad'),
+    ('observed_at', '2026-11-04T17:00:00'),
+    ('retry_after', 1), ('retry_after', []), ('retry_after', 'bad'),
+    ('retry_after', '2026-11-04T17:39:00'), ('retry_after', '2026-11-04T16:00:00Z'),
+    ('retry_after_source', None), ('retry_after_source', []), ('retry_after_source', 'guess'),
+])
+def test_invalid_observation_fields_fail_closed(quota_lane, field, value):
+    message, count, now = quota_lane
+    health = router._quota_observation(message.read_text())
+    health[field] = value
+    with cdb.get_db_session() as db:
+        db.add(cdb.RoutingDecision(id='invalid', task_class='provider_health_observation',
+            host_id='lab', executor='codex', status='complete', provider_health_json=json.dumps(health)))
+    health = router.provider_health('lab')
+    assert health['state'] == 'unknown_unreadable' and not health['retry_allowed']
+
+
+@pytest.mark.parametrize('unrecorded', [0, 23])
+def test_terminal_replay_only_unrecorded_bounded_oldest_first(quota_lane, monkeypatch, unrecorded):
+    from src import estate_write_lane as lane
+    message, count, now = quota_lane
+    health = router._quota_observation(message.read_text())
+    with cdb.get_db_session() as db:
+        # Include old results without provider telemetry: they must not starve recovery.
+        for i in reversed(range(100 + unrecorded + 15)):
+            result = {'ok': False, 'provider_health': health} if i < 100 + unrecorded else {'ok': False}
+            row = cdb.EstateExecution(id=f'terminal-{i:03}', objective='implement', executor='codex-write',
+                provider='codex', host_id='lab', repo_id='odysseus', lease_id='lease', branch='feat/test',
+                worktree_path='/w/test', lifecycle_state='failed', worktree_resolution='finalized',
+                finished_at=(now[0] + timedelta(seconds=i)).replace(tzinfo=None), result_json=json.dumps(result))
+            db.add(row)
+            if i < 100:
+                lane._record_outcome(row, 'failed', 'lab', result)
+
+    replayed = []
+    record = lane._record_outcome
+    def replay(row, *args):
+        replayed.append(row.id)
+        return record(row, *args)
+    monkeypatch.setattr(lane, '_record_outcome', replay)
+    monkeypatch.setattr(lane, '_worker', lambda *a, **k: pytest.fail('terminal replay called worker'))
+    # The production limit is ten; assert the externally visible bound as well.
+    for sweep in range((unrecorded + 9) // 10 + 2):
+        before = len(replayed)
+        with cdb.get_db_session() as db:
+            lane.reconcile_stale_estate_executions(db, cdb.EstateExecution)
+        assert len(replayed) - before == min(10, max(0, unrecorded - before))
+    assert replayed == [f'terminal-{i:03}' for i in range(100, 100 + unrecorded)]
+    with cdb.get_db_session() as db:
+        rows = db.query(cdb.RoutingDecision).filter_by(task_class='provider_health_observation').all()
+        assert len(rows) == 100 + unrecorded
+        assert all(json.loads(row.provider_health_json)['observed_at'] == health['observed_at'] for row in rows)

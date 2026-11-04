@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import re
 import socket
+import threading
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -59,6 +60,7 @@ _QUOTA_BACKOFF_SECONDS = 900
 _PROVIDER_FAILURE_STATES = frozenset({"quota_exhausted", "auth_failed", "unreachable"})
 # A failed persistence attempt must invalidate even an earlier persisted success.
 _PROVIDER_HEALTH_WRITE_FAILURES = {}
+_PROVIDER_HEALTH_LOCK = threading.Lock()
 _USAGE_LIMIT = re.compile(r"you[’']ve\s+hit\s+your\s+usage\s+limit", re.I)
 
 
@@ -137,12 +139,15 @@ def _unreadable_provider_health(provider: str, reason: str) -> dict:
 def provider_health(host_id: Optional[str], provider: str = "codex") -> dict:
     """Latest observation; telemetry errors never authorise paid execution."""
     key = (host_id or "none", provider)
-    if key in _PROVIDER_HEALTH_WRITE_FAILURES:
-        pending = _PROVIDER_HEALTH_WRITE_FAILURES[key]
+    with _PROVIDER_HEALTH_LOCK:
+        pending = _PROVIDER_HEALTH_WRITE_FAILURES.get(key)
+    if pending:
         # One idempotent persistence retry per read; never probe the provider.
         _record_provider_health(host_id, pending["observation"], observation_id=pending["observation_id"])
-        if key in _PROVIDER_HEALTH_WRITE_FAILURES:
-            return _PROVIDER_HEALTH_WRITE_FAILURES[key]["failure"]
+        with _PROVIDER_HEALTH_LOCK:
+            pending = _PROVIDER_HEALTH_WRITE_FAILURES.get(key)
+            if pending:
+                return pending["failure"]
     health = {"provider": provider, "state": "unknown", "retry_after": None}
     try:
         from core.database import RoutingDecision, get_db_session
@@ -154,6 +159,7 @@ def provider_health(host_id: Optional[str], provider: str = "codex") -> dict:
             ).order_by(RoutingDecision.created_at.desc(), RoutingDecision.id.desc()).first()
             if row:
                 health = json.loads(row.provider_health_json)
+                _validate_provider_payload(health)
                 if health.get("provider") != provider:
                     raise ValueError("provider observation scope mismatch")
         return _provider_health_view(health)
@@ -161,6 +167,30 @@ def provider_health(host_id: Optional[str], provider: str = "codex") -> dict:
         import logging
         logging.getLogger(__name__).exception("provider health telemetry read failed")
         return _unreadable_provider_health(provider, "provider health telemetry unreadable")
+
+
+def _validate_provider_payload(health: dict) -> None:
+    if not isinstance(health, dict):
+        raise ValueError("invalid provider observation")
+    for field in ("provider", "state", "observed_at", "reason"):
+        if not isinstance(health.get(field), str) or not health[field].strip():
+            raise ValueError(f"invalid provider observation {field}")
+    observed = datetime.fromisoformat(health["observed_at"])
+    if observed.tzinfo is None:
+        raise ValueError("provider observation timestamp missing timezone")
+    if health["state"] not in {"ok", *_PROVIDER_FAILURE_STATES}:
+        raise ValueError("invalid provider observation state")
+    retry = health["retry_after"]  # Required, including explicit null on success.
+    if health["state"] == "ok":
+        if retry is not None or health.get("retry_after_source") is not None:
+            raise ValueError("successful provider observation has a retry")
+    else:
+        if not isinstance(retry, str) or datetime.fromisoformat(retry).tzinfo is None:
+            raise ValueError("invalid provider retry timestamp")
+        if datetime.fromisoformat(retry) <= observed:
+            raise ValueError("provider retry must follow observation")
+        if health.get("retry_after_source") not in {"provider_time", "bounded_backoff"}:
+            raise ValueError("invalid provider retry source")
 
 
 def _provider_health_view(health: dict) -> dict:
@@ -207,20 +237,22 @@ def _record_provider_health(host_id: Optional[str], health: dict, *, observation
             with get_db_session() as db:
                 row = db.query(RoutingDecision).filter_by(id=observation_id).first()
                 _validate_provider_observation(row, key[0], health)
-        previous = _PROVIDER_HEALTH_WRITE_FAILURES.get(key)
-        if previous is None or datetime.fromisoformat(health["observed_at"]) >= datetime.fromisoformat(previous["observation"]["observed_at"]):
-            _PROVIDER_HEALTH_WRITE_FAILURES.pop(key, None)
+        with _PROVIDER_HEALTH_LOCK:
+            previous = _PROVIDER_HEALTH_WRITE_FAILURES.get(key)
+            if previous is None or datetime.fromisoformat(health["observed_at"]) >= datetime.fromisoformat(previous["observation"]["observed_at"]):
+                _PROVIDER_HEALTH_WRITE_FAILURES.pop(key, None)
         return health
     except Exception:
         import logging
         logging.getLogger(__name__).exception("provider health telemetry write failed")
         failure = _unreadable_provider_health(health["provider"], "provider health telemetry unwritable; observation not persisted")
         failure["observed_at"] = health["observed_at"]
-        previous = _PROVIDER_HEALTH_WRITE_FAILURES.get(key)
-        if previous is None or datetime.fromisoformat(health["observed_at"]) >= datetime.fromisoformat(previous["observation"]["observed_at"]):
-            _PROVIDER_HEALTH_WRITE_FAILURES[key] = {
-                "observation": dict(health), "observation_id": observation_id, "failure": failure,
-            }
+        with _PROVIDER_HEALTH_LOCK:
+            previous = _PROVIDER_HEALTH_WRITE_FAILURES.get(key)
+            if previous is None or datetime.fromisoformat(health["observed_at"]) >= datetime.fromisoformat(previous["observation"]["observed_at"]):
+                _PROVIDER_HEALTH_WRITE_FAILURES[key] = {
+                    "observation": dict(health), "observation_id": observation_id, "failure": failure,
+                }
         return failure
 
 
