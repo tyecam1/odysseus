@@ -218,3 +218,15 @@ def test_numeric_and_submission_backstops():
               "User wants to submit compilable code to the autograder"):
         assert ci.postfilter({**base, "description": d})["first_pass"] == "deny", d
     assert ci.postfilter({**base, "description": "User reviews PR #157 on 2026-11-02"})["first_pass"] == "approve"
+
+
+def test_digest_puts_restricted_rows_in_their_own_late_section(tmp_path):
+    work = tmp_path / "imp"
+    work.mkdir()
+    for i, (sens, desc) in enumerate([("restricted", "private health matter"), ("ordinary", "prefers bullet points")]):
+        row = ci._row("imp", f"c{i}", {"kind": "preference", "description": desc, "msgs": [], "domain": "neutral",
+                                       "validity": "unknown", "sensitivity": sens, "confidence": 0.9, "first_pass": "approve"}, "h")
+        ci._append(work / "ledger.jsonl", row)
+    ci.digest("imp", root=tmp_path)
+    text = (work / "digest.md").read_text()
+    assert text.index("bullet points") < text.index("RESTRICTED") < text.index("health matter")

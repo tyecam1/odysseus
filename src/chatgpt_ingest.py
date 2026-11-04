@@ -550,13 +550,15 @@ def digest(import_id: str, *, root: Optional[Path] = None, threshold: float = 0.
         else:
             home["convs"].add(r["conversation_id"])
             home["ids"].append(r["candidate_id"])
-    clusters.sort(key=lambda c: (c["domain"], -len(c["convs"]), c["rep"]["kind"]))
+    clusters.sort(key=lambda c: (c["rep"]["sensitivity"] == "restricted", c["domain"], -len(c["convs"]), c["rep"]["kind"]))
     lines, domain = [f"# ChatGPT import {import_id} - review digest ({len(clusters)} items from {len(live)} rows)\n"], None
     for c in clusters:
         r = c["rep"]
-        if c["domain"] != domain:
-            domain = c["domain"]
-            lines.append(f"\n## {domain} ({sum(1 for x in clusters if x['domain'] == domain)})\n")
+        section = (r["sensitivity"] == "restricted", c["domain"])
+        if section != domain:
+            domain = section
+            count = sum(1 for x in clusters if (x["rep"]["sensitivity"] == "restricted", x["domain"]) == section)
+            lines.append(f"\n## {c['domain']}{' - RESTRICTED (human gate only; review last)' if section[0] else ''} ({count})\n")
         flag = "GATE" if r["review"] == "human_gate" or r["sensitivity"] != "ordinary" else r["review"]
         lines.append(f"- [{len(c['convs'])}x {r['kind']} {r['sensitivity'][:4]} {flag}] {r['description']} ({c['ids'][0][:8]})")
     path = work / "digest.md"
