@@ -1,0 +1,119 @@
+"""Synthetic-fixture tests for src.chatgpt_ingest (PR #217 Gate B/C/D plumbing). No real export, no network."""
+import io
+import json
+import os
+import zipfile
+
+import pytest
+
+from tests.helpers.import_state import clear_fake_database_modules
+from tests.helpers.sqlite_db import make_temp_sqlite
+
+from src import chatgpt_ingest as ci
+
+
+@pytest.fixture(autouse=True)
+def _isolated(monkeypatch, tmp_path):
+    clear_fake_database_modules()
+    import core.database as cdb
+    import src.source_events as se
+    session_local, engine, tmpfile = make_temp_sqlite(cdb.Base.metadata)
+    monkeypatch.setattr(cdb, "SessionLocal", session_local)
+    monkeypatch.setattr(se, "SOURCE_EVENT_PAYLOAD_DIR", tmp_path / "payloads")
+    yield
+    engine.dispose()
+    os.unlink(tmpfile.name)
+
+
+def _node(nid, parent, role, text, children=()):
+    return {"id": nid, "parent": parent, "children": list(children),
+            "message": {"id": nid, "author": {"role": role}, "content": {"parts": [text]}, "create_time": 1.0}
+            if text is not None else None}
+
+
+def _conv(cid, user_text, *, branch=False):
+    mapping = {"root": _node("root", None, "system", None, ["u1"]),
+               "u1": _node("u1", "root", "user", user_text, ["a1"] + (["a1b"] if branch else [])),
+               "a1": _node("a1", "u1", "assistant", "old branch answer"),
+               }
+    cur = "a1"
+    if branch:
+        mapping["a1b"] = _node("a1b", "u1", "assistant", "ACTIVE branch answer")
+        cur = "a1b"
+    return {"conversation_id": cid, "title": "t", "current_node": cur, "mapping": mapping}
+
+
+def _zip(path, convs):
+    with zipfile.ZipFile(path, "w") as zf:
+        zf.writestr("conversations-000.json", json.dumps(convs))
+    return path
+
+
+def _local(system, user):
+    if "SECRET" in user:
+        raise AssertionError("quarantined text reached the model")
+    return json.dumps({"candidates": [{"kind": "decision", "description": "User decided to use mmWave radar for the PhD sensing study",
+                                       "msgs": ["u1"], "domain": "obsidian-phd", "validity": "current_candidate",
+                                       "sensitivity": "ordinary", "confidence": 0.9, "verdict": "approve"},
+                                      {"kind": "preference", "description": "User likes trivia", "msgs": ["u1"],
+                                       "domain": "neutral", "sensitivity": "ordinary", "confidence": 0.3,
+                                       "verdict": "deny"}]})
+
+
+def _strong(system, user):
+    rows = json.loads(user)["rows"]
+    return json.dumps({"rows": [{"id": r["id"], "decision": "accept", "destination": "automation/review/x", "rationale": "ok"}
+                                for r in rows]})
+
+
+def test_active_branch_only_and_reimport_skips_unchanged(tmp_path):
+    z = _zip(tmp_path / "e.zip", [_conv("c1", "I decided on radar", branch=True), _conv("c2", "hi")])
+    first = ci.stage(z, "imp", root=tmp_path)
+    assert first["created"] == 2
+    again = ci.stage(z, "imp", root=tmp_path)
+    assert again["unchanged"] == 2 and again["created"] == 0
+    msgs = ci.linearize(_conv("c1", "x", branch=True))
+    assert [m["text"] for m in msgs] == ["x", "ACTIVE branch answer"]
+
+
+def test_revised_conversation_is_linked_not_duplicated(tmp_path):
+    ci.stage(_zip(tmp_path / "a.zip", [_conv("c1", "v1")]), "imp", root=tmp_path)
+    r = ci.stage(_zip(tmp_path / "b.zip", [_conv("c1", "v2")]), "imp", root=tmp_path)
+    assert r["revised"] == 1 and r["created"] == 0
+
+
+def test_secret_text_is_quarantined_and_never_reaches_model(tmp_path):
+    z = _zip(tmp_path / "e.zip", [_conv("c1", "my api_key = SECRETVALUE123456")])
+    out = ci.run_all(z, "imp", local=_local, strong=_strong, root=tmp_path)
+    assert out["stage"]["quarantined"] == 1
+    assert out["extract"]["quarantined"] == 1
+
+
+def test_end_to_end_gates_and_idempotent_resume(tmp_path):
+    z = _zip(tmp_path / "e.zip", [_conv("c1", "I decided on radar for my PhD sensing study")])
+    out = ci.run_all(z, "imp", local=_local, strong=_strong, root=tmp_path)
+    rep = out["report"]
+    assert rep["candidates"] == 2
+    # obsidian-phd accept is escalated to the human gate, never self-approved; first-pass deny is suppressed
+    assert rep["review"].get("human_gate") == 1 and rep["review"].get("rejected") == 1
+    assert rep["awaiting_human"] == 1
+    assert out["handoff"] == {"obsidian-phd": 1}
+    ledger = (tmp_path / "imp" / "handoff" / "obsidian-phd.jsonl").read_text()
+    assert "radar" not in ledger          # pointer-only outbox, no description text
+    again = ci.run_all(z, "imp", local=_local, strong=_strong, root=tmp_path)
+    assert again["stage"]["unchanged"] == 1 and again["extract"]["processed"] == 0 and again["handoff"] == {}
+
+
+def test_unsafe_archive_rejected(tmp_path):
+    p = tmp_path / "bad.zip"
+    with zipfile.ZipFile(p, "w") as zf:
+        zf.writestr("../evil.json", "[]")
+    with pytest.raises(ValueError):
+        list(ci.iter_conversations(p))
+
+
+def test_unparseable_model_reply_is_retried_not_guessed(tmp_path):
+    z = _zip(tmp_path / "e.zip", [_conv("c1", "hello there")])
+    ci.stage(z, "imp", root=tmp_path)
+    assert ci.extract("imp", lambda s, u: "not json", root=tmp_path)["failed"] == 1
+    assert ci.extract("imp", _local, root=tmp_path)["processed"] == 1
