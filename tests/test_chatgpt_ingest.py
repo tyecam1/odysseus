@@ -154,3 +154,9 @@ def test_stale_prompt_rows_are_not_reviewed_or_handed_off(tmp_path):
     row["prompt"] = "v0"
     ci._append(work / "ledger.jsonl", row)
     assert ci.review("imp", _strong, root=tmp_path)["reviewed"] == 0
+
+
+def test_filter_does_not_overmatch_and_fiction_interest_is_kept():
+    ok = ci.postfilter({"description": "User keeps developing a warp-drive worldbuilding idea as a creative interest, for example ion rings",
+                        "first_pass": "approve", "domain": "misumi"})
+    assert ok["first_pass"] == "approve" and ok["domain"] == "misumi"
