@@ -343,3 +343,54 @@ def test_decision_pass_and_questions_are_guided_by_preferences_and_decisions(tmp
     top = (tmp_path / "imp" / "digest-top.md").read_text()
     assert "guided by [decision]" in top
     assert top.index("Your decisions and the rules behind them") < top.index("Your recurring questions")
+
+
+def _tier_setup(tmp_path):
+    convs = [_conv(f"k{i}", f"I decided on radar for pose sensing in the cobot cell {i}") for i in range(3)]
+    convs += [_conv(f"h{i}", f"homework integral calculus problem {i}") for i in range(3)]
+
+    def base(system, user):
+        if system == ci.TRIAGE_SYSTEM:
+            return json.dumps({"purpose": "coursework" if "homework" in user else "work_or_life"})
+        if system in (ci.PREF_SYSTEM, ci.DECISION_SYSTEM):
+            return json.dumps({"preferences": [], "decisions": []})
+        return _local(system, user)
+    z = _zip(tmp_path / "e.zip", convs)
+    ci.run_all(z, "imp", local=base, strong=_strong, root=tmp_path)
+    return base
+
+
+def test_lexicon_learns_core_language_and_scan_ranks_it_first(tmp_path):
+    _tier_setup(tmp_path)
+    out = ci.build_lexicon("imp", root=tmp_path, min_pos=1)
+    assert out["positive_conversations"] == 3 and out["negative_conversations"] == 3
+    terms = json.loads((tmp_path / "imp" / "lexicon.json").read_text())["terms"]
+    assert "radar" in terms and "homework" not in terms
+    ci.scan("imp", root=tmp_path)
+    scores = json.loads((tmp_path / "imp" / "scan.json").read_text())
+    assert min(scores[f"k{i}"]["score"] for i in range(3)) > max(scores[f"h{i}"]["score"] for i in range(3))
+
+
+def test_deepread_uses_strong_reader_on_top_scored_conversations_and_supersedes_baseline(tmp_path):
+    _tier_setup(tmp_path)
+    ci.build_lexicon("imp", root=tmp_path, min_pos=1)
+    ci.scan("imp", root=tmp_path)
+    seen = []
+
+    def reader(system, user):
+        seen.append(user)
+        return json.dumps({"candidates": [{"kind": "preference", "description": "User prefers radar over cameras for privacy",
+                                           "msgs": ["u1"], "domain": "obsidian-phd", "validity": "current_candidate",
+                                           "sensitivity": "ordinary", "speaker_basis": "user_first_person",
+                                           "confidence": 0.9, "verdict": "approve"}]})
+    out = ci.deepread("imp", reader, root=tmp_path, max_conversations=2, min_score=0.1)
+    assert out["read"] == 2 and out["candidates"] == 2 and all("radar" in u for u in seen)
+    latest = {}
+    for r in ci._read_jsonl(tmp_path / "imp" / "ledger.jsonl"):
+        latest[r["candidate_id"]] = r
+    strong_rows = [r for r in latest.values() if r.get("reader") == "local-strong"]
+    assert len(strong_rows) == 2 or len({r["conversation_id"] for r in strong_rows}) == 2
+    for cid in {r["conversation_id"] for r in strong_rows}:
+        base = [r for r in latest.values() if r["conversation_id"] == cid and r.get("reader") != "local-strong" and r["active"]]
+        assert not base                       # baseline rows for that conversation are superseded
+    assert ci.deepread("imp", reader, root=tmp_path, max_conversations=2, min_score=0.1)["read"] <= 1   # idempotent

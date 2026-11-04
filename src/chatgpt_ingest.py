@@ -803,7 +803,8 @@ def user_questions(users: list[dict], limit: int = 2) -> list[tuple[str, str]]:
     return out
 
 
-def enrich(import_id: str, llm: Optional[Llm] = None, *, root: Optional[Path] = None, limit: Optional[int] = None) -> dict:
+def enrich(import_id: str, llm: Optional[Llm] = None, *, root: Optional[Path] = None, limit: Optional[int] = None,
+           reader: str = "classify", min_score: Optional[float] = None) -> dict:
     """Owner priority: the user's PREFERENCES and QUESTIONS.  Idempotent, resumable, and independent of the main pass.
 
     Preferences: a narrow local-model pass over user messages that contain preference language (including conversations
@@ -820,11 +821,16 @@ def enrich(import_id: str, llm: Optional[Llm] = None, *, root: Optional[Path] = 
     latest = {r["candidate_id"]: r for r in _read_jsonl(ledger)}
     manifest = {r["cid"]: r for r in _read_jsonl(work / "manifest.jsonl")}
     counts = {"checked": 0, "preferences": 0, "decisions": 0, "questions": 0, "skipped_for_others": 0, "failed": 0}
-    llm = llm or default_local_llm()
+    llm = llm or (strong_llm() if reader == "strong" else default_local_llm())
+    scores = _load_scan(work)
+    if reader == "strong" and min_score is None:
+        min_score = _score_cut(scores)             # strong reader only on the top-scoring conversations
     for cid, rec in manifest.items():
         if limit is not None and counts["checked"] >= limit:
             break
-        key = f"{rec['hash']}|{PROMPT_VERSION}|{ENRICH_VERSION}"
+        key = f"{rec['hash']}|{PROMPT_VERSION}|{ENRICH_VERSION}" + ("|strong" if reader == "strong" else "")
+        if min_score is not None and scores.get(cid, {}).get("score", 0) < min_score:
+            continue
         if done.get(cid) == key or rec["quarantine"] or extracted.get(cid) != f"{rec['hash']}|{PROMPT_VERSION}":
             continue
         if label.get(cid) == "for_others":
@@ -892,13 +898,191 @@ def enrich(import_id: str, llm: Optional[Llm] = None, *, root: Optional[Path] = 
     return counts
 
 
+DEEP_VERSION = "d1"
+TOKEN_RE = re.compile(r"[a-z][a-z0-9_-]{3,}")
+GENERIC_WORDS = frozenset(
+    "please help would like make need thanks thank could what how about this that with from have just want can you your "
+    "some more other then there here only very also into over after before again still going doing done does did get got "
+    "give take let know think look see use used using work works working write written create make made file code text "
+    "answer question explain example following below above first second next last new good best better right".split())
+READER_ADDENDUM = (" Priority: capture the user's explicit preferences (how they want things done or answered), the decisions "
+                   "they made together with the reason, and standing constraints; these matter most. Be selective and precise.")
+
+
+def strong_llm() -> Llm:
+    """The default DATA READER: the local-strong alias (resolved live, local endpoint only)."""
+    from src import estate_router
+    from src.model_context import is_local_endpoint
+
+    if not is_local_endpoint(estate_router._OLLAMA_BASE):
+        raise RuntimeError("strong reader refused: the model endpoint is not local")
+    resolved = estate_router.resolve_alias("local-strong", estate_router.current_host_id())
+    model = resolved.get("concrete_model") if resolved.get("resolved") else None
+    if not model:
+        raise RuntimeError("local-strong unavailable: " + str(resolved.get("reason"))[:160])
+
+    def call(system: str, user: str) -> Optional[str]:
+        res = estate_router.execute_local(model, f"{system}\n\n{user}", timeout=300.0, max_retries=0, think=False)
+        return res.get("output") if res.get("ok") else None
+    return call
+
+
+def _user_terms(payload: dict) -> set:
+    text = " ".join(m["text"] for m in payload["messages"] if m["role"] == "user").lower()
+    return {w for w in TOKEN_RE.findall(text) if w not in STOP_WORDS and w not in GENERIC_WORDS}
+
+
+def build_lexicon(import_id: str, *, root: Optional[Path] = None, min_pos: int = 5, top: int = 800) -> dict:
+    """Deterministic: the owner's core language = terms that discriminate conversations that yielded durable rows
+    (positives) from coursework/trivia/empty ones (negatives), learned from the existing extraction outcome."""
+    import math
+    from src.source_events import read_source_event_payload
+
+    work = _private((root or _data_root()) / import_id)
+    rows = _read_jsonl(work / "ledger.jsonl")
+    latest = {r["candidate_id"]: r for r in rows}
+    kept = {r["conversation_id"] for r in latest.values()
+            if r["active"] and r["review"] != "superseded" and r["kind"] != "question" and r["domain"] != "quarantine"}
+    label = {r["cid"]: r["purpose"] for r in _read_jsonl(work / "triage.jsonl")}
+    extracted = json.loads((work / "extract-done.json").read_text()) if (work / "extract-done.json").is_file() else {}
+    pos_df: dict = {}
+    neg_df: dict = {}
+    n_pos = n_neg = 0
+    for rec in {r["cid"]: r for r in _read_jsonl(work / "manifest.jsonl")}.values():
+        cid = rec["cid"]
+        if rec["quarantine"] or label.get(cid) == "for_others" or cid not in extracted:
+            continue
+        payload = read_source_event_payload(rec["ptr"]) if "ptr" in rec else None
+        if not isinstance(payload, dict):
+            continue
+        terms = _user_terms(payload)
+        if cid in kept:
+            n_pos += 1
+            for t in terms:
+                pos_df[t] = pos_df.get(t, 0) + 1
+        else:
+            n_neg += 1
+            for t in terms:
+                neg_df[t] = neg_df.get(t, 0) + 1
+    weights = {}
+    for t, p in pos_df.items():
+        if p < min_pos:
+            continue
+        w = math.log(((p + 0.5) / (n_pos + 1)) / ((neg_df.get(t, 0) + 0.5) / (n_neg + 1)))
+        if w >= 0.7:
+            weights[t] = round(w, 2)
+    best = dict(sorted(weights.items(), key=lambda kv: -(pos_df[kv[0]] * kv[1]))[:top])
+    fd = os.open(work / "lexicon.json", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        json.dump({"terms": best, "n_pos": n_pos, "n_neg": n_neg, "built": _now()}, fh)
+    return {"terms": len(best), "positive_conversations": n_pos, "negative_conversations": n_neg}
+
+
+def scan(import_id: str, *, root: Optional[Path] = None) -> dict:
+    """Deterministic, model-free priority score per conversation: core-language hits + preference/decision markers + questions."""
+    from src.source_events import read_source_event_payload
+
+    work = _private((root or _data_root()) / import_id)
+    lex_path = work / "lexicon.json"
+    lex = json.loads(lex_path.read_text())["terms"] if lex_path.is_file() else {}
+    label = {r["cid"]: r["purpose"] for r in _read_jsonl(work / "triage.jsonl")}
+    scores: dict = {}
+    for rec in {r["cid"]: r for r in _read_jsonl(work / "manifest.jsonl")}.values():
+        cid = rec["cid"]
+        if rec["quarantine"] or label.get(cid) == "for_others":
+            continue
+        payload = read_source_event_payload(rec["ptr"]) if "ptr" in rec else None
+        if not isinstance(payload, dict):
+            continue
+        users = [m for m in payload["messages"] if m["role"] == "user"]
+        text = " ".join(m["text"] for m in users)
+        hits = sorted((lex[t] for t in _user_terms(payload) if t in lex), reverse=True)[:10]
+        pref, dec = len(PREF_RE.findall(text)), len(DECISION_RE.findall(text))
+        qs = len(user_questions(users, limit=3))
+        scores[cid] = {"score": round(sum(hits) + 2 * min(pref, 3) + 1.5 * min(dec, 3) + 0.3 * qs, 2),
+                       "lex": len(hits), "pref": pref, "dec": dec, "q": qs}
+    fd = os.open(work / "scan.json", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        json.dump(scores, fh)
+    ordered = sorted((s["score"] for s in scores.values()), reverse=True)
+    return {"scored": len(scores), "p90": ordered[len(ordered) // 10] if ordered else 0,
+            "median": ordered[len(ordered) // 2] if ordered else 0}
+
+
+def _load_scan(work: Path) -> dict:
+    path = work / "scan.json"
+    return json.loads(path.read_text()) if path.is_file() else {}
+
+
+def _score_cut(scores: dict, top_fraction: float = 0.3) -> float:
+    ordered = sorted((s["score"] for s in scores.values()), reverse=True)
+    return ordered[max(0, int(len(ordered) * top_fraction) - 1)] if ordered else 0.0
+
+
+def deepread(import_id: str, llm: Optional[Llm] = None, *, root: Optional[Path] = None, max_conversations: int = 400,
+             min_score: Optional[float] = None) -> dict:
+    """Strong-reader tier: the highest-scoring conversations (cheap scan first) are re-read by local-strong; its rows
+    supersede the baseline reader's non-enrich rows for that conversation.  Resumable and idempotent."""
+    from src.source_events import read_source_event_payload
+
+    work = _private((root or _data_root()) / import_id)
+    ledger, done_path = work / "ledger.jsonl", work / "deepread-done.json"
+    done = json.loads(done_path.read_text()) if done_path.is_file() else {}
+    scores = _load_scan(work)
+    cut = min_score if min_score is not None else _score_cut(scores)
+    manifest = {r["cid"]: r for r in _read_jsonl(work / "manifest.jsonl")}
+    order = [c for c, s in sorted(scores.items(), key=lambda kv: -kv[1]["score"]) if s["score"] >= cut and c in manifest]
+    llm = llm or strong_llm()
+    counts = {"candidates_in_scope": len(order), "read": 0, "candidates": 0, "superseded_rows": 0, "failed": 0}
+    for cid in order:
+        if counts["read"] >= max_conversations:
+            break
+        rec = manifest[cid]
+        key = f"{rec['hash']}|{PROMPT_VERSION}|{DEEP_VERSION}"
+        if done.get(cid) == key:
+            continue
+        payload = read_source_event_payload(rec["ptr"]) if "ptr" in rec else None
+        if not isinstance(payload, dict):
+            counts["failed"] += 1
+            continue
+        cands = parse_candidates(llm(EXTRACT_SYSTEM + READER_ADDENDUM, _render(payload)))
+        if cands is None:
+            counts["failed"] += 1
+            continue                           # retried next run, never guessed
+        ids = {m["id"][:8]: m["id"] for m in payload["messages"]}
+        latest = {r["candidate_id"]: r for r in _read_jsonl(ledger)}
+        for old in latest.values():
+            if (old["conversation_id"] == cid and old["review"] != "superseded" and old.get("source") != "enrich"):
+                _append(ledger, {**old, "review": "superseded", "active": False, "ts": _now()})
+                counts["superseded_rows"] += 1
+        for c in map(postfilter, cands):
+            c["msgs"] = [ids[m[:8]] for m in c["msgs"] if m[:8] in ids] or \
+                        [m["id"] for m in payload["messages"] if m["role"] == "user"][:1]
+            row = _row(import_id, cid, c, rec["hash"])
+            row["reader"] = "local-strong"
+            _append(ledger, row)
+            counts["candidates"] += 1
+        done[cid] = key
+        counts["read"] += 1
+        if counts["read"] % 10 == 0:
+            done_path.write_text(json.dumps(done))
+    done_path.write_text(json.dumps(done))
+    return counts
+
+
 def run_all(zip_path: Path, import_id: str, *, local: Optional[Llm] = None, strong: Optional[Llm] = None,
+            reader: Optional[Llm] = None, deep: int = 0,
             root: Optional[Path] = None, limit: Optional[int] = None) -> dict:
     t = time.monotonic()
     s = stage(zip_path, import_id, root=root, limit=limit)
     e = extract(import_id, local, root=root)
     e["refilter"] = refilter(import_id, root=root)
     e["enrich"] = enrich(import_id, local, root=root)
+    if deep:                                   # cheap deterministic scan first, then the strong reader on the best-scoring
+        e["lexicon"] = build_lexicon(import_id, root=root)
+        e["scan"] = scan(import_id, root=root)
+        e["deepread"] = deepread(import_id, reader, root=root, max_conversations=deep)
+        e["enrich_strong"] = enrich(import_id, reader or strong_llm(), root=root, reader="strong")
     v = review(import_id, strong, root=root)
     h = handoff(import_id, root=root)
     return {"stage": s, "extract": e, "review": v, "handoff": h, "digest": digest(import_id, root=root), "report": report(import_id, root=root),
@@ -918,9 +1102,12 @@ def gate_status(root: Optional[Path] = None) -> dict:
 
 def _main(argv: Optional[list[str]] = None) -> int:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("command", choices=("gate", "run", "stage", "extract", "review", "handoff", "report", "digest", "retriage", "refilter", "enrich"))
+    p.add_argument("command", choices=("gate", "run", "stage", "extract", "review", "handoff", "report", "digest", "retriage", "refilter", "enrich", "lexicon", "scan", "deepread"))
     p.add_argument("--synthetic", action="store_true", help="fixture data only; bypasses Gate A")
     p.add_argument("--zip")
+    p.add_argument("--reader", choices=("strong", "classify"), default="strong", help="enrich reader; strong = local-strong (default)")
+    p.add_argument("--deep", type=int, default=400, help="max conversations for the strong-reader tier in a full run")
+    p.add_argument("--min-score", type=float)
     p.add_argument("--embed", action="store_true", help="semantic clustering in the digest (needs a free GPU)")
     p.add_argument("--import-id", default="")
     p.add_argument("--limit", type=int)
@@ -933,7 +1120,7 @@ def _main(argv: Optional[list[str]] = None) -> int:
         return 2
     try:
         if a.command == "run":
-            result = run_all(Path(a.zip), a.import_id, limit=a.limit)
+            result = run_all(Path(a.zip), a.import_id, limit=a.limit, deep=a.deep)
         elif a.command == "stage":
             result = stage(Path(a.zip), a.import_id, limit=a.limit)
         elif a.command == "extract":
@@ -945,7 +1132,13 @@ def _main(argv: Optional[list[str]] = None) -> int:
         elif a.command == "digest":
             result = digest(a.import_id, embed=a.embed)
         elif a.command == "enrich":
-            result = enrich(a.import_id, limit=a.limit)
+            result = enrich(a.import_id, limit=a.limit, reader=a.reader, min_score=a.min_score)
+        elif a.command == "lexicon":
+            result = build_lexicon(a.import_id)
+        elif a.command == "scan":
+            result = scan(a.import_id)
+        elif a.command == "deepread":
+            result = deepread(a.import_id, max_conversations=a.deep, min_score=a.min_score)
         elif a.command == "retriage":
             result = retriage(a.import_id)
         elif a.command == "refilter":
