@@ -238,3 +238,24 @@ def test_top_digest_ranks_supported_items_first_and_excludes_restricted(tmp_path
     ci.run_all(z, "imp", local=_local, strong=_strong, root=tmp_path)
     top = (tmp_path / "imp" / "digest-top.md").read_text()
     assert top.splitlines()[2].startswith("- [2x")
+
+
+def test_retriage_supersedes_rows_when_triage_rule_changes_and_for_others_is_skipped(tmp_path):
+    z = _zip(tmp_path / "e.zip", [_conv("c1", "I decided on radar for my PhD sensing study")])
+    ci.run_all(z, "imp", local=_local, strong=_strong, root=tmp_path)
+
+    def llm(system, user):
+        return json.dumps({"purpose": "for_others"}) if system == ci.TRIAGE_SYSTEM else _local(system, user)
+    out = ci.retriage("imp", llm, root=tmp_path)
+    assert out["superseded_convs"] == 1 and out["superseded_rows"] >= 1
+    latest = {}
+    for r in ci._read_jsonl(tmp_path / "imp" / "ledger.jsonl"):
+        latest[r["candidate_id"]] = r
+    assert not any(r["active"] for r in latest.values())
+    assert "for_others" in ci.SKIP_PURPOSES
+
+
+def test_community_terms_are_restricted():
+    base = {"first_pass": "approve", "domain": "misumi", "sensitivity": "ordinary", "speaker_basis": "user_first_person"}
+    out = ci.postfilter({**base, "description": "User campaigns for safer parks in the ward"})
+    assert out["sensitivity"] == "restricted"
