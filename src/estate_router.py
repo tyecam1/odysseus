@@ -138,7 +138,11 @@ def provider_health(host_id: Optional[str], provider: str = "codex") -> dict:
     """Latest observation; telemetry errors never authorise paid execution."""
     key = (host_id or "none", provider)
     if key in _PROVIDER_HEALTH_WRITE_FAILURES:
-        return _PROVIDER_HEALTH_WRITE_FAILURES[key]
+        pending = _PROVIDER_HEALTH_WRITE_FAILURES[key]
+        # One idempotent persistence retry per read; never probe the provider.
+        _record_provider_health(host_id, pending["observation"], observation_id=pending["observation_id"])
+        if key in _PROVIDER_HEALTH_WRITE_FAILURES:
+            return _PROVIDER_HEALTH_WRITE_FAILURES[key]["failure"]
     health = {"provider": provider, "state": "unknown", "retry_after": None}
     try:
         from core.database import RoutingDecision, get_db_session
@@ -171,22 +175,40 @@ def _provider_health_view(health: dict) -> dict:
             (state in _PROVIDER_FAILURE_STATES and retry_due)}
 
 
+def _validate_provider_observation(row, host_id: str, health: dict) -> None:
+    if row is None or row.host_id != host_id or row.executor != health["provider"] \
+            or row.task_class != "provider_health_observation" or json.loads(row.provider_health_json) != health:
+        raise ValueError("provider observation id conflicts with different observation")
+
+
 def _record_provider_health(host_id: Optional[str], health: dict, *, observation_id: Optional[str] = None) -> dict:
     key = (host_id or "none", health["provider"])
+    observation_id = observation_id or str(uuid.uuid4())
     try:
+        from sqlalchemy.exc import IntegrityError
         from core.database import RoutingDecision, get_db_session
-        with get_db_session() as db:
-            if not observation_id or db.query(RoutingDecision.id).filter_by(id=observation_id).first() is None:
-                db.add(RoutingDecision(
-                    id=observation_id or str(uuid.uuid4()), task_class="provider_health_observation",
-                    host_id=key[0], executor=health["provider"],
-                    created_at=datetime.fromisoformat(health["observed_at"]).astimezone(timezone.utc).replace(tzinfo=None),
-                    provider_health_json=json.dumps(health),
-                    escalation_reason=f"provider_{health['state']}" if health["state"] in _PROVIDER_FAILURE_STATES else None,
-                    status="blocked" if health["state"] in _PROVIDER_FAILURE_STATES else "complete",
-                ))
+        try:
+            with get_db_session() as db:
+                row = db.query(RoutingDecision).filter_by(id=observation_id).first()
+                if row is None:
+                    db.add(RoutingDecision(
+                        id=observation_id, task_class="provider_health_observation",
+                        host_id=key[0], executor=health["provider"],
+                        created_at=datetime.fromisoformat(health["observed_at"]).astimezone(timezone.utc).replace(tzinfo=None),
+                        provider_health_json=json.dumps(health),
+                        escalation_reason=f"provider_{health['state']}" if health["state"] in _PROVIDER_FAILURE_STATES else None,
+                        status="blocked" if health["state"] in _PROVIDER_FAILURE_STATES else "complete",
+                    ))
+                else:
+                    _validate_provider_observation(row, key[0], health)
+        except IntegrityError:
+            # A concurrent replay may have committed after our lookup. Validate
+            # the winner in a fresh transaction after the failed one rolled back.
+            with get_db_session() as db:
+                row = db.query(RoutingDecision).filter_by(id=observation_id).first()
+                _validate_provider_observation(row, key[0], health)
         previous = _PROVIDER_HEALTH_WRITE_FAILURES.get(key)
-        if previous is None or health["observed_at"] >= previous["observed_at"]:
+        if previous is None or datetime.fromisoformat(health["observed_at"]) >= datetime.fromisoformat(previous["observation"]["observed_at"]):
             _PROVIDER_HEALTH_WRITE_FAILURES.pop(key, None)
         return health
     except Exception:
@@ -194,7 +216,11 @@ def _record_provider_health(host_id: Optional[str], health: dict, *, observation
         logging.getLogger(__name__).exception("provider health telemetry write failed")
         failure = _unreadable_provider_health(health["provider"], "provider health telemetry unwritable; observation not persisted")
         failure["observed_at"] = health["observed_at"]
-        _PROVIDER_HEALTH_WRITE_FAILURES[key] = failure
+        previous = _PROVIDER_HEALTH_WRITE_FAILURES.get(key)
+        if previous is None or datetime.fromisoformat(health["observed_at"]) >= datetime.fromisoformat(previous["observation"]["observed_at"]):
+            _PROVIDER_HEALTH_WRITE_FAILURES[key] = {
+                "observation": dict(health), "observation_id": observation_id, "failure": failure,
+            }
         return failure
 
 
@@ -1508,9 +1534,6 @@ def execute_codex_write_durable(objective: str, *, repo_id: str, host_id: str,
     and ran workspace-write in-process with no run decision or tracked unit.
     Every call is delegated to the Stage 6 worker lane, which re-validates
     the exact lease inside `lease_serialized_transaction`. Deleted in Stage 9."""
-    refusal = _provider_refusal(provider_health(host_id))
-    if refusal:
-        return refusal
     return execute_write_via_worker(objective, repo_id=repo_id, host_id=host_id, decision_id=decision_id,
                                     wait_timeout=wait_timeout, timeout=timeout)
 
@@ -1725,7 +1748,7 @@ def run_task(task: dict) -> dict:
             paid_entry = next((h for h in (route.get("hosts_checked") or []) if h.get("host_id") == paid_host), None) or {}
             health = provider_health(paid_host, provider_name)
             refusal = _provider_refusal(health)
-            if refusal:
+            if refusal and not implementation_mode:
                 _update_decision_outcome(
                     route["decision_id"], status="blocked", deterministic_gate="fail",
                     escalation_reason=refusal["escalation_reason"], verification_outcome="fail",

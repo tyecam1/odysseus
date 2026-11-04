@@ -551,6 +551,8 @@ not spend provider calls. Known-dead dispatch is refused before CLI execution
 or durable write admission, with `provider_<state>` telemetry. Current
 health is re-read at read dispatch and write admission; routing snapshots
 cannot authorise calls during a subsequently observed cooldown.
+The capacity gate applies to new execution admission; existing execution reuse
+and unresolved-worktree recovery instructions remain available.
 
 Observed authentication/credential errors produce `auth_failed`; provider
 connection failures and timeouts produce `unreachable`. Both use the same
@@ -563,6 +565,8 @@ observation write also invalidates earlier success in the serving process
 until that observation or a newer one is persisted; it is reported as
 `unknown_unreadable`, never `ok`/live. No observation yet is `unknown` and
 permits the initial normal execution. Host and worker eligibility are unchanged.
+Later health reads retry the retained observation once with the same id and
+keep admission closed until persistence succeeds.
 Terminal durable execution results are replayed during reconciliation using
 an execution-derived observation id. Recovery preserves `observed_at` and
 is idempotent, including a crash after terminal commit but before telemetry.

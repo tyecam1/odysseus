@@ -99,6 +99,14 @@ def _exhaust():
     return result['execution']['provider_health']
 
 
+@pytest.fixture
+def quota_write_lease(quota_lane):
+    with cdb.get_db_session() as db:
+        db.add(cdb.ParkLease(id='lease', repo_id='odysseus', host_id='lab', status='active',
+                            allowed_write_scope='repo', branch='feat/test', worktree_path='/w/test',
+                            heartbeat_at=cdb.utcnow_naive()))
+
+
 def test_real_usage_limit_preflight_keeps_lab_eligible_and_api_truthful(quota_lane):
     health = _exhaust()
     assert health['retry_after'] == '2026-11-04T17:39:00+00:00'
@@ -126,12 +134,13 @@ def test_real_usage_limit_preflight_keeps_lab_eligible_and_api_truthful(quota_la
     assert response.json()['snapshot']['codex']['provider_health']['state'] == 'quota_exhausted'
 
 
-def test_repeated_dispatch_refused_without_starting_cli_or_write_admission(quota_lane, monkeypatch):
+def test_repeated_dispatch_refused_without_starting_cli_or_write_admission(quota_lane, quota_write_lease, monkeypatch):
+    from src import estate_write_lane as lane
     state, count, now = quota_lane
     _exhaust()
     before = count.read_text()
     assert _run_paid()['escalation_reason'] == 'provider_quota_exhausted'
-    monkeypatch.setattr(router, 'execute_write_via_worker', lambda *a, **k: pytest.fail('write admitted'))
+    monkeypatch.setattr(lane, '_worker', lambda *a, **k: pytest.fail('write worker called'))
     refusal = router.execute_codex_write_durable('implement', repo_id='odysseus', host_id='lab')
     assert refusal['executed'] is False
     assert 'codex quota_exhausted' in refusal['error']
@@ -288,7 +297,8 @@ def test_durable_write_outcome_reports_provider_quota_without_lifecycle_change(q
 
 @pytest.mark.parametrize('mode', ['advisory', 'implementation'])
 @pytest.mark.parametrize('cached_state', ['ok', 'unknown'])
-def test_current_health_wins_race_after_route(quota_lane, monkeypatch, mode, cached_state):
+def test_current_health_wins_race_after_route(quota_lane, quota_write_lease, monkeypatch, mode, cached_state):
+    from src import estate_write_lane as lane
     state, count, now = quota_lane
     monkeypatch.setattr(client, 'worker_repo_probe', lambda *a, **k: {'resolved': True})
     resolve = router.resolve_route
@@ -301,7 +311,7 @@ def test_current_health_wins_race_after_route(quota_lane, monkeypatch, mode, cac
         return route
     monkeypatch.setattr(router, 'resolve_route', raced_route)
     monkeypatch.setattr(router, '_dispatch_read_only', lambda *a, **k: pytest.fail('paid worker dispatched'))
-    monkeypatch.setattr(router, 'execute_write_via_worker', lambda *a, **k: pytest.fail('write admitted'))
+    monkeypatch.setattr(lane, '_worker', lambda *a, **k: pytest.fail('write worker called'))
     result = router.run_task({'task_class': 'code_review', 'objective': 'review', 'repo': 'odysseus',
         'requirements': {'capabilities': ['code-strong']},
         'routing': {'allow_paid_escalation': True, 'mode': mode}})
@@ -310,12 +320,11 @@ def test_current_health_wins_race_after_route(quota_lane, monkeypatch, mode, cac
     assert not count.exists()
 
 
-def test_dispatch_boundaries_check_health_without_wrapper(quota_lane, monkeypatch):
+def test_dispatch_boundaries_check_health_without_wrapper(quota_lane, quota_write_lease, monkeypatch):
     from src import estate_write_lane as lane
     state, count, now = quota_lane
     router._record_provider_health('lab', router._quota_observation(state.read_text()))
     monkeypatch.setattr(client, 'call_worker', lambda *a, **k: pytest.fail('worker dispatched'))
-    monkeypatch.setattr(lane, '_lease_authority', lambda *a: pytest.fail('write admission reached'))
     assert router._dispatch_read_only('lab', 'codex', {'objective': 'review'})['executed'] is False
     assert lane.execute_write_via_worker('implement', repo_id='odysseus', host_id='lab')['executed'] is False
 
@@ -374,30 +383,52 @@ def test_health_query_failure_blocks_paid_dispatch(quota_lane, monkeypatch):
     assert router._dispatch_read_only('lab', 'codex', {'objective': 'review'})['executed'] is False
 
 
-def test_failed_health_persistence_invalidates_earlier_success(quota_lane, monkeypatch):
+def test_failed_health_persistence_retries_pending_observation_and_recovers(quota_lane, monkeypatch):
     from contextlib import contextmanager
     state, count, now = quota_lane
     state.write_text('ok')
     assert _run_paid()['ok']
     now[0] += timedelta(seconds=1)
     real_session = cdb.get_db_session
+    attempts = []
     @contextmanager
     def reject_observation():
         with real_session() as db:
             yield db
             if any(isinstance(row, cdb.RoutingDecision) and row.task_class == 'provider_health_observation'
                    for row in db.new):
+                attempts.append('write')
                 raise OSError('observation write failed')
     monkeypatch.setattr(cdb, 'get_db_session', reject_observation)
     state.write_text("You've hit your usage limit ... try again at 5:39 PM.")
     result = _run_paid()
     assert result['provider_health']['state'] == 'unknown_unreadable'
     assert 'unwritable' in result['provider_health']['reason']
+    before = len(attempts)
+    assert router.provider_health('lab')['retry_allowed'] is False
+    assert len(attempts) == before + 1  # Bounded: one write attempt per read.
+    before_calls = count.read_text()
+    assert router._dispatch_read_only('lab', 'codex', {'objective': 'review'})['executed'] is False
+    assert count.read_text() == before_calls
     monkeypatch.setattr(cdb, 'get_db_session', real_session)
+    health = router.provider_health('lab')
+    assert health['state'] == 'quota_exhausted'
+    assert health['retry_after'] == '2026-11-04T17:39:00+00:00'
+    assert health['observed_at'] == now[0].isoformat()
+    assert ('lab', 'codex') not in router._PROVIDER_HEALTH_WRITE_FAILURES
+    assert router.provider_health('lab') == health
+    with real_session() as db:
+        rows = db.query(cdb.RoutingDecision).filter_by(task_class='provider_health_observation').all()
+        assert len(rows) == 2  # Original success plus exactly one retried failure.
+        assert sum(json.loads(row.provider_health_json)['state'] == 'quota_exhausted' for row in rows) == 1
     before = count.read_text()
     assert _run_paid()['executed'] is False
     assert count.read_text() == before
     assert not preflight.delegation_preflight([{'task_class': 'code_review'}])['snapshot']['codex']['available']
+    now[0] = datetime.fromisoformat(health['retry_after']) + timedelta(seconds=1)
+    state.write_text('ok')
+    assert _run_paid()['ok']
+    assert router.provider_health('lab')['state'] == 'ok'
 
 
 @pytest.mark.parametrize('message, expected', [
@@ -495,3 +526,87 @@ def test_cli_timeout_after_success_records_unreachable(quota_lane, monkeypatch):
     assert result['escalation_reason'] == 'provider_unreachable'
     assert router.provider_health('lab')['state'] == 'unreachable'
     assert _run_paid()['executed'] is False
+
+
+@pytest.mark.parametrize('entry', ['lane', 'durable', 'run_task'])
+@pytest.mark.parametrize('lifecycle', ['accepted', 'running', 'succeeded', 'failed', 'timed_out', 'interrupted', 'lost'])
+def test_cooldown_preserves_existing_execution_response(quota_lane, quota_write_lease, monkeypatch, entry, lifecycle):
+    from src import estate_write_lane as lane
+    state, count, now = quota_lane
+    with cdb.get_db_session() as db:
+        db.add(cdb.EstateExecution(id='existing', objective='implement', executor='codex-write', provider='codex',
+            host_id='lab', repo_id='odysseus', lease_id='lease', branch='feat/test', worktree_path='/w/test',
+            lifecycle_state=lifecycle, worktree_resolution='unresolved', worker_handle_json='{"pid":123}'))
+    monkeypatch.setattr(client, 'worker_repo_probe', lambda *a, **k: {'resolved': True})
+    monkeypatch.setattr(lane, '_worker', lambda *a, **k: pytest.fail('existing execution caused worker call'))
+    def submit():
+        if entry == 'run_task':
+            return router.run_task({'task_class': 'code_implementation', 'repo': 'odysseus', 'objective': 'implement',
+                'requirements': {'capabilities': ['code-strong']},
+                'routing': {'allow_paid_escalation': True, 'mode': 'implementation'}})['execution']
+        execute = lane.execute_write_via_worker if entry == 'lane' else router.execute_codex_write_durable
+        return execute('implement', repo_id='odysseus', host_id='lab')
+    before = submit()
+    assert before['execution_id'] == 'existing'
+    assert before['lifecycle_state'] == lifecycle
+    if lifecycle in ('accepted', 'running'):
+        assert before['dispatch'] == 'reused_in_flight'
+        assert 'GET /api/estate/run/existing' in before['next_action']['http']
+    else:
+        assert before['next_action']
+        assert before['error_code'] == lane._UNRESOLVED_REFUSALS[lifecycle]
+    router._record_provider_health('lab', router._quota_observation(state.read_text()))
+    assert submit() == before
+    assert not count.exists()
+    with cdb.get_db_session() as db:
+        assert db.query(cdb.EstateExecution).count() == 1
+        assert db.query(cdb.EstateExecution).one().lifecycle_state == lifecycle
+
+
+def test_concurrent_terminal_replay_validates_durable_winner(quota_lane, monkeypatch):
+    from types import SimpleNamespace
+    from src import estate_write_lane as lane
+    state, count, now = quota_lane
+    health = router._quota_observation(state.read_text())
+    session_class = cdb.SessionLocal.class_
+    real_add = session_class.add
+    raced = []
+    def insert_winner(db, row, *args, **kwargs):
+        if isinstance(row, cdb.RoutingDecision) and row.task_class == 'provider_health_observation' and not raced:
+            raced.append(row.id)
+            # Commit between the loser's existence check and its INSERT.
+            with cdb.get_db_session() as winner:
+                winner.add(cdb.RoutingDecision(**{name: getattr(row, name) for name in (
+                    'id', 'task_class', 'host_id', 'executor', 'created_at', 'provider_health_json',
+                    'escalation_reason', 'status')}))
+        return real_add(db, row, *args, **kwargs)
+    monkeypatch.setattr(session_class, 'add', insert_winner)
+    result = {'ok': False, 'provider_health': health, 'error': 'quota failure'}
+    row = SimpleNamespace(id='race-execution', decision_id=None)
+    lane._record_outcome(row, 'failed', 'lab', result)
+    assert len(raced) == 1
+    # A health-read retry must not mask a false write-failure latch.
+    assert ('lab', 'codex') not in router._PROVIDER_HEALTH_WRITE_FAILURES
+    assert router.provider_health('lab')['state'] == 'quota_exhausted'
+    lane._record_outcome(row, 'failed', 'lab', result)
+    with cdb.get_db_session() as db:
+        rows = db.query(cdb.RoutingDecision).filter_by(task_class='provider_health_observation').all()
+        assert len(rows) == 1
+        assert json.loads(rows[0].provider_health_json) == health
+
+
+@pytest.mark.parametrize('conflict', ['payload', 'host', 'provider', 'task_class'])
+def test_replayed_observation_id_must_match_payload_and_scope(quota_lane, conflict):
+    state, count, now = quota_lane
+    health = router._quota_observation(state.read_text())
+    values = dict(id='conflicting', task_class='provider_health_observation', host_id='lab',
+                  executor='codex', provider_health_json=json.dumps(health), status='blocked')
+    if conflict == 'payload':
+        values['provider_health_json'] = json.dumps({**health, 'reason': 'different observation'})
+    else:
+        values[{'host': 'host_id', 'provider': 'executor', 'task_class': 'task_class'}[conflict]] = 'other'
+    with cdb.get_db_session() as db:
+        db.add(cdb.RoutingDecision(**values))
+    result = router._record_provider_health('lab', health, observation_id='conflicting')
+    assert result['state'] == 'unknown_unreadable'
+    assert router.provider_health('lab')['retry_allowed'] is False

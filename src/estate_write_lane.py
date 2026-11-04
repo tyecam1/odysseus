@@ -226,9 +226,6 @@ def execute_write_via_worker(objective: str, *, repo_id: str, host_id: str,
     from sqlalchemy.exc import IntegrityError
     from core.database import EstateExecution, ParkLease, lease_serialized_transaction
 
-    refusal = _router._provider_refusal(_router.provider_health(host_id))
-    if refusal:
-        return refusal
     authority = _lease_authority(repo_id, host_id)                                   # step 1
     if not authority["ok"]:
         return {"ok": False, "provider": "codex-write", "authority_denied": True,
@@ -251,6 +248,9 @@ def execute_write_via_worker(objective: str, *, repo_id: str, host_id: str,
         return {"ok": False, "provider": "codex-write", "authority_denied": False,
                 "error_code": refusal.code, "error": str(refusal), **refusal.extra}
 
+    refusal = _router._provider_refusal(_router.provider_health(host_id))
+    if refusal:
+        return refusal
     verify, exc = _worker(host_id, "worktree.verify",                                  # step 2
                           {"repo_id": repo_id, "worktree_path": worktree_path, "branch": branch},
                           deadline_s=_VERIFY_DEADLINE_S)
