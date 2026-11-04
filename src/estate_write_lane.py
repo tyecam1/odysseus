@@ -44,6 +44,9 @@ LOST_GRACE_SECONDS = 120            # execution_deadline_at + this, unobserved -
 MONITOR_INTERVAL_SECONDS = 5.0
 OBSERVATION_STALE_SECONDS = 15      # reconcile re-observes rows older than this
 PROVIDER_HEALTH_REPLAY_BATCH_SIZE = 10
+PROVIDER_HEALTH_PAYLOAD_MAX_BYTES = 1024 * 1024
+PROVIDER_HEALTH_PAYLOAD_MAX_DEPTH = 64
+_REPLAY_NOT_LOADED = object()
 _CLIENT_SIDE_CODES = frozenset({"worker_unreachable", "worker_protocol_error", "placement_mismatch"})
 # Worker error codes that can ONLY arise before a start/prepare claim
 # (validation, identity, prerequisites, pre-claim authority checks). Any
@@ -573,68 +576,127 @@ def _unrecorded_provider_health(db, EstateExecution):
         RoutingDecision.task_class == "provider_health_replay",
         RoutingDecision.host_id == EstateExecution.host_id,
         RoutingDecision.executor == EstateExecution.provider,
-    ).exists()
+    ).correlate(EstateExecution).exists()
     return db.query(EstateExecution).filter(
         EstateExecution.lifecycle_state.in_(_TERMINAL),
         ~recorded,
     )
 
 
-def _provider_health_replay_pages(query, EstateExecution):
-    """Keyset pages stay stable as dispositions remove rows from selection."""
-    from datetime import datetime
-    from sqlalchemy import and_, func, or_
-    finished = func.coalesce(EstateExecution.finished_at, datetime.min)
+def _provider_health_replay_pages(query, EstateExecution, *, max_rows=None):
+    """Indexed keyset traversal, oldest admission first (including legacy rows).
+
+    submitted_at is non-null and immutable: new admissions cannot jump ahead
+    of old backlog. Every visited row consumes budget, so live observations
+    below get a turn even while backfilling unusable historical results.
+    """
+    from sqlalchemy import tuple_
     cursor = None
-    while True:
+    processed = 0
+    while max_rows is None or processed < max_rows:
         page = query
         if cursor is not None:
-            page = page.filter(or_(finished > cursor[0], and_(finished == cursor[0], EstateExecution.id > cursor[1])))
-        rows = page.order_by(finished, EstateExecution.id).limit(PROVIDER_HEALTH_REPLAY_BATCH_SIZE).all()
+            page = page.filter(tuple_(EstateExecution.submitted_at, EstateExecution.id) > cursor)
+        size = PROVIDER_HEALTH_REPLAY_BATCH_SIZE
+        if max_rows is not None:
+            size = min(size, max_rows - processed)
+        # Merge the three indexed state ranges. A single IN(states) ORDER BY
+        # can otherwise sort the entire history even with a cursor index.
+        rows = []
+        for state in _TERMINAL:
+            rows.extend(page.filter(EstateExecution.lifecycle_state == state).order_by(
+                EstateExecution.submitted_at, EstateExecution.id,
+            ).limit(size).all())
+        rows = sorted(rows, key=lambda row: (row.submitted_at, row.id))[:size]
         if not rows:
             return
+        cursor = (rows[-1].submitted_at, rows[-1].id)
         for row in rows:
+            processed += 1
             yield row
-        cursor = (rows[-1].finished_at or datetime.min, rows[-1].id)
 
 
-def _classify_provider_health_replay(db, row):
+def _bounded_provider_replay_payload(raw):
+    # Check length before decoding/allocating, then depth before json.loads.
+    # Count containers only outside strings, including escaped quotes/brackets.
+    if not isinstance(raw, (str, bytes)) or len(raw) > PROVIDER_HEALTH_PAYLOAD_MAX_BYTES:
+        raise ValueError("provider replay payload too large or missing")
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8")
+    if len(raw.encode("utf-8")) > PROVIDER_HEALTH_PAYLOAD_MAX_BYTES:
+        raise ValueError("provider replay payload too large")
+    depth = 0
+    quoted = escaped = False
+    for char in raw:
+        if quoted:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                quoted = False
+        elif char == '"':
+            quoted = True
+        elif char in "[{":
+            depth += 1
+            if depth > PROVIDER_HEALTH_PAYLOAD_MAX_DEPTH:
+                raise ValueError("provider replay payload too deep")
+        elif char in "]}":
+            depth -= 1
+    return json.loads(raw)
+
+
+def _classify_provider_health_replay(db, row, *, recorded=_REPLAY_NOT_LOADED):
     from core.database import RoutingDecision
     try:
-        result = json.loads(row.result_json)
+        result = _bounded_provider_replay_payload(row.result_json)
         health = result.get("provider_health")
         _router._validate_provider_payload(health)
         if health["provider"] != row.provider:
             raise ValueError("provider observation scope mismatch")
-    except (ValueError, TypeError, KeyError, AttributeError):
+    except Exception:
+        # Payload failures (including decoder recursion/allocation failures)
+        # belong to this row alone; never strand another host's observations.
         return "no_usable_observation", None
-    recorded = db.query(RoutingDecision).filter_by(id=f"provider-health:{row.id}").first()
+    if recorded is _REPLAY_NOT_LOADED:
+        recorded = db.query(RoutingDecision).filter_by(id=f"provider-health:{row.id}").first()
     if recorded is None:
         return "pending", result
     try:
         _router._validate_provider_observation(recorded, row.host_id, health)
-    except (ValueError, TypeError):
+    except Exception:
         return "conflict", result
     return "recorded", result
 
 
-def _record_provider_replay_disposition(row, disposition):
+def _record_provider_replay_dispositions(dispositions):
     """Bounded, idempotent telemetry in the existing store; no lifecycle mutation."""
     from sqlalchemy.exc import IntegrityError
     from core.database import RoutingDecision, get_db_session
-    values = dict(id=f"provider-health-replay:{row.id}", task_class="provider_health_replay",
+    values = [dict(id=f"provider-health-replay:{row.id}", task_class="provider_health_replay",
                   host_id=row.host_id, executor=row.provider, escalation_reason=disposition,
                   status="blocked" if disposition == "conflict" else "complete")
-    try:
-        with get_db_session() as db:
-            if db.query(RoutingDecision).filter_by(id=values["id"]).first() is None:
-                db.add(RoutingDecision(**values))
-    except IntegrityError:
-        pass  # A concurrent sweep may have committed the same disposition.
+              for row, disposition in dispositions]
+    if not values:
+        return
+    ids = [value["id"] for value in values]
+    for attempt in range(2):
+        try:
+            with get_db_session() as db:
+                existing = {row.id for row in db.query(RoutingDecision).filter(RoutingDecision.id.in_(ids))}
+                db.add_all([RoutingDecision(**value) for value in values if value["id"] not in existing])
+            break
+        except IntegrityError:
+            if attempt:
+                raise
+            # A concurrent sweep won some inserts; retry the missing subset.
     with get_db_session() as db:
-        recorded = db.query(RoutingDecision).filter_by(id=values["id"]).one()
-        if any(getattr(recorded, name) != value for name, value in values.items()):
-            raise ValueError("provider replay disposition conflicts")
+        recorded = {row.id: row for row in db.query(RoutingDecision).filter(RoutingDecision.id.in_(ids))}
+        for value in values:
+            if value["id"] not in recorded or any(
+                getattr(recorded[value["id"]], name) != field for name, field in value.items()
+            ):
+                raise ValueError("provider replay disposition conflicts")
 
 
 def reconcile_stale_estate_executions(db, EstateExecution) -> int:
@@ -646,23 +708,18 @@ def reconcile_stale_estate_executions(db, EstateExecution) -> int:
     # Terminal result_json survives a crash before _record_outcome. Replay with
     # an execution-derived observation id; repeated/concurrent sweeps cannot
     # add a second observation or move its original observed_at forward.
-    terminals = _provider_health_replay_pages(_unrecorded_provider_health(db, EstateExecution), EstateExecution)
-    replayed = 0
+    terminals = _provider_health_replay_pages(_unrecorded_provider_health(db, EstateExecution), EstateExecution,
+                                            max_rows=PROVIDER_HEALTH_REPLAY_BATCH_SIZE)
+    dispositions = []
     for row in terminals:
         disposition, result = _classify_provider_health_replay(db, row)
-        if disposition in ("pending", "conflict") and replayed >= PROVIDER_HEALTH_REPLAY_BATCH_SIZE:
-            break
         if disposition == "pending":
             _record_outcome(row, row.lifecycle_state, row.host_id, result)
             disposition, _ = _classify_provider_health_replay(db, row)
             if disposition == "pending":
                 continue  # Persistence failed; keep only this provider's valid backlog closed.
-            replayed += 1
-        elif disposition == "conflict":
-            replayed += 1
-        # Unusable results and validated existing observations consume no replay
-        # budget. Persist their disposition so they can never starve later pages.
-        _record_provider_replay_disposition(row, disposition)
+        dispositions.append((row, disposition))
+    _record_provider_replay_dispositions(dispositions)
     reconciled = _reconcile_legacy(db, EstateExecution)
     now = _now()
     stale_before = now - timedelta(seconds=OBSERVATION_STALE_SECONDS)

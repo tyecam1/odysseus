@@ -1042,6 +1042,7 @@ class EstateExecution(TimestampMixin, Base):
 
     __table_args__ = (
         Index('ix_estate_executions_host_state', 'host_id', 'lifecycle_state'),
+        Index('ix_estate_executions_replay_cursor', 'lifecycle_state', 'submitted_at', 'id'),
         # Mirrors ParkLease's own ix_park_leases_active_repo_unique
         # pattern: the actual single-writer guarantee for admission
         # control, not just the in-Python check in
@@ -2496,6 +2497,8 @@ def _migrate_add_estate_execution_worker_columns():
                 "WHERE lease_id IS NULL OR lease_id NOT IN "
                 "(SELECT id FROM park_leases WHERE status = 'active')"
             )
+        conn.execute("CREATE INDEX IF NOT EXISTS ix_estate_executions_replay_cursor "
+                     "ON estate_executions (lifecycle_state, submitted_at, id)")
         _recreate_partial_unique_index(
             conn, table="estate_executions", index="ix_estate_executions_active_lease_unique",
             column="lease_id", predicate=ESTATE_EXECUTION_UNRESOLVED_PREDICATE,
@@ -2596,6 +2599,10 @@ def _migrate_add_estate_execution_worker_columns_postgresql():
             conn.execute(text(
                 "CREATE INDEX IF NOT EXISTS ix_estate_executions_worktree_resolution "
                 "ON estate_executions (worktree_resolution)"
+            ))
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_estate_executions_replay_cursor "
+                "ON estate_executions (lifecycle_state, submitted_at, id)"
             ))
             _pg_recreate_partial_unique_index(
                 conn, table="estate_executions", index="ix_estate_executions_active_lease_unique",

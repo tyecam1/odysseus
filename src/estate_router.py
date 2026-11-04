@@ -152,8 +152,9 @@ def provider_health(host_id: Optional[str], provider: str = "codex") -> dict:
     try:
         from core.database import EstateExecution, RoutingDecision, get_db_session
         from src.estate_write_lane import (
-            _unrecorded_provider_health, _provider_health_replay_pages, _classify_provider_health_replay,
+            _unrecorded_provider_health, _classify_provider_health_replay, PROVIDER_HEALTH_PAYLOAD_MAX_BYTES,
         )
+        from sqlalchemy import Text, cast, func, or_
         with get_db_session() as db:
             conflict = db.query(RoutingDecision).filter_by(
                 host_id=key[0], executor=provider, task_class="provider_health_replay",
@@ -163,9 +164,20 @@ def provider_health(host_id: Optional[str], provider: str = "codex") -> dict:
                 return _unreadable_provider_health(provider, "provider observation payload conflict")
             backlog = _unrecorded_provider_health(db, EstateExecution).filter(
                 EstateExecution.host_id == key[0], EstateExecution.provider == provider,
+                func.length(EstateExecution.result_json) <= PROVIDER_HEALTH_PAYLOAD_MAX_BYTES,
+                # A usable JSON key is literal or contains a JSON escape. This
+                # inexpensive superset skips legacy {} without trusting JSON SQL
+                # functions on malformed input (or missing escaped-key evidence).
+                or_(cast(EstateExecution.result_json, Text).contains('"provider_health"', autoescape=True),
+                    cast(EstateExecution.result_json, Text).contains("\\", autoescape=True)),
             )
-            for terminal in _provider_health_replay_pages(backlog, EstateExecution):
-                disposition, _ = _classify_provider_health_replay(db, terminal)
+            # Stream one query, including existing observations, rather than
+            # restarting history scans and doing a lookup per terminal result.
+            backlog = backlog.outerjoin(
+                RoutingDecision, RoutingDecision.id == "provider-health:" + EstateExecution.id,
+            ).add_entity(RoutingDecision).order_by(EstateExecution.id).yield_per(100)
+            for terminal, recorded in backlog:
+                disposition, _ = _classify_provider_health_replay(db, terminal, recorded=recorded)
                 if disposition == "conflict":
                     return _unreadable_provider_health(provider, "provider observation payload conflict")
                 if disposition == "pending":

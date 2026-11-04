@@ -570,12 +570,16 @@ keep admission closed until persistence succeeds.
 Terminal durable execution results are replayed during reconciliation using
 an execution-derived observation id. Recovery preserves `observed_at` and
 is idempotent, including a crash after terminal commit but before telemetry.
-Each sweep pages through terminal results, oldest terminal first, classifying
-them in Python and replaying at most 10 valid unrecorded observations.
+Each sweep visits at most 10 terminal results, oldest admission first, using
+an indexed `(lifecycle_state, submitted_at, id)` cursor. Every visited row
+consumes budget so historical backfill cannot delay live execution monitoring.
 Replay dispositions are persisted by execution-derived id in the existing
-routing telemetry. Missing or unusable observations consume no replay budget
-and are durably marked handled. Existing observations must match the terminal
-payload and scope before being marked reconciled; conflicts are durably
+routing telemetry. Missing or unusable observations are durably marked handled
+in a batch transaction. Parsing is bounded to 1 MiB and 64 container levels;
+malformed rows cannot abort another host's replay. Health reads stream possible
+observations in one query, skipping obvious legacy payloads without telemetry.
+Existing observations must match the terminal payload and scope before being
+marked reconciled; conflicts are durably
 reported as `unknown_unreadable` for that host/provider.
 While valid unrecorded observations remain for a host/provider, health reads fail closed as
 `unknown_unreadable` with reason `observation backlog`; paid admission waits
