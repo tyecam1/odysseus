@@ -1277,7 +1277,11 @@ def test_execute_codex_with_sandbox_kills_entire_process_group_on_timeout(tmp_pa
         "provider": "codex",
         "error": "codex exec timed out after 1.0s",
         "latency_ms": result["latency_ms"],
+        "provider_health": result["provider_health"],
+        "escalation_reason": "provider_unreachable",
     }
+    assert result["provider_health"]["state"] == "unreachable"
+    assert result["provider_health"]["retry_after_source"] == "bounded_backoff"
     # Must return promptly after the 1s worker timeout, not block for
     # anywhere near the fixture child's full 30s natural lifetime - a slow
     # return here would mean cleanup is relying on the child dying on its
@@ -1431,7 +1435,11 @@ def test_execute_codex_with_sandbox_kills_descendant_when_leader_exits_first(tmp
         "provider": "codex",
         "error": "codex exec timed out after 1.0s",
         "latency_ms": result["latency_ms"],
+        "provider_health": result["provider_health"],
+        "escalation_reason": "provider_unreachable",
     }
+    assert result["provider_health"]["state"] == "unreachable"
+    assert result["provider_health"]["retry_after_source"] == "bounded_backoff"
     # The critical proof, not just a nice-to-have: against the prior
     # implementation (os.killpg(os.getpgid(proc.pid), ...) plus an
     # unbounded final proc.communicate()), killpg never runs here (getpgid

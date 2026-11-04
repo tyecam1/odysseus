@@ -152,7 +152,8 @@ def _merge_finalization(existing: Optional[str], **parts) -> str:
 def _record_outcome(row, state: str, host_id: str, result: Optional[dict] = None) -> None:
     health = (result or {}).get("provider_health")
     if health:
-        _router._record_provider_health(host_id, health)
+        health = _router._record_provider_health(host_id, health, observation_id=(
+            str(uuid.uuid5(uuid.NAMESPACE_URL, f"provider-health:{row.id}")) if getattr(row, "id", None) else None))
     if not row.decision_id:
         return
     ok = state == "succeeded" and bool((result or {}).get("ok"))
@@ -225,6 +226,9 @@ def execute_write_via_worker(objective: str, *, repo_id: str, host_id: str,
     from sqlalchemy.exc import IntegrityError
     from core.database import EstateExecution, ParkLease, lease_serialized_transaction
 
+    refusal = _router._provider_refusal(_router.provider_health(host_id))
+    if refusal:
+        return refusal
     authority = _lease_authority(repo_id, host_id)                                   # step 1
     if not authority["ok"]:
         return {"ok": False, "provider": "codex-write", "authority_denied": True,
@@ -285,6 +289,9 @@ def execute_write_via_worker(objective: str, *, repo_id: str, host_id: str,
                 reuse = _admission_outcome(blocker)
                 return {"ok": True, "provider": "codex-write", **reuse,
                         "next_action": _next_action_observe(reuse["execution_id"])}
+            refusal = _router._provider_refusal(_router.provider_health(host_id))
+            if refusal:
+                return refusal
             now = _now()
             db.add(EstateExecution(                                                        # step 5
                 id=execution_id, decision_id=decision_id, objective=objective,
@@ -325,6 +332,10 @@ def execute_write_via_worker(objective: str, *, repo_id: str, host_id: str,
                 "next_action": _next_action_observe(execution_id)}
     if row is not None and row.lifecycle_state in _TERMINAL:
         response["result"] = json.loads(row.result_json) if row.result_json else None
+        if (response["result"] or {}).get("provider_health"):
+            health = _router.provider_health(host_id)
+            if health["state"] == "unknown_unreadable":
+                response["result"]["provider_health"] = health
     return response
 
 
@@ -559,6 +570,17 @@ def reconcile_stale_estate_executions(db, EstateExecution) -> int:
     rows are observed through the worker; placeholder rows resolve through
     the same same-id start / fence logic as dispatch; resolved rows get
     their spool.release retried. Never redispatches under a new id."""
+    # Terminal result_json survives a crash before _record_outcome. Replay with
+    # an execution-derived observation id; repeated/concurrent sweeps cannot
+    # add a second observation or move its original observed_at forward.
+    terminals = db.query(EstateExecution).filter(
+        EstateExecution.lifecycle_state.in_(_TERMINAL),
+        EstateExecution.result_json.isnot(None),
+    ).all()
+    for row in terminals:
+        result = json.loads(row.result_json)
+        if result.get("provider_health"):
+            _record_outcome(row, row.lifecycle_state, row.host_id, result)
     reconciled = _reconcile_legacy(db, EstateExecution)
     now = _now()
     stale_before = now - timedelta(seconds=OBSERVATION_STALE_SECONDS)

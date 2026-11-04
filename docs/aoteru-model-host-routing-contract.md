@@ -534,9 +534,11 @@ Git, prompt text, logs or the backend config.
 `RoutingDecision.provider_health_json` records provider observations on the
 worker host; Codex read-only and write executors share that provider scope.
 Worker health and host eligibility are independent. Preflight, route/host
-explanations and `agent status` expose `unknown | ok | quota_exhausted`,
+explanations and `agent status` expose
+`unknown | ok | quota_exhausted | auth_failed | unreachable | unknown_unreadable`,
 `retry_after` (UTC), and the observation reason. Runtime presence alone
-leaves quota state `unknown`; quota exhaustion is never reported as live.
+leaves provider state `unknown`; observed failures and unreadable telemetry
+are never reported as live, even after their cooldown expires.
 
 The Codex usage-limit message is parsed before output truncation. An explicit
 ISO reset or a future clock time today is accepted; clock-only output uses
@@ -546,7 +548,24 @@ labelled `retry_after_source: bounded_backoff`, never a claimed provider
 reset. No date is rolled forward to guess tomorrow. Cooldown expiry permits
 a normal recovery execution; only success restores `ok`. Health reads do
 not spend provider calls. Known-dead dispatch is refused before CLI execution
-or durable write admission, with `provider_quota_exhausted` telemetry.
+or durable write admission, with `provider_<state>` telemetry. Current
+health is re-read at read dispatch and write admission; routing snapshots
+cannot authorise calls during a subsequently observed cooldown.
+
+Observed authentication/credential errors produce `auth_failed`; provider
+connection failures and timeouts produce `unreachable`. Both use the same
+**900-second bounded backoff**, labelled `bounded_backoff`, without inferring
+a provider reset. Expiry permits recovery execution; success restores `ok`.
+
+Malformed/missing observation payloads and failed health queries fail closed
+as `unknown_unreadable` with a reason and `retry_allowed: false`. A failed
+observation write also invalidates earlier success in the serving process
+until that observation or a newer one is persisted; it is reported as
+`unknown_unreadable`, never `ok`/live. No observation yet is `unknown` and
+permits the initial normal execution. Host and worker eligibility are unchanged.
+Terminal durable execution results are replayed during reconciliation using
+an execution-derived observation id. Recovery preserves `observed_at` and
+is idempotent, including a crash after terminal commit but before telemetry.
 
 A qualified local read-only route may be recommended for its requested
 aliases when no reserved verification requirement is supplied. Write work

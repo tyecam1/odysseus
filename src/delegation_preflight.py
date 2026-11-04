@@ -189,7 +189,7 @@ def delegation_preflight(units: Iterable[dict]) -> dict:
                     unit_codex_live, unit_codex_detail = False, f"worker unreachable: {exc.code}: {exc}"
                     unit_provider_health = {}
                 codex_by_host[unit_host] = {
-                    "available": unit_codex_live and unit_provider_health.get("state") != "quota_exhausted",
+                    "available": unit_codex_live and unit_provider_health.get("state") in {"unknown", "ok"},
                     "reason": unit_codex_detail, "provider_health": unit_provider_health,
                 }
             write_authority = None
@@ -236,11 +236,11 @@ def delegation_preflight(units: Iterable[dict]) -> dict:
             if write_authority and not write_ready:
                 evidence.append(write_authority["reason"])
             why = (
-                ("Codex cooldown elapsed; recovery execution required" if unit_provider_health.get("state") == "quota_exhausted"
+                ("Codex cooldown elapsed; recovery execution required" if unit_provider_health.get("state") not in {"unknown", "ok"}
                  else f"substantial separable code work; Codex is live on {(route.get('route') or {}).get('host')}")
                 if ok else "; ".join(evidence)
             )
-            quota_blocked = unit_provider_health.get("state") == "quota_exhausted" and not unit_provider_health.get("retry_allowed")
+            quota_blocked = bool(unit_provider_health) and not unit_provider_health.get("retry_allowed")
             if quota_blocked:
                 why += "; no_qualified_fallback for the same write authority and verification floor"
             alternative = (
@@ -251,7 +251,7 @@ def delegation_preflight(units: Iterable[dict]) -> dict:
             )
             if alternative:
                 ok = True
-                why = "Codex quota_exhausted; requested aliases resolve to a qualified local read-only route"
+                why = f"Codex {unit_provider_health['state']}; requested aliases resolve to a qualified local read-only route"
             recommendations.append({
                 "index": index,
                 "task_class": task["task_class"],

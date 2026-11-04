@@ -56,6 +56,9 @@ _CONFIG_DIR = Path(get_app_root()) / "config"
 
 # A fallback cooldown is policy, not a claimed provider reset time.
 _QUOTA_BACKOFF_SECONDS = 900
+_PROVIDER_FAILURE_STATES = frozenset({"quota_exhausted", "auth_failed", "unreachable"})
+# A failed persistence attempt must invalidate even an earlier persisted success.
+_PROVIDER_HEALTH_WRITE_FAILURES = {}
 _USAGE_LIMIT = re.compile(r"you[’']ve\s+hit\s+your\s+usage\s+limit", re.I)
 
 
@@ -107,66 +110,108 @@ def _quota_observation(text: str) -> Optional[dict]:
     }
 
 
+def _provider_failure_observation(text: str) -> Optional[dict]:
+    observed = _quota_observation(text)
+    if observed:
+        return observed
+    if re.search(r"authentication|unauthori[sz]ed|invalid.{0,20}(?:api.?key|credential|token)|"
+                 r"(?:credential|token).{0,20}(?:expired|invalid|missing|failed|error)|not (?:logged|signed) in|\b401\b|\b403\b", text, re.I):
+        state = "auth_failed"
+    elif re.search(r"connection (?:failed|refused|reset|error)|failed to connect|"
+                   r"timed? out|timeout|network (?:error|unreachable)|name resolution|dns", text, re.I):
+        state = "unreachable"
+    else:
+        return None
+    now = _provider_now().astimezone(timezone.utc)
+    return {"provider": "codex", "state": state, "observed_at": now.isoformat(),
+            "retry_after": (now + timedelta(seconds=_QUOTA_BACKOFF_SECONDS)).isoformat(),
+            "retry_after_source": "bounded_backoff",
+            "reason": f"Codex observed {state}; conservative 900-second bounded backoff"}
+
+
+def _unreadable_provider_health(provider: str, reason: str) -> dict:
+    return {"provider": provider, "state": "unknown_unreadable", "retry_after": None,
+            "retry_allowed": False, "reason": reason}
+
+
 def provider_health(host_id: Optional[str], provider: str = "codex") -> dict:
-    """Latest capacity observation in existing routing telemetry, shared by
-    Codex read/write executors. Expiry permits a retry; it is not recovery.
-    """
-    from core.database import RoutingDecision, get_db_session
+    """Latest observation; telemetry errors never authorise paid execution."""
+    key = (host_id or "none", provider)
+    if key in _PROVIDER_HEALTH_WRITE_FAILURES:
+        return _PROVIDER_HEALTH_WRITE_FAILURES[key]
     health = {"provider": provider, "state": "unknown", "retry_after": None}
     try:
+        from core.database import RoutingDecision, get_db_session
         with get_db_session() as db:
             row = db.query(RoutingDecision).filter(
-                RoutingDecision.host_id == (host_id or "none"),
+                RoutingDecision.host_id == key[0],
                 RoutingDecision.executor == provider,
                 RoutingDecision.task_class == "provider_health_observation",
             ).order_by(RoutingDecision.created_at.desc(), RoutingDecision.id.desc()).first()
-            if row and row.provider_health_json:
+            if row:
                 health = json.loads(row.provider_health_json)
+                if health.get("provider") != provider:
+                    raise ValueError("provider observation scope mismatch")
+        return _provider_health_view(health)
     except Exception:
         import logging
         logging.getLogger(__name__).exception("provider health telemetry read failed")
-        health["reason"] = "provider health telemetry unavailable"
-    return _provider_health_view(health)
+        return _unreadable_provider_health(provider, "provider health telemetry unreadable")
 
 
 def _provider_health_view(health: dict) -> dict:
+    state = health["state"]
+    if state not in {"unknown", "ok", "unknown_unreadable", *_PROVIDER_FAILURE_STATES}:
+        raise ValueError("invalid provider health state")
     retry = health.get("retry_after")
     retry_due = bool(retry and datetime.fromisoformat(retry) <= _provider_now())
-    return {**health, "retry_allowed": health.get("state") != "quota_exhausted" or retry_due}
+    if state in _PROVIDER_FAILURE_STATES and not retry:
+        raise ValueError("provider failure missing retry_after")
+    return {**health, "retry_allowed": state in {"unknown", "ok"} or
+            (state in _PROVIDER_FAILURE_STATES and retry_due)}
 
 
-def _record_provider_health(host_id: Optional[str], health: dict) -> None:
-    from core.database import RoutingDecision, get_db_session
+def _record_provider_health(host_id: Optional[str], health: dict, *, observation_id: Optional[str] = None) -> dict:
+    key = (host_id or "none", health["provider"])
     try:
+        from core.database import RoutingDecision, get_db_session
         with get_db_session() as db:
-            db.add(RoutingDecision(
-                id=str(uuid.uuid4()), task_class="provider_health_observation",
-                host_id=host_id or "none", executor=health["provider"],
-                created_at=datetime.fromisoformat(health["observed_at"]).astimezone(timezone.utc).replace(tzinfo=None),
-                provider_health_json=json.dumps(health),
-                escalation_reason="provider_quota_exhausted" if health["state"] == "quota_exhausted" else None,
-                status="blocked" if health["state"] == "quota_exhausted" else "complete",
-            ))
+            if not observation_id or db.query(RoutingDecision.id).filter_by(id=observation_id).first() is None:
+                db.add(RoutingDecision(
+                    id=observation_id or str(uuid.uuid4()), task_class="provider_health_observation",
+                    host_id=key[0], executor=health["provider"],
+                    created_at=datetime.fromisoformat(health["observed_at"]).astimezone(timezone.utc).replace(tzinfo=None),
+                    provider_health_json=json.dumps(health),
+                    escalation_reason=f"provider_{health['state']}" if health["state"] in _PROVIDER_FAILURE_STATES else None,
+                    status="blocked" if health["state"] in _PROVIDER_FAILURE_STATES else "complete",
+                ))
+        previous = _PROVIDER_HEALTH_WRITE_FAILURES.get(key)
+        if previous is None or health["observed_at"] >= previous["observed_at"]:
+            _PROVIDER_HEALTH_WRITE_FAILURES.pop(key, None)
+        return health
     except Exception:
         import logging
         logging.getLogger(__name__).exception("provider health telemetry write failed")
+        failure = _unreadable_provider_health(health["provider"], "provider health telemetry unwritable; observation not persisted")
+        failure["observed_at"] = health["observed_at"]
+        _PROVIDER_HEALTH_WRITE_FAILURES[key] = failure
+        return failure
 
 
 def _codex_health(host_id: str, runtime: dict) -> dict:
     health = provider_health(host_id)
-    available = bool(runtime.get("available")) and health["state"] != "quota_exhausted"
+    available = bool(runtime.get("available")) and health["state"] in {"unknown", "ok"}
     reason = "live" if available else (
-        health.get("reason") if health["state"] == "quota_exhausted" else runtime.get("detail"))
-    return {"available": available, "reason": reason,
-            "provider_health": health}
+        health.get("reason") if health["state"] not in {"unknown", "ok"} else runtime.get("detail"))
+    return {"available": available, "reason": reason, "provider_health": health}
 
 
 def _provider_refusal(health: dict) -> Optional[dict]:
-    if health.get("retry_allowed", True):
+    if health.get("retry_allowed", False):
         return None
     return {"ok": False, "executed": False, "provider_health": health,
-            "escalation_reason": "provider_quota_exhausted",
-            "error": f"{health['provider']} quota_exhausted until {health['retry_after']}: {health.get('reason')}; no_qualified_fallback for the same authority and verification floor"}
+            "escalation_reason": f"provider_{health['state']}",
+            "error": f"{health['provider']} {health['state']} until {health.get('retry_after')}: {health.get('reason')}; no_qualified_fallback for the same authority and verification floor"}
 
 
 class RoutingConfigError(RuntimeError):
@@ -1153,7 +1198,10 @@ def _execute_codex_with_sandbox(objective: str, *, sandbox: str, provider: str,
 
     available, detail = _codex_available()
     if not available:
-        return {"ok": False, "error": f"codex unavailable: {detail}", "provider": provider}
+        observed = _provider_failure_observation(detail)
+        return {"ok": False, "error": f"codex unavailable: {detail}", "provider": provider,
+                **({"provider_health": _provider_health_view(observed),
+                    "escalation_reason": f"provider_{observed['state']}"} if observed else {})}
     codex_binary = detail  # _codex_available() returns the resolved binary path on success
     # Resolve afresh from the authenticated Codex subscription catalogue.
     # Omitting --model inherits potentially stale host configuration.
@@ -1161,11 +1209,11 @@ def _execute_codex_with_sandbox(objective: str, *, sandbox: str, provider: str,
         subscription_model = resolve_latest_codex_model(codex_binary)
         reasoning_effort = subscription_effort()
     except SubscriptionModelError as exc:
-        observed = _quota_observation(exc.provider_error_text or str(exc))
+        observed = _provider_failure_observation(exc.provider_error_text or str(exc.__cause__ or exc))
         if observed:
             return {"ok": False, "provider": provider, "error": observed["reason"], "model_policy": "fail_closed",
                     "provider_health": _provider_health_view(observed),
-                    "escalation_reason": "provider_quota_exhausted"}
+                    "escalation_reason": f"provider_{observed['state']}"}
         return {"ok": False, "provider": provider, "model_policy": "fail_closed",
                 "error": str(exc)}
 
@@ -1205,13 +1253,13 @@ def _execute_codex_with_sandbox(objective: str, *, sandbox: str, provider: str,
             stdout, stderr = proc.communicate(timeout=timeout)
             latency_ms = int((time.monotonic() - started) * 1000)
             if proc.returncode != 0:
-                observed = _quota_observation(f"{stderr or ''}\n{stdout or ''}")
+                observed = _provider_failure_observation(f"{stderr or ''}\n{stdout or ''}")
                 return {
                     "ok": False, "provider": provider, "latency_ms": latency_ms,
                     "error": f"codex exec exited {proc.returncode}: {(stderr or '')[-500:]}",
                     "codex_binary": codex_binary,
                     **({"provider_health": _provider_health_view(observed),
-                        "escalation_reason": "provider_quota_exhausted"} if observed else {}),
+                        "escalation_reason": f"provider_{observed['state']}"} if observed else {}),
                 }
             output = Path(out_path).read_text().strip() if Path(out_path).exists() else ""
             observed = {"provider": "codex", "state": "ok", "retry_after": None,
@@ -1245,12 +1293,17 @@ def _execute_codex_with_sandbox(objective: str, *, sandbox: str, provider: str,
                 "error": f"codex exec timed out after {timeout}s",
                 "latency_ms": int((time.monotonic() - started) * 1000),
             }
+            observed = _provider_failure_observation(result["error"])
+            result.update(provider_health=_provider_health_view(observed), escalation_reason="provider_unreachable")
             if cleanup_incomplete:
                 result["cleanup_incomplete"] = True
                 result["cleanup_still_alive_pids"] = cleanup["still_alive_pids"]
             return result
         except Exception as e:
-            return {"ok": False, "provider": provider, "error": str(e),
+            observed = _provider_failure_observation(str(e))
+            return {**({"provider_health": _provider_health_view(observed),
+                        "escalation_reason": f"provider_{observed['state']}"} if observed else {}),
+                    "ok": False, "provider": provider, "error": str(e),
                     "latency_ms": int((time.monotonic() - started) * 1000)}
 
 
@@ -1529,6 +1582,10 @@ def _dispatch_read_only(host_id: str, executor: str, task: dict, *, concrete_mod
     never be treated as having executed anything)."""
     from src.estate_worker_client import WorkerTransportError, call_worker
 
+    if executor == "codex":
+        refusal = _provider_refusal(provider_health(host_id))
+        if refusal:
+            return refusal
     objective = task.get("objective")
     placement = {
         "routed_host": host_id, "executed_host": None, "attested": False, "transport": None,
@@ -1575,7 +1632,7 @@ def _dispatch_read_only(host_id: str, executor: str, task: dict, *, concrete_mod
     placement["attested"] = attested_host == host_id
     result["placement"] = placement
     if executor == "codex" and result.get("provider_health"):
-        _record_provider_health(host_id, result["provider_health"])
+        result["provider_health"] = _record_provider_health(host_id, result["provider_health"])
     return result
 
 
@@ -1666,12 +1723,12 @@ def run_task(task: dict) -> dict:
             executor_name = provider_name
             paid_host = route["route"].get("host")
             paid_entry = next((h for h in (route.get("hosts_checked") or []) if h.get("host_id") == paid_host), None) or {}
-            health = (paid_entry.get("providers") or {}).get(provider_name) or provider_health(paid_host, provider_name)
+            health = provider_health(paid_host, provider_name)
             refusal = _provider_refusal(health)
             if refusal:
                 _update_decision_outcome(
                     route["decision_id"], status="blocked", deterministic_gate="fail",
-                    escalation_reason="provider_quota_exhausted", verification_outcome="fail",
+                    escalation_reason=refusal["escalation_reason"], verification_outcome="fail",
                     executor=executor_name,
                     provider_health=health,
                 )
@@ -1723,10 +1780,10 @@ def run_task(task: dict) -> dict:
                     }
                 result = provider_fn(paid_objective, repo_id=repo_id, host_id=host_id,
                                       decision_id=route["decision_id"])
-                if result.get("escalation_reason") == "provider_quota_exhausted" and result.get("executed") is False:
+                if result.get("provider_health") and result.get("executed") is False:
                     _update_decision_outcome(
                         route["decision_id"], status="blocked", deterministic_gate="fail",
-                        escalation_reason="provider_quota_exhausted", provider_health=result.get("provider_health"),
+                        escalation_reason=result["escalation_reason"], provider_health=result.get("provider_health"),
                     )
                     return {**route, **result, "execution_error": result["error"], "reason": result["error"]}
                 if result.get("authority_denied"):
@@ -1784,6 +1841,13 @@ def run_task(task: dict) -> dict:
                 # actually grounds a repo-aware task now that host
                 # selection can name a host other than this backend.
                 result = _dispatch_read_only(route["route"]["host"], "codex", task, timeout=180.0)
+                if result.get("provider_health") and result.get("executed") is False:
+                    _update_decision_outcome(
+                        route["decision_id"], status="blocked", deterministic_gate="fail",
+                        escalation_reason=result["escalation_reason"], provider_health=result["provider_health"],
+                        verification_outcome="fail",
+                    )
+                    return {**route, **result, "execution_error": result["error"], "reason": result["error"]}
                 if (result.get("placement") or {}).get("executed_host") is None:
                     # Same truthful-failure requirement as the local
                     # branch below: a transport/protocol/pre-execution
@@ -1817,7 +1881,7 @@ def run_task(task: dict) -> dict:
             execution_health = result.get("provider_health") or (result.get("result") or {}).get("provider_health")
             paid_escalation_reason = (
                 "insufficient_capability" if gate == "pass" else
-                "provider_quota_exhausted" if (execution_health or {}).get("state") == "quota_exhausted" else
+                f"provider_{execution_health['state']}" if execution_health and execution_health.get("state") not in {"ok", "unknown"} else
                 "worker_failed"
             )
             if not implementation_mode:
@@ -1843,8 +1907,8 @@ def run_task(task: dict) -> dict:
                 f"local capability was insufficient; {executor_name} executed on "
                 f"{route['route']['host']}" + (" under the active repo lease" if implementation_mode else " read-only")
             )
-            if paid_escalation_reason == "provider_quota_exhausted":
-                reason = f"codex quota_exhausted; retry_after={execution_health['retry_after']}; {execution_health['reason']}"
+            if execution_health and execution_health.get("state") not in {"ok", "unknown"}:
+                reason = f"codex {execution_health['state']}; retry_after={execution_health['retry_after']}; {execution_health['reason']}"
             route = {
                 **route, "ok": gate == "pass", "reason": reason,
                 "route": {

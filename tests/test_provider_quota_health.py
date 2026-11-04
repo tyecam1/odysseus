@@ -28,6 +28,7 @@ from src import estate_worker_client as client
 
 @pytest.fixture
 def quota_lane(tmp_path, monkeypatch):
+    monkeypatch.setattr(router, "_PROVIDER_HEALTH_WRITE_FAILURES", {})
     engine = create_engine(f"sqlite:///{tmp_path / 'telemetry.db'}")
     cdb.Base.metadata.create_all(engine)
     monkeypatch.setattr(cdb, "SessionLocal", sessionmaker(bind=engine))
@@ -63,9 +64,15 @@ if sys.argv[1:3] == ['debug', 'models']:
     if state.read_text() == 'catalogue-quota':
         print("ERROR: You've hit your usage limit ... try again at 5:39 PM.", file=sys.stderr)
         sys.exit(1)
+    if state.read_text().startswith('catalogue-error:'):
+        print(state.read_text(), file=sys.stderr)
+        sys.exit(1)
     print(json.dumps({{'models': [{{'slug': 'gpt-6.1-sol'}}]}}))
     sys.exit(0)
 message = state.read_text()
+if message == 'sleep':
+    import time
+    time.sleep(10)
 if message != 'ok':
     print(message, file=sys.stderr)
     sys.exit(1)
@@ -277,3 +284,214 @@ def test_durable_write_outcome_reports_provider_quota_without_lifecycle_change(q
         row = db.query(cdb.RoutingDecision).filter_by(id=result['decision_id']).one()
         assert row.escalation_reason == 'provider_quota_exhausted'
         assert json.loads(row.provider_health_json)['state'] == 'quota_exhausted'
+
+
+@pytest.mark.parametrize('mode', ['advisory', 'implementation'])
+@pytest.mark.parametrize('cached_state', ['ok', 'unknown'])
+def test_current_health_wins_race_after_route(quota_lane, monkeypatch, mode, cached_state):
+    state, count, now = quota_lane
+    monkeypatch.setattr(client, 'worker_repo_probe', lambda *a, **k: {'resolved': True})
+    resolve = router.resolve_route
+    def raced_route(*args, **kwargs):
+        route = resolve(*args, **kwargs)
+        for host in route['hosts_checked']:
+            host['providers'] = {'codex': {'provider': 'codex', 'state': cached_state,
+                                         'retry_allowed': True, 'retry_after': None}}
+        router._record_provider_health('lab', router._quota_observation(state.read_text()))
+        return route
+    monkeypatch.setattr(router, 'resolve_route', raced_route)
+    monkeypatch.setattr(router, '_dispatch_read_only', lambda *a, **k: pytest.fail('paid worker dispatched'))
+    monkeypatch.setattr(router, 'execute_write_via_worker', lambda *a, **k: pytest.fail('write admitted'))
+    result = router.run_task({'task_class': 'code_review', 'objective': 'review', 'repo': 'odysseus',
+        'requirements': {'capabilities': ['code-strong']},
+        'routing': {'allow_paid_escalation': True, 'mode': mode}})
+    assert result['executed'] is False
+    assert result['escalation_reason'] == 'provider_quota_exhausted'
+    assert not count.exists()
+
+
+def test_dispatch_boundaries_check_health_without_wrapper(quota_lane, monkeypatch):
+    from src import estate_write_lane as lane
+    state, count, now = quota_lane
+    router._record_provider_health('lab', router._quota_observation(state.read_text()))
+    monkeypatch.setattr(client, 'call_worker', lambda *a, **k: pytest.fail('worker dispatched'))
+    monkeypatch.setattr(lane, '_lease_authority', lambda *a: pytest.fail('write admission reached'))
+    assert router._dispatch_read_only('lab', 'codex', {'objective': 'review'})['executed'] is False
+    assert lane.execute_write_via_worker('implement', repo_id='odysseus', host_id='lab')['executed'] is False
+
+
+def test_write_health_rechecked_after_worktree_verification(quota_lane, monkeypatch):
+    from src import estate_write_lane as lane
+    state, count, now = quota_lane
+    with cdb.get_db_session() as db:
+        db.add(cdb.ParkLease(id='lease', repo_id='odysseus', host_id='lab', status='active',
+                            allowed_write_scope='repo', branch='feat/test', worktree_path='/w/test',
+                            heartbeat_at=cdb.utcnow_naive()))
+    def verify(*a, **k):
+        router._record_provider_health('lab', router._quota_observation(state.read_text()))
+        return {'ok': True, 'clean': True, 'head_sha': 'abc'}, None
+    monkeypatch.setattr(lane, '_worker', verify)
+    result = lane.execute_write_via_worker('implement', repo_id='odysseus', host_id='lab')
+    assert result['executed'] is False
+    assert result['escalation_reason'] == 'provider_quota_exhausted'
+    with cdb.get_db_session() as db:
+        assert db.query(cdb.EstateExecution).count() == 0
+
+
+@pytest.mark.parametrize('payload', ['{bad', 'null', '[]', '{}', '',
+    '{"provider":"codex","state":"ok","retry_after":"bad"}',
+    '{"provider":"codex","state":"quota_exhausted","retry_after":null}'])
+def test_unreadable_observation_blocks_paid_but_keeps_host_eligible(quota_lane, payload):
+    with cdb.get_db_session() as db:
+        db.add(cdb.RoutingDecision(id='bad-health', task_class='provider_health_observation',
+            host_id='lab', executor='codex', status='complete', provider_health_json=payload))
+    health = router.provider_health('lab')
+    assert health['state'] == 'unknown_unreadable' and not health['retry_allowed']
+    assert health['reason']
+    result = _run_paid()
+    assert result['executed'] is False
+    assert result['escalation_reason'] == 'provider_unknown_unreadable'
+    snapshot = preflight.delegation_preflight([{'task_class': 'code_review'}])
+    assert not snapshot['snapshot']['codex']['available']
+    assert snapshot['snapshot']['codex']['reason'] != 'live'
+    assert snapshot['units'][0]['recommended_route'] is None
+    assert snapshot['snapshot']['eligible_hosts'][0]['eligible']
+    assert snapshot['snapshot']['eligible_hosts'][0]['healthy']
+
+
+def test_health_query_failure_blocks_paid_dispatch(quota_lane, monkeypatch):
+    from contextlib import contextmanager
+    @contextmanager
+    def broken():
+        raise OSError('health database unavailable')
+        yield
+    monkeypatch.setattr(cdb, 'get_db_session', broken)
+    health = router.provider_health('lab')
+    assert health['state'] == 'unknown_unreadable'
+    assert not health['retry_allowed']
+    assert not router._codex_health('lab', {'available': True})['available']
+    monkeypatch.setattr(client, 'call_worker', lambda *a, **k: pytest.fail('paid call'))
+    assert router._dispatch_read_only('lab', 'codex', {'objective': 'review'})['executed'] is False
+
+
+def test_failed_health_persistence_invalidates_earlier_success(quota_lane, monkeypatch):
+    from contextlib import contextmanager
+    state, count, now = quota_lane
+    state.write_text('ok')
+    assert _run_paid()['ok']
+    now[0] += timedelta(seconds=1)
+    real_session = cdb.get_db_session
+    @contextmanager
+    def reject_observation():
+        with real_session() as db:
+            yield db
+            if any(isinstance(row, cdb.RoutingDecision) and row.task_class == 'provider_health_observation'
+                   for row in db.new):
+                raise OSError('observation write failed')
+    monkeypatch.setattr(cdb, 'get_db_session', reject_observation)
+    state.write_text("You've hit your usage limit ... try again at 5:39 PM.")
+    result = _run_paid()
+    assert result['provider_health']['state'] == 'unknown_unreadable'
+    assert 'unwritable' in result['provider_health']['reason']
+    monkeypatch.setattr(cdb, 'get_db_session', real_session)
+    before = count.read_text()
+    assert _run_paid()['executed'] is False
+    assert count.read_text() == before
+    assert not preflight.delegation_preflight([{'task_class': 'code_review'}])['snapshot']['codex']['available']
+
+
+@pytest.mark.parametrize('message, expected', [
+    ('authentication failed: invalid credentials', 'auth_failed'),
+    ('HTTP 401 Unauthorized', 'auth_failed'),
+    ('connection failed: connection refused', 'unreachable'),
+    ('request timed out contacting provider', 'unreachable'),
+])
+def test_observed_failure_after_success_replaces_health(quota_lane, message, expected):
+    state, count, now = quota_lane
+    state.write_text('ok')
+    assert _run_paid()['ok']
+    assert router.provider_health('lab')['state'] == 'ok'
+    now[0] += timedelta(seconds=1)
+    state.write_text(message)
+    result = _run_paid()
+    assert result['provider_health']['state'] == expected
+    assert result['escalation_reason'] == f'provider_{expected}'
+    health = router.provider_health('lab')
+    assert health['state'] == expected
+    assert health['retry_after_source'] == 'bounded_backoff'
+    assert datetime.fromisoformat(health['retry_after']) == now[0] + timedelta(seconds=900)
+    snapshot = preflight.delegation_preflight([{'task_class': 'code_review'}])
+    assert not snapshot['snapshot']['codex']['available']
+    assert snapshot['snapshot']['codex']['reason'] != 'live'
+    assert snapshot['units'][0]['recommended_route'] is None
+    assert _run_paid()['executed'] is False
+    now[0] += timedelta(seconds=901)
+    assert router.provider_health('lab')['retry_allowed']
+    assert not preflight.delegation_preflight([{'task_class': 'code_review'}])['snapshot']['codex']['available']
+    state.write_text('ok')
+    assert _run_paid()['ok']
+    assert router.provider_health('lab')['state'] == 'ok'
+
+
+def test_terminal_health_recovered_after_crash_once(quota_lane, monkeypatch):
+    from src import estate_write_lane as lane
+    state, count, now = quota_lane
+    health = router._quota_observation(state.read_text())
+    result = {'ok': False, 'provider_health': health, 'error': 'quota failure',
+              'escalation_reason': 'provider_quota_exhausted'}
+    with cdb.get_db_session() as db:
+        db.add(cdb.EstateExecution(id='crashed', objective='implement', executor='codex-write', provider='codex',
+            host_id='lab', repo_id='odysseus', lease_id='lease', branch='feat/test', worktree_path='/w/test',
+            lifecycle_state='running', worktree_resolution='unresolved', worker_handle_json='{"pid": 123}'))
+    original = lane._record_outcome
+    def crash(*a, **k):
+        raise RuntimeError('crash after terminal commit')
+    monkeypatch.setattr(lane, '_record_outcome', crash)
+    with pytest.raises(RuntimeError, match='crash after terminal commit'):
+        lane._apply_view('crashed', {'state': 'failed', 'handle': {'pid': 123}, 'result': result})
+    assert lane._load_row('crashed').lifecycle_state == 'failed'
+    with cdb.get_db_session() as db:
+        assert db.query(cdb.RoutingDecision).filter_by(task_class='provider_health_observation').count() == 0
+    monkeypatch.setattr(lane, '_record_outcome', original)
+    monkeypatch.setattr(lane, '_worker', lambda *a, **k: pytest.fail('terminal execution redispatched'))
+    for _ in range(2):
+        with cdb.get_db_session() as db:
+            lane.reconcile_stale_estate_executions(db, cdb.EstateExecution)
+    assert router.provider_health('lab')['state'] == 'quota_exhausted'
+    with cdb.get_db_session() as db:
+        rows = db.query(cdb.RoutingDecision).filter_by(task_class='provider_health_observation').all()
+        assert len(rows) == 1
+        assert json.loads(rows[0].provider_health_json)['observed_at'] == health['observed_at']
+
+
+@pytest.mark.parametrize('message, expected', [
+    ('catalogue-error: authentication failed', 'auth_failed'),
+    ('catalogue-error: connection failed', 'unreachable'),
+])
+def test_catalogue_failure_after_success_changes_provider_state(quota_lane, message, expected):
+    state, count, now = quota_lane
+    state.write_text('ok')
+    assert _run_paid()['ok']
+    now[0] += timedelta(seconds=1)
+    state.write_text(message)
+    result = _run_paid()
+    assert result['provider_health']['state'] == expected
+    assert result['execution']['model_policy'] == 'fail_closed'
+    assert router.provider_health('lab')['state'] == expected
+
+
+def test_cli_timeout_after_success_records_unreachable(quota_lane, monkeypatch):
+    state, count, now = quota_lane
+    state.write_text('ok')
+    assert _run_paid()['ok']
+    now[0] += timedelta(seconds=1)
+    state.write_text('sleep')
+    monkeypatch.setattr(client, 'call_worker', lambda host, verb, payload, **kw: {
+        'result': router.execute_codex(payload['objective'], timeout=0.05),
+        'attestation': {'host_id': host},
+    })
+    result = _run_paid()
+    assert result['provider_health']['state'] == 'unreachable'
+    assert result['escalation_reason'] == 'provider_unreachable'
+    assert router.provider_health('lab')['state'] == 'unreachable'
+    assert _run_paid()['executed'] is False
