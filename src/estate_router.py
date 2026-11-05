@@ -31,6 +31,7 @@ import json
 import re
 import socket
 import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -52,6 +53,139 @@ from src.estate_worker_procs import (
 )
 
 _CONFIG_DIR = Path(get_app_root()) / "config"
+
+
+def _provider_outcome(result: dict, now=None, *, host_tz=None) -> dict:
+    """Failure evidence always wins; reset clocks are relative to the outcome."""
+    now = now or datetime.now().astimezone()
+    host_tz = host_tz or now.tzinfo
+    states = [result[k] for k in ("status", "state", "terminal_state", "lifecycle_state") if result.get(k) is not None]
+    exits = [result[k] for k in ("exit_code", "exit_status", "returncode") if result.get(k) is not None]
+    text = "\n".join(str(result.get(k) or "") for k in ("error", "output", "stdout", "stderr"))
+    text = (text + "\n" + "\n".join(map(str, states))).lower().replace("’", "'")
+    now = now.replace(tzinfo=host_tz) if now.tzinfo is None else now.astimezone(host_tz)
+    retry = now + timedelta(minutes=15)
+    if re.search(r"usage limit|quota (?:exhausted|exceeded)|insufficient_quota", text):
+        reason = "provider usage limit; retry_after_assumed"
+        reset = text.partition("try again at")[2]
+        clock = re.search(r"(?<!\d)(\d{1,2}:\d{2})\s*(am|pm)?\b", reset)
+        if clock:
+            try:
+                stamp = datetime.strptime("".join(clock.groups(default="")),
+                                          "%I:%M%p" if clock[2] else "%H:%M")
+                cleaned = re.sub(r"(\d)(st|nd|rd|th)\b", r"\1", reset).replace(",", "")
+                date = re.search(r"\d{4}-\d{2}-\d{2}|(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]* \d{1,2}(?: \d{4})?", cleaned)
+                day = now
+                if " on " in cleaned and date is None:
+                    raise ValueError("unparseable reset date")
+                if date:
+                    for fmt in ("%Y-%m-%d", "%b %d %Y", "%B %d %Y", "%b %d", "%B %d"):
+                        try:
+                            day = datetime.strptime(date[0], fmt)
+                            if "%Y" not in fmt:
+                                day = day.replace(year=now.year)
+                            break
+                        except ValueError:
+                            continue
+                    else:
+                        raise ValueError("unparseable reset date")
+                retry = now.replace(year=day.year, month=day.month, day=day.day,
+                                    hour=stamp.hour, minute=stamp.minute, second=0, microsecond=0)
+                if retry <= now:
+                    retry = now.replace(hour=stamp.hour, minute=stamp.minute, second=0,
+                                        microsecond=0) + timedelta(days=1)
+                reason = "provider usage limit; host wall-clock reset"
+            except ValueError:
+                pass
+        state = "quota_exhausted"
+    elif re.search(r"unauthorized|authentication|invalid.api.key|not logged in|login required|401", text):
+        state, reason = "auth_failed", "provider authentication failed"
+    elif re.search(r"unreachable|connection|timed out|timeout|dns|network", text):
+        state, reason = "unreachable", "provider transport unavailable"
+    else:
+        success = (result.get("ok") is True and not result.get("error")
+                   and not result.get("evidence_truncated")
+                   and all(type(code) in (int, str) and code in (0, "0") for code in exits)
+                   and all(s in {"complete", "completed", "succeeded"} for s in states)
+                   and bool(exits) and bool(states)
+                   and not re.search(r"\b(error|failed|failure|exception|interrupted|cancelled|canceled)\b", text))
+        state, reason = ("ok", "no provider error") if success else ("unknown", "unclassified provider outcome")
+        retry = None
+    return {"state": state, "retry_after": min(retry, now + timedelta(days=7)).astimezone(timezone.utc).isoformat() if retry else None,
+            "reason": reason, "retry_after_assumed": "retry_after_assumed" in reason}
+
+
+def provider_allows_dispatch(provider: str, *, now: Optional[datetime] = None,
+                             launch_timeout: Optional[float] = None) -> dict:
+    """Read health; launch admission atomically reserves one provider attempt."""
+    from core.database import RoutingDecision, get_db_session
+    from sqlalchemy import text
+    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    health = {"state": "unknown", "retry_after": None, "reason": "no recorded outcome; initial attempt permitted"}
+    outcome_id = None
+    try:
+        with get_db_session() as db:
+            if launch_timeout is not None:
+                # Serialize even an empty history, before reading admission.
+                if db.get_bind().dialect.name == "sqlite":
+                    db.execute(text("BEGIN IMMEDIATE"))
+                elif db.get_bind().dialect.name == "postgresql":
+                    db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:scope))"),
+                               {"scope": "provider_outcome:" + provider})
+                else:
+                    raise ValueError("unsupported admission database")
+            row = db.query(RoutingDecision).filter_by(
+                executor=provider, task_class="provider_outcome",
+            ).order_by(RoutingDecision.created_at.desc(), RoutingDecision.id.desc()).first()
+            allowed = row is None
+            if row is not None:
+                health = json.loads(row.escalation_reason)["provider_health"]
+                state, retry = health["state"], health["retry_after"]
+                if not isinstance(health["reason"], str) or type(health["retry_after_assumed"]) is not bool:
+                    raise ValueError("incomplete stored provider health")
+                reset = datetime.fromisoformat(retry) if retry else None
+                if (state not in {"launching", "ok", "unknown", "quota_exhausted", "auth_failed", "unreachable"}
+                        or (reset is not None and reset.tzinfo is None)):
+                    raise ValueError("invalid stored provider health")
+                allowed = state == "ok" or (state != "unknown" and reset is not None and now >= reset)
+                if state == "launching":
+                    launched_at = datetime.fromisoformat(health["launched_at"])
+                    if launched_at.tzinfo is None or reset is None or reset <= launched_at:
+                        raise ValueError("invalid launch marker")
+                    health = {**health, "state": "unknown", "reason": "launch outcome not recorded"}
+            if allowed and launch_timeout is not None:
+                outcome_id = str(uuid.uuid4())
+                launch_health = {"state": "launching", "launched_at": now.isoformat(),
+                    "retry_after": (now + timedelta(seconds=launch_timeout, minutes=15)).isoformat(),
+                    "reason": "launch outcome not recorded", "retry_after_assumed": False}
+                # Preserve latest-row ordering even within one clock tick.
+                created_at = max(now.replace(tzinfo=None), row.created_at + timedelta(microseconds=1)) if row else now.replace(tzinfo=None)
+                db.add(RoutingDecision(id=outcome_id, task_class="provider_outcome",
+                    host_id=socket.gethostname(), executor=provider, status="launching",
+                    created_at=created_at, escalation_reason=json.dumps({"provider_health": launch_health})))
+    except Exception:
+        health = {"state": "unknown", "retry_after": None,
+                  "reason": "latest outcome unreadable or unparseable; launch intent not committed"}
+        allowed = False
+    return {**health, "provider": provider, "allowed": allowed,
+            **({"outcome_id": outcome_id} if allowed and outcome_id else {}),
+            "reason": f"provider {provider}: {health['state']}: {health['reason']}"}
+
+
+def _record_provider_outcome(result: dict, outcome_id: str) -> Optional[str]:
+    """Finalize the committed launch marker; a failed update leaves it blocking."""
+    from core.database import RoutingDecision, get_db_session
+    health = _provider_outcome(result)
+    try:
+        with get_db_session() as db:
+            row = db.query(RoutingDecision).filter_by(id=outcome_id, task_class="provider_outcome").one()
+            health["launched_at"] = json.loads(row.escalation_reason)["provider_health"]["launched_at"]
+            row.status = "complete" if health["state"] == "ok" else "failed"
+            row.escalation_reason = json.dumps({"provider_health": health})
+        return outcome_id
+    except Exception:
+        import logging
+        logging.getLogger(__name__).exception("provider outcome update failed; launch marker retained: %s", outcome_id)
 
 
 class RoutingConfigError(RuntimeError):
@@ -822,6 +956,9 @@ def resolve_route(task: dict, *, record_decision: bool = True) -> dict:
         result["context_error"] = context_error
     if context_note:
         result["context_note"] = context_note
+    if executor == "none":
+        result["provider_health"] = provider_allows_dispatch(_resolve_paid_provider(alias).get("provider"))
+        result["reason"] += "; " + result["provider_health"]["reason"]
     if unverified_constraints:
         result["unverified_constraints"] = unverified_constraints
     return result
@@ -1016,19 +1153,19 @@ def _kill_process_tree(root_pid: int, process_group_id: int, *, reap_timeout: fl
 def _execute_codex_with_sandbox(objective: str, *, sandbox: str, provider: str,
                                 timeout: float = 180.0, cwd: Optional[str] = None,
                                 on_started: Optional[Callable[[int], None]] = None) -> dict:
-    """Share bounded CLI mechanics without making sandbox choice policy.
-
-    Only the public advisory/write functions choose the sandbox. Keeping
-    credential checks, ephemeral execution, timeout, and error handling in
-    one place prevents the narrow write lane drifting from the established
-    paid-worker behavior.
-    """
+    """The sole paid launch point; workers must use the authoritative DATABASE_URL."""
     import os
     import signal
     import subprocess
     import tempfile
     import time
 
+    health = provider_allows_dispatch("codex", launch_timeout=timeout) if os.getenv("DATABASE_URL") else {
+        "allowed": False, "state": "unknown", "retry_after": None,
+        "reason": "provider codex: unknown: authoritative DATABASE_URL required"}
+    if not health["allowed"]:
+        return {"ok": False, "provider": provider, "error": health["reason"],
+                "executed": False}
     available, detail = _codex_available()
     if not available:
         return {"ok": False, "error": f"codex unavailable: {detail}", "provider": provider}
@@ -1045,6 +1182,7 @@ def _execute_codex_with_sandbox(objective: str, *, sandbox: str, provider: str,
     started = time.monotonic()
     with tempfile.TemporaryDirectory(prefix="p12-codex-") as scratch:
         out_path = str(Path(scratch) / "codex-last-message.txt")
+        proc, result, stdout, stderr = None, {}, "", ""
         try:
             proc = subprocess.Popen(
                 [
@@ -1078,17 +1216,20 @@ def _execute_codex_with_sandbox(objective: str, *, sandbox: str, provider: str,
             stdout, stderr = proc.communicate(timeout=timeout)
             latency_ms = int((time.monotonic() - started) * 1000)
             if proc.returncode != 0:
-                return {
-                    "ok": False, "provider": provider, "latency_ms": latency_ms,
-                    "error": f"codex exec exited {proc.returncode}: {(stderr or '')[-500:]}",
+                result = {
+                    "ok": False, "exit_code": proc.returncode, "provider": provider, "latency_ms": latency_ms,
+                    "error": f"codex exec exited {proc.returncode}: {(stdout or '')[-1000:]}\n{(stderr or '')[-1000:]}",
                     "codex_binary": codex_binary,
                 }
+                return result
             output = Path(out_path).read_text().strip() if Path(out_path).exists() else ""
-            return {"ok": True, "provider": provider, "output": output, "latency_ms": latency_ms,
+            result = {"ok": True, "exit_code": 0, "stdout": stdout, "stderr": stderr,
+                    "provider": provider, "output": output, "latency_ms": latency_ms,
                     "codex_binary": codex_binary, "concrete_model": subscription_model,
                     "reasoning_effort": reasoning_effort,
                     "model_catalogue": "authenticated-codex-debug-models"}
-        except subprocess.TimeoutExpired:
+            return result
+        except subprocess.TimeoutExpired as exc:
             # Tree-aware cleanup: killpg alone is insufficient when a
             # descendant (observed live: the MCP server codex spawns)
             # has moved into its own process group while staying in the
@@ -1098,8 +1239,9 @@ def _execute_codex_with_sandbox(objective: str, *, sandbox: str, provider: str,
             cleanup = _kill_process_tree(process_group_id, process_group_id)
             cleanup_incomplete = not cleanup["ok"]
             try:
-                proc.communicate(timeout=5)
+                stdout, stderr = proc.communicate(timeout=5)
             except subprocess.TimeoutExpired:
+                stdout, stderr = exc.stdout, exc.stderr
                 # Bounded reap so a cleanup call itself can never hang
                 # indefinitely - but if it still hasn't drained by then,
                 # something is holding the output pipes open past a
@@ -1116,8 +1258,13 @@ def _execute_codex_with_sandbox(objective: str, *, sandbox: str, provider: str,
                 result["cleanup_still_alive_pids"] = cleanup["still_alive_pids"]
             return result
         except Exception as e:
-            return {"ok": False, "provider": provider, "error": str(e),
-                    "latency_ms": int((time.monotonic() - started) * 1000)}
+            result = {"ok": False, "provider": provider, "error": str(e),
+                      "latency_ms": int((time.monotonic() - started) * 1000)}
+            return result
+        finally:
+            _record_provider_outcome({"stdout": stdout, "stderr": stderr,
+                "exit_code": proc.returncode if proc else None,
+                "state": "completed" if proc and proc.returncode == 0 else "failed", **result}, health["outcome_id"])
 
 
 def execute_codex(objective: str, *, timeout: float = 180.0, cwd: Optional[str] = None) -> dict:
@@ -1434,7 +1581,7 @@ def _dispatch_read_only(host_id: str, executor: str, task: dict, *, concrete_mod
 
     result = dict(response["result"])
     attested_host = response["attestation"]["host_id"]
-    placement["executed_host"] = attested_host
+    placement["executed_host"] = None if result.get("executed") is False else attested_host
     placement["attested"] = attested_host == host_id
     result["placement"] = placement
     return result

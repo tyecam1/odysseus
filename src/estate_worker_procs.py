@@ -358,7 +358,7 @@ UNIT_STOP_PROOF_S = 15.0
 # Environment a runner unit inherits. A transient user service starts from
 # the user manager's environment, not the caller's, so only these are
 # forwarded explicitly (plus every AOTERU_* variable).
-_RUNNER_ENV_KEYS = ("HOME", "PATH", "LANG", "LC_ALL", "USER", "LOGNAME", "CODEX_HOME", "PYTHONPATH")
+_RUNNER_ENV_KEYS = ("HOME", "PATH", "LANG", "LC_ALL", "USER", "LOGNAME", "CODEX_HOME", "PYTHONPATH", "DATABASE_URL")
 
 
 def _user_manager_env() -> dict:
