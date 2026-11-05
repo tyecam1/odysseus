@@ -482,8 +482,15 @@ If equivalent existing surfaces already own any of these concerns, extend them i
 
 `estate_router.provider_allows_dispatch` reads the latest computed provider
 health independently of host/worker eligibility; preflight and status share
-this fact. Only the central `_execute_codex_with_sandbox` launch path records
-`RoutingDecision` rows with task class `provider_outcome`. Admission refusals,
+this fact. Only the central `_execute_codex_with_sandbox` launch path reserves
+`RoutingDecision` rows with task class `provider_outcome`: admission and a
+`launching` intent commit in one serialized transaction before Codex setup.
+Failure to commit refuses launch. A fresh intent blocks other launches for
+the provider. Its UTC `launched_at` plus the executor's configured timeout
+plus 15 minutes defines the launch grace. Missing final outcomes block as
+unknown ("launch outcome not recorded") until grace expires; then one new
+attempt may reserve a fresh intent. The recorder updates the same row;
+failed updates are logged and leave the marker intact. Admission refusals,
 probes and lifecycle updates never write provider outcomes. At that boundary,
 full process evidence is classified once, failure first, into `provider_health`
 in `escalation_reason`: state, absolute UTC `retry_after`, assumption flag and
@@ -498,9 +505,9 @@ empty local database is not authoritative. Only provider-outcome rows participat
 in health history; routing decisions and `EstateExecution` lifecycle records
 remain separate. Empty provider history permits the initial attempt.
 
-Outcomes replace older observations by `created_at`, then UUID. Backwards clock
-jumps can mis-order observations, bounded by cooldown expiry and the next
-outcome. Unreadable stored health is unknown and blocks dispatch. Quota clocks
+Outcomes replace older observations by `created_at`, then UUID; new launch
+timestamps advance past the latest row even within one clock tick or after a
+backwards clock jump. Unreadable stored health is unknown and blocks dispatch. Quota clocks
 use controller timezone (lab GMT), rolling earlier clocks to tomorrow.
 Unparseable resets mark `retry_after_assumed` and back off 15 minutes; cooldowns
 cap at seven days. Auth/transport failures back off 15 minutes. Expiry permits

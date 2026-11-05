@@ -115,15 +115,25 @@ def _provider_outcome(result: dict, now=None, *, host_tz=None) -> dict:
             "reason": reason, "retry_after_assumed": "retry_after_assumed" in reason}
 
 
-def provider_allows_dispatch(provider: str, *, now: Optional[datetime] = None) -> dict:
-    """Derived provider fact, independent of worker/host/lease eligibility."""
+def provider_allows_dispatch(provider: str, *, now: Optional[datetime] = None,
+                             launch_timeout: Optional[float] = None) -> dict:
+    """Read health; launch admission atomically reserves one provider attempt."""
     from core.database import RoutingDecision, get_db_session
-    now = now or datetime.now(timezone.utc)
+    from sqlalchemy import text
+    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     health = {"state": "unknown", "retry_after": None, "reason": "no recorded outcome; initial attempt permitted"}
+    outcome_id = None
     try:
         with get_db_session() as db:
-            # Only the launch recorder creates provider_outcome rows. Routing
-            # refusals and execution lifecycle updates are not observations.
+            if launch_timeout is not None:
+                # Serialize even an empty history, before reading admission.
+                if db.get_bind().dialect.name == "sqlite":
+                    db.execute(text("BEGIN IMMEDIATE"))
+                elif db.get_bind().dialect.name == "postgresql":
+                    db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:scope))"),
+                               {"scope": "provider_outcome:" + provider})
+                else:
+                    raise ValueError("unsupported admission database")
             row = db.query(RoutingDecision).filter_by(
                 executor=provider, task_class="provider_outcome",
             ).order_by(RoutingDecision.created_at.desc(), RoutingDecision.id.desc()).first()
@@ -134,31 +144,48 @@ def provider_allows_dispatch(provider: str, *, now: Optional[datetime] = None) -
                 if not isinstance(health["reason"], str) or type(health["retry_after_assumed"]) is not bool:
                     raise ValueError("incomplete stored provider health")
                 reset = datetime.fromisoformat(retry) if retry else None
-                if (state not in {"ok", "unknown", "quota_exhausted", "auth_failed", "unreachable"}
+                if (state not in {"launching", "ok", "unknown", "quota_exhausted", "auth_failed", "unreachable"}
                         or (reset is not None and reset.tzinfo is None)):
                     raise ValueError("invalid stored provider health")
                 allowed = state == "ok" or (state != "unknown" and reset is not None and now >= reset)
+                if state == "launching":
+                    launched_at = datetime.fromisoformat(health["launched_at"])
+                    if launched_at.tzinfo is None or reset is None or reset <= launched_at:
+                        raise ValueError("invalid launch marker")
+                    health = {**health, "state": "unknown", "reason": "launch outcome not recorded"}
+            if allowed and launch_timeout is not None:
+                outcome_id = str(uuid.uuid4())
+                launch_health = {"state": "launching", "launched_at": now.isoformat(),
+                    "retry_after": (now + timedelta(seconds=launch_timeout, minutes=15)).isoformat(),
+                    "reason": "launch outcome not recorded", "retry_after_assumed": False}
+                # Preserve latest-row ordering even within one clock tick.
+                created_at = max(now.replace(tzinfo=None), row.created_at + timedelta(microseconds=1)) if row else now.replace(tzinfo=None)
+                db.add(RoutingDecision(id=outcome_id, task_class="provider_outcome",
+                    host_id=socket.gethostname(), executor=provider, status="launching",
+                    created_at=created_at, escalation_reason=json.dumps({"provider_health": launch_health})))
     except Exception:
-        health = {"state": "unknown", "retry_after": None, "reason": "latest outcome unreadable or unparseable"}
+        health = {"state": "unknown", "retry_after": None,
+                  "reason": "latest outcome unreadable or unparseable; launch intent not committed"}
         allowed = False
     return {**health, "provider": provider, "allowed": allowed,
+            **({"outcome_id": outcome_id} if allowed and outcome_id else {}),
             "reason": f"provider {provider}: {health['state']}: {health['reason']}"}
 
 
-def _record_provider_outcome(result: dict) -> Optional[str]:
-    """Called only after Popen succeeds; classify full evidence once, before storage."""
+def _record_provider_outcome(result: dict, outcome_id: str) -> Optional[str]:
+    """Finalize the committed launch marker; a failed update leaves it blocking."""
     from core.database import RoutingDecision, get_db_session
-    health, outcome_id = _provider_outcome(result), str(uuid.uuid4())
+    health = _provider_outcome(result)
     try:
         with get_db_session() as db:
-            db.add(RoutingDecision(id=outcome_id, task_class="provider_outcome",
-                host_id=socket.gethostname(), executor="codex",
-                status="complete" if health["state"] == "ok" else "failed",
-                escalation_reason=json.dumps({"provider_health": health})))
+            row = db.query(RoutingDecision).filter_by(id=outcome_id, task_class="provider_outcome").one()
+            health["launched_at"] = json.loads(row.escalation_reason)["provider_health"]["launched_at"]
+            row.status = "complete" if health["state"] == "ok" else "failed"
+            row.escalation_reason = json.dumps({"provider_health": health})
         return outcome_id
     except Exception:
         import logging
-        logging.getLogger(__name__).exception("provider outcome write failed")
+        logging.getLogger(__name__).exception("provider outcome update failed; launch marker retained: %s", outcome_id)
 
 
 class RoutingConfigError(RuntimeError):
@@ -1133,7 +1160,7 @@ def _execute_codex_with_sandbox(objective: str, *, sandbox: str, provider: str,
     import tempfile
     import time
 
-    health = provider_allows_dispatch("codex") if os.getenv("DATABASE_URL") else {
+    health = provider_allows_dispatch("codex", launch_timeout=timeout) if os.getenv("DATABASE_URL") else {
         "allowed": False, "state": "unknown", "retry_after": None,
         "reason": "provider codex: unknown: authoritative DATABASE_URL required"}
     if not health["allowed"]:
@@ -1235,9 +1262,9 @@ def _execute_codex_with_sandbox(objective: str, *, sandbox: str, provider: str,
                       "latency_ms": int((time.monotonic() - started) * 1000)}
             return result
         finally:
-            if proc is not None:
-                _record_provider_outcome({"stdout": stdout, "stderr": stderr,
-                    "exit_code": proc.returncode, "state": "completed" if proc.returncode == 0 else "failed", **result})
+            _record_provider_outcome({"stdout": stdout, "stderr": stderr,
+                "exit_code": proc.returncode if proc else None,
+                "state": "completed" if proc and proc.returncode == 0 else "failed", **result}, health["outcome_id"])
 
 
 def execute_codex(objective: str, *, timeout: float = 180.0, cwd: Optional[str] = None) -> dict:

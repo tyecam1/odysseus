@@ -61,6 +61,22 @@ def lab(fixture_config, monkeypatch, tmp_path):
     os.unlink(handle.name)
 
 
+def record_outcome(result):
+    """Seed an externally observed outcome, independently of admission."""
+    import uuid
+    key = str(uuid.uuid4())
+    with cdb.get_db_session() as db:
+        latest = db.query(cdb.RoutingDecision).filter_by(task_class="provider_outcome").order_by(
+            cdb.RoutingDecision.created_at.desc()).first()
+        created = router.datetime.now(timezone.utc).replace(tzinfo=None)
+        if latest:
+            created = max(created, latest.created_at + timedelta(microseconds=1))
+        db.add(cdb.RoutingDecision(id=key, task_class="provider_outcome", executor="codex",
+            host_id="test-lab", status="complete", created_at=created,
+            escalation_reason=json.dumps({"provider_health": router._provider_outcome(result)})))
+    return key
+
+
 def preflight():
     return delegation_preflight([{"task_class": "code_review", "objective": "Review code",
                                   "capabilities": ["reasoning-strong"]}])
@@ -127,7 +143,7 @@ def test_unreadable_latest_and_later_valid_outcome(lab):
     assert router.provider_allows_dispatch("codex")["state"] == "unknown"
     assert "unparseable" in run()["execution_error"]
     # A later externally observed valid outcome clears unknown without a latch.
-    decision = router._record_provider_outcome({"ok": True, "exit_code": 0, "state": "completed"})
+    decision = record_outcome({"ok": True, "exit_code": 0, "state": "completed"})
     with cdb.get_db_session() as db:
         db.query(cdb.RoutingDecision).filter_by(id=decision).update({"created_at": NOW.replace(tzinfo=None) + timedelta(days=1)})
     assert router.provider_allows_dispatch("codex")["state"] == "ok"
@@ -284,6 +300,133 @@ def outcome_count():
         return db.query(cdb.RoutingDecision).filter_by(task_class="provider_outcome").count()
 
 
+def test_outcome_commit_failure_retains_marker_after_quota(lab, monkeypatch, caplog):
+    record_outcome({"ok": True, "exit_code": 0, "state": "completed"})
+    session_factory = cdb.SessionLocal
+
+    def session():
+        db = session_factory()
+        commit = db.commit
+
+        def fail_update():
+            if any(r.task_class == "provider_outcome" and r.status != "launching"
+                   for r in list(db.dirty) + list(db.new)):
+                raise OSError("disk full")
+            commit()
+
+        db.commit = fail_update
+        return db
+
+    monkeypatch.setattr(cdb, "SessionLocal", session)
+    assert LIMIT in router.execute_codex("review")["error"]
+    assert router.execute_codex("retry").get("executed") is False
+    assert "provider outcome update failed; launch marker retained" in caplog.text
+    health = router.provider_allows_dispatch("codex")
+    assert not health["allowed"] and "launch outcome not recorded" in health["reason"]
+    with cdb.get_db_session() as db:
+        assert db.query(cdb.RoutingDecision).filter_by(status="launching").count() == 1
+    assert lab[2].read_text().splitlines() == ["call"]
+
+
+def test_killed_runner_blocks_until_grace_then_single_attempt(lab):
+    import subprocess
+    lab[1]("", success=True)
+    with cdb.get_db_session() as db:
+        database_url = str(db.bind.url)
+    script = f"""
+import os
+from datetime import datetime
+from src import estate_router as r
+class Clock(datetime):
+    @classmethod
+    def now(cls, tz=None):
+        return datetime.fromisoformat({NOW.isoformat()!r})
+r.datetime = Clock
+r._codex_available = lambda: (True, {str(lab[2].with_name('codex'))!r})
+r.resolve_latest_codex_model = lambda _: 'gpt-6.1-sol'
+r.subscription_effort = lambda: 'high'
+r._execute_codex_with_sandbox('review', sandbox='read-only', provider='codex',
+    timeout=180, on_started=lambda _: os._exit(23))
+"""
+    child = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True,
+        env={**os.environ, "DATABASE_URL": database_url}, timeout=30)
+    assert child.returncode == 23, child.stderr
+    # This controller reads the durable marker left by the dead runner.
+    lab[0].current = NOW + timedelta(seconds=180, minutes=15) - timedelta(microseconds=1)
+    assert not router.execute_codex("retry")["executed"]
+    lab[0].current += timedelta(microseconds=1)
+    health = router.provider_allows_dispatch("codex")
+    assert health["state"] == "unknown" and health["allowed"]
+    # Leave the new attempt unfinished: expiry admits exactly one observer.
+    first = router.provider_allows_dispatch("codex", launch_timeout=180)
+    assert first["allowed"] and first["outcome_id"]
+    assert not router.execute_codex("second retry")["executed"]
+    assert outcome_count() == 2
+
+
+def test_intent_commit_failure_refuses_launch(lab, monkeypatch):
+    record_outcome({"ok": True, "exit_code": 0, "state": "completed"})
+    session_factory = cdb.SessionLocal
+
+    def session():
+        db = session_factory()
+        commit = db.commit
+
+        def fail_insert():
+            if db.new:
+                raise OSError("disk full")
+            commit()
+
+        db.commit = fail_insert
+        return db
+
+    monkeypatch.setattr(cdb, "SessionLocal", session)
+    monkeypatch.setattr(router, "_codex_available", lambda: pytest.fail("Codex setup invoked"))
+    result = router.execute_codex("review")
+    assert not result["ok"] and result["executed"] is False
+    assert "launch intent not committed" in result["error"]
+    assert not lab[2].exists() and outcome_count() == 1
+
+
+@pytest.mark.parametrize("success", [True, False])
+def test_final_result_updates_same_row_and_fresh_marker_blocks(lab, success):
+    lab[1]("" if success else LIMIT, success=success)
+    observed = []
+
+    def started(_):
+        with cdb.get_db_session() as db:
+            row = db.query(cdb.RoutingDecision).filter_by(task_class="provider_outcome").one()
+            observed.append(row.id)
+            health = json.loads(row.escalation_reason)["provider_health"]
+            assert health["state"] == "launching" and health["launched_at"] == NOW.isoformat()
+        assert not router.execute_codex("concurrent")["executed"]
+
+    result = router._execute_codex_with_sandbox("review", sandbox="read-only",
+        provider="codex", on_started=started)
+    assert result["ok"] == success
+    with cdb.get_db_session() as db:
+        row = db.query(cdb.RoutingDecision).filter_by(task_class="provider_outcome").one()
+        assert row.id == observed[0] and row.status == ("complete" if success else "failed")
+    health = router.provider_allows_dispatch("codex")
+    assert health["state"] == ("ok" if success else "quota_exhausted")
+    assert health["allowed"] == success
+    if not success:
+        lab[0].current = NOW.replace(hour=17, minute=38)
+        assert not router.provider_allows_dispatch("codex")["allowed"]
+        lab[0].current += timedelta(minutes=1)
+        assert router.provider_allows_dispatch("codex")["allowed"]
+    assert lab[2].read_text().splitlines() == ["call"]
+
+
+def test_simultaneous_admissions_reserve_only_one_attempt(lab):
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        claims = list(pool.map(lambda _: router.provider_allows_dispatch(
+            "codex", launch_timeout=180), range(2)))
+    assert sum(claim["allowed"] for claim in claims) == 1
+    assert outcome_count() == 1
+
+
 @pytest.mark.parametrize("result,state", [
     ({"ok": True, "error": LIMIT, "exit_code": 1}, "quota_exhausted"),
     ({"ok": True, "exit_code": 1}, "unknown"),
@@ -296,7 +439,8 @@ def outcome_count():
 ])
 def test_failure_first_fresh_and_recorded_outcomes(lab, result, state):
     assert router._provider_outcome(result)["state"] == state
-    router._record_provider_outcome({**result, "provider_health": {"state": "ok"}})
+    intent = router.provider_allows_dispatch("codex", launch_timeout=180)["outcome_id"]
+    router._record_provider_outcome({**result, "provider_health": {"state": "ok"}}, intent)
     health = router.provider_allows_dispatch("codex")
     assert health["state"] == state and health["allowed"] == (state == "ok")
 
@@ -314,7 +458,9 @@ def test_quota_beyond_clip_limit_keeps_authoritative_reset(lab):
 
 @pytest.mark.parametrize("terminal", [{}, {"state": "completed"}])
 def test_incoming_truncated_success_stays_unknown(lab, terminal):
-    router._record_provider_outcome({"ok": True, "exit_code": 0, "output": "done", "evidence_truncated": True, **terminal})
+    intent = router.provider_allows_dispatch("codex", launch_timeout=180)["outcome_id"]
+    router._record_provider_outcome({"ok": True, "exit_code": 0, "output": "done",
+                                   "evidence_truncated": True, **terminal}, intent)
     health = router.provider_allows_dispatch("codex")
     assert health["state"] == "unknown" and not health["allowed"]
 
@@ -339,7 +485,7 @@ def test_failure_first_property_table():
 
 
 def test_reader_trusts_stored_health_without_reclassifying(lab, monkeypatch):
-    key = router._record_provider_outcome({"ok": False, "error": LIMIT})
+    key = record_outcome({"ok": False, "error": LIMIT})
     with cdb.get_db_session() as db:
         row = db.get(cdb.RoutingDecision, key)
         row.created_at = NOW.replace(tzinfo=None) - timedelta(days=30)
@@ -355,7 +501,7 @@ def test_reader_trusts_stored_health_without_reclassifying(lab, monkeypatch):
 
 @pytest.mark.parametrize("unreadable", [False, True])
 def test_worker_execute_refuses_exhausted_or_unreadable(lab, worker_lane, unreadable):
-    decision = router._record_provider_outcome({"ok": False, "error": LIMIT})
+    decision = record_outcome({"ok": False, "error": LIMIT})
     if unreadable:
         with cdb.get_db_session() as db:
             db.get(cdb.RoutingDecision, decision).escalation_reason = "broken"
@@ -371,7 +517,7 @@ def test_spooled_runner_rechecks_health_after_start(lab, worker_lane):
     worker, units, call, _, payload, finish = worker_lane
     # Start has already been claimed, but the detached runner has not run yet.
     units.write_spool(payload["execution_id"], request=payload)
-    router._record_provider_outcome({"ok": False, "error": LIMIT})
+    record_outcome({"ok": False, "error": LIMIT})
     lab[1]("", success=True)
     units.enter("aoteru-run-spooled.service")
     assert worker._run_spooled("spooled") == 0
@@ -398,7 +544,7 @@ def test_crash_recovery_refuses_then_recovers_after_reset(lab, worker_lane, monk
         execution_id = row.id
         assert row.lifecycle_state == "accepted"
     assert "start" not in calls
-    router._record_provider_outcome({"ok": False, "error": LIMIT})  # another execution exhausts Codex before restart
+    record_outcome({"ok": False, "error": LIMIT})  # another execution exhausts Codex before restart
     lab[1]("", success=True)
     assert call("test-lab", "status", {"execution_id": execution_id})["result"]["state"] == "unknown"
     with cdb.get_db_session() as db:
@@ -427,7 +573,7 @@ def test_crash_recovery_refuses_then_recovers_after_reset(lab, worker_lane, monk
 @pytest.mark.parametrize("kind", ["codex", "codex-readonly", "codex-write", "durable-write",
                                  "routed-read", "routed-write", "shared-read", "shared-write"])
 def test_all_paid_launch_paths_refuse_exhaustion(lab, worker_lane, kind):
-    router._record_provider_outcome({"ok": False, "error": LIMIT})
+    record_outcome({"ok": False, "error": LIMIT})
     lab[1]("", success=True)
     worker, units, call, _, payload, finish = worker_lane
     if kind == "codex":
@@ -464,7 +610,7 @@ def test_launch_requires_explicit_authoritative_database(lab, monkeypatch):
 
 def test_separate_executor_process_reads_authoritative_health(lab):
     import subprocess
-    router._record_provider_outcome({"ok": False, "error": LIMIT})
+    record_outcome({"ok": False, "error": LIMIT})
     lab[1]("", success=True)
     with cdb.get_db_session() as db:
         database_url = str(db.bind.url)

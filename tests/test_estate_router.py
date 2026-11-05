@@ -1861,7 +1861,7 @@ def test_codex_lanes_preserve_distinct_sandbox_authority(
     assert args[args.index("-c") + 1] == "model_reasoning_effort=high"
 
 
-def test_codex_executor_fails_before_launch_if_current_model_is_unverifiable(monkeypatch):
+def test_codex_executor_fails_before_launch_if_current_model_is_unverifiable(runtime_db, monkeypatch):
     import subprocess
     from src.subscription_model_policy import SubscriptionModelError
     monkeypatch.setattr(estate_router, "_codex_available", lambda: (True, "/usr/bin/codex"))
