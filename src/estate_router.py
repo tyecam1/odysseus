@@ -1137,19 +1137,19 @@ def _execute_codex_with_sandbox(objective: str, *, sandbox: str, provider: str,
 def _invoke_codex_with_sandbox(objective: str, *, sandbox: str, provider: str,
                                 timeout: float = 180.0, cwd: Optional[str] = None,
                                 on_started: Optional[Callable[[int], None]] = None) -> dict:
-    """Share bounded CLI mechanics without making sandbox choice policy.
-
-    Only the public advisory/write functions choose the sandbox. Keeping
-    credential checks, ephemeral execution, timeout, and error handling in
-    one place prevents the narrow write lane drifting from the established
-    paid-worker behavior.
-    """
+    """The sole paid launch point; workers must use the authoritative DATABASE_URL."""
     import os
     import signal
     import subprocess
     import tempfile
     import time
 
+    health = provider_allows_dispatch("codex") if os.getenv("DATABASE_URL") else {
+        "allowed": False, "state": "unknown", "retry_after": None,
+        "reason": "provider codex: unknown: authoritative DATABASE_URL required"}
+    if not health["allowed"]:
+        return {"ok": False, "provider": provider, "error": health["reason"],
+                "provider_health": health, "executed": False}
     available, detail = _codex_available()
     if not available:
         return {"ok": False, "error": f"codex unavailable: {detail}", "provider": provider}
@@ -1555,7 +1555,7 @@ def _dispatch_read_only(host_id: str, executor: str, task: dict, *, concrete_mod
 
     result = dict(response["result"])
     attested_host = response["attestation"]["host_id"]
-    placement["executed_host"] = attested_host
+    placement["executed_host"] = None if result.get("executed") is False else attested_host
     placement["attested"] = attested_host == host_id
     result["placement"] = placement
     return result
@@ -1643,11 +1643,6 @@ def run_task(task: dict) -> dict:
                     "reason", f"paid provider {provider_name!r} has no "
                     f"{'write ' if implementation_mode else ''}implementation",
                 )}
-            health = provider_allows_dispatch(provider_name)
-            if not health["allowed"]:
-                return {**route, "ok": False, "executed": False,
-                        "provider_health": health, "execution_error": health["reason"],
-                        "reason": health["reason"], "escalation_reason": "provider_unavailable"}
             objective = task.get("objective")
             paid_objective = objective if isinstance(objective, str) else str(objective)
             executor_name = provider_name

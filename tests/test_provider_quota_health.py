@@ -69,7 +69,7 @@ def run(implementation_mode=False):
 
 
 @pytest.mark.parametrize("stream", ["stderr", "stdout"])
-def test_real_limit_preflight_and_repeated_read_write_refusal(lab, stream):
+def test_real_limit_preflight_and_repeated_read_refusal(lab, stream):
     clock, executable, count = lab
     executable(stream=stream)
     first = run()
@@ -82,8 +82,8 @@ def test_real_limit_preflight_and_repeated_read_write_refusal(lab, stream):
     assert result["snapshot"]["codex"]["runtime_available"]
     assert result["units"][0]["recommended_route"] is None
     assert result["snapshot"]["eligible_hosts"][0]["eligible"]
-    for implementation_mode in (False, True, False):
-        refused = run(implementation_mode=implementation_mode)
+    for _ in range(3):
+        refused = run()
         assert not refused["executed"] and "provider codex: quota_exhausted" in refused["execution_error"]
     assert count.read_text().splitlines() == ["call"]
     assert not router.resolve_route(TASK, record_decision=False)["provider_health"]["allowed"]
@@ -271,3 +271,197 @@ def test_existing_timestamp_order_and_uuid_tiebreak(lab):
             provider="codex", host_id="test-lab", repo_id="odysseus", lifecycle_state="failed",
             created_at=NOW.replace(tzinfo=None) - timedelta(seconds=1), result_json="corrupt"))
     assert router.provider_allows_dispatch("codex")["state"] == "ok"
+
+
+@pytest.fixture
+def worker_lane(lab, monkeypatch, tmp_path):
+    """Real protocol + spool/controller logic; fake only units and worktree probes."""
+    from src import estate_worker as worker, estate_worker_client as client
+    from src.estate_worker_protocol import build_request
+    from tests.helpers.fake_units import FakeUnits
+    monkeypatch.setattr(worker, "_SPOOL_ROOT", tmp_path / "spool")
+    monkeypatch.setattr(worker, "_PREPARE_ROOT", tmp_path / "prepare")
+    monkeypatch.setattr(worker, "_DECISION_FS_PROBED", {})
+    monkeypatch.setattr(worker, "_worker_version", lambda: "test")
+    monkeypatch.setattr(worker, "machine_fingerprint", lambda: "test")
+    monkeypatch.setattr(worker, "_worktree_verification", lambda *args: {
+        "ok": True, "clean": True, "head_sha": "abc", "path": str(tmp_path)})
+    units = FakeUnits(tmp_path, monkeypatch, worker)
+    calls = []
+
+    def call(host, verb, payload, *, deadline_s=60):
+        calls.append(verb)
+        response = worker.handle(build_request(verb, host, payload, deadline_s))
+        assert response["ok"], response
+        return response
+
+    monkeypatch.setattr(client, "call_worker", call)
+
+    def finish(execution_id):
+        unit = f"aoteru-run-{execution_id}.service"
+        units.enter(unit)
+        worker._run_spooled(execution_id)
+        units.set_populated(unit, None)
+        return call("test-lab", "status", {"execution_id": execution_id})["result"]
+
+    monkeypatch.setattr(write_lane, "_observe_worker_execution", lambda execution_id:
+                        write_lane._apply_view(execution_id, finish(execution_id)))
+    monkeypatch.setattr(router, "resolve_repo_path", lambda _: str(tmp_path))
+    with cdb.get_db_session() as db:
+        db.add(cdb.ParkLease(id="L1", repo_id="odysseus", host_id="test-lab",
+                            worktree_path=str(tmp_path), branch="feature", status="active"))
+    # The routed write must pass the existing qualification gate too.
+    import yaml
+    path = router._CONFIG_DIR / "estate.yaml"
+    config = yaml.safe_load(path.read_text())
+    config["hosts"][0]["worker"]["qualified_executors"].append("codex-write")
+    path.write_text(yaml.safe_dump(config))
+    payload = {"execution_id": "spooled", "kind": "codex-write", "objective": "change",
+               "repo_id": "odysseus", "timeout_s": 1800,
+               "lease": {"lease_id": "L1", "worktree_path": str(tmp_path),
+                         "branch": "feature", "expected_head_sha": "abc"}}
+    return worker, units, call, calls, payload, finish
+
+
+def observed(result):
+    decision = router._record_decision(TASK, host_id="test-lab", executor="codex",
+                                      model_alias=None, concrete_model=None, status="needs_escalation")
+    router._update_decision_outcome(decision, status="complete" if result.get("ok") else "failed",
+                                   deterministic_gate="pass" if result.get("ok") else "fail",
+                                   provider_result=result)
+    return decision
+
+
+@pytest.mark.parametrize("unreadable", [False, True])
+def test_worker_execute_refuses_exhausted_or_unreadable(lab, worker_lane, unreadable):
+    decision = observed({"ok": False, "error": LIMIT})
+    if unreadable:
+        with cdb.get_db_session() as db:
+            db.get(cdb.RoutingDecision, decision).escalation_reason = "broken"
+    lab[1]("", success=True)
+    result = worker_lane[2]("test-lab", "execute", {
+        "kind": "codex-readonly", "objective": "review"})["result"]
+    assert not result["ok"] and result["executed"] is False
+    assert "provider codex: " + ("unknown" if unreadable else "quota_exhausted") in result["error"]
+    assert not lab[2].exists()
+
+
+def test_spooled_runner_rechecks_health_after_start(lab, worker_lane):
+    worker, units, call, _, payload, finish = worker_lane
+    # Start has already been claimed, but the detached runner has not run yet.
+    units.write_spool(payload["execution_id"], request=payload)
+    observed({"ok": False, "error": LIMIT})
+    lab[1]("", success=True)
+    units.enter("aoteru-run-spooled.service")
+    assert worker._run_spooled("spooled") == 0
+    result = worker._json_read(worker._SPOOL_ROOT / "spooled" / "result.json")
+    assert not result["ok"] and "provider codex: quota_exhausted" in result["error"]
+    assert not lab[2].exists()
+
+
+def test_crash_recovery_refuses_then_recovers_after_reset(lab, worker_lane, monkeypatch):
+    worker, units, call, calls, payload, finish = worker_lane
+
+    class Crash(Exception):
+        pass
+
+    def crash(_):
+        raise Crash("controller crashed before start")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(write_lane, "_dispatch_start", crash)
+        with pytest.raises(Crash):
+            write_lane.execute_write_via_worker("change", repo_id="odysseus", host_id="test-lab")
+    with cdb.get_db_session() as db:
+        row = db.query(cdb.EstateExecution).one()
+        execution_id = row.id
+        assert row.lifecycle_state == "accepted"
+    assert "start" not in calls
+    observed({"ok": False, "error": LIMIT})  # another execution exhausts Codex before restart
+    lab[1]("", success=True)
+    assert call("test-lab", "status", {"execution_id": execution_id})["result"]["state"] == "unknown"
+    with cdb.get_db_session() as db:
+        write_lane.reconcile_stale_estate_executions(db, cdb.EstateExecution)
+    write_lane._apply_view(execution_id, finish(execution_id))
+    row = write_lane._load_row(execution_id)
+    assert calls.count("start") == 1 and row.lifecycle_state == "failed"
+    assert "provider codex: quota_exhausted" in json.loads(row.result_json)["error"]
+    assert not lab[2].exists()
+    # Preserve the existing recovery/lease gates before trying a new write.
+    recovered = write_lane.recover_execution_lease(execution_id, lease_id="L1", host_id="test-lab",
+        repo_id="odysseus", branch="feature", worktree_path=payload["lease"]["worktree_path"])
+    assert recovered["recovered"], recovered
+    lab[0].current = NOW + timedelta(hours=6)
+    assert router.provider_allows_dispatch("codex")["allowed"]
+    assert run()["execution"]["ok"]  # valid ok observation, not just cooldown expiry
+    assert router.provider_allows_dispatch("codex")["state"] == "ok"
+    with cdb.get_db_session() as db:
+        db.add(cdb.ParkLease(id="L2", repo_id="odysseus", host_id="test-lab", status="active",
+                            worktree_path=payload["lease"]["worktree_path"], branch="feature"))
+    retry = write_lane.execute_write_via_worker("change", repo_id="odysseus", host_id="test-lab")
+    assert retry["lifecycle_state"] == "succeeded", retry
+    assert lab[2].read_text().splitlines() == ["call", "call"]
+
+
+@pytest.mark.parametrize("kind", ["codex", "codex-readonly", "codex-write", "durable-write",
+                                 "routed-read", "routed-write", "shared-read", "shared-write",
+                                 "invoke-read", "invoke-write"])
+def test_all_paid_launch_paths_refuse_exhaustion(lab, worker_lane, kind):
+    observed({"ok": False, "error": LIMIT})
+    lab[1]("", success=True)
+    worker, units, call, _, payload, finish = worker_lane
+    if kind == "codex":
+        result = router.execute_codex("review")
+    elif kind == "codex-readonly":
+        result = call("test-lab", "execute", {"kind": kind, "objective": "review"})["result"]
+    elif kind == "codex-write":
+        call("test-lab", "start", payload)
+        result = finish(payload["execution_id"])["result"]
+    elif kind == "durable-write":
+        result = router.execute_codex_write_durable("change", repo_id="odysseus", host_id="test-lab")["result"]
+    elif kind.startswith("routed-"):
+        response = router.run_task({**TASK, "repo": "odysseus", "routing": {
+            "allow_paid_escalation": True, "mode": "implementation" if kind.endswith("write") else "advisory"}})
+        result = response.get("execution") or {"ok": False, "error": response.get("execution_error")}
+        if kind.endswith("write") and "result" in result:
+            result = result["result"]
+    else:
+        launch = router._invoke_codex_with_sandbox if kind.startswith("invoke-") else router._execute_codex_with_sandbox
+        result = launch("change", provider="codex", sandbox="workspace-write" if kind.endswith("write") else "read-only")
+    assert not result["ok"] and "provider codex: quota_exhausted" in result["error"]
+    assert not lab[2].exists()
+
+
+def test_launch_requires_explicit_authoritative_database(lab, monkeypatch):
+    lab[1]("", success=True)
+    monkeypatch.delenv("DATABASE_URL")
+    result = router.execute_codex("review")
+    assert not result["ok"] and "provider codex: unknown: authoritative DATABASE_URL required" in result["error"]
+    assert not lab[2].exists()
+
+
+def test_separate_executor_process_reads_authoritative_health(lab):
+    import subprocess
+    observed({"ok": False, "error": LIMIT})
+    lab[1]("", success=True)
+    with cdb.get_db_session() as db:
+        database_url = str(db.bind.url)
+    script = f"""
+import json
+from datetime import datetime
+from src import estate_router as r
+class Clock(datetime):
+    @classmethod
+    def now(cls, tz=None):
+        now = datetime.fromisoformat({NOW.isoformat()!r})
+        return now.astimezone(tz) if tz else now.replace(tzinfo=None)
+r.datetime = Clock
+r._codex_available = lambda: (True, {str(lab[2].with_name('codex'))!r})
+r.resolve_latest_codex_model = lambda _: 'gpt-6.1-sol'
+print(json.dumps(r.execute_codex('review')))
+"""
+    child = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True,
+                           env={**os.environ, "DATABASE_URL": database_url}, timeout=30, check=True)
+    result = json.loads(child.stdout.splitlines()[-1])
+    assert not result["ok"] and "provider codex: quota_exhausted" in result["error"]
+    assert not lab[2].exists()

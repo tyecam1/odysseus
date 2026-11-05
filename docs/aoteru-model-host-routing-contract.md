@@ -488,6 +488,14 @@ decision lookup exposes it separately); write results use
 `EstateExecution.result_json.provider_health`. Classification and outcome
 persist in the same transaction. No health table or replay is involved.
 
+Admission is enforced only in `_invoke_codex_with_sandbox`, immediately
+before paid CLI setup/launch, including worker execute and recovered/spooled
+write runs. Every executor process must explicitly configure `DATABASE_URL`
+to the controller's authoritative database (shared database service, or the
+same SQLite file on a shared mount). A worker-local empty database is not
+an authoritative source. Missing configuration or unreadable health refuses
+launch with a provider-scoped reason; there is no cached verdict or fallback.
+
 The latest outcome is ordered by existing `created_at`, then UUID. A backwards
 host clock jump can mis-order outcomes; cooldown expiry and the next outcome
 bound this limitation. Missing/corrupt latest evidence is `unknown` and blocks
