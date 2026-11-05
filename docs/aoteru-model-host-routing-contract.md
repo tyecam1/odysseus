@@ -478,6 +478,27 @@ If equivalent existing surfaces already own any of these concerns, extend them i
 
 ## Codex usage-limit → GLM failover (operator priority, 2026-10-19)
 
+### Provider health from recorded outcomes
+
+`estate_router.provider_allows_dispatch` derives provider health separately
+from host/worker eligibility. Paid read/write admission, preflight and agent
+status share this fact. Read-only telemetry uses a compact JSON envelope in
+`RoutingDecision.escalation_reason` (retaining the original reason code;
+decision lookup exposes it separately); write results use
+`EstateExecution.result_json.provider_health`. Classification and outcome
+persist in the same transaction. No health table or replay is involved.
+
+The latest outcome is ordered by existing `created_at`, then UUID. A backwards
+host clock jump can mis-order outcomes; cooldown expiry and the next outcome
+bound this limitation. Missing/corrupt latest evidence is `unknown` and blocks
+paid dispatch until valid later evidence exists. An empty history permits the
+initial attempt. Quota reset clocks use the executing host timezone (lab GMT);
+an earlier clock rolls to tomorrow. Unparseable resets explicitly mark
+`retry_after_assumed` and back off 15 minutes; all cooldowns cap at seven days.
+Authentication/transport failures use a 15-minute cooldown. Expiry permits a
+new attempt; only observed success changes health to `ok`. Alternatives must
+already satisfy the original capability, authority and verification gates.
+
 **Required behaviour:** A confirmed Codex usage/quota exhaustion is a
 **provider-availability event**, not a reason to stop or park an otherwise
 eligible development task. On this condition the central Odysseus router must

@@ -130,6 +130,10 @@ def _transition(execution_id: str, from_states: tuple, **fields) -> bool:
     from core.database import EstateExecution, get_db_session
     assert "worktree_resolution" not in fields
     with get_db_session() as db:
+        if fields.get("result_json") is not None:
+            result = json.loads(fields["result_json"])
+            result["provider_health"] = _router._provider_outcome(result)
+            fields["result_json"] = json.dumps(result)
         updated = db.query(EstateExecution).filter(
             EstateExecution.id == execution_id,
             EstateExecution.lifecycle_state.in_(from_states),

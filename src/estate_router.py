@@ -31,6 +31,7 @@ import json
 import re
 import socket
 import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -52,6 +53,111 @@ from src.estate_worker_procs import (
 )
 
 _CONFIG_DIR = Path(get_app_root()) / "config"
+
+
+def classify_provider_outcome(text: str, now: datetime, *, host_tz) -> tuple:
+    """Pure classification; CLI reset clocks belong to the executing host."""
+    text = text.lower().replace("’", "'")
+    now = now.replace(tzinfo=host_tz) if now.tzinfo is None else now.astimezone(host_tz)
+    retry = now + timedelta(minutes=15)
+    if re.search(r"usage limit|quota (?:exhausted|exceeded)|insufficient_quota", text):
+        reason = "provider usage limit; retry_after_assumed"
+        reset = text.partition("try again at")[2]
+        clock = re.search(r"(?<!\d)(\d{1,2}:\d{2})\s*(am|pm)?\b", reset)
+        if clock:
+            try:
+                stamp = datetime.strptime("".join(clock.groups(default="")),
+                                          "%I:%M%p" if clock[2] else "%H:%M")
+                cleaned = re.sub(r"(\d)(st|nd|rd|th)\b", r"\1", reset).replace(",", "")
+                date = re.search(r"\d{4}-\d{2}-\d{2}|(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]* \d{1,2}(?: \d{4})?", cleaned)
+                day = now
+                if " on " in cleaned and date is None:
+                    raise ValueError("unparseable reset date")
+                if date:
+                    for fmt in ("%Y-%m-%d", "%b %d %Y", "%B %d %Y", "%b %d", "%B %d"):
+                        try:
+                            day = datetime.strptime(date[0], fmt)
+                            if "%Y" not in fmt:
+                                day = day.replace(year=now.year)
+                            break
+                        except ValueError:
+                            continue
+                    else:
+                        raise ValueError("unparseable reset date")
+                retry = now.replace(year=day.year, month=day.month, day=day.day,
+                                    hour=stamp.hour, minute=stamp.minute, second=0, microsecond=0)
+                if retry <= now:
+                    retry = now.replace(hour=stamp.hour, minute=stamp.minute, second=0,
+                                        microsecond=0) + timedelta(days=1)
+                reason = "provider usage limit; host wall-clock reset"
+            except ValueError:
+                pass
+        state = "quota_exhausted"
+    elif re.search(r"unauthorized|authentication|invalid.api.key|not logged in|login required|401", text):
+        state, reason = "auth_failed", "provider authentication failed"
+    elif re.search(r"unreachable|connection|timed out|timeout|dns|network", text):
+        state, reason = "unreachable", "provider transport unavailable"
+    else:
+        return (("ok", None, "no provider error") if not text.strip() else
+                ("unknown", None, "unclassified provider outcome"))
+    return state, min(retry, now + timedelta(days=7)).isoformat(), reason
+
+
+def _provider_outcome(result: dict) -> dict:
+    # Called inside each existing outcome transaction, never by a replay loop.
+    if "provider_health" in result:
+        return result["provider_health"]  # classified in the executing host's timezone
+    now = datetime.now().astimezone()
+    text = "" if result.get("ok") is True else "\n".join(
+        str(result.get(k) or "") for k in ("stdout", "stderr", "error")) or "unknown failure"
+    state, retry, reason = classify_provider_outcome(text, now, host_tz=now.tzinfo)
+    return {"state": state, "retry_after": retry, "reason": reason,
+            "retry_after_assumed": "retry_after_assumed" in reason}
+
+
+def provider_allows_dispatch(provider: str, *, now: Optional[datetime] = None) -> dict:
+    """Derived provider fact, independent of worker/host/lease eligibility."""
+    from core.database import RoutingDecision, EstateExecution, get_db_session
+    now = now or datetime.now(timezone.utc)
+    health = {"state": "unknown", "retry_after": None, "reason": "latest outcome unreadable"}
+    allowed = False
+    try:
+        with get_db_session() as db:
+            decision = db.query(RoutingDecision).filter(
+                RoutingDecision.executor == provider,
+                RoutingDecision.status.in_(("complete", "failed")),
+            ).order_by(RoutingDecision.created_at.desc(), RoutingDecision.id.desc()).first()
+            execution = db.query(EstateExecution).filter(
+                EstateExecution.provider == provider,
+                EstateExecution.lifecycle_state.in_(("succeeded", "failed", "timed_out", "interrupted")),
+            ).order_by(EstateExecution.created_at.desc(), EstateExecution.id.desc()).first()
+            rows = [r for r in (decision, execution) if r is not None]
+            if not rows:
+                # No observation is distinct from a damaged/unreadable observation.
+                health["reason"] = "no recorded outcome; initial attempt permitted"
+                allowed = True
+            else:
+                # UUIDs only break ties. Backwards wall-clock jumps can mis-order
+                # outcomes; retry_after bounds cooldown and the next outcome corrects it.
+                row = max(rows, key=lambda r: (r.created_at, r.id))
+                payload = json.loads(row.result_json if row is execution else row.escalation_reason)
+                health = payload["provider_health"]
+                state, retry = health["state"], health["retry_after"]
+                if not isinstance(health["reason"], str):
+                    raise ValueError("invalid provider reason")
+                if state not in {"ok", "quota_exhausted", "auth_failed", "unreachable", "unknown"}:
+                    raise ValueError("invalid provider state")
+                reset = datetime.fromisoformat(retry) if retry else None
+                if reset is not None and (reset.tzinfo is None or reset > now + timedelta(days=7)):
+                    raise ValueError("invalid retry_after")
+                if state in {"quota_exhausted", "auth_failed", "unreachable"} and reset is None:
+                    raise ValueError("missing retry_after")
+                allowed = state == "ok" or (state != "unknown" and reset is not None and now >= reset)
+    except Exception:
+        health = {"state": "unknown", "retry_after": None, "reason": "latest outcome unreadable or unparseable"}
+        allowed = False
+    return {**health, "provider": provider, "allowed": allowed,
+            "reason": f"provider {provider}: {health['state']}: {health['reason']}"}
 
 
 class RoutingConfigError(RuntimeError):
@@ -822,6 +928,9 @@ def resolve_route(task: dict, *, record_decision: bool = True) -> dict:
         result["context_error"] = context_error
     if context_note:
         result["context_note"] = context_note
+    if executor == "none":
+        result["provider_health"] = provider_allows_dispatch(_resolve_paid_provider(alias).get("provider"))
+        result["reason"] += "; " + result["provider_health"]["reason"]
     if unverified_constraints:
         result["unverified_constraints"] = unverified_constraints
     return result
@@ -833,7 +942,8 @@ def _update_decision_outcome(decision_id: str, *, status: str, deterministic_gat
                              actual_route: Optional[str] = None,
                              verification_outcome: Optional[str] = None,
                              executed_host_id: Optional[str] = None,
-                             concrete_model: Optional[str] = None) -> None:
+                             concrete_model: Optional[str] = None,
+                             provider_result: Optional[dict] = None) -> None:
     """Execution happens after `resolve_route()` already wrote its
     decision row — update that same row with the real outcome rather than
     writing a second telemetry row for one routed task (`RoutingDecision`
@@ -866,6 +976,9 @@ def _update_decision_outcome(decision_id: str, *, status: str, deterministic_gat
                     row.executed_host_id = executed_host_id
                 if concrete_model is not None:
                     row.concrete_model = concrete_model
+                if provider_result is not None:
+                    row.escalation_reason = json.dumps({"reason": row.escalation_reason,
+                        "provider_health": _provider_outcome(provider_result)})
     except Exception:
         import logging
         logging.getLogger(__name__).exception("routing_decisions outcome update failed; execution result is unaffected")
@@ -1014,6 +1127,14 @@ def _kill_process_tree(root_pid: int, process_group_id: int, *, reap_timeout: fl
 
 
 def _execute_codex_with_sandbox(objective: str, *, sandbox: str, provider: str,
+                                **kwargs) -> dict:
+    result = _invoke_codex_with_sandbox(objective, sandbox=sandbox, provider=provider, **kwargs)
+    if result.get("codex_binary"):
+        result["provider_health"] = _provider_outcome(result)
+    return result
+
+
+def _invoke_codex_with_sandbox(objective: str, *, sandbox: str, provider: str,
                                 timeout: float = 180.0, cwd: Optional[str] = None,
                                 on_started: Optional[Callable[[int], None]] = None) -> dict:
     """Share bounded CLI mechanics without making sandbox choice policy.
@@ -1080,7 +1201,7 @@ def _execute_codex_with_sandbox(objective: str, *, sandbox: str, provider: str,
             if proc.returncode != 0:
                 return {
                     "ok": False, "provider": provider, "latency_ms": latency_ms,
-                    "error": f"codex exec exited {proc.returncode}: {(stderr or '')[-500:]}",
+                    "error": f"codex exec exited {proc.returncode}: {(stdout or '')[-1000:]}\n{(stderr or '')[-1000:]}",
                     "codex_binary": codex_binary,
                 }
             output = Path(out_path).read_text().strip() if Path(out_path).exists() else ""
@@ -1522,6 +1643,11 @@ def run_task(task: dict) -> dict:
                     "reason", f"paid provider {provider_name!r} has no "
                     f"{'write ' if implementation_mode else ''}implementation",
                 )}
+            health = provider_allows_dispatch(provider_name)
+            if not health["allowed"]:
+                return {**route, "ok": False, "executed": False,
+                        "provider_health": health, "execution_error": health["reason"],
+                        "reason": health["reason"], "escalation_reason": "provider_unavailable"}
             objective = task.get("objective")
             paid_objective = objective if isinstance(objective, str) else str(objective)
             executor_name = provider_name
@@ -1647,7 +1773,7 @@ def run_task(task: dict) -> dict:
                     _update_decision_outcome(
                         route["decision_id"], status="failed", deterministic_gate="fail",
                         escalation_reason="worker_failed", verification_outcome="fail",
-                        actual_route=actual_route,
+                        actual_route=actual_route, executor=provider_name, provider_result=result,
                     )
                     return {
                         **route, "ok": False, "executed": False,
@@ -1672,6 +1798,7 @@ def run_task(task: dict) -> dict:
                     verification_outcome=gate,
                     executed_host_id=(result.get("placement") or {}).get("executed_host"),
                     concrete_model=result.get("concrete_model"),
+                    provider_result=result,
                 )
             # implementation_mode, terminal within execute_codex_write_durable's
             # wait_timeout: the decision outcome was already recorded by
