@@ -55,9 +55,15 @@ from src.estate_worker_procs import (
 _CONFIG_DIR = Path(get_app_root()) / "config"
 
 
-def classify_provider_outcome(text: str, now: datetime, *, host_tz) -> tuple:
-    """Pure classification; interpret CLI reset clocks in the supplied timezone."""
-    text = text.lower().replace("’", "'")
+def _provider_outcome(result: dict, now=None, *, host_tz=None, recorded=None) -> dict:
+    """Failure evidence always wins; reset clocks are relative to the outcome."""
+    now = now or datetime.now().astimezone()
+    host_tz = host_tz or now.tzinfo
+    sources = (result, recorded or {})
+    states = [s[k] for s in sources for k in ("status", "state", "terminal_state", "lifecycle_state") if s.get(k) is not None]
+    exits = [s[k] for s in sources for k in ("exit_code", "exit_status", "returncode") if s.get(k) is not None]
+    text = "\n".join(str(s.get(k) or "") for s in sources for k in ("error", "output", "stdout", "stderr"))
+    text = (text + "\n" + "\n".join(map(str, states))).lower().replace("’", "'")
     now = now.replace(tzinfo=host_tz) if now.tzinfo is None else now.astimezone(host_tz)
     retry = now + timedelta(minutes=15)
     if re.search(r"usage limit|quota (?:exhausted|exceeded)|insufficient_quota", text):
@@ -98,19 +104,16 @@ def classify_provider_outcome(text: str, now: datetime, *, host_tz) -> tuple:
     elif re.search(r"unreachable|connection|timed out|timeout|dns|network", text):
         state, reason = "unreachable", "provider transport unavailable"
     else:
-        return (("ok", None, "no provider error") if not text.strip() else
-                ("unknown", None, "unclassified provider outcome"))
-    return state, min(retry, now + timedelta(days=7)).isoformat(), reason
-
-
-def _provider_outcome(result: dict) -> dict:
-    # Derive health inside the outcome transaction; ignore worker verdicts.
-    now = datetime.now().astimezone()
-    text = "" if result.get("ok") is True else "\n".join(
-        str(result.get(k) or "") for k in ("stdout", "stderr", "error")).strip() or "unknown failure"
-    state, retry, reason = classify_provider_outcome(text, now, host_tz=now.tzinfo)
-    return {"state": state, "retry_after": retry, "reason": reason,
-            "retry_after_assumed": "retry_after_assumed" in reason}
+        success = (result.get("ok") is True and not any(s.get("error") for s in sources)
+                   and not result.get("evidence_truncated")
+                   and all(type(code) in (int, str) and code in (0, "0") for code in exits)
+                   and all(s in {"complete", "completed", "succeeded"} for s in states)
+                   and bool(exits or states)
+                   and not re.search(r"\b(error|failed|failure|exception|interrupted|cancelled|canceled)\b", text))
+        state, reason = ("ok", "no provider error") if success else ("unknown", "unclassified provider outcome")
+        retry = None
+    return {"state": state, "retry_after": min(retry, now + timedelta(days=7)).isoformat() if retry else None,
+            "reason": reason, "retry_after_assumed": "retry_after_assumed" in reason}
 
 
 def provider_allows_dispatch(provider: str, *, now: Optional[datetime] = None) -> dict:
@@ -138,18 +141,18 @@ def provider_allows_dispatch(provider: str, *, now: Optional[datetime] = None) -
                 # UUIDs only break ties. Backwards wall-clock jumps can mis-order
                 # outcomes; retry_after bounds cooldown and the next outcome corrects it.
                 row = max(rows, key=lambda r: (r.created_at, r.id))
-                payload = json.loads(row.result_json if row is execution else row.escalation_reason)
-                health = payload["provider_health"]
+                try:
+                    payload = json.loads(row.result_json if row is execution else row.escalation_reason)
+                except (TypeError, ValueError):
+                    payload = {}  # execution columns may still contain failure evidence
+                health = _provider_outcome(
+                    payload if row is execution else payload["provider_result"],
+                    ((row.finished_at or row.created_at) if row is execution else row.updated_at).replace(tzinfo=timezone.utc),
+                    host_tz=datetime.now().astimezone().tzinfo,
+                    recorded={"state": row.lifecycle_state, "error": row.error, "exit_status": row.exit_status}
+                    if row is execution else {"state": row.status})
                 state, retry = health["state"], health["retry_after"]
-                if not isinstance(health["reason"], str):
-                    raise ValueError("invalid provider reason")
-                if state not in {"ok", "quota_exhausted", "auth_failed", "unreachable", "unknown"}:
-                    raise ValueError("invalid provider state")
                 reset = datetime.fromisoformat(retry) if retry else None
-                if reset is not None and (reset.tzinfo is None or reset > now + timedelta(days=7)):
-                    raise ValueError("invalid retry_after")
-                if state in {"quota_exhausted", "auth_failed", "unreachable"} and reset is None:
-                    raise ValueError("missing retry_after")
                 allowed = state == "ok" or (state != "unknown" and reset is not None and now >= reset)
     except Exception:
         health = {"state": "unknown", "retry_after": None, "reason": "latest outcome unreadable or unparseable"}
@@ -975,8 +978,13 @@ def _update_decision_outcome(decision_id: str, *, status: str, deterministic_gat
                 if concrete_model is not None:
                     row.concrete_model = concrete_model
                 if provider_result is not None:
+                    evidence = {k: v[:2048] if isinstance(v, str) else v for k, v in provider_result.items()
+                                if k in {"ok", "error", "output", "stdout", "stderr", "exit_code", "exit_status",
+                                         "returncode", "status", "state", "terminal_state", "lifecycle_state"}}
+                    evidence["evidence_truncated"] = any(isinstance(provider_result[k], str) and len(provider_result[k]) > 2048
+                                                        for k in evidence)
                     row.escalation_reason = json.dumps({"reason": row.escalation_reason,
-                        "provider_health": _provider_outcome(provider_result)})
+                                                       "provider_result": evidence})
     except Exception:
         import logging
         logging.getLogger(__name__).exception("routing_decisions outcome update failed; execution result is unaffected")
@@ -1190,12 +1198,13 @@ def _execute_codex_with_sandbox(objective: str, *, sandbox: str, provider: str,
             latency_ms = int((time.monotonic() - started) * 1000)
             if proc.returncode != 0:
                 return {
-                    "ok": False, "provider": provider, "latency_ms": latency_ms,
+                    "ok": False, "exit_code": proc.returncode, "provider": provider, "latency_ms": latency_ms,
                     "error": f"codex exec exited {proc.returncode}: {(stdout or '')[-1000:]}\n{(stderr or '')[-1000:]}",
                     "codex_binary": codex_binary,
                 }
             output = Path(out_path).read_text().strip() if Path(out_path).exists() else ""
-            return {"ok": True, "provider": provider, "output": output, "latency_ms": latency_ms,
+            return {"ok": True, "exit_code": 0, "stdout": stdout, "stderr": stderr,
+                    "provider": provider, "output": output, "latency_ms": latency_ms,
                     "codex_binary": codex_binary, "concrete_model": subscription_model,
                     "reasoning_effort": reasoning_effort,
                     "model_catalogue": "authenticated-codex-debug-models"}

@@ -352,10 +352,9 @@ def get_decision_by_id(decision_id: str) -> Optional[dict]:
         row = db.query(RoutingDecision).filter(RoutingDecision.id == decision_id).first()
         if row is None:
             return None
-        reason, health = row.escalation_reason, None
+        reason = row.escalation_reason
         try:
-            outcome = json.loads(reason)
-            reason, health = outcome["reason"], outcome["provider_health"]
+            reason = json.loads(reason)["reason"]
         except (TypeError, ValueError, KeyError):
             pass  # legacy scalar reason codes retain their existing meaning
         return {
@@ -374,7 +373,6 @@ def get_decision_by_id(decision_id: str) -> Optional[dict]:
             "retries": row.retries,
             "escalated": row.escalated,
             "escalation_reason": reason,
-            "provider_health": health,
             "verification_outcome": row.verification_outcome,
             "nondelegation_reason": row.nondelegation_reason,
             "recommended_route": row.recommended_route,

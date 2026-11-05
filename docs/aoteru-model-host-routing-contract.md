@@ -485,8 +485,9 @@ from host/worker eligibility. Paid read/write admission, preflight and agent
 status share this fact. Read-only telemetry uses a compact JSON envelope in
 `RoutingDecision.escalation_reason` (retaining the original reason code;
 decision lookup exposes it separately); write results use
-`EstateExecution.result_json.provider_health`. Controller classification ignores
-worker verdicts and persists with the outcome. No health table or replay is involved.
+`EstateExecution.result_json`. Routing telemetry stores bounded raw evidence in
+`provider_result`; health is classified on read, with failure evidence taking
+precedence over success flags. Stored verdicts are ignored. No health table or replay is involved.
 
 Admission is enforced only in `_execute_codex_with_sandbox`, immediately
 before paid CLI setup/launch, including worker execute and recovered/spooled

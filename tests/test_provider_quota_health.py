@@ -1,5 +1,6 @@
 """Provider cooldown is derived from existing outcomes, never host eligibility."""
 import json
+from itertools import product
 import os
 import sys
 from datetime import datetime, timedelta, timezone
@@ -31,6 +32,8 @@ def lab(fixture_config, monkeypatch, tmp_path):
             return cls.current.astimezone(tz) if tz else cls.current.replace(tzinfo=None)
 
     monkeypatch.setattr(router, "datetime", Clock)
+    monkeypatch.setattr(cdb, "datetime", Clock)
+    monkeypatch.setattr(write_lane, "_now", lambda: Clock.current.replace(tzinfo=None))
     monkeypatch.setattr(router, "resolve_latest_codex_model", lambda _: "gpt-6.1-sol")
     monkeypatch.setattr(router, "subscription_effort", lambda: "high")
     binary, count = tmp_path / "codex", tmp_path / "calls"
@@ -138,47 +141,6 @@ def test_database_read_failure_is_provider_scoped(lab, monkeypatch):
     assert "provider codex" in health["reason"]
 
 
-def test_atomic_routing_outcome_and_classification(lab, monkeypatch):
-    decision = router._record_decision(TASK, host_id="test-lab", executor="codex",
-                                      model_alias=None, concrete_model=None, status="needs_escalation")
-    def fail(result):
-        raise RuntimeError("failure between outcome assignment and classification")
-    with monkeypatch.context() as patch:
-        patch.setattr(router, "_provider_outcome", fail)
-        router._update_decision_outcome(decision, status="failed", deterministic_gate="fail",
-                                        provider_result={"ok": False, "error": LIMIT})
-    with cdb.get_db_session() as db:
-        row = db.get(cdb.RoutingDecision, decision)
-        assert row.status == "needs_escalation" and row.escalation_reason is None
-    router._update_decision_outcome(decision, status="failed", deterministic_gate="fail",
-                                    provider_result={"ok": False, "error": LIMIT})
-    assert router.provider_allows_dispatch("codex")["state"] == "quota_exhausted"
-
-
-def test_atomic_execution_outcome_and_classification(lab, monkeypatch):
-    result = json.dumps({"ok": False, "error": LIMIT, "provider_health": {"state": "ok", "retry_after": None, "reason": "no provider error"}})
-    with cdb.get_db_session() as db:
-        db.add(cdb.EstateExecution(id="write", objective="implement", executor="codex-write",
-                                  provider="codex", host_id="test-lab", repo_id="odysseus",
-                                  lifecycle_state="running", worktree_resolution="unresolved"))
-    def fail(result):
-        raise RuntimeError("classification failure")
-    with monkeypatch.context() as patch:
-        patch.setattr(router, "_provider_outcome", fail)
-        with pytest.raises(RuntimeError):
-            write_lane._transition("write", ("running",), lifecycle_state="failed",
-                                   result_json=result)
-    with cdb.get_db_session() as db:
-        row = db.get(cdb.EstateExecution, "write")
-        assert row.lifecycle_state == "running" and row.result_json is None
-    assert write_lane._transition("write", ("running",), lifecycle_state="failed",
-                                  result_json=result)
-    assert router.provider_allows_dispatch("codex")["state"] == "quota_exhausted"
-    assert write_lane._transition("write", ("failed",), lifecycle_state="succeeded",
-                                  result_json=json.dumps({"ok": True, "output": "done"}))
-    assert router.provider_allows_dispatch("codex")["state"] == "ok"
-
-
 @pytest.mark.parametrize("reset,expected,assumed", [
     ("5:39 PM.", "2026-11-05T17:39:00+00:00", False),
     ("5:39 AM.", "2026-11-06T05:39:00+00:00", False),
@@ -193,18 +155,16 @@ def test_atomic_execution_outcome_and_classification(lab, monkeypatch):
     ("5:39 PM on an unknown date.", "2026-11-05T12:15:00+00:00", True),
 ])
 def test_reset_wall_clock_in_lab_gmt(reset, expected, assumed):
-    state, retry, reason = router.classify_provider_outcome(
-        "You've hit your usage limit. Please try again at " + reset, NOW, host_tz=ZoneInfo("GMT"))
-    assert state == "quota_exhausted" and retry == expected
-    assert ("retry_after_assumed" in reason) == assumed
+    health = router._provider_outcome(
+        {"error": "You've hit your usage limit. Please try again at " + reset}, NOW, host_tz=ZoneInfo("GMT"))
+    assert health["state"] == "quota_exhausted" and health["retry_after"] == expected
+    assert health["retry_after_assumed"] == assumed
 
 
-def test_explicit_host_timezone_and_unknown_classification():
-    state, retry, _ = router.classify_provider_outcome(LIMIT, NOW, host_tz=ZoneInfo("Asia/Tokyo"))
-    assert state == "quota_exhausted" and retry == "2026-11-06T17:39:00+09:00"
-    assert router.classify_provider_outcome(LIMIT, NOW.replace(tzinfo=None), host_tz=ZoneInfo("GMT"))[1] == "2026-11-05T17:39:00+00:00"
-    assert router.classify_provider_outcome("", NOW, host_tz=timezone.utc)[0] == "ok"
-    assert router.classify_provider_outcome("tool exception", NOW, host_tz=timezone.utc)[0] == "unknown"
+def test_explicit_host_timezone():
+    health = router._provider_outcome({"error": LIMIT}, NOW, host_tz=ZoneInfo("Asia/Tokyo"))
+    assert health["state"] == "quota_exhausted" and health["retry_after"] == "2026-11-06T17:39:00+09:00"
+    assert router._provider_outcome({"error": LIMIT}, NOW.replace(tzinfo=None), host_tz=ZoneInfo("GMT"))["retry_after"] == "2026-11-05T17:39:00+00:00"
 
 
 def test_api_and_agent_status_report_the_same_provider_fact(lab, monkeypatch):
@@ -260,11 +220,10 @@ def test_qualified_local_alternative_does_not_grant_write_authority(lab, monkeyp
 
 def test_existing_timestamp_order_and_uuid_tiebreak(lab):
     with cdb.get_db_session() as db:
-        for key, state in (("z-random", "ok"), ("a-random", "unknown")):
+        for key, ok in (("z-random", True), ("a-random", False)):
             db.add(cdb.RoutingDecision(id=key, task_class="code_review", host_id="test-lab",
                 executor="codex", status="complete", created_at=NOW.replace(tzinfo=None),
-                escalation_reason=json.dumps({"provider_health": {
-                    "state": state, "retry_after": None, "reason": "observed"}})))
+                escalation_reason=json.dumps({"provider_result": {"ok": ok, "exit_code": 0}})))
         db.add(cdb.EstateExecution(id="zz-older", objective="old", executor="codex-write",
             provider="codex", host_id="test-lab", repo_id="odysseus", lifecycle_state="failed",
             created_at=NOW.replace(tzinfo=None) - timedelta(seconds=1), result_json="corrupt"))
@@ -330,20 +289,55 @@ def observed(result):
     return decision
 
 
-@pytest.mark.parametrize("result,state", [({}, "unknown"), ({"ok": False}, "unknown"),
-    ({"ok": None}, "unknown"), ({"stdout": " \t", "stderr": "\n", "error": " "}, "unknown"),
-    ({"ok": False, "stdout": " \n"}, "unknown"),
-    ({"ok": False, "error": "You've hit your usage limit"}, "quota_exhausted"),
-    ({"error": "You've hit your usage limit"}, "quota_exhausted"),
-    ({"ok": False, "exit_code": 1, "stderr": "tool failed"}, "unknown"),
-    ({"ok": False, "error": LIMIT, "provider_health": {"state": "quota_exhausted",
-      "retry_after": "2026-11-05T17:39:00+00:00", "reason": "worker verdict"}}, "quota_exhausted"),
-    ({"ok": True, "output": "done"}, "ok")])
-def test_worker_verdict_cannot_override_raw_outcome(lab, result, state):
-    result = {"provider_health": {"state": "ok", "retry_after": None, "reason": "no provider error"}, **result}
+@pytest.mark.parametrize("result,state", [
+    ({"ok": True, "error": LIMIT, "exit_code": 1}, "quota_exhausted"),
+    ({"ok": True, "exit_code": 1}, "unknown"),
+    ({"ok": True, "exit_code": 0, "output": LIMIT}, "quota_exhausted"),
+    ({"ok": True, "exit_code": 0, "error": "401 Unauthorized"}, "auth_failed"),
+    ({"ok": True, "exit_code": 0, "stderr": "connection failed"}, "unreachable"),
+    ({"ok": True, "exit_code": 0, "output": "done"}, "ok"),
+])
+def test_failure_first_fresh_and_recorded_outcomes(lab, result, state):
+    assert router._provider_outcome(result)["state"] == state
     observed(result)
     health = router.provider_allows_dispatch("codex")
     assert health["state"] == state and health["allowed"] == (state == "ok")
+
+
+def test_truncated_evidence_blocks_dispatch(lab):
+    decision = observed({"ok": True, "exit_code": 0, "output": "x" * 2048 + LIMIT})
+    with cdb.get_db_session() as db:
+        payload = json.loads(db.get(cdb.RoutingDecision, decision).escalation_reason)
+    assert "provider_health" not in payload and payload["provider_result"]["evidence_truncated"]
+    assert len(payload["provider_result"]["output"]) == 2048
+    assert not router.provider_allows_dispatch("codex")["allowed"]
+
+
+def test_failure_first_property_table():
+    for ok, code, error, quota, terminal in product(
+            (False, True), (0, 1), ("", "tool exception"), ("", LIMIT), ("succeeded", "failed")):
+        result = {"ok": ok, "exit_code": code, "error": error, "output": quota, "state": terminal}
+        state = router._provider_outcome(result)["state"]
+        assert (state == "ok") == (ok and code == 0 and not error and not quota and terminal == "succeeded"), result
+
+
+@pytest.mark.parametrize("result,terminal,columns,expected", [
+    ({"ok": False, "error": LIMIT}, "failed", {}, "quota_exhausted"),
+    ({"ok": True, "error": LIMIT, "exit_code": 1}, "failed", {}, "quota_exhausted"),
+    ({"ok": True, "exit_code": 0}, "failed", {}, "unknown"),
+    ({"ok": True, "exit_code": 0}, "succeeded", {}, "ok"),
+    ({}, "succeeded", {}, "unknown"),
+    (None, "failed", {"error": LIMIT}, "quota_exhausted"),
+    ({"ok": True, "exit_code": 0}, "succeeded", {"exit_status": "1"}, "unknown"),
+])
+def test_stored_verdict_is_ignored(lab, result, terminal, columns, expected):
+    with cdb.get_db_session() as db:
+        db.add(cdb.EstateExecution(id="write", objective="implement", executor="codex-write",
+            provider="codex", host_id="test-lab", repo_id="odysseus", lifecycle_state=terminal, **columns,
+            result_json=None if result is None else json.dumps({**result, "provider_health": {"state": "ok", "retry_after": None,
+                                                                   "reason": "cached success"}})))
+    health = router.provider_allows_dispatch("codex")
+    assert health["state"] == expected and health["allowed"] == (expected == "ok")
 
 
 @pytest.mark.parametrize("corrupt", [False, True])
@@ -362,7 +356,6 @@ def test_failed_telemetry_without_readable_result_blocks_dispatch(worker_lane, c
     write_lane._apply_view("write", view)
     row = write_lane._load_row("write")
     assert row.lifecycle_state == "failed"
-    assert json.loads(row.result_json)["provider_health"]["state"] == "unknown"
     health = router.provider_allows_dispatch("codex")
     assert health["state"] == "unknown" and not health["allowed"]
 
