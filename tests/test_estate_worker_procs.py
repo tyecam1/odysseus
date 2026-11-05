@@ -22,6 +22,21 @@ import src.estate_worker_procs as procs
 # Linux — real processes
 # ---------------------------------------------------------------------
 
+def test_runner_unit_forwards_worker_database_url(monkeypatch, tmp_path):
+    database_url = "sqlite:////shared/controller.db"
+    monkeypatch.setenv("DATABASE_URL", database_url)
+    monkeypatch.setattr(procs, "_user_manager_env", lambda: {})
+    commands = []
+
+    def run(argv, **kwargs):
+        commands.append(argv)
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(procs.subprocess, "run", run)
+    procs.spawn_runner_unit(["runner"], str(tmp_path), str(tmp_path / "runner.log"), "aoteru-run-test")
+    assert f"--setenv=DATABASE_URL={database_url}" in commands[0]
+
+
 def test_spawn_detached_is_alive_then_dies(tmp_path):
     handle = procs.spawn_detached(
         [sys.executable, "-c", "import time; time.sleep(2)"],

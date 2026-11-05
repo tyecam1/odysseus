@@ -109,7 +109,7 @@ def _provider_outcome(result: dict) -> dict:
         return result["provider_health"]  # classified in the executing host's timezone
     now = datetime.now().astimezone()
     text = "" if result.get("ok") is True else "\n".join(
-        str(result.get(k) or "") for k in ("stdout", "stderr", "error")) or "unknown failure"
+        str(result.get(k) or "") for k in ("stdout", "stderr", "error")).strip() or "unknown failure"
     state, retry, reason = classify_provider_outcome(text, now, host_tz=now.tzinfo)
     return {"state": state, "retry_after": retry, "reason": reason,
             "retry_after_assumed": "retry_after_assumed" in reason}

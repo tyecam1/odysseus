@@ -332,6 +332,33 @@ def observed(result):
     return decision
 
 
+@pytest.mark.parametrize("result", [{}, {"ok": False}, {"ok": None},
+    {"stdout": " \t", "stderr": "\n", "error": " "}, {"ok": False, "stdout": " \n"}])
+def test_missing_success_evidence_is_unknown(result):
+    assert router._provider_outcome(result)["state"] == "unknown"
+
+
+@pytest.mark.parametrize("corrupt", [False, True])
+def test_failed_telemetry_without_readable_result_blocks_dispatch(worker_lane, corrupt):
+    worker, units, _, _, _, _ = worker_lane
+    spool = units.write_spool("write", run_unit="aoteru-run-write.service",
+                              state={"state": "failed"}, populated=False)
+    if corrupt:
+        (spool / "result.json").write_text("{unreadable")
+    view = worker._execution_view(spool)
+    assert view["state"] == "failed" and "result" not in view
+    with cdb.get_db_session() as db:
+        db.add(cdb.EstateExecution(id="write", objective="implement", executor="codex-write",
+            provider="codex", host_id="test-lab", repo_id="odysseus",
+            lifecycle_state="running", worktree_resolution="unresolved"))
+    write_lane._apply_view("write", view)
+    row = write_lane._load_row("write")
+    assert row.lifecycle_state == "failed"
+    assert json.loads(row.result_json)["provider_health"]["state"] == "unknown"
+    health = router.provider_allows_dispatch("codex")
+    assert health["state"] == "unknown" and not health["allowed"]
+
+
 @pytest.mark.parametrize("unreadable", [False, True])
 def test_worker_execute_refuses_exhausted_or_unreadable(lab, worker_lane, unreadable):
     decision = observed({"ok": False, "error": LIMIT})
