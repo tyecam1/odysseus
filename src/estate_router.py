@@ -57,8 +57,11 @@ _CONFIG_DIR = Path(get_app_root()) / "config"
 
 # A fallback cooldown is policy, not a claimed provider reset time.
 _QUOTA_BACKOFF_SECONDS = 900
+# Transient telemetry uncertainty must permit recovery without a process restart.
+PROVIDER_HEALTH_FAIL_CLOSED_PERIOD = timedelta(minutes=15)
 _PROVIDER_FAILURE_STATES = frozenset({"quota_exhausted", "auth_failed", "unreachable"})
-# A failed persistence attempt must invalidate even an earlier persisted success.
+# Scoped uncertainty invalidates earlier success; durable entries retain their
+# replay expiry here without retaining an observation for persistence retry.
 _PROVIDER_HEALTH_WRITE_FAILURES = {}
 _PROVIDER_HEALTH_LOCK = threading.Lock()
 _USAGE_LIMIT = re.compile(r"you[’']ve\s+hit\s+your\s+usage\s+limit", re.I)
@@ -139,68 +142,149 @@ def _provider_failure_observation(text: str) -> Optional[dict]:
             "reason": f"Codex observed {state}; conservative 900-second bounded backoff"}
 
 
-def _unreadable_provider_health(provider: str, reason: str) -> dict:
-    return {"provider": provider, "state": "unknown_unreadable", "retry_after": None,
-            "retry_allowed": False, "reason": reason}
+def _unreadable_provider_health(provider: str, reason: str, *, installed_at=None,
+                                period=PROVIDER_HEALTH_FAIL_CLOSED_PERIOD) -> dict:
+    health = {"provider": provider, "state": "unknown_unreadable", "retry_after": None,
+              "retry_allowed": False, "reason": reason}
+    if installed_at is not None:
+        expiry = installed_at + period
+        health.update(observed_at=installed_at.isoformat(), retry_after=expiry.isoformat(),
+                      retry_allowed=_provider_now() >= expiry)
+    return health
 
 
-def provider_health(host_id: Optional[str], provider: str = "codex") -> dict:
-    """Latest observation; telemetry errors never authorise paid execution."""
-    key = (host_id or "none", provider)
-    with _PROVIDER_HEALTH_LOCK:
-        pending = _PROVIDER_HEALTH_WRITE_FAILURES.get(key)
-    if pending:
-        # One idempotent persistence retry per read; never probe the provider.
-        if pending["observation"] is None:
-            return pending["failure"]
-        _record_provider_health(host_id, pending["observation"], provider=provider,
-                                observation_id=pending["observation_id"])
+def _claim_provider_recovery(key, health):
+    # Health reads never consume the recovery attempt. Only the dispatch/admission
+    # boundary claims it, under the same per-scope latch lock as observations.
+    if health["state"] == "unknown_unreadable" and health["retry_allowed"]:
         with _PROVIDER_HEALTH_LOCK:
             pending = _PROVIDER_HEALTH_WRITE_FAILURES.get(key)
-            if pending:
+            now = _provider_now().astimezone(timezone.utc)
+            if pending and now < pending["installed_at"] + pending.get("period", PROVIDER_HEALTH_FAIL_CLOSED_PERIOD):
                 return pending["failure"]
-    health = {"provider": provider, "state": "unknown", "retry_after": None}
+            failure = _unreadable_provider_health(key[1], "provider recovery observation pending", installed_at=now)
+            _PROVIDER_HEALTH_WRITE_FAILURES[key] = {
+                "observation": None, "observation_id": str(uuid.uuid4()), "failure": failure,
+                "observed_at": now, "installed_at": now,
+            }
+    return health
+
+
+def provider_health(host_id: Optional[str], provider: str = "codex", *, claim_recovery=False) -> dict:
+    """Latest observation; uncertainty has a fixed expiry and one recovery attempt."""
+    key = (host_id or "none", provider)
+    health = {"provider": provider, "state": "unknown", "retry_after": None, "retry_allowed": True}
+    latest_at = latest_id = latch_observation_id = None
     try:
         from core.database import EstateExecution, RoutingDecision, get_db_session
         from src.estate_write_lane import (
-            _recent_provider_health, _unrecorded_provider_health, _classify_provider_health_replay,
+            REPLAY_HORIZON, _recent_provider_health, _unrecorded_provider_health, _classify_provider_health_replay,
         )
         with get_db_session() as db:
+            # Always read durable evidence before consulting a process latch: a
+            # different connection/process may already have observed recovery.
+            row = db.query(RoutingDecision).filter(
+                RoutingDecision.host_id == key[0], RoutingDecision.executor == provider,
+                RoutingDecision.task_class == "provider_health_observation",
+            ).order_by(RoutingDecision.created_at.desc(), RoutingDecision.id.desc()).first()
+            if row:
+                try:
+                    payload = json.loads(row.provider_health_json)
+                    _validate_provider_payload(payload)
+                    if payload["provider"] != provider:
+                        raise ValueError("provider observation scope mismatch")
+                    latest_at = datetime.fromisoformat(payload["observed_at"])
+                    latest_id = row.id
+                    health = _provider_health_view(payload)
+                except Exception:
+                    # Unlike a malformed worker response, unreadable durable
+                    # evidence may hide a week-long quota reset. Use its trusted
+                    # store time and the replay horizon, never its payload clock.
+                    health = _unreadable_provider_health(provider, "provider health telemetry unreadable",
+                        installed_at=row.created_at.replace(tzinfo=timezone.utc), period=REPLAY_HORIZON)
             unreadable = _recent_provider_health(db, EstateExecution, handled=True).filter(
                 EstateExecution.host_id == key[0], EstateExecution.provider == provider,
             ).join(RoutingDecision, RoutingDecision.id == "provider-health-replay:" + EstateExecution.id).filter(
                 RoutingDecision.escalation_reason.in_(("conflict", "unpersistable")),
-            ).with_entities(RoutingDecision.escalation_reason).first()
+            )
+            backlog = _unrecorded_provider_health(db, EstateExecution).filter(
+                EstateExecution.host_id == key[0], EstateExecution.provider == provider,
+            )
+            if latest_at is not None:
+                # A newer valid observation supersedes every older disposition
+                # (including pending replay), without altering replay bookkeeping.
+                cutoff = latest_at.astimezone(timezone.utc).replace(tzinfo=None)
+                unreadable = unreadable.filter(EstateExecution.finished_at >= cutoff)
+                backlog = backlog.filter(EstateExecution.finished_at >= cutoff)
+            unreadable = unreadable.with_entities(RoutingDecision.escalation_reason, EstateExecution.finished_at).order_by(
+                EstateExecution.finished_at.desc()).first()
             if unreadable:
                 reason = ("provider observation payload conflict" if unreadable[0] == "conflict"
                           else "unreadable_recent provider observation")
-                return _unreadable_provider_health(provider, reason)
-            backlog = _unrecorded_provider_health(db, EstateExecution).filter(
-                EstateExecution.host_id == key[0], EstateExecution.provider == provider,
-            ).outerjoin(RoutingDecision, RoutingDecision.id == "provider-health:" + EstateExecution.id
-            ).add_entity(RoutingDecision).yield_per(100)
-            for terminal, recorded in backlog:
-                disposition, _ = _classify_provider_health_replay(db, terminal, recorded=recorded)
-                if disposition in {"conflict", "unpersistable", "pending"}:
-                    reason = {"conflict": "provider observation payload conflict",
-                              "unpersistable": "unreadable_recent provider observation",
-                              "pending": "observation backlog"}[disposition]
-                    return _unreadable_provider_health(provider, reason)
-            row = db.query(RoutingDecision).filter(
-                RoutingDecision.host_id == key[0],
-                RoutingDecision.executor == provider,
-                RoutingDecision.task_class == "provider_health_observation",
-            ).order_by(RoutingDecision.created_at.desc(), RoutingDecision.id.desc()).first()
-            if row:
-                health = json.loads(row.provider_health_json)
-                _validate_provider_payload(health)
-                if health.get("provider") != provider:
-                    raise ValueError("provider observation scope mismatch")
-        return _provider_health_view(health)
+                health = _unreadable_provider_health(provider, reason,
+                    installed_at=unreadable[1].replace(tzinfo=timezone.utc), period=REPLAY_HORIZON)
+            else:
+                backlog = backlog.outerjoin(RoutingDecision, RoutingDecision.id == "provider-health:" + EstateExecution.id
+                ).add_entity(RoutingDecision).yield_per(100)
+                for terminal, recorded in backlog:
+                    disposition, _ = _classify_provider_health_replay(db, terminal, recorded=recorded)
+                    if disposition in {"conflict", "unpersistable", "pending"}:
+                        reason = {"conflict": "provider observation payload conflict",
+                                  "unpersistable": "unreadable_recent provider observation",
+                                  "pending": "observation backlog"}[disposition]
+                        health = _unreadable_provider_health(provider, reason,
+                            installed_at=terminal.finished_at.replace(tzinfo=timezone.utc), period=REPLAY_HORIZON)
+                        if disposition == "pending":
+                            latch_observation_id = f"provider-health:{terminal.id}"
+                        break
     except Exception:
         import logging
         logging.getLogger(__name__).exception("provider health telemetry read failed")
-        return _unreadable_provider_health(provider, "provider health telemetry unreadable")
+        # A partial read cannot clear uncertainty or claim a healthy provider.
+        latest_at = latest_id = latch_observation_id = None
+        health = {"provider": provider, "state": "unknown", "retry_after": None, "retry_allowed": True}
+        with _PROVIDER_HEALTH_LOCK:
+            if key not in _PROVIDER_HEALTH_WRITE_FAILURES:
+                now = _provider_now().astimezone(timezone.utc)
+                _PROVIDER_HEALTH_WRITE_FAILURES[key] = {
+                    "observation": None, "observation_id": str(uuid.uuid4()),
+                    "failure": _unreadable_provider_health(provider, "provider health telemetry unreadable", installed_at=now),
+                    "observed_at": now, "installed_at": now,
+                }
+    with _PROVIDER_HEALTH_LOCK:
+        pending = _PROVIDER_HEALTH_WRITE_FAILURES.get(key)
+        if health["state"] == "unknown_unreadable" and health.get("observed_at"):
+            installed = datetime.fromisoformat(health["observed_at"])
+            if pending is None or installed > pending["installed_at"]:
+                # Remember the fixed durable expiry even when its row leaves
+                # the indexed replay window; no persistence retry is needed.
+                pending = {"observation": None, "observation_id": latch_observation_id, "failure": health,
+                           "observed_at": installed, "installed_at": installed,
+                           "period": datetime.fromisoformat(health["retry_after"]) - installed}
+                _PROVIDER_HEALTH_WRITE_FAILURES[key] = pending
+        if pending and latest_at is not None and (
+                latest_at > pending["installed_at"] or (
+                    latest_id == pending["observation_id"] and health["state"] != "unknown_unreadable")):
+            _PROVIDER_HEALTH_WRITE_FAILURES.pop(key)
+            pending = None
+    if pending:
+        expiry = pending["installed_at"] + pending.get("period", PROVIDER_HEALTH_FAIL_CLOSED_PERIOD)
+        # Retry retained evidence only while live. Retries must never renew the
+        # original installation time or resurrect expired poison observations.
+        if pending["observation"] is not None and _provider_now() < expiry:
+            _record_provider_health(host_id, pending["observation"], provider=provider,
+                                    observation_id=pending["observation_id"])
+            with _PROVIDER_HEALTH_LOCK:
+                current = _PROVIDER_HEALTH_WRITE_FAILURES.get(key)
+            if current is None:
+                return provider_health(host_id, provider, claim_recovery=claim_recovery)
+            pending = current
+        # Durable failure evidence retains its own (possibly longer) cooldown.
+        if health["retry_allowed"]:
+            health = _unreadable_provider_health(provider, pending["failure"]["reason"],
+                                                installed_at=pending["installed_at"],
+                                                period=pending.get("period", PROVIDER_HEALTH_FAIL_CLOSED_PERIOD))
+    return _claim_provider_recovery(key, health) if claim_recovery else health
 
 
 def _validate_provider_payload(health: dict) -> None:
@@ -254,7 +338,7 @@ def _record_provider_health(host_id: Optional[str], health: dict, *, observation
     # Scope and failure metadata belong to the dispatch, never untrusted evidence.
     key = (host_id or "none", provider)
     observation_id = observation_id or str(uuid.uuid4())
-    observed_at = _provider_now().astimezone(timezone.utc)
+    installed_at = observed_at = _provider_now().astimezone(timezone.utc)
     observation = None
     try:
         from sqlalchemy.exc import IntegrityError
@@ -286,7 +370,7 @@ def _record_provider_health(host_id: Optional[str], health: dict, *, observation
                 _validate_provider_observation(row, key[0], health)
         with _PROVIDER_HEALTH_LOCK:
             previous = _PROVIDER_HEALTH_WRITE_FAILURES.get(key)
-            if previous is None or observed_at >= previous.get("observed_at", datetime.min.replace(tzinfo=timezone.utc)):
+            if previous is None or observation_id == previous["observation_id"] or observed_at >= previous["installed_at"]:
                 _PROVIDER_HEALTH_WRITE_FAILURES.pop(key, None)
         return health
     except Exception:
@@ -294,15 +378,17 @@ def _record_provider_health(host_id: Optional[str], health: dict, *, observation
         logging.getLogger(__name__).exception("provider health telemetry write failed")
         failure = _unreadable_provider_health(provider, (
             "provider health telemetry unreadable; invalid observation" if observation is None else
-            "provider health telemetry unwritable; observation not persisted"))
-        failure["observed_at"] = observed_at.isoformat()
+            "provider health telemetry unwritable; observation not persisted"), installed_at=installed_at)
         if retain_failure:
             with _PROVIDER_HEALTH_LOCK:
                 previous = _PROVIDER_HEALTH_WRITE_FAILURES.get(key)
                 if observation is None or previous is None or observed_at >= previous.get("observed_at", datetime.min.replace(tzinfo=timezone.utc)):
+                    if previous and previous["observation_id"] == observation_id:
+                        installed_at = previous["installed_at"]
+                    failure = _unreadable_provider_health(provider, failure["reason"], installed_at=installed_at)
                     _PROVIDER_HEALTH_WRITE_FAILURES[key] = {
                         "observation": observation, "observation_id": observation_id, "failure": failure,
-                        "observed_at": observed_at,
+                        "observed_at": observed_at, "installed_at": installed_at,
                     }
         return failure
 
@@ -1689,7 +1775,7 @@ def _dispatch_read_only(host_id: str, executor: str, task: dict, *, concrete_mod
     from src.estate_worker_client import WorkerTransportError, call_worker
 
     if executor == "codex":
-        refusal = _provider_refusal(provider_health(host_id))
+        refusal = _provider_refusal(provider_health(host_id, claim_recovery=True))
         if refusal:
             return refusal
     objective = task.get("objective")

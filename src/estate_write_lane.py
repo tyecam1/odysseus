@@ -47,6 +47,8 @@ PROVIDER_HEALTH_REPLAY_BATCH_SIZE = 10
 # No accepted cooldown exceeds MAX_COOLDOWN from its original observation.
 # Retain replay and unreadable dispositions for that lifetime plus a clock
 # margin, so expiry cannot forget a cooldown while keeping an indexed window.
+# Durable unreadable/pending evidence may hide a long reset, unlike the short
+# malformed-response latch. Newer valid persisted evidence supersedes either.
 MAX_COOLDOWN = timedelta(days=7)
 REPLAY_HORIZON = MAX_COOLDOWN + timedelta(minutes=15)
 PROVIDER_HEALTH_PAYLOAD_MAX_BYTES = 1024 * 1024
@@ -162,7 +164,8 @@ def _record_outcome(row, state: str, host_id: str, result: Optional[dict] = None
     health = (result or {}).get("provider_health")
     if "provider_health" in (result or {}):
         # Durable terminal evidence is owned by bounded replay, including its
-        # failure lifetime. Only non-durable observations need a process latch.
+        # failure lifetime. Only non-durable observations need a process
+        # persistence-retry latch; durable gates retain execution/store times.
         health = _router._record_provider_health(host_id, health, observation_id=(
             f"provider-health:{row.id}" if getattr(row, "id", None) else None),
             retain_failure=not bool(getattr(row, "id", None)), provider=getattr(row, "provider", "codex"))
@@ -301,7 +304,7 @@ def execute_write_via_worker(objective: str, *, repo_id: str, host_id: str,
                 reuse = _admission_outcome(blocker)
                 return {"ok": True, "provider": "codex-write", **reuse,
                         "next_action": _next_action_observe(reuse["execution_id"])}
-            refusal = _router._provider_refusal(_router.provider_health(host_id))
+            refusal = _router._provider_refusal(_router.provider_health(host_id, claim_recovery=True))
             if refusal:
                 return refusal
             now = _now()

@@ -651,6 +651,7 @@ def test_retry_cannot_delete_newer_pending_failure(quota_lane, monkeypatch):
     pending = InterleavedPending({key: {
         'observation': older, 'observation_id': 'retry-a',
         'failure': router._unreadable_provider_health('codex', 'pending A'),
+        'installed_at': now[0], 'observed_at': datetime.fromisoformat(older['observed_at']),
     }})
     monkeypatch.setattr(router, '_PROVIDER_HEALTH_WRITE_FAILURES', pending)
     monkeypatch.setattr(router, '_PROVIDER_HEALTH_LOCK', ObservedLock(), raising=False)
@@ -1300,7 +1301,8 @@ def test_unpersistable_recent_rows_do_not_monopolise_replay(quota_lane):
     # A durable disposition prevents repeated persistence attempts, including after restart.
     with cdb.get_db_session() as db:
         lane.reconcile_stale_estate_executions(db, cdb.EstateExecution)
-    assert not router._PROVIDER_HEALTH_WRITE_FAILURES
+    assert all(pending['observation'] is None and pending['period'] == lane.REPLAY_HORIZON
+               for pending in router._PROVIDER_HEALTH_WRITE_FAILURES.values())
     now[0] += lane.REPLAY_HORIZON + timedelta(seconds=1)
     assert router.provider_health('bad-host')['retry_allowed']
     assert not count.exists()
@@ -1395,3 +1397,221 @@ def test_member_extraction_replays_health_without_rewriting_execution_outcome(qu
         observation = db.query(cdb.RoutingDecision).filter_by(id='provider-health:large-success').one()
         assert json.loads(observation.provider_health_json) == health
     assert router.provider_health('lab')['state'] == 'ok'
+
+
+# Round 10: a latch's lifetime comes from controller/store time, never bad evidence.
+_LATCH_KINDS = ('malformed', 'write_failure', 'query_failure', 'persisted_unreadable',
+                'replay_pending', 'replay_unreadable', 'replay_conflict',
+                'disposed_unreadable', 'disposed_conflict', 'recovery_pending')
+
+
+def _external_provider_observation(now, state='ok', *, host='lab', provider='codex'):
+    """Commit through another connection without touching the process latch."""
+    health = {'provider': provider, 'state': state, 'observed_at': now.isoformat(),
+              'retry_after': None, 'reason': 'independently observed execution'}
+    if state != 'ok':
+        health.update(retry_after=(now + timedelta(hours=2)).isoformat(), retry_after_source='provider_time')
+    peer = create_engine(cdb.SessionLocal.kw['bind'].url)
+    try:
+        with peer.begin() as conn:
+            conn.execute(cdb.RoutingDecision.__table__.insert().values(
+                id=f'external:{host}:{provider}:{now.isoformat()}', host_id=host, executor=provider,
+                task_class='provider_health_observation', created_at=now.replace(tzinfo=None),
+                provider_health_json=json.dumps(health), status='complete'))
+    finally:
+        peer.dispose()
+    return health
+
+
+def _install_test_latch(quota_lane, monkeypatch, kind):
+    from contextlib import contextmanager
+    from src import estate_write_lane as lane
+    message, count, now = quota_lane
+    _external_provider_observation(now[0] - timedelta(seconds=1))
+    installed = now[0]
+    real_session = cdb.get_db_session
+    if kind in ('malformed', 'recovery_pending'):
+        # Reproduce the reviewed path after a persisted success; a malicious
+        # payload clock must not anchor or extend the malformed-response latch.
+        bad = {'provider': 'codex', 'state': 'ok', 'retry_after': None,
+               'reason': 'missing observed_at'}
+        monkeypatch.setattr(client, 'call_worker', lambda host, *a, **k: {
+            'result': {'ok': False, 'provider_health': bad}, 'attestation': {'host_id': host}})
+        assert router._dispatch_read_only('lab', 'codex', {'objective': 'review'})['provider_health']['state'] == 'unknown_unreadable'
+        if kind == 'recovery_pending':
+            now[0] += timedelta(minutes=15)
+            with monkeypatch.context() as recovery_patch:
+                def disconnected(*a, **k):
+                    raise client.WorkerTransportError('worker_unreachable', 'no recovery observation')
+                recovery_patch.setattr(client, 'call_worker', disconnected)
+                result = router._dispatch_read_only('lab', 'codex', {'objective': 'recover'})
+                assert result['error_code'] == 'worker_unreachable'
+            installed = now[0]
+    elif kind == 'write_failure':
+        original_add = cdb.SessionLocal.class_.add
+        def reject_health(db, row, *a, **k):
+            if isinstance(row, cdb.RoutingDecision) and row.task_class == 'provider_health_observation' \
+                    and json.loads(row.provider_health_json)['state'] != 'ok':
+                raise OSError('observation writes unavailable')
+            return original_add(db, row, *a, **k)
+        monkeypatch.setattr(cdb.SessionLocal.class_, 'add', reject_health)
+        router._record_provider_health('lab', router._quota_observation(message.read_text()))
+    elif kind == 'query_failure':
+        @contextmanager
+        def broken():
+            raise OSError('telemetry read unavailable')
+            yield
+        monkeypatch.setattr(cdb, 'get_db_session', broken)
+    elif kind == 'persisted_unreadable':
+        with real_session() as db:
+            db.add(cdb.RoutingDecision(id='unreadable', host_id='lab', executor='codex',
+                task_class='provider_health_observation', status='blocked',
+                created_at=installed.replace(tzinfo=None), provider_health_json='{bad'))
+    else:
+        health = router._quota_observation(message.read_text())
+        conflict = kind.endswith('conflict')
+        payload = json.dumps({'provider_health': health}) if conflict or kind == 'replay_pending' else '{bad'
+        with real_session() as db:
+            db.add(_replay_execution('latch', payload, installed.replace(tzinfo=None)))
+            if conflict:
+                db.add(cdb.RoutingDecision(id='provider-health:latch', host_id='lab', executor='codex',
+                    task_class='provider_health_observation', created_at=installed.replace(tzinfo=None),
+                    status='blocked', provider_health_json=json.dumps({**health, 'reason': 'conflicting reason'})))
+        if kind.startswith('disposed_'):
+            with real_session() as db:
+                lane.reconcile_stale_estate_executions(db, cdb.EstateExecution)
+    health = router.provider_health('lab')
+    assert health['state'] == 'unknown_unreadable' and not health['retry_allowed']
+    period = lane.REPLAY_HORIZON if kind.startswith(('replay_', 'disposed_', 'persisted_')) else timedelta(minutes=15)
+    return installed, period, real_session
+
+
+@pytest.mark.parametrize('kind', _LATCH_KINDS)
+def test_round10_latch_expiry_allows_one_reobservation(quota_lane, quota_write_lease, monkeypatch, kind):
+    from src import estate_write_lane as lane
+    message, count, now = quota_lane
+    installed, period, real_session = _install_test_latch(quota_lane, monkeypatch, kind)
+    calls = []
+    def reobserve(host, *a, **k):
+        calls.append(host)
+        # While the sole recovery call is running, both boundaries stay shut.
+        assert router._dispatch_read_only('lab', 'codex', {'objective': 'concurrent read'})['executed'] is False
+        if kind != 'query_failure':
+            assert lane.execute_write_via_worker('implement', repo_id='odysseus', host_id='lab')['executed'] is False
+        return {'result': {'ok': False, 'provider_health': {'state': 'bad'}}, 'attestation': {'host_id': host}}
+    monkeypatch.setattr(client, 'call_worker', reobserve)
+    monkeypatch.setattr(lane, '_worker', lambda *a, **k: pytest.fail('blocked write reached worker'))
+    # Repeated reads/retries, including just before expiry, cannot slide it.
+    for delta in (period / 2, period - timedelta(microseconds=1)):
+        now[0] = installed + delta
+        assert not router.provider_health('lab')['retry_allowed']
+        assert router._dispatch_read_only('lab', 'codex', {'objective': 'review'})['executed'] is False
+        if kind != 'query_failure':
+            assert lane.execute_write_via_worker('implement', repo_id='odysseus', host_id='lab')['executed'] is False
+    now[0] = installed + period + timedelta(microseconds=1)
+    # Query failures retain the first failure time even while the DB stays down.
+    assert router.provider_health('lab')['retry_allowed']
+    assert router.provider_health('lab')['retry_allowed']  # observing is not a claim
+    result = router._dispatch_read_only('lab', 'codex', {'objective': 'recover'})
+    assert result['provider_health']['state'] == 'unknown_unreadable'
+    assert calls == ['lab']
+    assert not router.provider_health('lab')['retry_allowed']
+    assert router._dispatch_read_only('lab', 'codex', {'objective': 'again'})['executed'] is False
+    assert not count.exists()
+
+
+@pytest.mark.parametrize('kind', _LATCH_KINDS)
+@pytest.mark.parametrize('state', ['ok', 'quota_exhausted'])
+def test_round10_newer_durable_evidence_supersedes_every_latch(quota_lane, monkeypatch, kind, state):
+    message, count, now = quota_lane
+    installed, period, real_session = _install_test_latch(quota_lane, monkeypatch, kind)
+    monkeypatch.setattr(cdb, 'get_db_session', real_session)
+    now[0] = installed + timedelta(seconds=1)
+    # Neither another host nor another provider can clear this scope's latch.
+    _external_provider_observation(now[0], host='other-host')
+    _external_provider_observation(now[0], provider='other-provider')
+    assert not router.provider_health('lab')['retry_allowed']
+    expected = _external_provider_observation(now[0], state)
+    health = router.provider_health('lab')
+    assert health['state'] == state
+    assert health['retry_allowed'] is (state == 'ok')
+    assert health['retry_after'] == expected['retry_after']
+    assert ('lab', 'codex') not in router._PROVIDER_HEALTH_WRITE_FAILURES
+    if state == 'quota_exhausted':
+        monkeypatch.setattr(client, 'call_worker', lambda *a, **k: pytest.fail('new quota escaped gate'))
+        assert router._dispatch_read_only('lab', 'codex', {'objective': 'review'})['executed'] is False
+        now[0] += timedelta(hours=2)
+        assert router.provider_health('lab')['retry_allowed']
+    assert not count.exists()
+
+
+@pytest.mark.parametrize('kind', [kind for kind in _LATCH_KINDS if kind != 'query_failure'])
+def test_round10_write_admission_claims_recovery_after_verification(quota_lane, quota_write_lease, monkeypatch, kind):
+    from src import estate_write_lane as lane
+    message, count, now = quota_lane
+    installed, period, real_session = _install_test_latch(quota_lane, monkeypatch, kind)
+    now[0] = installed + period + timedelta(microseconds=1)
+    verbs = []
+    def worker(host, verb, payload, **kw):
+        verbs.append(verb)
+        if verb == 'worktree.verify':
+            # A telemetry/readiness check or worktree verification cannot
+            # consume the one attempt before the durable admission boundary.
+            assert router.provider_health('lab')['retry_allowed']
+            return {'ok': True, 'clean': True, 'head_sha': 'abc'}, None
+        assert verb == 'start'
+        assert not router.provider_health('lab')['retry_allowed']
+        assert router._dispatch_read_only('lab', 'codex', {'objective': 'concurrent'})['executed'] is False
+        # Advance observation time to establish strictly newer durable evidence.
+        now[0] += timedelta(seconds=1)
+        return {'state': 'succeeded', 'handle': {'pid': 123}, 'result': {'ok': True, 'output': 'done',
+            'provider_health': {'provider': 'codex', 'state': 'ok', 'retry_after': None,
+                'observed_at': now[0].isoformat(), 'reason': 'successful recovery'}}}, None
+    monkeypatch.setattr(lane, '_worker', worker)
+    monkeypatch.setattr(client, 'call_worker', lambda *a, **k: pytest.fail('concurrent paid read escaped gate'))
+    result = lane.execute_write_via_worker('implement', repo_id='odysseus', host_id='lab')
+    assert result['lifecycle_state'] == 'succeeded'
+    assert verbs == ['worktree.verify', 'start']
+    assert router.provider_health('lab')['state'] == 'ok'
+    assert not count.exists()
+
+
+def test_round10_expired_malformed_latch_cannot_survive_a_year(quota_lane, monkeypatch):
+    from src import estate_write_lane as lane
+    message, count, now = quota_lane
+    installed, period, real_session = _install_test_latch(quota_lane, monkeypatch, 'malformed')
+    now[0] = installed + lane.REPLAY_HORIZON + timedelta(days=365)
+    message.write_text('ok')
+    monkeypatch.setattr(client, 'call_worker', lambda host, verb, payload, **kw: {
+        'result': router.execute_codex(payload['objective']), 'attestation': {'host_id': host}})
+    assert _run_paid()['ok']
+    assert router.provider_health('lab')['state'] == 'ok'
+    assert count.read_text().count('call') == 2  # catalogue plus one normal execution
+
+
+@pytest.mark.parametrize('external', [False, True])
+def test_round10_persisting_pending_terminal_evidence_clears_its_latch(quota_lane, external):
+    from src import estate_write_lane as lane
+    message, count, now = quota_lane
+    health = router._quota_observation(message.read_text())
+    # A real execution finishes after the worker observed its quota state.
+    now[0] += timedelta(seconds=2)
+    with cdb.get_db_session() as db:
+        db.add(_replay_execution('pending-later-finish', json.dumps({'provider_health': health}),
+                                now[0].replace(tzinfo=None)))
+    assert not router.provider_health('lab')['retry_allowed']
+    if external:
+        with cdb.SessionLocal.kw['bind'].begin() as conn:
+            conn.execute(cdb.RoutingDecision.__table__.insert().values(
+                id='provider-health:pending-later-finish', task_class='provider_health_observation',
+                host_id='lab', executor='codex', status='blocked',
+                created_at=datetime.fromisoformat(health['observed_at']).replace(tzinfo=None),
+                provider_health_json=json.dumps(health)))
+    else:
+        with cdb.get_db_session() as db:
+            lane.reconcile_stale_estate_executions(db, cdb.EstateExecution)
+    observed = router.provider_health('lab')
+    assert observed['state'] == 'quota_exhausted'
+    assert observed['retry_after'] == health['retry_after']
+    now[0] = datetime.fromisoformat(health['retry_after'])
+    assert router.provider_health('lab')['retry_allowed']

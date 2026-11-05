@@ -564,11 +564,19 @@ connection failures and timeouts produce `unreachable`. Both use the same
 a provider reset. Expiry permits recovery execution; success restores `ok`.
 
 Malformed/missing observation payloads and failed health queries fail closed
-as `unknown_unreadable` with a reason and `retry_allowed: false`. A failed
-observation write also invalidates earlier success in the serving process
-until that observation or a newer one is persisted; it is reported as
-`unknown_unreadable`, never `ok`/live. No observation yet is `unknown` and
-permits the initial normal execution. Host and worker eligibility are unchanged.
+as `unknown_unreadable` with a reason and `retry_allowed: false`. Malformed
+worker evidence, failed health queries, failed observation writes and pending
+recovery observations use a fixed **15-minute** fail-closed period
+(`PROVIDER_HEALTH_FAIL_CLOSED_PERIOD`), anchored to controller installation
+time, never a malformed payload timestamp. Persistence retries do not renew
+that time. Expiry permits one paid recovery attempt per serving process and
+provider/host scope; dispatch/write admission atomically reserves it until a
+new observation or the next bounded expiry. Health reads do not reserve it.
+A failed observation write invalidates earlier success while the latch is live;
+it is reported as `unknown_unreadable`, never `ok`/live. Any strictly newer valid
+persisted observation in the same scope immediately supersedes a latch, even
+when another process wrote it; a newer quota failure retains its own reset.
+No observation yet is `unknown` and permits the initial normal execution. Host and worker eligibility are unchanged.
 Health reads retry a retained non-durable observation once with the same id;
 terminal evidence instead belongs to bounded reconciliation.
 Terminal durable execution results are replayed using an execution-derived
@@ -588,8 +596,12 @@ failed observation persistence get durable `unpersistable`/`conflict` dispositio
 in the existing routing telemetry, atomically with the handled marker. They do
 not consume another sweep's budget. Their host/provider stays fail-closed as
 `unknown_unreadable` (`unreadable_recent` or conflict reason) until the execution
-ages out of the replay window, including after restart. Parsing is bounded to
-1 MiB and 64 container levels. If a whole result exceeds those bounds, replay
+ages out of the replay window or a newer valid persisted observation supersedes
+it, including after restart. These dispositions, unrecorded terminal observations
+and unreadable stored health rows use trusted execution/store times and the
+longer replay horizon because they may conceal a supported week-long quota
+reset; a transient malformed worker response uses the short recovery period.
+Parsing is bounded to 1 MiB and 64 container levels. If a whole result exceeds those bounds, replay
 tries to recover only its complete top-level `provider_health` object within a
 1 MiB scan; evidence outside that bound remains unreadable, never harmless.
 Existing observations must match the terminal payload and scope. Unrecorded
