@@ -302,7 +302,7 @@ def test_reconciliation_never_relaunches_a_paid_executor(runtime_db, monkeypatch
 # reconciliation for rows created before Stage 6.
 
 
-def test_codex_process_group_is_killed_on_timeout(monkeypatch, tmp_path):
+def test_codex_process_group_is_killed_on_timeout(runtime_db, monkeypatch, tmp_path):
     """_execute_codex_with_sandbox (used by the worker runner) kills the
     codex process group on timeout and reports it."""
     hold_event = threading.Event()

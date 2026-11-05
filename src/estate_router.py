@@ -55,14 +55,13 @@ from src.estate_worker_procs import (
 _CONFIG_DIR = Path(get_app_root()) / "config"
 
 
-def _provider_outcome(result: dict, now=None, *, host_tz=None, recorded=None) -> dict:
+def _provider_outcome(result: dict, now=None, *, host_tz=None) -> dict:
     """Failure evidence always wins; reset clocks are relative to the outcome."""
     now = now or datetime.now().astimezone()
     host_tz = host_tz or now.tzinfo
-    sources = (result, recorded or {})
-    states = [s[k] for s in sources for k in ("status", "state", "terminal_state", "lifecycle_state") if s.get(k) is not None]
-    exits = [s[k] for s in sources for k in ("exit_code", "exit_status", "returncode") if s.get(k) is not None]
-    text = "\n".join(str(s.get(k) or "") for s in sources for k in ("error", "output", "stdout", "stderr"))
+    states = [result[k] for k in ("status", "state", "terminal_state", "lifecycle_state") if result.get(k) is not None]
+    exits = [result[k] for k in ("exit_code", "exit_status", "returncode") if result.get(k) is not None]
+    text = "\n".join(str(result.get(k) or "") for k in ("error", "output", "stdout", "stderr"))
     text = (text + "\n" + "\n".join(map(str, states))).lower().replace("’", "'")
     now = now.replace(tzinfo=host_tz) if now.tzinfo is None else now.astimezone(host_tz)
     retry = now + timedelta(minutes=15)
@@ -104,61 +103,62 @@ def _provider_outcome(result: dict, now=None, *, host_tz=None, recorded=None) ->
     elif re.search(r"unreachable|connection|timed out|timeout|dns|network", text):
         state, reason = "unreachable", "provider transport unavailable"
     else:
-        success = (result.get("ok") is True and not any(s.get("error") for s in sources)
+        success = (result.get("ok") is True and not result.get("error")
                    and not result.get("evidence_truncated")
                    and all(type(code) in (int, str) and code in (0, "0") for code in exits)
                    and all(s in {"complete", "completed", "succeeded"} for s in states)
-                   and bool(exits or states)
+                   and bool(exits) and bool(states)
                    and not re.search(r"\b(error|failed|failure|exception|interrupted|cancelled|canceled)\b", text))
         state, reason = ("ok", "no provider error") if success else ("unknown", "unclassified provider outcome")
         retry = None
-    return {"state": state, "retry_after": min(retry, now + timedelta(days=7)).isoformat() if retry else None,
+    return {"state": state, "retry_after": min(retry, now + timedelta(days=7)).astimezone(timezone.utc).isoformat() if retry else None,
             "reason": reason, "retry_after_assumed": "retry_after_assumed" in reason}
 
 
 def provider_allows_dispatch(provider: str, *, now: Optional[datetime] = None) -> dict:
     """Derived provider fact, independent of worker/host/lease eligibility."""
-    from core.database import RoutingDecision, EstateExecution, get_db_session
+    from core.database import RoutingDecision, get_db_session
     now = now or datetime.now(timezone.utc)
-    health = {"state": "unknown", "retry_after": None, "reason": "latest outcome unreadable"}
-    allowed = False
+    health = {"state": "unknown", "retry_after": None, "reason": "no recorded outcome; initial attempt permitted"}
     try:
         with get_db_session() as db:
-            decision = db.query(RoutingDecision).filter(
-                RoutingDecision.executor == provider,
-                RoutingDecision.status.in_(("complete", "failed")),
+            # Only the launch recorder creates provider_outcome rows. Routing
+            # refusals and execution lifecycle updates are not observations.
+            row = db.query(RoutingDecision).filter_by(
+                executor=provider, task_class="provider_outcome",
             ).order_by(RoutingDecision.created_at.desc(), RoutingDecision.id.desc()).first()
-            execution = db.query(EstateExecution).filter(
-                EstateExecution.provider == provider,
-                EstateExecution.lifecycle_state.in_(("succeeded", "failed", "timed_out", "interrupted")),
-            ).order_by(EstateExecution.created_at.desc(), EstateExecution.id.desc()).first()
-            rows = [r for r in (decision, execution) if r is not None]
-            if not rows:
-                # No observation is distinct from a damaged/unreadable observation.
-                health["reason"] = "no recorded outcome; initial attempt permitted"
-                allowed = True
-            else:
-                # UUIDs only break ties. Backwards wall-clock jumps can mis-order
-                # outcomes; retry_after bounds cooldown and the next outcome corrects it.
-                row = max(rows, key=lambda r: (r.created_at, r.id))
-                try:
-                    payload = json.loads(row.result_json if row is execution else row.escalation_reason)
-                except (TypeError, ValueError):
-                    payload = {}  # execution columns may still contain failure evidence
-                health = _provider_outcome(
-                    payload if row is execution else payload["provider_result"],
-                    ((row.finished_at or row.created_at) if row is execution else row.updated_at).replace(tzinfo=timezone.utc),
-                    host_tz=datetime.now().astimezone().tzinfo,
-                    recorded={"state": row.lifecycle_state, "error": row.error, "exit_status": row.exit_status}
-                    if row is execution else {"state": row.status})
+            allowed = row is None
+            if row is not None:
+                health = json.loads(row.escalation_reason)["provider_health"]
                 state, retry = health["state"], health["retry_after"]
+                if not isinstance(health["reason"], str) or type(health["retry_after_assumed"]) is not bool:
+                    raise ValueError("incomplete stored provider health")
                 reset = datetime.fromisoformat(retry) if retry else None
+                if (state not in {"ok", "unknown", "quota_exhausted", "auth_failed", "unreachable"}
+                        or (reset is not None and reset.tzinfo is None)):
+                    raise ValueError("invalid stored provider health")
                 allowed = state == "ok" or (state != "unknown" and reset is not None and now >= reset)
     except Exception:
         health = {"state": "unknown", "retry_after": None, "reason": "latest outcome unreadable or unparseable"}
         allowed = False
     return {**health, "provider": provider, "allowed": allowed,
             "reason": f"provider {provider}: {health['state']}: {health['reason']}"}
+
+
+def _record_provider_outcome(result: dict) -> Optional[str]:
+    """Called only after Popen succeeds; classify full evidence once, before storage."""
+    from core.database import RoutingDecision, get_db_session
+    health, outcome_id = _provider_outcome(result), str(uuid.uuid4())
+    try:
+        with get_db_session() as db:
+            db.add(RoutingDecision(id=outcome_id, task_class="provider_outcome",
+                host_id=socket.gethostname(), executor="codex",
+                status="complete" if health["state"] == "ok" else "failed",
+                escalation_reason=json.dumps({"provider_health": health})))
+        return outcome_id
+    except Exception:
+        import logging
+        logging.getLogger(__name__).exception("provider outcome write failed")
 
 
 class RoutingConfigError(RuntimeError):
@@ -943,8 +943,7 @@ def _update_decision_outcome(decision_id: str, *, status: str, deterministic_gat
                              actual_route: Optional[str] = None,
                              verification_outcome: Optional[str] = None,
                              executed_host_id: Optional[str] = None,
-                             concrete_model: Optional[str] = None,
-                             provider_result: Optional[dict] = None) -> None:
+                             concrete_model: Optional[str] = None) -> None:
     """Execution happens after `resolve_route()` already wrote its
     decision row — update that same row with the real outcome rather than
     writing a second telemetry row for one routed task (`RoutingDecision`
@@ -977,14 +976,6 @@ def _update_decision_outcome(decision_id: str, *, status: str, deterministic_gat
                     row.executed_host_id = executed_host_id
                 if concrete_model is not None:
                     row.concrete_model = concrete_model
-                if provider_result is not None:
-                    evidence = {k: v[:2048] if isinstance(v, str) else v for k, v in provider_result.items()
-                                if k in {"ok", "error", "output", "stdout", "stderr", "exit_code", "exit_status",
-                                         "returncode", "status", "state", "terminal_state", "lifecycle_state"}}
-                    evidence["evidence_truncated"] = any(isinstance(provider_result[k], str) and len(provider_result[k]) > 2048
-                                                        for k in evidence)
-                    row.escalation_reason = json.dumps({"reason": row.escalation_reason,
-                                                       "provider_result": evidence})
     except Exception:
         import logging
         logging.getLogger(__name__).exception("routing_decisions outcome update failed; execution result is unaffected")
@@ -1164,6 +1155,7 @@ def _execute_codex_with_sandbox(objective: str, *, sandbox: str, provider: str,
     started = time.monotonic()
     with tempfile.TemporaryDirectory(prefix="p12-codex-") as scratch:
         out_path = str(Path(scratch) / "codex-last-message.txt")
+        proc, result, stdout, stderr = None, {}, "", ""
         try:
             proc = subprocess.Popen(
                 [
@@ -1197,18 +1189,20 @@ def _execute_codex_with_sandbox(objective: str, *, sandbox: str, provider: str,
             stdout, stderr = proc.communicate(timeout=timeout)
             latency_ms = int((time.monotonic() - started) * 1000)
             if proc.returncode != 0:
-                return {
+                result = {
                     "ok": False, "exit_code": proc.returncode, "provider": provider, "latency_ms": latency_ms,
                     "error": f"codex exec exited {proc.returncode}: {(stdout or '')[-1000:]}\n{(stderr or '')[-1000:]}",
                     "codex_binary": codex_binary,
                 }
+                return result
             output = Path(out_path).read_text().strip() if Path(out_path).exists() else ""
-            return {"ok": True, "exit_code": 0, "stdout": stdout, "stderr": stderr,
+            result = {"ok": True, "exit_code": 0, "stdout": stdout, "stderr": stderr,
                     "provider": provider, "output": output, "latency_ms": latency_ms,
                     "codex_binary": codex_binary, "concrete_model": subscription_model,
                     "reasoning_effort": reasoning_effort,
                     "model_catalogue": "authenticated-codex-debug-models"}
-        except subprocess.TimeoutExpired:
+            return result
+        except subprocess.TimeoutExpired as exc:
             # Tree-aware cleanup: killpg alone is insufficient when a
             # descendant (observed live: the MCP server codex spawns)
             # has moved into its own process group while staying in the
@@ -1218,8 +1212,9 @@ def _execute_codex_with_sandbox(objective: str, *, sandbox: str, provider: str,
             cleanup = _kill_process_tree(process_group_id, process_group_id)
             cleanup_incomplete = not cleanup["ok"]
             try:
-                proc.communicate(timeout=5)
+                stdout, stderr = proc.communicate(timeout=5)
             except subprocess.TimeoutExpired:
+                stdout, stderr = exc.stdout, exc.stderr
                 # Bounded reap so a cleanup call itself can never hang
                 # indefinitely - but if it still hasn't drained by then,
                 # something is holding the output pipes open past a
@@ -1236,8 +1231,13 @@ def _execute_codex_with_sandbox(objective: str, *, sandbox: str, provider: str,
                 result["cleanup_still_alive_pids"] = cleanup["still_alive_pids"]
             return result
         except Exception as e:
-            return {"ok": False, "provider": provider, "error": str(e),
-                    "latency_ms": int((time.monotonic() - started) * 1000)}
+            result = {"ok": False, "provider": provider, "error": str(e),
+                      "latency_ms": int((time.monotonic() - started) * 1000)}
+            return result
+        finally:
+            if proc is not None:
+                _record_provider_outcome({"stdout": stdout, "stderr": stderr,
+                    "exit_code": proc.returncode, "state": "completed" if proc.returncode == 0 else "failed", **result})
 
 
 def execute_codex(objective: str, *, timeout: float = 180.0, cwd: Optional[str] = None) -> dict:
@@ -1767,7 +1767,7 @@ def run_task(task: dict) -> dict:
                     _update_decision_outcome(
                         route["decision_id"], status="failed", deterministic_gate="fail",
                         escalation_reason="worker_failed", verification_outcome="fail",
-                        actual_route=actual_route, executor=provider_name, provider_result=result,
+                        actual_route=actual_route,
                     )
                     return {
                         **route, "ok": False, "executed": False,
@@ -1792,7 +1792,6 @@ def run_task(task: dict) -> dict:
                     verification_outcome=gate,
                     executed_host_id=(result.get("placement") or {}).get("executed_host"),
                     concrete_model=result.get("concrete_model"),
-                    provider_result=result,
                 )
             # implementation_mode, terminal within execute_codex_write_durable's
             # wait_timeout: the decision outcome was already recorded by

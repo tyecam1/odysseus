@@ -480,33 +480,32 @@ If equivalent existing surfaces already own any of these concerns, extend them i
 
 ### Provider health from recorded outcomes
 
-`estate_router.provider_allows_dispatch` derives provider health separately
-from host/worker eligibility. Paid read/write admission, preflight and agent
-status share this fact. Read-only telemetry uses a compact JSON envelope in
-`RoutingDecision.escalation_reason` (retaining the original reason code;
-decision lookup exposes it separately); write results use
-`EstateExecution.result_json`. Routing telemetry stores bounded raw evidence in
-`provider_result`; health is classified on read, with failure evidence taking
-precedence over success flags. Stored verdicts are ignored. No health table or replay is involved.
+`estate_router.provider_allows_dispatch` reads the latest computed provider
+health independently of host/worker eligibility; preflight and status share
+this fact. Only the central `_execute_codex_with_sandbox` launch path records
+`RoutingDecision` rows with task class `provider_outcome`. Admission refusals,
+probes and lifecycle updates never write provider outcomes. At that boundary,
+full process evidence is classified once, failure first, into `provider_health`
+in `escalation_reason`: state, absolute UTC `retry_after`, assumption flag and
+short reason. Readers never classify excerpts or accept worker verdicts.
+Success requires explicit success, zero exit and completed state; missing or
+truncated evidence remains unknown. No health table or replay is involved.
 
-Admission is enforced only in `_execute_codex_with_sandbox`, immediately
-before paid CLI setup/launch, including worker execute and recovered/spooled
-write runs. Workers need `DATABASE_URL` pointing at the controller's
-authoritative database (shared database service, or the
-same SQLite file on a shared mount). A worker-local empty database is not
-an authoritative source. Missing configuration or unreadable health refuses
-launch with a provider-scoped reason; there is no cached verdict or fallback.
+Admission runs immediately before CLI setup/launch, including spooled and
+recovered writes. Workers require `DATABASE_URL` for the authoritative controller
+database; missing configuration or unreadable health refuses launch. A worker's
+empty local database is not authoritative. Only provider-outcome rows participate
+in health history; routing decisions and `EstateExecution` lifecycle records
+remain separate. Empty provider history permits the initial attempt.
 
-The latest outcome is ordered by existing `created_at`, then UUID. A backwards
-host clock jump can mis-order outcomes; cooldown expiry and the next outcome
-bound this limitation. Missing/corrupt latest evidence is `unknown` and blocks
-paid dispatch until valid later evidence exists. An empty history permits the
-initial attempt. Quota reset clocks use the controller timezone (lab GMT);
-an earlier clock rolls to tomorrow. Unparseable resets explicitly mark
-`retry_after_assumed` and back off 15 minutes; all cooldowns cap at seven days.
-Authentication/transport failures use a 15-minute cooldown. Expiry permits a
-new attempt; only observed success changes health to `ok`. Alternatives must
-already satisfy the original capability, authority and verification gates.
+Outcomes replace older observations by `created_at`, then UUID. Backwards clock
+jumps can mis-order observations, bounded by cooldown expiry and the next
+outcome. Unreadable stored health is unknown and blocks dispatch. Quota clocks
+use controller timezone (lab GMT), rolling earlier clocks to tomorrow.
+Unparseable resets mark `retry_after_assumed` and back off 15 minutes; cooldowns
+cap at seven days. Auth/transport failures back off 15 minutes. Expiry permits
+another attempt; only observed success sets `ok`. Alternatives retain the
+original capability, authority and verification gates.
 
 **Required behaviour:** A confirmed Codex usage/quota exhaustion is a
 **provider-availability event**, not a reason to stop or park an otherwise

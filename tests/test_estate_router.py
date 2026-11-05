@@ -13,6 +13,7 @@ import pytest
 import yaml
 
 import src.estate_router as estate_router
+from tests.test_estate_execution_runtime import runtime_db  # noqa: F401
 
 _CODEX_PROCESS_GROUP_FIXTURE = Path(__file__).parent / "fixtures" / "codex_process_group_probe.sh"
 
@@ -1259,7 +1260,7 @@ class TestResolveCodexBinary:
         assert "not found" in source
 
 
-def test_execute_codex_with_sandbox_kills_entire_process_group_on_timeout(tmp_path, monkeypatch):
+def test_execute_codex_with_sandbox_kills_entire_process_group_on_timeout(runtime_db, tmp_path, monkeypatch):
     pid_dir = tmp_path / "pids"
     pid_dir.mkdir()
     monkeypatch.setenv("AOTERU_TEST_PID_DIR", str(pid_dir))
@@ -1291,7 +1292,7 @@ def test_execute_codex_with_sandbox_kills_entire_process_group_on_timeout(tmp_pa
     assert _wait_for_pid_exit(child_pid), f"child pid {child_pid} still exists after timeout cleanup"
 
 
-def test_execute_codex_with_sandbox_kills_process_that_escaped_pgid(tmp_path, monkeypatch):
+def test_execute_codex_with_sandbox_kills_process_that_escaped_pgid(runtime_db, tmp_path, monkeypatch):
     """The actual incident-observed topology (2026-09-01): a codex-
     launched MCP server descendant called setpgid(0, 0), landing in its
     own process group while staying in the leader's session. Proves the
@@ -1388,7 +1389,7 @@ def test_kill_process_tree_reports_incomplete_when_a_pid_cannot_be_reaped(monkey
     assert (immortal_pid, __import__("signal").SIGKILL) in kill_calls
 
 
-def test_execute_codex_with_sandbox_kills_descendant_when_leader_exits_first(tmp_path, monkeypatch):
+def test_execute_codex_with_sandbox_kills_descendant_when_leader_exits_first(runtime_db, tmp_path, monkeypatch):
     """Adversarial case controller review flagged: the wrapper/group leader
     can exit before the timeout fires (e.g. it forked a detached child and
     returned), leaving os.getpgid(proc.pid) unable to resolve a live
@@ -1454,7 +1455,7 @@ def test_execute_codex_with_sandbox_kills_descendant_when_leader_exits_first(tmp
     )
 
 
-def test_execute_codex_with_sandbox_success_shape_unchanged(tmp_path, monkeypatch):
+def test_execute_codex_with_sandbox_success_shape_unchanged(runtime_db, tmp_path, monkeypatch):
     pid_dir = tmp_path / "pids"
     pid_dir.mkdir()
     monkeypatch.setenv("AOTERU_TEST_PID_DIR", str(pid_dir))
@@ -1809,7 +1810,7 @@ def test_scenario_b_repetitive_compute_dispatches_to_remote_local_executor(fixtu
     [("execute_codex", "read-only"), ("execute_codex_write", "workspace-write")],
 )
 def test_codex_lanes_preserve_distinct_sandbox_authority(
-        fixture_config, monkeypatch, tmp_path, executor, expected_sandbox):
+        runtime_db, fixture_config, monkeypatch, tmp_path, executor, expected_sandbox):
     import subprocess
 
     monkeypatch.setattr(estate_router, "_codex_available", lambda: (True, "codex"))
