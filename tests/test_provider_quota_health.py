@@ -713,6 +713,83 @@ def test_incomplete_observation_fails_closed(quota_lane, state, field):
     assert not count.exists()
 
 
+@pytest.mark.parametrize('entry', ['read_only', 'routed', 'write', 'durable', 'routed_write', 'record'])
+@pytest.mark.parametrize('mutation', [
+    *[f'missing:{field}' for field in (
+        'provider', 'state', 'observed_at', 'reason', 'retry_after', 'retry_after_source')],
+    *[f'type:{field}' for field in (
+        'provider', 'state', 'observed_at', 'reason', 'retry_after', 'retry_after_source')],
+    'scope', 'payload:null', 'payload:false', 'payload:zero', 'payload:string',
+    'payload:list', 'payload:nonempty_list', 'payload:empty_dict',
+])
+def test_malformed_worker_health_closes_next_paid_dispatch(
+        quota_lane, quota_write_lease, monkeypatch, entry, mutation):
+    from src import estate_write_lane as lane
+    message, count, now = quota_lane
+    router._record_provider_health('lab', {
+        'provider': 'codex', 'state': 'ok', 'retry_after': None,
+        'observed_at': now[0].isoformat(), 'reason': 'successful execution',
+    })
+    assert router.provider_health('lab')['state'] == 'ok'
+    now[0] += timedelta(seconds=1)
+    health = router._quota_observation(message.read_text())
+    kind, _, field = mutation.partition(':')
+    if kind == 'missing':
+        del health[field]
+    elif kind == 'type':
+        health[field] = []  # Includes unhashable provider/state/source values.
+    elif kind == 'scope':
+        health['provider'] = 'other-provider'
+    else:
+        health = {'null': None, 'false': False, 'zero': 0, 'string': 'bad',
+                  'list': [], 'nonempty_list': ['bad'], 'empty_dict': {}}[field]
+    result = {'ok': False, 'provider_health': health, 'error': 'quota evidence'}
+    calls = []
+    def read_worker(host, verb, payload, **kwargs):
+        calls.append(verb)
+        return {'result': result, 'attestation': {'host_id': host}}
+    def write_worker(host, verb, payload, **kwargs):
+        if verb == 'worktree.verify':
+            return {'ok': True, 'clean': True, 'head_sha': 'abc'}, None
+        assert verb == 'start'
+        calls.append(verb)
+        return {'state': 'failed', 'handle': {'pid': 123}, 'result': result}, None
+    monkeypatch.setattr(client, 'call_worker', read_worker)
+    monkeypatch.setattr(client, 'worker_repo_probe', lambda *a, **k: {'resolved': True})
+    monkeypatch.setattr(lane, '_worker', write_worker)
+    if entry == 'read_only':
+        outcome = router._dispatch_read_only('lab', 'codex', {'objective': 'review'})
+    elif entry == 'routed':
+        outcome = _run_paid()
+    elif entry == 'record':
+        outcome = {'provider_health': router._record_provider_health('lab', health)}
+    elif entry == 'routed_write':
+        outcome = router.run_task({'task_class': 'code_implementation', 'repo': 'odysseus',
+            'objective': 'implement', 'requirements': {'capabilities': ['code-strong']},
+            'routing': {'allow_paid_escalation': True, 'mode': 'implementation'}})
+    else:
+        execute = lane.execute_write_via_worker if entry == 'write' else router.execute_codex_write_durable
+        outcome = execute('implement', repo_id='odysseus', host_id='lab')
+    returned_health = outcome.get('provider_health') or outcome['result']['provider_health']
+    assert returned_health['state'] == 'unknown_unreadable'
+    assert returned_health['reason'] and returned_health['retry_allowed'] is False
+    assert len(calls) == (0 if entry == 'record' else 1)
+    # Clear only the test execution's worktree blocker so the next write reaches
+    # the provider gate, rather than the existing-execution recovery response.
+    with cdb.get_db_session() as db:
+        db.query(cdb.EstateExecution).update({'worktree_resolution': 'finalized'})
+    monkeypatch.setattr(client, 'call_worker', lambda *a, **k: pytest.fail('next paid read dispatched'))
+    monkeypatch.setattr(lane, '_worker', lambda *a, **k: pytest.fail('next paid write dispatched'))
+    for refused in (_run_paid(), router._dispatch_read_only('lab', 'codex', {'objective': 'review'}),
+                    lane.execute_write_via_worker('implement', repo_id='odysseus', host_id='lab')):
+        assert refused['executed'] is False
+        assert refused['escalation_reason'] == 'provider_unknown_unreadable'
+        assert refused['provider_health']['reason']
+    assert router.provider_health('other-host')['state'] == 'unknown'
+    assert router.provider_health('lab', 'other-provider')['state'] == 'unknown'
+    assert not count.exists()
+
+
 @pytest.mark.parametrize('field, value', [
     ('provider', None), ('provider', 1), ('state', ['ok']), ('state', 'unknown'),
     ('state', 'unknown_unreadable'), ('state', 'invalid'), ('reason', None), ('reason', 1), ('reason', ''),

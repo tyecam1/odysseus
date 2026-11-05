@@ -160,12 +160,12 @@ def _merge_finalization(existing: Optional[str], **parts) -> str:
 
 def _record_outcome(row, state: str, host_id: str, result: Optional[dict] = None) -> None:
     health = (result or {}).get("provider_health")
-    if health:
+    if "provider_health" in (result or {}):
         # Durable terminal evidence is owned by bounded replay, including its
         # failure lifetime. Only non-durable observations need a process latch.
         health = _router._record_provider_health(host_id, health, observation_id=(
             f"provider-health:{row.id}" if getattr(row, "id", None) else None),
-            retain_failure=not bool(getattr(row, "id", None)))
+            retain_failure=not bool(getattr(row, "id", None)), provider=getattr(row, "provider", "codex"))
     if not row.decision_id:
         return
     ok = state == "succeeded" and bool((result or {}).get("ok"))
@@ -344,7 +344,7 @@ def execute_write_via_worker(objective: str, *, repo_id: str, host_id: str,
                 "next_action": _next_action_observe(execution_id)}
     if row is not None and row.lifecycle_state in _TERMINAL:
         response["result"] = json.loads(row.result_json) if row.result_json else None
-        if (response["result"] or {}).get("provider_health"):
+        if "provider_health" in (response["result"] or {}):
             health = _router.provider_health(host_id)
             if health["state"] == "unknown_unreadable":
                 response["result"]["provider_health"] = health
@@ -773,7 +773,7 @@ def reconcile_stale_estate_executions(db, EstateExecution) -> int:
             # Replay owns health only. Member extraction deliberately omits
             # output/outcome fields, so it must not rewrite the route's outcome.
             _router._record_provider_health(row.host_id, result["provider_health"],
-                observation_id=f"provider-health:{row.id}", retain_failure=False)
+                observation_id=f"provider-health:{row.id}", retain_failure=False, provider=row.provider)
             disposition, _ = _classify_provider_health_replay(db, row)
             if disposition == "pending":
                 disposition = "unpersistable"

@@ -151,7 +151,10 @@ def provider_health(host_id: Optional[str], provider: str = "codex") -> dict:
         pending = _PROVIDER_HEALTH_WRITE_FAILURES.get(key)
     if pending:
         # One idempotent persistence retry per read; never probe the provider.
-        _record_provider_health(host_id, pending["observation"], observation_id=pending["observation_id"])
+        if pending["observation"] is None:
+            return pending["failure"]
+        _record_provider_health(host_id, pending["observation"], provider=provider,
+                                observation_id=pending["observation_id"])
         with _PROVIDER_HEALTH_LOCK:
             pending = _PROVIDER_HEALTH_WRITE_FAILURES.get(key)
             if pending:
@@ -247,21 +250,28 @@ def _validate_provider_observation(row, host_id: str, health: dict) -> None:
 
 
 def _record_provider_health(host_id: Optional[str], health: dict, *, observation_id: Optional[str] = None,
-                            retain_failure: bool = True) -> dict:
-    key = (host_id or "none", health["provider"])
+                            retain_failure: bool = True, provider: str = "codex") -> dict:
+    # Scope and failure metadata belong to the dispatch, never untrusted evidence.
+    key = (host_id or "none", provider)
     observation_id = observation_id or str(uuid.uuid4())
+    observed_at = _provider_now().astimezone(timezone.utc)
+    observation = None
     try:
         from sqlalchemy.exc import IntegrityError
         from core.database import RoutingDecision, get_db_session
         _validate_provider_payload(health)
+        if health["provider"] != provider:
+            raise ValueError("provider observation scope mismatch")
+        observed_at = datetime.fromisoformat(health["observed_at"]).astimezone(timezone.utc)
+        observation = dict(health)
         try:
             with get_db_session() as db:
                 row = db.query(RoutingDecision).filter_by(id=observation_id).first()
                 if row is None:
                     db.add(RoutingDecision(
                         id=observation_id, task_class="provider_health_observation",
-                        host_id=key[0], executor=health["provider"],
-                        created_at=datetime.fromisoformat(health["observed_at"]).astimezone(timezone.utc).replace(tzinfo=None),
+                        host_id=key[0], executor=provider,
+                        created_at=observed_at.replace(tzinfo=None),
                         provider_health_json=json.dumps(health),
                         escalation_reason=f"provider_{health['state']}" if health["state"] in _PROVIDER_FAILURE_STATES else None,
                         status="blocked" if health["state"] in _PROVIDER_FAILURE_STATES else "complete",
@@ -276,20 +286,23 @@ def _record_provider_health(host_id: Optional[str], health: dict, *, observation
                 _validate_provider_observation(row, key[0], health)
         with _PROVIDER_HEALTH_LOCK:
             previous = _PROVIDER_HEALTH_WRITE_FAILURES.get(key)
-            if previous is None or datetime.fromisoformat(health["observed_at"]) >= datetime.fromisoformat(previous["observation"]["observed_at"]):
+            if previous is None or observed_at >= previous.get("observed_at", datetime.min.replace(tzinfo=timezone.utc)):
                 _PROVIDER_HEALTH_WRITE_FAILURES.pop(key, None)
         return health
     except Exception:
         import logging
         logging.getLogger(__name__).exception("provider health telemetry write failed")
-        failure = _unreadable_provider_health(health["provider"], "provider health telemetry unwritable; observation not persisted")
-        failure["observed_at"] = health["observed_at"]
+        failure = _unreadable_provider_health(provider, (
+            "provider health telemetry unreadable; invalid observation" if observation is None else
+            "provider health telemetry unwritable; observation not persisted"))
+        failure["observed_at"] = observed_at.isoformat()
         if retain_failure:
             with _PROVIDER_HEALTH_LOCK:
                 previous = _PROVIDER_HEALTH_WRITE_FAILURES.get(key)
-                if previous is None or datetime.fromisoformat(health["observed_at"]) >= datetime.fromisoformat(previous["observation"]["observed_at"]):
+                if observation is None or previous is None or observed_at >= previous.get("observed_at", datetime.min.replace(tzinfo=timezone.utc)):
                     _PROVIDER_HEALTH_WRITE_FAILURES[key] = {
-                        "observation": dict(health), "observation_id": observation_id, "failure": failure,
+                        "observation": observation, "observation_id": observation_id, "failure": failure,
+                        "observed_at": observed_at,
                     }
         return failure
 
@@ -1724,7 +1737,7 @@ def _dispatch_read_only(host_id: str, executor: str, task: dict, *, concrete_mod
     placement["executed_host"] = attested_host
     placement["attested"] = attested_host == host_id
     result["placement"] = placement
-    if executor == "codex" and result.get("provider_health"):
+    if executor == "codex" and "provider_health" in result:
         result["provider_health"] = _record_provider_health(host_id, result["provider_health"])
     return result
 
