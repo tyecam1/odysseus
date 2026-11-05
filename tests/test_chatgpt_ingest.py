@@ -394,3 +394,44 @@ def test_deepread_uses_strong_reader_on_top_scored_conversations_and_supersedes_
         base = [r for r in latest.values() if r["conversation_id"] == cid and r.get("reader") != "local-strong" and r["active"]]
         assert not base                       # baseline rows for that conversation are superseded
     assert ci.deepread("imp", reader, root=tmp_path, max_conversations=2, min_score=0.1)["read"] <= 1   # idempotent
+
+
+def _pending_rows(tmp_path, n, kind="goal", domain="neutral"):
+    work = tmp_path / "imp"
+    work.mkdir(exist_ok=True)
+    for i in range(n):
+        row = ci._row("imp", f"c{i}", {"kind": kind, "description": f"User holds standing item number {i} zeta{i}", "msgs": [],
+                                       "domain": domain, "validity": "unknown", "sensitivity": "ordinary",
+                                       "speaker_basis": "user_first_person", "confidence": 0.9, "first_pass": "approve"}, "h")
+        ci._append(work / "ledger.jsonl", row)
+
+
+def test_review_survives_truncated_replies_by_salvaging_and_splitting(tmp_path):
+    _pending_rows(tmp_path, 8)
+    calls = []
+
+    def llm(system, user):
+        rows = json.loads(user)["rows"]
+        calls.append(len(rows))
+        keep = rows[:3]                                  # a reply that stops after 3 complete rows, cut mid-object
+        full = json.dumps({"rows": [{"id": r["id"], "decision": "accept", "destination": "x", "rationale": "ok"} for r in keep]})
+        return full[:-2] + ',{"id":"' + rows[-1]["id"][:6]
+    out = ci.review("imp", llm, root=tmp_path, inv=lambda d: [])
+    assert out["failed"] == 0 and out["reviewed"] == 8 and len(calls) > 1
+
+
+def test_review_runs_preferences_before_other_kinds(tmp_path):
+    _pending_rows(tmp_path, 2, kind="procedure")
+    work = tmp_path / "imp"
+    pref = ci._row("imp", "p1", {"kind": "preference", "description": "User prefers terse replies", "msgs": [], "domain": "neutral",
+                                 "validity": "unknown", "sensitivity": "ordinary", "speaker_basis": "user_first_person",
+                                 "confidence": 0.9, "first_pass": "approve"}, "h")
+    ci._append(work / "ledger.jsonl", pref)
+    order = []
+
+    def llm(system, user):
+        rows = json.loads(user)["rows"]
+        order.append(rows[0]["kind"])
+        return json.dumps({"rows": [{"id": r["id"], "decision": "accept", "destination": "x", "rationale": "ok"} for r in rows]})
+    ci.review("imp", llm, root=tmp_path, inv=lambda d: [])
+    assert order[0] == "preference"

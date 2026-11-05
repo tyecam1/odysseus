@@ -35,7 +35,7 @@ MAX_ZIP_RATIO = 200                       # decompression-bomb bound
 MAX_MEMBERS = 20000
 USER_CHARS = 6000                         # per conversation, user text sent to the model
 ASSIST_CHARS = 300                        # assistant text is context only, heavily truncated
-BATCH_REVIEW = 25
+BATCH_REVIEW = 8      # the strong model truncates long JSON replies; small batches plus salvage/split keep reviews whole
 TOP_N = 60
 DOMAINS = ("misumi", "obsidian-phd", "odysseus", "neutral", "quarantine")
 KINDS = ("preference", "decision", "goal", "open_loop", "procedure", "research_lead",
@@ -474,6 +474,38 @@ def default_strong_llm() -> Llm:
     return call
 
 
+REVIEW_OBJ_RE = re.compile(r'\{\s*"id"\s*:\s*"[0-9a-f]{16}"\s*,\s*"decision"\s*:\s*"(?:accept|reject|human_gate)"[^{}]*\}')
+REVIEW_VALID = ("accept", "reject", "human_gate")
+REVIEW_PRIORITY = {"preference": 0, "decision": 1, "goal": 2, "open_loop": 2}      # owner priority: preferences, then decisions
+
+
+def _review_batch(llm: Llm, batch: list[dict], known: list[str], depth: int = 0) -> dict:
+    """Decisions for a batch.  A truncated or malformed reply keeps every complete row and re-queues the rest at half size,
+    so one oversized batch can never fail wholesale (the strong model truncates long JSON replies)."""
+    body = json.dumps({"rows": [{"id": b["candidate_id"], "domain": b["domain"], "kind": b["kind"],
+                                 "description": b["description"], "validity": b["validity"],
+                                 "first_pass": b["first_pass"], "dup": b.get("duplicate_of")} for b in batch],
+                       "KNOWN": known}, separators=(",", ":"))
+    text = re.sub(r"<think>.*?</think>", "", llm(REVIEW_SYSTEM, body) or "", flags=re.S).strip()
+    text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text).strip()
+    found: dict = {}
+    try:
+        found = {d["id"]: d for d in json.loads(text)["rows"] if isinstance(d, dict)}
+    except (ValueError, KeyError, TypeError):
+        for hit in REVIEW_OBJ_RE.finditer(text):
+            try:
+                d = json.loads(hit.group(0))
+                found[d["id"]] = d
+            except (ValueError, KeyError):
+                continue
+    missing = [b for b in batch if found.get(b["candidate_id"], {}).get("decision") not in REVIEW_VALID]
+    if missing and len(batch) > 1 and depth < 4:
+        step = max(1, (len(missing) + 1) // 2) if len(missing) < len(batch) else max(1, len(batch) // 2)
+        for i in range(0, len(missing), step):
+            found.update(_review_batch(llm, missing[i:i + step], known, depth + 1))
+    return found
+
+
 def review(import_id: str, llm: Optional[Llm] = None, *, root: Optional[Path] = None,
            inv: Optional[Callable[[str], list[str]]] = None) -> dict:
     work = _private((root or _data_root()) / import_id)
@@ -490,27 +522,16 @@ def review(import_id: str, llm: Optional[Llm] = None, *, root: Optional[Path] = 
             _append(ledger, {**r, "review": "rejected", "review_rationale": "first-pass deny", "active": False, "ts": _now()})
             counts["rejected"] += 1
             todo.remove(r)
-    by_domain: dict[str, list[dict]] = {}
+    tiers: dict = {}
     for r in todo:
-        by_domain.setdefault(r["domain"], []).append(r)
-    for domain, rows in by_domain.items():
+        tiers.setdefault((REVIEW_PRIORITY.get(r["kind"], 5), r["domain"]), []).append(r)
+    for (_, domain), rows in sorted(tiers.items(), key=lambda kv: kv[0]):
         titles = inv(domain)
         for i in range(0, len(rows), BATCH_REVIEW):
             batch = rows[i:i + BATCH_REVIEW]
             keys = set().union(*(_norm(b["description"]) for b in batch))
-            known = [t for t in titles if _norm(t) & keys][:40]
-            body = json.dumps({"rows": [{"id": b["candidate_id"], "domain": b["domain"], "kind": b["kind"],
-                                         "description": b["description"], "validity": b["validity"],
-                                         "first_pass": b["first_pass"], "dup": b.get("duplicate_of")} for b in batch],
-                               "KNOWN": known}, separators=(",", ":"))
-            reply = llm(REVIEW_SYSTEM, body)
-            try:
-                text = re.sub(r"<think>.*?</think>", "", reply or "", flags=re.S).strip()
-                text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text).strip()
-                decisions = {d["id"]: d for d in json.loads(text)["rows"] if isinstance(d, dict)}
-            except (ValueError, KeyError, TypeError):
-                counts["failed"] += len(batch)
-                continue
+            known = [x for x in titles if _norm(x) & keys][:40]
+            decisions = _review_batch(llm, batch, known)
             for b in batch:
                 d = decisions.get(b["candidate_id"])
                 if not d or d.get("decision") not in ("accept", "reject", "human_gate"):
