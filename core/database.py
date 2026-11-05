@@ -1020,6 +1020,8 @@ class EstateExecution(TimestampMixin, Base):
     finished_at       = Column(DateTime, nullable=True)
     exit_status       = Column(String, nullable=True)
     result_json       = Column(Text, nullable=True)
+    # Replay telemetry only; never participates in admission or lease resolution.
+    provider_health_replay_handled = Column(Boolean, nullable=False, default=False, server_default="false")
     error             = Column(Text, nullable=True)
     finalization_json = Column(Text, nullable=True)
     # Multihost Stage 6 (docs/aoteru-multihost-execution-implementation-plan.md
@@ -1042,7 +1044,11 @@ class EstateExecution(TimestampMixin, Base):
 
     __table_args__ = (
         Index('ix_estate_executions_host_state', 'host_id', 'lifecycle_state'),
-        Index('ix_estate_executions_replay_cursor', 'lifecycle_state', 'submitted_at', 'id'),
+        Index('ix_estate_executions_replay_cursor', 'provider_health_replay_handled', 'finished_at', 'id'),
+        # Keep spool acknowledgement work independent of terminal telemetry history.
+        Index('ix_estate_executions_unreleased_spool', 'spool_released_at', 'worktree_resolution',
+              sqlite_where=text('worker_handle_json IS NOT NULL AND spool_released_at IS NULL'),
+              postgresql_where=text('worker_handle_json IS NOT NULL AND spool_released_at IS NULL')),
         # Mirrors ParkLease's own ix_park_leases_active_repo_unique
         # pattern: the actual single-writer guarantee for admission
         # control, not just the in-Python check in
@@ -2434,6 +2440,7 @@ _ESTATE_EXECUTION_WORKER_COLUMNS = (
     ("worktree_resolution", "VARCHAR NOT NULL DEFAULT 'unresolved'"),
     ("admission_head_sha", "VARCHAR"),
     ("spool_released_at", "DATETIME"),
+    ("provider_health_replay_handled", "BOOLEAN NOT NULL DEFAULT false"),
 )
 
 
@@ -2497,8 +2504,14 @@ def _migrate_add_estate_execution_worker_columns():
                 "WHERE lease_id IS NULL OR lease_id NOT IN "
                 "(SELECT id FROM park_leases WHERE status = 'active')"
             )
+        replay_columns = [row[2] for row in conn.execute("PRAGMA index_info(ix_estate_executions_replay_cursor)")]
+        if replay_columns and replay_columns != ["provider_health_replay_handled", "finished_at", "id"]:
+            conn.execute("DROP INDEX ix_estate_executions_replay_cursor")
         conn.execute("CREATE INDEX IF NOT EXISTS ix_estate_executions_replay_cursor "
-                     "ON estate_executions (lifecycle_state, submitted_at, id)")
+                     "ON estate_executions (provider_health_replay_handled, finished_at, id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS ix_estate_executions_unreleased_spool "
+                     "ON estate_executions (spool_released_at, worktree_resolution) "
+                     "WHERE worker_handle_json IS NOT NULL AND spool_released_at IS NULL")
         _recreate_partial_unique_index(
             conn, table="estate_executions", index="ix_estate_executions_active_lease_unique",
             column="lease_id", predicate=ESTATE_EXECUTION_UNRESOLVED_PREDICATE,
@@ -2600,9 +2613,19 @@ def _migrate_add_estate_execution_worker_columns_postgresql():
                 "CREATE INDEX IF NOT EXISTS ix_estate_executions_worktree_resolution "
                 "ON estate_executions (worktree_resolution)"
             ))
+            for index in inspector.get_indexes("estate_executions"):
+                if index["name"] == "ix_estate_executions_replay_cursor" and index["column_names"] != [
+                    "provider_health_replay_handled", "finished_at", "id",
+                ]:
+                    conn.execute(text("DROP INDEX ix_estate_executions_replay_cursor"))
             conn.execute(text(
                 "CREATE INDEX IF NOT EXISTS ix_estate_executions_replay_cursor "
-                "ON estate_executions (lifecycle_state, submitted_at, id)"
+                "ON estate_executions (provider_health_replay_handled, finished_at, id)"
+            ))
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_estate_executions_unreleased_spool "
+                "ON estate_executions (spool_released_at, worktree_resolution) "
+                "WHERE worker_handle_json IS NOT NULL AND spool_released_at IS NULL"
             ))
             _pg_recreate_partial_unique_index(
                 conn, table="estate_executions", index="ix_estate_executions_active_lease_unique",

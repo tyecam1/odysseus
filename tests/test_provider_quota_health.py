@@ -734,7 +734,7 @@ def test_invalid_observation_fields_fail_closed(quota_lane, field, value):
 
 
 @pytest.mark.parametrize('unrecorded', [0, 23])
-def test_terminal_replay_all_rows_bounded_oldest_admission_first(quota_lane, monkeypatch, unrecorded):
+def test_terminal_replay_all_rows_bounded_newest_finished_first(quota_lane, monkeypatch, unrecorded):
     from src import estate_write_lane as lane
     message, count, now = quota_lane
     health = router._quota_observation(message.read_text())
@@ -752,23 +752,24 @@ def test_terminal_replay_all_rows_bounded_oldest_admission_first(quota_lane, mon
                 lane._record_outcome(row, 'failed', 'lab', result)
 
     replayed = []
-    record = lane._record_outcome
-    def replay(row, *args):
-        replayed.append(row.id)
-        return record(row, *args)
-    monkeypatch.setattr(lane, '_record_outcome', replay)
+    record = router._record_provider_health
+    def replay(host, health, *, observation_id, **kwargs):
+        replayed.append(observation_id.removeprefix('provider-health:'))
+        return record(host, health, observation_id=observation_id, **kwargs)
+    monkeypatch.setattr(router, '_record_provider_health', replay)
     monkeypatch.setattr(lane, '_worker', lambda *a, **k: pytest.fail('terminal replay called worker'))
     # The production limit is ten; assert the externally visible bound as well.
     for sweep in range((100 + unrecorded + 15 + 9) // 10):
         before = len(replayed)
         with cdb.get_db_session() as db:
             lane.reconcile_stale_estate_executions(db, cdb.EstateExecution)
-        expected = min(10, max(0, unrecorded - before)) if sweep >= 10 else 0
-        assert len(replayed) - before == expected
+        visited = range(max(0, 100 + unrecorded + 15 - (sweep + 1) * 10),
+                        max(0, 100 + unrecorded + 15 - sweep * 10))
+        assert len(replayed) - before == sum(100 <= i < 100 + unrecorded for i in visited)
         with cdb.get_db_session() as db:
             assert db.query(cdb.RoutingDecision).filter_by(task_class='provider_health_replay').count() == min(
                 (sweep + 1) * 10, 100 + unrecorded + 15)
-    assert replayed == [f'terminal-{i:03}' for i in range(100, 100 + unrecorded)]
+    assert replayed == [f'terminal-{i:03}' for i in reversed(range(100, 100 + unrecorded))]
     with cdb.get_db_session() as db:
         rows = db.query(cdb.RoutingDecision).filter_by(task_class='provider_health_observation').all()
         assert len(rows) == 100 + unrecorded
@@ -780,7 +781,7 @@ def test_replay_backlog_blocks_health_and_paid_admission(quota_lane, quota_write
     message, count, now = quota_lane
     quota = router._quota_observation(message.read_text())
     with cdb.get_db_session() as db:
-        # The quota failure is just beyond one replay batch of successful results.
+        # The newest quota failure is recorded in the first batch; remaining evidence still closes admission.
         for i in range(11):
             health = quota if i == 10 else {
                 'provider': 'codex', 'state': 'ok', 'retry_after': None,
@@ -821,8 +822,8 @@ def test_empty_terminal_payloads_cannot_starve_quota_replay(quota_lane, monkeypa
     quota = router._quota_observation(message.read_text())
     with cdb.get_db_session() as db:
         for i in range(24):
-            # More than two batches of empty objects, including noncanonical whitespace.
-            payload = '{"provider_health": { \n }}' if i < 23 else json.dumps({'provider_health': quota})
+            # More than two batches of genuinely absent observations, including whitespace.
+            payload = ' { \n } ' if i < 23 else json.dumps({'provider_health': quota})
             db.add(cdb.EstateExecution(id=f'empty-{i:02}', objective='implement', executor='codex-write',
                 provider='codex', host_id='lab', repo_id='odysseus', lease_id='lease', branch='feat/test',
                 worktree_path='/w/test', lifecycle_state='failed', worktree_resolution='finalized',
@@ -862,22 +863,19 @@ def test_unusable_terminal_replay_cannot_starve_another_host(quota_lane, monkeyp
         with cdb.get_db_session() as db:
             lane.reconcile_stale_estate_executions(db, cdb.EstateExecution)
         with cdb.get_db_session() as db:
-            if sweep < 2:
-                assert db.query(cdb.RoutingDecision).filter_by(task_class='provider_health_replay').count() == (sweep + 1) * 10
-                assert router.provider_health('lab')['reason'] == 'observation backlog'
-                continue
+            assert db.query(cdb.RoutingDecision).filter_by(task_class='provider_health_replay').count() == min((sweep + 1) * 10, 24)
             observation = db.query(cdb.RoutingDecision).filter_by(task_class='provider_health_observation').one()
             assert observation.id == 'provider-health:malformed-23'
             assert json.loads(observation.provider_health_json) == quota
-            # Includes durable handling of unusable results, not just a transient skip.
-            assert db.query(cdb.RoutingDecision).filter_by(
-                task_class='provider_health_replay', escalation_reason='no_usable_observation',
-                host_id='bad-host', executor='codex',
-            ).count() == 23
-            assert lane._unrecorded_provider_health(db, cdb.EstateExecution).count() == 0
-        assert router.provider_health('bad-host')['state'] == 'unknown'
+            if sweep == 2:
+                disposition = 'no_observation' if payload == {} else 'unpersistable'
+                assert db.query(cdb.RoutingDecision).filter_by(
+                    task_class='provider_health_replay', escalation_reason=disposition,
+                    host_id='bad-host', executor='codex',
+                ).count() == 23
+                assert lane._unrecorded_provider_health(db, cdb.EstateExecution).count() == 0
+        assert router.provider_health('bad-host')['state'] == ('unknown' if payload == {} else 'unknown_unreadable')
         assert router.provider_health('lab')['state'] == 'quota_exhausted'
-        assert router.provider_health('lab')['reason'] != 'observation backlog'
         assert router.provider_health('lab', 'other-provider')['state'] == 'unknown'
     assert not count.exists()
 
@@ -919,7 +917,8 @@ def _replay_execution(execution_id, payload, submitted_at, **kwargs):
     return cdb.EstateExecution(id=execution_id, objective='implement', executor='codex-write',
         provider='codex', host_id=kwargs.pop('host_id', 'lab'), repo_id='odysseus', lease_id='lease',
         branch='feat/test', worktree_path='/w/test', lifecycle_state='failed',
-        worktree_resolution='finalized', submitted_at=submitted_at, result_json=payload, **kwargs)
+        worktree_resolution='finalized', submitted_at=submitted_at,
+        finished_at=kwargs.pop('finished_at', submitted_at), result_json=payload, **kwargs)
 
 
 @pytest.mark.parametrize('payload', [
@@ -950,7 +949,7 @@ def test_bounded_malformed_replay_isolated_and_disposed(quota_lane, monkeypatch,
         with cdb.get_db_session() as db:
             lane.reconcile_stale_estate_executions(db, cdb.EstateExecution)
         with cdb.get_db_session() as db:
-            assert db.query(cdb.RoutingDecision).filter_by(id='provider-health-replay:bad').one().escalation_reason == 'no_usable_observation'
+            assert db.query(cdb.RoutingDecision).filter_by(id='provider-health-replay:bad').one().escalation_reason == 'unpersistable'
             assert db.query(cdb.RoutingDecision).filter_by(id='provider-health:good').count() == 1
         assert router.provider_health('lab')['state'] == 'quota_exhausted'
     assert not parsed_bad, 'unusable raw payload reached JSON parser'
@@ -963,7 +962,7 @@ def test_replay_validation_exception_is_row_local(quota_lane, monkeypatch, error
     quota = router._quota_observation(message.read_text())
     bad = {**quota, 'reason': 'raise on this row'}
     with cdb.get_db_session() as db:
-        db.add(_replay_execution('bad', json.dumps({'provider_health': bad}), now[0].replace(tzinfo=None)))
+        db.add(_replay_execution('bad', json.dumps({'provider_health': bad}), now[0].replace(tzinfo=None), host_id='bad-host'))
         db.add(_replay_execution('good', json.dumps({'provider_health': quota}), now[0].replace(tzinfo=None)))
     validate = router._validate_provider_payload
     def validate_row(health):
@@ -973,17 +972,17 @@ def test_replay_validation_exception_is_row_local(quota_lane, monkeypatch, error
     monkeypatch.setattr(router, '_validate_provider_payload', validate_row)
     with cdb.get_db_session() as db:
         lane.reconcile_stale_estate_executions(db, cdb.EstateExecution)
-        assert db.query(cdb.RoutingDecision).filter_by(id='provider-health-replay:bad').one().escalation_reason == 'no_usable_observation'
+        assert db.query(cdb.RoutingDecision).filter_by(id='provider-health-replay:bad').one().escalation_reason == 'unpersistable'
     assert router.provider_health('lab')['state'] == 'quota_exhausted'
 
 
-def test_large_legacy_replay_bounded_queries_live_progress_and_convergence(quota_lane, monkeypatch):
+def test_expired_legacy_history_not_backfilled_and_live_progress_continues(quota_lane, monkeypatch):
     from sqlalchemy import event
     from src import estate_write_lane as lane
     message, count, now = quota_lane
     start = now[0].replace(tzinfo=None)
     with cdb.get_db_session() as db:
-        db.add_all([_replay_execution(f'legacy-{i:05}', '{}', start + timedelta(seconds=i))
+        db.add_all([_replay_execution(f'legacy-{i:05}', '{}', start - timedelta(days=2, seconds=i))
                     for i in range(5000)])
         db.add(cdb.EstateExecution(id='live', objective='implement', executor='codex-write',
             provider='codex', host_id='lab', repo_id='odysseus', lease_id='lease', branch='feat/test',
@@ -1003,7 +1002,7 @@ def test_large_legacy_replay_bounded_queries_live_progress_and_convergence(quota
         # Legacy-only history must be cheap even before any dispositions exist.
         assert router.provider_health('lab')['state'] == 'unknown'
         assert len(statements) <= 5
-        for sweep in range(500):
+        for sweep in range(2):
             statements.clear()
             with cdb.get_db_session() as db:
                 lane.reconcile_stale_estate_executions(db, cdb.EstateExecution)
@@ -1011,10 +1010,11 @@ def test_large_legacy_replay_bounded_queries_live_progress_and_convergence(quota
             if sweep == 0:
                 assert observed == [('status', 'live')]
                 with cdb.get_db_session() as db:
-                    assert db.query(cdb.RoutingDecision).filter_by(task_class='provider_health_replay').count() == 10
+                    assert db.query(cdb.RoutingDecision).filter_by(task_class='provider_health_replay').count() == 0
         with cdb.get_db_session() as db:
             assert lane._unrecorded_provider_health(db, cdb.EstateExecution).count() == 0
-            assert db.query(cdb.RoutingDecision).filter_by(task_class='provider_health_replay').count() == 5000
+            assert db.query(cdb.RoutingDecision).filter_by(task_class='provider_health_replay').count() == 0
+            assert db.query(cdb.EstateExecution).filter_by(provider_health_replay_handled=True).count() == 0
         statements.clear()
         assert router.provider_health('lab')['state'] == 'unknown'
         assert len(statements) <= 5
@@ -1030,6 +1030,7 @@ def test_replay_cursor_uses_index_and_crosses_tied_pages(quota_lane):
     # Exercise the existing-table migration as well as metadata on a fresh DB.
     with engine.begin() as conn:
         conn.execute(text('DROP INDEX ix_estate_executions_replay_cursor'))
+        conn.execute(text('CREATE INDEX ix_estate_executions_replay_cursor ON estate_executions (lifecycle_state, submitted_at, id)'))
     original_engine = cdb.engine
     try:
         cdb.engine = engine
@@ -1051,7 +1052,7 @@ def test_replay_cursor_uses_index_and_crosses_tied_pages(quota_lane):
         with cdb.get_db_session() as db:
             rows = list(lane._provider_health_replay_pages(
                 lane._unrecorded_provider_health(db, cdb.EstateExecution), cdb.EstateExecution, max_rows=23))
-            assert [row.id for row in rows] == [f'tied-{i:02}' for i in range(23)]
+            assert [row.id for row in rows] == [f'tied-{i:02}' for i in range(24, 1, -1)]
         assert any('ix_estate_executions_replay_cursor' in row[-1] for row in plans)
         assert not any('TEMP B-TREE' in row[-1] for row in plans)
     finally:
@@ -1074,3 +1075,154 @@ def test_health_backlog_finds_valid_observation_after_legacy_rows(quota_lane, es
         db.add_all([_replay_execution(f'legacy-{i:03}', '{}', now[0].replace(tzinfo=None)) for i in range(100)])
         db.add(_replay_execution('valid', payload, now[0].replace(tzinfo=None)))
     assert router.provider_health('lab')['reason'] == 'observation backlog'
+
+
+@pytest.mark.parametrize('shape', ['oversize', 'deep'])
+@pytest.mark.parametrize('health_first', [False, True])
+def test_recent_bounded_payload_never_opens_paid_dispatch(quota_lane, monkeypatch, shape, health_first):
+    from src import estate_write_lane as lane
+    message, count, now = quota_lane
+    quota = router._quota_observation(message.read_text())
+    noise = json.dumps('x' * (1024 * 1024 + 1)) if shape == 'oversize' else '[' * 100 + '0' + ']' * 100
+    member = '"provider_health":' + json.dumps(quota)
+    payload = '{' + (member + ',"noise":' + noise if health_first else '"noise":' + noise + ',' + member) + '}'
+    with cdb.get_db_session() as db:
+        db.add(_replay_execution('bounded-quota', payload, now[0].replace(tzinfo=None),
+                                finished_at=now[0].replace(tzinfo=None)))
+    monkeypatch.setattr(client, 'call_worker', lambda *a, **k: pytest.fail('paid dispatch escaped gate'))
+    # Both before reconciliation and after a process restart, uncertainty closes admission.
+    for sweep in range(3):
+        health = router.provider_health('lab')
+        assert health['state'] in {'quota_exhausted', 'unknown_unreadable'}
+        assert not health['retry_allowed']
+        assert router._dispatch_read_only('lab', 'codex', {'objective': 'review'})['executed'] is False
+        with cdb.get_db_session() as db:
+            lane.reconcile_stale_estate_executions(db, cdb.EstateExecution)
+        router._PROVIDER_HEALTH_WRITE_FAILURES.clear()
+    with cdb.get_db_session() as db:
+        assert db.query(cdb.RoutingDecision).filter_by(task_class='provider_health_replay').count() == 1
+    if health_first or shape == 'deep':
+        assert router.provider_health('lab')['state'] == 'quota_exhausted'
+    now[0] += timedelta(hours=24, seconds=1)
+    assert router.provider_health('lab')['retry_allowed']
+    assert not count.exists()
+
+
+def test_unpersistable_recent_rows_do_not_monopolise_replay(quota_lane):
+    from src import estate_write_lane as lane
+    message, count, now = quota_lane
+    quota = router._quota_observation(message.read_text())
+    bad = {**quota, 'observed_at': '0001-01-01T00:00:00+01:00'}
+    with cdb.get_db_session() as db:
+        for i in range(10):
+            when = (now[0] - timedelta(seconds=20 - i)).replace(tzinfo=None)
+            db.add(_replay_execution(f'overflow-{i:02}', json.dumps({'provider_health': bad}), when,
+                                    finished_at=when, host_id='bad-host'))
+        db.add(_replay_execution('following-quota', json.dumps({'provider_health': quota}),
+                                now[0].replace(tzinfo=None), finished_at=now[0].replace(tzinfo=None)))
+    for _ in range(2):
+        with cdb.get_db_session() as db:
+            lane.reconcile_stale_estate_executions(db, cdb.EstateExecution)
+    with cdb.get_db_session() as db:
+        assert db.query(cdb.RoutingDecision).filter_by(id='provider-health:following-quota').count() == 1
+        assert db.query(cdb.RoutingDecision).filter_by(task_class='provider_health_replay',
+            escalation_reason='unpersistable', host_id='bad-host').count() == 10
+    router._PROVIDER_HEALTH_WRITE_FAILURES.clear()
+    assert router.provider_health('bad-host')['state'] == 'unknown_unreadable'
+    assert not router.provider_health('bad-host')['retry_allowed']
+    assert router.provider_health('lab')['state'] == 'quota_exhausted'
+    # A durable disposition prevents repeated persistence attempts, including after restart.
+    with cdb.get_db_session() as db:
+        lane.reconcile_stale_estate_executions(db, cdb.EstateExecution)
+    assert not router._PROVIDER_HEALTH_WRITE_FAILURES
+    now[0] += timedelta(hours=24, seconds=1)
+    assert router.provider_health('bad-host')['retry_allowed']
+    assert not count.exists()
+
+
+def test_replay_vm_cost_independent_of_expired_history(quota_lane, record_property):
+    from sqlalchemy import event
+    from src import estate_write_lane as lane
+    message, count, now = quota_lane
+    engine = cdb.SessionLocal.kw['bind']
+    start = now[0].replace(tzinfo=None)
+    costs = []
+    for history_size in (0, 10000):
+        with cdb.get_db_session() as db:
+            db.query(cdb.RoutingDecision).delete()
+            db.query(cdb.EstateExecution).delete()
+            for i in range(history_size):
+                when = start - timedelta(days=3, seconds=history_size - i)
+                db.add(_replay_execution(f'history-{i:05}', '{}', when, finished_at=when))
+                if i < history_size // 2:
+                    db.add(cdb.RoutingDecision(id=f'provider-health-replay:history-{i:05}',
+                        task_class='provider_health_replay', host_id='lab', executor='codex',
+                        escalation_reason='no_usable_observation', status='complete'))
+            for i in range(4):
+                db.add(_replay_execution(f'recent-{i}', '{}', start, finished_at=start))
+        statements, steps, connections = [], [0], set()
+        def executed(conn, cursor, statement, parameters, context, executemany):
+            statements.append(statement)
+            connections.add(cursor.connection)
+            cursor.connection.set_progress_handler(progress, 1)
+        def progress():
+            steps[0] += 1
+            return 0
+        event.listen(engine, 'before_cursor_execute', executed)
+        try:
+            with cdb.get_db_session() as db:
+                lane.reconcile_stale_estate_executions(db, cdb.EstateExecution)
+        finally:
+            event.remove(engine, 'before_cursor_execute', executed)
+            for raw in connections:
+                raw.set_progress_handler(None, 0)
+        costs.append((len(statements), steps[0]))
+    record_property("replay_costs_empty_then_expired_history", str(costs))
+    assert costs[1][0] <= costs[0][0] + 2, costs
+    assert costs[1][1] <= costs[0][1] + 1000, costs
+    assert costs[1][1] < 4000, costs
+
+
+def test_terminal_write_failure_ages_out_without_process_retry_latch(quota_lane, monkeypatch):
+    from src import estate_write_lane as lane
+    message, count, now = quota_lane
+    health = {**router._quota_observation(message.read_text()),
+              'observed_at': '0001-01-01T00:00:00+01:00'}
+    result = {'provider_health': health}
+    with cdb.get_db_session() as db:
+        db.add(_replay_execution('live-overflow', json.dumps(result), now[0].replace(tzinfo=None)))
+    lane._record_outcome(lane._load_row('live-overflow'), 'failed', 'lab', result)
+    assert not router._PROVIDER_HEALTH_WRITE_FAILURES
+    monkeypatch.setattr(client, 'call_worker', lambda *a, **k: pytest.fail('paid dispatch escaped gate'))
+    assert router._dispatch_read_only('lab', 'codex', {'objective': 'review'})['executed'] is False
+    # Even if reconciliation was stopped for a day, stale poison evidence no
+    # longer gates this provider or gets retried by a health read.
+    now[0] += timedelta(hours=24, seconds=1)
+    assert router.provider_health('lab')['retry_allowed']
+    with cdb.get_db_session() as db:
+        lane.reconcile_stale_estate_executions(db, cdb.EstateExecution)
+        assert db.query(cdb.RoutingDecision).filter_by(task_class='provider_health_replay').count() == 0
+    assert not count.exists()
+
+
+def test_member_extraction_replays_health_without_rewriting_execution_outcome(quota_lane):
+    from src import estate_write_lane as lane
+    message, count, now = quota_lane
+    health = {'provider': 'codex', 'state': 'ok', 'retry_after': None,
+              'observed_at': now[0].isoformat(), 'reason': 'successful execution'}
+    result = json.dumps({'provider_health': health, 'ok': True, 'output': 'x' * (1024 * 1024)})
+    with cdb.get_db_session() as db:
+        db.add(cdb.RoutingDecision(id='completed-decision', task_class='code_implementation',
+            host_id='lab', executor='codex-write', status='complete', deterministic_gate='pass'))
+        row = _replay_execution('large-success', result, now[0].replace(tzinfo=None))
+        row.lifecycle_state = 'succeeded'
+        row.decision_id = 'completed-decision'
+        db.add(row)
+    with cdb.get_db_session() as db:
+        lane.reconcile_stale_estate_executions(db, cdb.EstateExecution)
+    with cdb.get_db_session() as db:
+        decision = db.query(cdb.RoutingDecision).filter_by(id='completed-decision').one()
+        assert (decision.status, decision.deterministic_gate) == ('complete', 'pass')
+        observation = db.query(cdb.RoutingDecision).filter_by(id='provider-health:large-success').one()
+        assert json.loads(observation.provider_health_json) == health
+    assert router.provider_health('lab')['state'] == 'ok'

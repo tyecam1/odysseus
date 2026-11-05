@@ -53,6 +53,7 @@ def test_u54_lock_statement_compiles_select_for_update_on_postgresql():
 _PRE_STAGE6_COLUMNS = (
     "worker_handle_json", "worker_attestation_json", "last_observed_at",
     "execution_deadline_at", "worktree_resolution", "admission_head_sha", "spool_released_at",
+    "provider_health_replay_handled",
 )
 
 
@@ -67,6 +68,8 @@ def pre_stage6_db(monkeypatch, tmp_path):
     conn = sqlite3.connect(path)
     conn.execute("DROP INDEX ix_estate_executions_active_lease_unique")
     conn.execute("DROP INDEX ix_estate_executions_worktree_resolution")
+    conn.execute("DROP INDEX ix_estate_executions_replay_cursor")
+    conn.execute("DROP INDEX ix_estate_executions_unreleased_spool")
     for name in _PRE_STAGE6_COLUMNS:
         conn.execute(f"ALTER TABLE estate_executions DROP COLUMN {name}")
     conn.execute("CREATE UNIQUE INDEX ix_estate_executions_active_lease_unique ON estate_executions "

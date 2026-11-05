@@ -565,25 +565,31 @@ observation write also invalidates earlier success in the serving process
 until that observation or a newer one is persisted; it is reported as
 `unknown_unreadable`, never `ok`/live. No observation yet is `unknown` and
 permits the initial normal execution. Host and worker eligibility are unchanged.
-Later health reads retry the retained observation once with the same id and
-keep admission closed until persistence succeeds.
-Terminal durable execution results are replayed during reconciliation using
-an execution-derived observation id. Recovery preserves `observed_at` and
-is idempotent, including a crash after terminal commit but before telemetry.
-Each sweep visits at most 10 terminal results, oldest admission first, using
-an indexed `(lifecycle_state, submitted_at, id)` cursor. Every visited row
-consumes budget so historical backfill cannot delay live execution monitoring.
-Replay dispositions are persisted by execution-derived id in the existing
-routing telemetry. Missing or unusable observations are durably marked handled
-in a batch transaction. Parsing is bounded to 1 MiB and 64 container levels;
-malformed rows cannot abort another host's replay. Health reads stream possible
-observations in one query, skipping obvious legacy payloads without telemetry.
-Existing observations must match the terminal payload and scope before being
-marked reconciled; conflicts are durably
-reported as `unknown_unreadable` for that host/provider.
-While valid unrecorded observations remain for a host/provider, health reads fail closed as
-`unknown_unreadable` with reason `observation backlog`; paid admission waits
-for reconciliation to catch up.
+Health reads retry a retained non-durable observation once with the same id;
+terminal evidence instead belongs to bounded reconciliation.
+Terminal durable execution results are replayed using an execution-derived
+observation id, preserving `observed_at` idempotently after a crash. Replay is
+responsible only for results finished in the last **24 hours** (`REPLAY_HORIZON`).
+Older rows and rows without `finished_at` are never replayed or backfilled.
+Each sweep visits at most 10 rows, newest finished first; every row counts.
+An indexed `(provider_health_replay_handled, finished_at, id)` range and keyset
+pagination restrict selection to unhandled rows inside that window. A durable
+telemetry marker advances subsequent sweeps without rescanning a handled prefix.
+
+Valid observations are persisted; genuinely absent observations get a bulk
+`no_observation` disposition. Malformed/unreadable evidence, scope conflicts and
+failed observation persistence get durable `unpersistable`/`conflict` dispositions
+in the existing routing telemetry, atomically with the handled marker. They do
+not consume another sweep's budget. Their host/provider stays fail-closed as
+`unknown_unreadable` (`unreadable_recent` or conflict reason) until the execution
+ages out of the replay window, including after restart. Parsing is bounded to
+1 MiB and 64 container levels. If a whole result exceeds those bounds, replay
+tries to recover only its complete top-level `provider_health` object within a
+1 MiB scan; evidence outside that bound remains unreadable, never harmless.
+Existing observations must match the terminal payload and scope. Unrecorded
+valid observations also close paid admission with reason `observation backlog`
+until reconciliation catches up. No replay telemetry changes execution lifecycle,
+worktree resolution or lease authority.
 
 A qualified local read-only route may be recommended for its requested
 aliases when no reserved verification requirement is supplied. Write work

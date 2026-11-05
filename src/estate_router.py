@@ -152,36 +152,29 @@ def provider_health(host_id: Optional[str], provider: str = "codex") -> dict:
     try:
         from core.database import EstateExecution, RoutingDecision, get_db_session
         from src.estate_write_lane import (
-            _unrecorded_provider_health, _classify_provider_health_replay, PROVIDER_HEALTH_PAYLOAD_MAX_BYTES,
+            _recent_provider_health, _unrecorded_provider_health, _classify_provider_health_replay,
         )
-        from sqlalchemy import Text, cast, func, or_
         with get_db_session() as db:
-            conflict = db.query(RoutingDecision).filter_by(
-                host_id=key[0], executor=provider, task_class="provider_health_replay",
-                escalation_reason="conflict",
-            ).first()
-            if conflict:
-                return _unreadable_provider_health(provider, "provider observation payload conflict")
+            unreadable = _recent_provider_health(db, EstateExecution, handled=True).filter(
+                EstateExecution.host_id == key[0], EstateExecution.provider == provider,
+            ).join(RoutingDecision, RoutingDecision.id == "provider-health-replay:" + EstateExecution.id).filter(
+                RoutingDecision.escalation_reason.in_(("conflict", "unpersistable")),
+            ).with_entities(RoutingDecision.escalation_reason).first()
+            if unreadable:
+                reason = ("provider observation payload conflict" if unreadable[0] == "conflict"
+                          else "unreadable_recent provider observation")
+                return _unreadable_provider_health(provider, reason)
             backlog = _unrecorded_provider_health(db, EstateExecution).filter(
                 EstateExecution.host_id == key[0], EstateExecution.provider == provider,
-                func.length(EstateExecution.result_json) <= PROVIDER_HEALTH_PAYLOAD_MAX_BYTES,
-                # A usable JSON key is literal or contains a JSON escape. This
-                # inexpensive superset skips legacy {} without trusting JSON SQL
-                # functions on malformed input (or missing escaped-key evidence).
-                or_(cast(EstateExecution.result_json, Text).contains('"provider_health"', autoescape=True),
-                    cast(EstateExecution.result_json, Text).contains("\\", autoescape=True)),
-            )
-            # Stream one query, including existing observations, rather than
-            # restarting history scans and doing a lookup per terminal result.
-            backlog = backlog.outerjoin(
-                RoutingDecision, RoutingDecision.id == "provider-health:" + EstateExecution.id,
-            ).add_entity(RoutingDecision).order_by(EstateExecution.id).yield_per(100)
+            ).outerjoin(RoutingDecision, RoutingDecision.id == "provider-health:" + EstateExecution.id
+            ).add_entity(RoutingDecision).yield_per(100)
             for terminal, recorded in backlog:
                 disposition, _ = _classify_provider_health_replay(db, terminal, recorded=recorded)
-                if disposition == "conflict":
-                    return _unreadable_provider_health(provider, "provider observation payload conflict")
-                if disposition == "pending":
-                    return _unreadable_provider_health(provider, "observation backlog")
+                if disposition in {"conflict", "unpersistable", "pending"}:
+                    reason = {"conflict": "provider observation payload conflict",
+                              "unpersistable": "unreadable_recent provider observation",
+                              "pending": "observation backlog"}[disposition]
+                    return _unreadable_provider_health(provider, reason)
             row = db.query(RoutingDecision).filter(
                 RoutingDecision.host_id == key[0],
                 RoutingDecision.executor == provider,
@@ -241,7 +234,8 @@ def _validate_provider_observation(row, host_id: str, health: dict) -> None:
         raise ValueError("provider observation id conflicts with different observation")
 
 
-def _record_provider_health(host_id: Optional[str], health: dict, *, observation_id: Optional[str] = None) -> dict:
+def _record_provider_health(host_id: Optional[str], health: dict, *, observation_id: Optional[str] = None,
+                            retain_failure: bool = True) -> dict:
     key = (host_id or "none", health["provider"])
     observation_id = observation_id or str(uuid.uuid4())
     try:
@@ -277,12 +271,13 @@ def _record_provider_health(host_id: Optional[str], health: dict, *, observation
         logging.getLogger(__name__).exception("provider health telemetry write failed")
         failure = _unreadable_provider_health(health["provider"], "provider health telemetry unwritable; observation not persisted")
         failure["observed_at"] = health["observed_at"]
-        with _PROVIDER_HEALTH_LOCK:
-            previous = _PROVIDER_HEALTH_WRITE_FAILURES.get(key)
-            if previous is None or datetime.fromisoformat(health["observed_at"]) >= datetime.fromisoformat(previous["observation"]["observed_at"]):
-                _PROVIDER_HEALTH_WRITE_FAILURES[key] = {
-                    "observation": dict(health), "observation_id": observation_id, "failure": failure,
-                }
+        if retain_failure:
+            with _PROVIDER_HEALTH_LOCK:
+                previous = _PROVIDER_HEALTH_WRITE_FAILURES.get(key)
+                if previous is None or datetime.fromisoformat(health["observed_at"]) >= datetime.fromisoformat(previous["observation"]["observed_at"]):
+                    _PROVIDER_HEALTH_WRITE_FAILURES[key] = {
+                        "observation": dict(health), "observation_id": observation_id, "failure": failure,
+                    }
         return failure
 
 
