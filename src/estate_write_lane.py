@@ -44,8 +44,11 @@ LOST_GRACE_SECONDS = 120            # execution_deadline_at + this, unobserved -
 MONITOR_INTERVAL_SECONDS = 5.0
 OBSERVATION_STALE_SECONDS = 15      # reconcile re-observes rows older than this
 PROVIDER_HEALTH_REPLAY_BATCH_SIZE = 10
-# Contractual replay horizon; older terminal results have no replay responsibility.
-REPLAY_HORIZON = timedelta(hours=24)
+# No accepted cooldown exceeds MAX_COOLDOWN from its original observation.
+# Retain replay and unreadable dispositions for that lifetime plus a clock
+# margin, so expiry cannot forget a cooldown while keeping an indexed window.
+MAX_COOLDOWN = timedelta(days=7)
+REPLAY_HORIZON = MAX_COOLDOWN + timedelta(minutes=15)
 PROVIDER_HEALTH_PAYLOAD_MAX_BYTES = 1024 * 1024
 PROVIDER_HEALTH_PAYLOAD_MAX_DEPTH = 64
 _REPLAY_NOT_LOADED = object()

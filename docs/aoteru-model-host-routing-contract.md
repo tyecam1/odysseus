@@ -545,7 +545,11 @@ ISO reset or a future clock time today is accepted; clock-only output uses
 the emitting worker's local timezone unless UTC/GMT is stated. A past,
 invalid or unrecognised reset uses a conservative **900-second backoff**,
 labelled `retry_after_source: bounded_backoff`, never a claimed provider
-reset. No date is rolled forward to guess tomorrow. Cooldown expiry permits
+reset. All cooldowns are capped at **7 days** (`MAX_COOLDOWN`) from the original
+observation; later stated resets are clamped at parse time and labelled
+`retry_after_source: bounded_cap`. A fresh attempt after the cap re-observes
+exhaustion if necessary. Received payloads exceeding that bound fail closed.
+No date is rolled forward to guess tomorrow. Cooldown expiry permits
 a normal recovery execution; only success restores `ok`. Health reads do
 not spend provider calls. Known-dead dispatch is refused before CLI execution
 or durable write admission, with `provider_<state>` telemetry. Current
@@ -569,7 +573,9 @@ Health reads retry a retained non-durable observation once with the same id;
 terminal evidence instead belongs to bounded reconciliation.
 Terminal durable execution results are replayed using an execution-derived
 observation id, preserving `observed_at` idempotently after a crash. Replay is
-responsible only for results finished in the last **24 hours** (`REPLAY_HORIZON`).
+responsible only for results finished in the last **7 days plus 15 minutes**
+(`REPLAY_HORIZON = MAX_COOLDOWN + clock margin`), covering every supported
+cooldown and holding unreadable dispositions fail-closed for the same horizon.
 Older rows and rows without `finished_at` are never replayed or backfilled.
 Each sweep visits at most 10 rows, newest finished first; every row counts.
 An indexed `(provider_health_replay_handled, finished_at, id)` range and keyset

@@ -102,13 +102,21 @@ def _quota_observation(text: str) -> Optional[dict]:
     if reset is None or reset <= now:
         reset = now + timedelta(seconds=_QUOTA_BACKOFF_SECONDS)
         source = "bounded_backoff"
+    # Bound before UTC conversion (even year-9999 resets can overflow there).
+    # Later stated resets are honoured only up to this cap; a fresh attempt
+    # after expiry re-observes exhaustion if the provider is still unavailable.
+    cap = now.astimezone(timezone.utc) + MAX_COOLDOWN
+    if reset > cap:
+        reset, source = cap, "bounded_cap"
     return {
         "provider": "codex", "state": "quota_exhausted",
         "observed_at": now.astimezone(timezone.utc).isoformat(),
         "retry_after": reset.astimezone(timezone.utc).isoformat(),
         "retry_after_source": source,
         "reason": ("Codex usage limit; reset time unavailable or not future; conservative 900-second bounded backoff"
-                   if source == "bounded_backoff" else "Codex usage limit; provider reset time (worker local timezone unless stated)"),
+                   if source == "bounded_backoff" else
+                   "Codex usage limit; provider reset exceeds maximum cooldown cap; retry then re-observe exhaustion"
+                   if source == "bounded_cap" else "Codex usage limit; provider reset time (worker local timezone unless stated)"),
     }
 
 
@@ -212,7 +220,11 @@ def _validate_provider_payload(health: dict) -> None:
             raise ValueError("invalid provider retry timestamp")
         if datetime.fromisoformat(retry) <= observed:
             raise ValueError("provider retry must follow observation")
-        if health.get("retry_after_source") not in {"provider_time", "bounded_backoff"}:
+        # Replayed/received payloads must obey the same bound as the parser;
+        # anchor it to observed_at, never slide it forward on a later read.
+        if datetime.fromisoformat(retry) - observed > MAX_COOLDOWN:
+            raise ValueError("provider retry exceeds maximum cooldown")
+        if health.get("retry_after_source") not in {"provider_time", "bounded_backoff", "bounded_cap"}:
             raise ValueError("invalid provider retry source")
 
 
@@ -241,6 +253,7 @@ def _record_provider_health(host_id: Optional[str], health: dict, *, observation
     try:
         from sqlalchemy.exc import IntegrityError
         from core.database import RoutingDecision, get_db_session
+        _validate_provider_payload(health)
         try:
             with get_db_session() as db:
                 row = db.query(RoutingDecision).filter_by(id=observation_id).first()
@@ -2079,6 +2092,7 @@ def run_task(task: dict) -> dict:
 # Stage 6 control-plane write lane (plan §6.0). Imported last: the module
 # reads this one's helpers at call time.
 from src.estate_write_lane import (  # noqa: E402
+    MAX_COOLDOWN,
     execute_write_via_worker,
     finalize_execution,
     get_estate_execution,

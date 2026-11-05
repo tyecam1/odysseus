@@ -921,6 +921,95 @@ def _replay_execution(execution_id, payload, submitted_at, **kwargs):
         finished_at=kwargs.pop('finished_at', submitted_at), result_json=payload, **kwargs)
 
 
+@pytest.mark.parametrize('elapsed', [timedelta(hours=25), timedelta(days=6)])
+def test_week_long_quota_survives_crash_and_delayed_replay(quota_lane, quota_write_lease, monkeypatch, elapsed):
+    from src import estate_write_lane as lane
+    message, count, now = quota_lane
+    start = now[0]
+    monkeypatch.setattr(lane, '_now', lambda: now[0].replace(tzinfo=None))
+    health = router._quota_observation("You've hit your usage limit ... try again at 2026-11-11T17:00:00Z.")
+    assert datetime.fromisoformat(health['retry_after']) == start + timedelta(days=7)
+    with cdb.get_db_session() as db:
+        row = _replay_execution('week-crash', None, start.replace(tzinfo=None))
+        row.lifecycle_state, row.worktree_resolution, row.finished_at = 'running', 'unresolved', None
+        db.add(row)
+    record = lane._record_outcome
+    def crash(*a, **k):
+        raise RuntimeError('crash before observation persistence')
+    monkeypatch.setattr(lane, '_record_outcome', crash)
+    with pytest.raises(RuntimeError, match='crash before observation persistence'):
+        lane._apply_view('week-crash', {'state': 'failed', 'handle': {'pid': 123},
+                                     'result': {'provider_health': health}})
+    monkeypatch.setattr(lane, '_record_outcome', record)
+    # Finalized work allows a fresh write admission to reach the capacity gate.
+    with cdb.get_db_session() as db:
+        db.query(cdb.EstateExecution).filter_by(id='week-crash').update({
+            'worktree_resolution': 'finalized', 'spool_released_at': start.replace(tzinfo=None)})
+        assert db.query(cdb.RoutingDecision).filter_by(task_class='provider_health_observation').count() == 0
+    now[0] = start + elapsed
+    monkeypatch.setattr(client, 'call_worker', lambda *a, **k: pytest.fail('paid worker called'))
+    monkeypatch.setattr(lane, '_worker', lambda *a, **k: pytest.fail('write worker called'))
+    for reconciled in (False, True):
+        if reconciled:
+            with cdb.get_db_session() as db:
+                lane.reconcile_stale_estate_executions(db, cdb.EstateExecution)
+            router._PROVIDER_HEALTH_WRITE_FAILURES.clear()  # Simulate restart.
+        assert not router.provider_health('lab')['retry_allowed']
+        assert _run_paid()['executed'] is False
+        assert lane.execute_write_via_worker('implement', repo_id='odysseus', host_id='lab')['executed'] is False
+    assert router.provider_health('lab')['retry_after'] == health['retry_after']
+    now[0] = start + timedelta(days=7)
+    assert router.provider_health('lab')['retry_allowed']
+    assert not count.exists()
+
+
+def test_unreadable_week_long_evidence_stays_closed_through_replay_horizon(quota_lane, monkeypatch):
+    from src import estate_write_lane as lane
+    message, count, now = quota_lane
+    start = now[0]
+    health = router._quota_observation("You've hit your usage limit ... try again at 2026-11-11T17:00:00Z.")
+    # A truncated result retains a reset but cannot be safely recovered.
+    payload = json.dumps({'provider_health': health})[:-1]
+    with cdb.get_db_session() as db:
+        db.add(_replay_execution('unreadable-week', payload, start.replace(tzinfo=None)))
+    with cdb.get_db_session() as db:
+        lane.reconcile_stale_estate_executions(db, cdb.EstateExecution)
+    with cdb.get_db_session() as db:
+        assert db.query(cdb.RoutingDecision).filter_by(id='provider-health-replay:unreadable-week').one().escalation_reason == 'unpersistable'
+    monkeypatch.setattr(client, 'call_worker', lambda *a, **k: pytest.fail('paid worker called'))
+    for elapsed in (timedelta(hours=25), timedelta(days=6), timedelta(days=7)):
+        now[0] = start + elapsed
+        router._PROVIDER_HEALTH_WRITE_FAILURES.clear()
+        health = router.provider_health('lab')
+        assert health['state'] == 'unknown_unreadable' and not health['retry_allowed']
+        assert _run_paid()['executed'] is False
+    now[0] = start + lane.REPLAY_HORIZON + timedelta(seconds=1)
+    assert router.provider_health('lab')['retry_allowed']
+    assert not count.exists()
+
+
+@pytest.mark.parametrize('reset', ['2026-11-12T17:00:00Z', '9999-12-31T23:59:59-23:59'])
+def test_reset_beyond_max_cooldown_is_capped_without_overflow(quota_lane, reset):
+    message, count, now = quota_lane
+    health = router._quota_observation(f"You've hit your usage limit ... try again at {reset}.")
+    assert datetime.fromisoformat(health['retry_after']) == now[0] + timedelta(days=7)
+    assert health['retry_after_source'] == 'bounded_cap'
+    assert 'cap' in health['reason']
+    router._validate_provider_payload(health)
+    router._record_provider_health('lab', health)
+    now[0] += timedelta(days=7)
+    assert router.provider_health('lab')['retry_allowed']
+
+
+def test_accepted_payload_cannot_exceed_max_cooldown(quota_lane):
+    message, count, now = quota_lane
+    health = router._quota_observation(message.read_text())
+    health['retry_after'] = (now[0] + timedelta(days=8)).isoformat()
+    with pytest.raises(ValueError, match='maximum cooldown'):
+        router._validate_provider_payload(health)
+    assert router._record_provider_health('lab', health)['state'] == 'unknown_unreadable'
+
+
 @pytest.mark.parametrize('payload', [
     '{"provider_health":' + '[' * 100000,
     '{"provider_health":' + '[' * 100 + '0' + ']' * 100 + '}',
@@ -982,7 +1071,7 @@ def test_expired_legacy_history_not_backfilled_and_live_progress_continues(quota
     message, count, now = quota_lane
     start = now[0].replace(tzinfo=None)
     with cdb.get_db_session() as db:
-        db.add_all([_replay_execution(f'legacy-{i:05}', '{}', start - timedelta(days=2, seconds=i))
+        db.add_all([_replay_execution(f'legacy-{i:05}', '{}', start - lane.REPLAY_HORIZON - timedelta(days=1, seconds=i))
                     for i in range(5000)])
         db.add(cdb.EstateExecution(id='live', objective='implement', executor='codex-write',
             provider='codex', host_id='lab', repo_id='odysseus', lease_id='lease', branch='feat/test',
@@ -1103,7 +1192,7 @@ def test_recent_bounded_payload_never_opens_paid_dispatch(quota_lane, monkeypatc
         assert db.query(cdb.RoutingDecision).filter_by(task_class='provider_health_replay').count() == 1
     if health_first or shape == 'deep':
         assert router.provider_health('lab')['state'] == 'quota_exhausted'
-    now[0] += timedelta(hours=24, seconds=1)
+    now[0] += lane.REPLAY_HORIZON + timedelta(seconds=1)
     assert router.provider_health('lab')['retry_allowed']
     assert not count.exists()
 
@@ -1135,7 +1224,7 @@ def test_unpersistable_recent_rows_do_not_monopolise_replay(quota_lane):
     with cdb.get_db_session() as db:
         lane.reconcile_stale_estate_executions(db, cdb.EstateExecution)
     assert not router._PROVIDER_HEALTH_WRITE_FAILURES
-    now[0] += timedelta(hours=24, seconds=1)
+    now[0] += lane.REPLAY_HORIZON + timedelta(seconds=1)
     assert router.provider_health('bad-host')['retry_allowed']
     assert not count.exists()
 
@@ -1152,12 +1241,15 @@ def test_replay_vm_cost_independent_of_expired_history(quota_lane, record_proper
             db.query(cdb.RoutingDecision).delete()
             db.query(cdb.EstateExecution).delete()
             for i in range(history_size):
-                when = start - timedelta(days=3, seconds=history_size - i)
+                when = start - lane.REPLAY_HORIZON - timedelta(days=1, seconds=history_size - i)
                 db.add(_replay_execution(f'history-{i:05}', '{}', when, finished_at=when))
                 if i < history_size // 2:
                     db.add(cdb.RoutingDecision(id=f'provider-health-replay:history-{i:05}',
                         task_class='provider_health_replay', host_id='lab', executor='codex',
                         escalation_reason='no_usable_observation', status='complete'))
+                # Handled rows inside the longer window must also stay cheap.
+                db.add(_replay_execution(f'handled-{i:05}', '{}', start,
+                                        provider_health_replay_handled=True))
             for i in range(4):
                 db.add(_replay_execution(f'recent-{i}', '{}', start, finished_at=start))
         statements, steps, connections = [], [0], set()
@@ -1195,9 +1287,9 @@ def test_terminal_write_failure_ages_out_without_process_retry_latch(quota_lane,
     assert not router._PROVIDER_HEALTH_WRITE_FAILURES
     monkeypatch.setattr(client, 'call_worker', lambda *a, **k: pytest.fail('paid dispatch escaped gate'))
     assert router._dispatch_read_only('lab', 'codex', {'objective': 'review'})['executed'] is False
-    # Even if reconciliation was stopped for a day, stale poison evidence no
+    # Even if reconciliation was stopped beyond the horizon, stale poison evidence no
     # longer gates this provider or gets retried by a health read.
-    now[0] += timedelta(hours=24, seconds=1)
+    now[0] += lane.REPLAY_HORIZON + timedelta(seconds=1)
     assert router.provider_health('lab')['retry_allowed']
     with cdb.get_db_session() as db:
         lane.reconcile_stale_estate_executions(db, cdb.EstateExecution)
