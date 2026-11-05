@@ -123,10 +123,7 @@ def test_unreadable_latest_and_later_valid_outcome(lab):
     assert router.provider_allows_dispatch("codex")["state"] == "unknown"
     assert "unparseable" in run()["execution_error"]
     # A later externally observed valid outcome clears unknown without a latch.
-    decision = router._record_decision(TASK, host_id="test-lab", executor="codex",
-                                      model_alias=None, concrete_model=None, status="needs_escalation")
-    router._update_decision_outcome(decision, status="complete", deterministic_gate="pass",
-                                    provider_result={"ok": True})
+    decision = observed({"ok": True})
     with cdb.get_db_session() as db:
         db.query(cdb.RoutingDecision).filter_by(id=decision).update({"created_at": NOW.replace(tzinfo=None) + timedelta(days=1)})
     assert router.provider_allows_dispatch("codex")["state"] == "ok"
@@ -159,6 +156,7 @@ def test_atomic_routing_outcome_and_classification(lab, monkeypatch):
 
 
 def test_atomic_execution_outcome_and_classification(lab, monkeypatch):
+    result = json.dumps({"ok": False, "error": LIMIT, "provider_health": {"state": "ok", "retry_after": None, "reason": "no provider error"}})
     with cdb.get_db_session() as db:
         db.add(cdb.EstateExecution(id="write", objective="implement", executor="codex-write",
                                   provider="codex", host_id="test-lab", repo_id="odysseus",
@@ -169,12 +167,12 @@ def test_atomic_execution_outcome_and_classification(lab, monkeypatch):
         patch.setattr(router, "_provider_outcome", fail)
         with pytest.raises(RuntimeError):
             write_lane._transition("write", ("running",), lifecycle_state="failed",
-                                   result_json=json.dumps({"ok": False, "error": LIMIT}))
+                                   result_json=result)
     with cdb.get_db_session() as db:
         row = db.get(cdb.EstateExecution, "write")
         assert row.lifecycle_state == "running" and row.result_json is None
     assert write_lane._transition("write", ("running",), lifecycle_state="failed",
-                                  result_json=json.dumps({"ok": False, "error": LIMIT}))
+                                  result_json=result)
     assert router.provider_allows_dispatch("codex")["state"] == "quota_exhausted"
     assert write_lane._transition("write", ("failed",), lifecycle_state="succeeded",
                                   result_json=json.dumps({"ok": True, "output": "done"}))
@@ -332,10 +330,20 @@ def observed(result):
     return decision
 
 
-@pytest.mark.parametrize("result", [{}, {"ok": False}, {"ok": None},
-    {"stdout": " \t", "stderr": "\n", "error": " "}, {"ok": False, "stdout": " \n"}])
-def test_missing_success_evidence_is_unknown(result):
-    assert router._provider_outcome(result)["state"] == "unknown"
+@pytest.mark.parametrize("result,state", [({}, "unknown"), ({"ok": False}, "unknown"),
+    ({"ok": None}, "unknown"), ({"stdout": " \t", "stderr": "\n", "error": " "}, "unknown"),
+    ({"ok": False, "stdout": " \n"}, "unknown"),
+    ({"ok": False, "error": "You've hit your usage limit"}, "quota_exhausted"),
+    ({"error": "You've hit your usage limit"}, "quota_exhausted"),
+    ({"ok": False, "exit_code": 1, "stderr": "tool failed"}, "unknown"),
+    ({"ok": False, "error": LIMIT, "provider_health": {"state": "quota_exhausted",
+      "retry_after": "2026-11-05T17:39:00+00:00", "reason": "worker verdict"}}, "quota_exhausted"),
+    ({"ok": True, "output": "done"}, "ok")])
+def test_worker_verdict_cannot_override_raw_outcome(lab, result, state):
+    result = {"provider_health": {"state": "ok", "retry_after": None, "reason": "no provider error"}, **result}
+    observed(result)
+    health = router.provider_allows_dispatch("codex")
+    assert health["state"] == state and health["allowed"] == (state == "ok")
 
 
 @pytest.mark.parametrize("corrupt", [False, True])
@@ -431,8 +439,7 @@ def test_crash_recovery_refuses_then_recovers_after_reset(lab, worker_lane, monk
 
 
 @pytest.mark.parametrize("kind", ["codex", "codex-readonly", "codex-write", "durable-write",
-                                 "routed-read", "routed-write", "shared-read", "shared-write",
-                                 "invoke-read", "invoke-write"])
+                                 "routed-read", "routed-write", "shared-read", "shared-write"])
 def test_all_paid_launch_paths_refuse_exhaustion(lab, worker_lane, kind):
     observed({"ok": False, "error": LIMIT})
     lab[1]("", success=True)
@@ -453,8 +460,8 @@ def test_all_paid_launch_paths_refuse_exhaustion(lab, worker_lane, kind):
         if kind.endswith("write") and "result" in result:
             result = result["result"]
     else:
-        launch = router._invoke_codex_with_sandbox if kind.startswith("invoke-") else router._execute_codex_with_sandbox
-        result = launch("change", provider="codex", sandbox="workspace-write" if kind.endswith("write") else "read-only")
+        result = router._execute_codex_with_sandbox("change", provider="codex",
+            sandbox="workspace-write" if kind.endswith("write") else "read-only")
     assert not result["ok"] and "provider codex: quota_exhausted" in result["error"]
     assert not lab[2].exists()
 

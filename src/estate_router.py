@@ -56,7 +56,7 @@ _CONFIG_DIR = Path(get_app_root()) / "config"
 
 
 def classify_provider_outcome(text: str, now: datetime, *, host_tz) -> tuple:
-    """Pure classification; CLI reset clocks belong to the executing host."""
+    """Pure classification; interpret CLI reset clocks in the supplied timezone."""
     text = text.lower().replace("’", "'")
     now = now.replace(tzinfo=host_tz) if now.tzinfo is None else now.astimezone(host_tz)
     retry = now + timedelta(minutes=15)
@@ -104,9 +104,7 @@ def classify_provider_outcome(text: str, now: datetime, *, host_tz) -> tuple:
 
 
 def _provider_outcome(result: dict) -> dict:
-    # Called inside each existing outcome transaction, never by a replay loop.
-    if "provider_health" in result:
-        return result["provider_health"]  # classified in the executing host's timezone
+    # Derive health inside the outcome transaction; ignore worker verdicts.
     now = datetime.now().astimezone()
     text = "" if result.get("ok") is True else "\n".join(
         str(result.get(k) or "") for k in ("stdout", "stderr", "error")).strip() or "unknown failure"
@@ -1127,14 +1125,6 @@ def _kill_process_tree(root_pid: int, process_group_id: int, *, reap_timeout: fl
 
 
 def _execute_codex_with_sandbox(objective: str, *, sandbox: str, provider: str,
-                                **kwargs) -> dict:
-    result = _invoke_codex_with_sandbox(objective, sandbox=sandbox, provider=provider, **kwargs)
-    if result.get("codex_binary"):
-        result["provider_health"] = _provider_outcome(result)
-    return result
-
-
-def _invoke_codex_with_sandbox(objective: str, *, sandbox: str, provider: str,
                                 timeout: float = 180.0, cwd: Optional[str] = None,
                                 on_started: Optional[Callable[[int], None]] = None) -> dict:
     """The sole paid launch point; workers must use the authoritative DATABASE_URL."""
@@ -1149,7 +1139,7 @@ def _invoke_codex_with_sandbox(objective: str, *, sandbox: str, provider: str,
         "reason": "provider codex: unknown: authoritative DATABASE_URL required"}
     if not health["allowed"]:
         return {"ok": False, "provider": provider, "error": health["reason"],
-                "provider_health": health, "executed": False}
+                "executed": False}
     available, detail = _codex_available()
     if not available:
         return {"ok": False, "error": f"codex unavailable: {detail}", "provider": provider}

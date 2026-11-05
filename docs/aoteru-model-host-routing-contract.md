@@ -485,10 +485,10 @@ from host/worker eligibility. Paid read/write admission, preflight and agent
 status share this fact. Read-only telemetry uses a compact JSON envelope in
 `RoutingDecision.escalation_reason` (retaining the original reason code;
 decision lookup exposes it separately); write results use
-`EstateExecution.result_json.provider_health`. Classification and outcome
-persist in the same transaction. No health table or replay is involved.
+`EstateExecution.result_json.provider_health`. Controller classification ignores
+worker verdicts and persists with the outcome. No health table or replay is involved.
 
-Admission is enforced only in `_invoke_codex_with_sandbox`, immediately
+Admission is enforced only in `_execute_codex_with_sandbox`, immediately
 before paid CLI setup/launch, including worker execute and recovered/spooled
 write runs. Workers need `DATABASE_URL` pointing at the controller's
 authoritative database (shared database service, or the
@@ -500,7 +500,7 @@ The latest outcome is ordered by existing `created_at`, then UUID. A backwards
 host clock jump can mis-order outcomes; cooldown expiry and the next outcome
 bound this limitation. Missing/corrupt latest evidence is `unknown` and blocks
 paid dispatch until valid later evidence exists. An empty history permits the
-initial attempt. Quota reset clocks use the executing host timezone (lab GMT);
+initial attempt. Quota reset clocks use the controller timezone (lab GMT);
 an earlier clock rolls to tomorrow. Unparseable resets explicitly mark
 `retry_after_assumed` and back off 15 minutes; all cooldowns cap at seven days.
 Authentication/transport failures use a 15-minute cooldown. Expiry permits a
