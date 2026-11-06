@@ -18,7 +18,7 @@ import logging
 import threading
 import time
 import uuid
-from datetime import timedelta
+from datetime import timedelta, timezone
 from typing import Any, Optional
 
 from src import park_lease_ops
@@ -221,6 +221,7 @@ def _admission_outcome(blocker) -> dict:
 
 def execute_write_via_worker(objective: str, *, repo_id: str, host_id: str,
                              decision_id: Optional[str] = None,
+                             subject=None, head_sha=None,
                              wait_timeout: float = 30.0, timeout: float = 1800.0) -> dict:
     from sqlalchemy.exc import IntegrityError
     from core.database import EstateExecution, ParkLease, lease_serialized_transaction
@@ -296,6 +297,17 @@ def execute_write_via_worker(objective: str, *, repo_id: str, host_id: str,
                 admission_head_sha=admission_head, submitted_at=now,
             ))
             db.flush()
+            # The execution is still uncommitted: no start/recovery/outcome writer can race this suffix.
+            if decision_id:
+                try:
+                    with db.begin_nested():
+                        suffix = _router._call_suffix({"subject": subject, "head_sha": head_sha}, {
+                            "v": 1, "started_at": now.replace(tzinfo=timezone.utc).isoformat(),
+                            "submitted": True, "execution_id": execution_id})
+                        if suffix is not None:
+                            _router._attach_call_suffix(db, decision_id, suffix)
+                except Exception:
+                    log.exception("submission telemetry failed; execution is unaffected")
     except _Refusal as refusal:
         return {"ok": False, "provider": "codex-write", "authority_denied": refusal.code == "write_lease_missing",
                 "error_code": refusal.code, "error": str(refusal), **refusal.extra}

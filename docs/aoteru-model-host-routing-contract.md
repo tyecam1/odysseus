@@ -329,13 +329,17 @@ uses its routing row; additional attempts retain separate snapshots in the same
 existing log, so multiple launches cannot overwrite one another. Recording is
 best effort and fail-open; a lost worker response or telemetry failure can leave
 an unobserved call. This covers only `run_task`'s paid read-only advisory branch,
-including packet launches. The write lane, worker-protocol execute path,
-EstateExecution and polling telemetry are deferred; polling creates no call
-record. There is no schema change or new authority.
+including packet launches. Worker-protocol execute remains deferred; polling
+creates no call record. There is no schema change or new authority.
 
-This single SQLite query counts observed launches by known subject and launches
-whose known head equals that subject's previous launched call (refusals and
-reuse are excluded before applying `lag`):
+The write lane records **admitted submissions** once, synchronously with
+EstateExecution creation, using the same validated caller subject/head and
+`v:1`, UTC submission time in `started_at`, `submitted:true`, and `execution_id`.
+Admission refusals and in-flight reuse write nothing. Recording is fail-open;
+a submitted execution that never starts is a possible overcount. Join
+`execution_id` to EstateExecution and filter its state when actual starts matter;
+`admission_head_sha` is never used as caller head. The query counts observed
+advisory launches or admitted submissions by subject and unchanged head:
 
 ```sql
 WITH suffixes AS (
@@ -346,7 +350,8 @@ WITH suffixes AS (
          json_extract(j, '$.head_sha') AS head_sha,
          json_extract(j, '$.started_at') AS started_at
   FROM suffixes WHERE json_valid(j) AND json_extract(j, '$.v') = 1
-    AND json_extract(j, '$.launched') = 1 AND json_extract(j, '$.subject') IS NOT NULL
+    AND (json_extract(j, '$.launched') = 1 OR json_extract(j, '$.submitted') = 1)
+    AND json_extract(j, '$.subject') IS NOT NULL
 ), ordered AS (
   SELECT *, lag(head_sha) OVER (PARTITION BY subject ORDER BY started_at, id) AS previous_head
   FROM calls

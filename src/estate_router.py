@@ -986,35 +986,46 @@ def _merge_decision_reason(previous: str, current: str) -> str:
     return re.split(pattern, current or "", maxsplit=1)[0] + "".join(suffixes.values()) + call
 
 
-def _record_advisory_call(decision_id: str, task: dict, result: dict) -> None:
-    """Best-effort per-launch telemetry in existing rows, never launch authority."""
-    from core.database import RoutingDecision, get_db_session
+def _call_suffix(task: dict, call: dict) -> Optional[str]:
+    """Validate caller metadata and format the bounded final call namespace."""
     subject, head = task.get("subject"), task.get("head_sha")
     # Registry repo slugs and dated agent-task IDs; kinds are explicitly bounded.
     shape = r"[a-z0-9][a-z0-9._-]*:(?:pr|issue|task|work-item|decision|packet|review|commit):[A-Za-z0-9][A-Za-z0-9_-]*"
     subject = subject if type(subject) is str and len(subject) <= 160 and re.fullmatch(shape, subject, re.ASCII) else None
     head = head if type(head) is str and re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", head) else None
+    call = {**call, "subject": subject, "head_sha": head}
+    suffix = " |call=" + json.dumps(call, separators=(",", ":"), ensure_ascii=True)
+    return suffix if len(suffix.encode("utf-8")) <= 512 else None
+
+
+def _attach_call_suffix(db, decision_id: str, suffix: str) -> None:
+    """Write the call namespace last; a decision that already holds one is cloned so every call keeps its own row."""
+    from core.database import RoutingDecision
+    row = db.get(RoutingDecision, decision_id)
+    if row is None:
+        return
+    if " |call=" in (row.escalation_reason or ""):
+        row = RoutingDecision(**{c.name: getattr(row, c.name) for c in row.__table__.columns
+                                 if c.name not in {"id", "created_at", "updated_at"}})
+        row.id = str(uuid.uuid4())
+        db.add(row)
+    row.escalation_reason = _merge_decision_reason(row.escalation_reason, (row.escalation_reason or "").partition(" |call=")[0] + suffix)
+
+
+def _record_advisory_call(decision_id: str, task: dict, result: dict) -> None:
+    """Best-effort per-launch telemetry in existing rows, never launch authority."""
+    from core.database import RoutingDecision, get_db_session
     launch = result.get("_advisory_launch") or {}
-    call = {"v": 1, "subject": subject, "head_sha": head,
+    call = {"v": 1,
             "started_at": launch.get("started_at"), "launched": bool(launch), "launch_id": launch.get("id")}
     with get_db_session() as db:
         if call["launch_id"] and db.query(RoutingDecision).filter(
                 RoutingDecision.escalation_reason.contains('"launch_id":"' + call["launch_id"] + '"')).first():
             call.update(launched=False, started_at=None, launch_id=None)  # reused result is not another call
-        suffix = " |call=" + json.dumps(call, separators=(",", ":"), ensure_ascii=True)
-        if len(suffix.encode("utf-8")) > 512:
+        suffix = _call_suffix(task, call)
+        if suffix is None:
             return
-        row = db.get(RoutingDecision, decision_id)
-        if row is None:
-            return
-        if " |call=" in (row.escalation_reason or ""):
-            # A packet request may launch several processes: retain one row per
-            # attempt, using the existing outcome log rather than overwriting it.
-            row = RoutingDecision(**{c.name: getattr(row, c.name) for c in row.__table__.columns
-                                     if c.name not in {"id", "created_at", "updated_at"}})
-            row.id = str(uuid.uuid4())
-            db.add(row)
-        row.escalation_reason = _merge_decision_reason(row.escalation_reason, (row.escalation_reason or "").partition(" |call=")[0] + suffix)
+        _attach_call_suffix(db, decision_id, suffix)
 
 
 def _dispatch_advisory_call(task: dict, route: dict) -> dict:
@@ -1892,7 +1903,8 @@ def run_task(task: dict, *, packet_authority: Optional[dict] = None) -> dict:
                         "verification_outcome": "fail",
                     }
                 result = provider_fn(paid_objective, repo_id=repo_id, host_id=host_id,
-                                      decision_id=route["decision_id"])
+                                      decision_id=route["decision_id"],
+                                      subject=task.get("subject"), head_sha=task.get("head_sha"))
                 if result.get("authority_denied"):
                     _update_decision_outcome(
                         route["decision_id"], status="blocked", deterministic_gate="fail",
