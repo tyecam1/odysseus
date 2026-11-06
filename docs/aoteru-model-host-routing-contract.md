@@ -322,16 +322,20 @@ invalid identifiers are null. Subjects are ASCII, at most 160 characters:
 slugs and numeric/datable work-item IDs; kinds are `pr`, `issue`, `task`,
 `work-item`, `decision`, `packet`, `review`, or `commit`. No branch/HEAD inference
 is permitted. Heads must be full 40- or 64-character lowercase hex. The entire
-suffix is bounded to 512 bytes. Only a successful central `Popen` supplies a
-launch timestamp and unique `launch_id`; refusals, transport failures and reused
+suffix is bounded to 512 bytes. A successful central `Popen` or acknowledged
+write-worker start supplies a launch timestamp and unique `launch_id`; refusals, transport failures and reused
 results have `launched:false` and no start timestamp. A packet's first attempt
 uses its routing row; additional attempts retain separate snapshots in the same
 existing log, so multiple launches cannot overwrite one another. Recording is
 best effort and fail-open; a lost worker response or telemetry failure can leave
-an unobserved call. This covers only `run_task`'s paid read-only advisory branch,
-including packet launches. The write lane, worker-protocol execute path,
-EstateExecution and polling telemetry are deferred; polling creates no call
-record. There is no schema change or new authority.
+an unobserved call. This covers `run_task`'s paid read-only advisory branch,
+including packet launches, and the implementation write lane (also used for
+governed reviews). Write starts update only the existing routing row, at most
+once per execution, using caller-supplied subject/head metadata; the admission
+head is a worktree base and is never inferred as the reviewed head. Admission
+refusals and in-flight reuse do not count. Worker-protocol execute and read-only
+worker `execute` remain deferred; polling creates no call record. There is no
+schema change or new authority.
 
 This single SQLite query counts observed launches by known subject and launches
 whose known head equals that subject's previous launched call (refusals and

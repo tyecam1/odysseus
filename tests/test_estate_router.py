@@ -1653,7 +1653,8 @@ def test_scenario_a_implementation_mode_dispatches_codex_write_under_active_leas
     assert result["dispatch"] == "new"
     assert result["next_action"]["cli"] == "aoteru execution exec-scenario-a --wait 60"
     assert dispatched == {"objective": "implement it", "repo_id": "test-repo",
-                          "host_id": result["route"]["host"], "decision_id": "implementation-decision"}
+                          "host_id": result["route"]["host"], "decision_id": "implementation-decision",
+                          "subject": None, "head_sha": None}
     assert recorded_route["task"]["recommended_route"] == "codex_eligible"
 
 

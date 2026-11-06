@@ -18,7 +18,7 @@ import logging
 import threading
 import time
 import uuid
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from src import park_lease_ops
@@ -221,10 +221,13 @@ def _admission_outcome(blocker) -> dict:
 
 def execute_write_via_worker(objective: str, *, repo_id: str, host_id: str,
                              decision_id: Optional[str] = None,
+                             subject=None, head_sha=None,
                              wait_timeout: float = 30.0, timeout: float = 1800.0) -> dict:
     from sqlalchemy.exc import IntegrityError
     from core.database import EstateExecution, ParkLease, lease_serialized_transaction
 
+    # head_sha is caller-supplied only; admission_head_sha is the lab worktree base, not the reviewed head.
+    _router._record_call(decision_id, {"subject": subject, "head_sha": head_sha}, {}, single_row=True)
     authority = _lease_authority(repo_id, host_id)                                   # step 1
     if not authority["ok"]:
         return {"ok": False, "provider": "codex-write", "authority_denied": True,
@@ -401,6 +404,11 @@ def _dispatch_start(execution_id: str) -> None:
             return
         result, exc = _worker(row.host_id, "start", _start_payload(row), deadline_s=60)
         if exc is None:
+            if result.get("accepted") is True and result.get("state") in (
+                    "starting", "running", "succeeded", "failed", "timed_out", "interrupted") and (
+                    result.get("spawned") is True or isinstance(result.get("handle"), dict)):
+                _router._record_call(row.decision_id, None, {"_advisory_launch": {
+                    "id": execution_id, "started_at": datetime.now(timezone.utc).isoformat()}}, single_row=True)
             _apply_view(execution_id, {**result, "state": result.get("state")}, start_answer=True)
             return
         if _is_ambiguous(exc):
