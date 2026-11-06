@@ -789,3 +789,20 @@ def test_park_status_lists_active_leases(client, monkeypatch, capsys):
     assert rc == 0
     assert captured["url"].endswith("/api/estate/park/status")
     assert "odysseus" in out
+
+
+def test_dispatch_forwards_optional_call_telemetry_and_omits_it_otherwise(client, monkeypatch):
+    client.main(["config", "set", "--url", "http://lab:7001", "--token", "ody_x"])
+    bodies = []
+
+    def fake_request(cfg, method, path, body=None, timeout=None):
+        bodies.append(body)
+        return {"status": 200, "body": {"ok": True, "executed": True}}
+    monkeypatch.setattr(client, "_request", fake_request)
+
+    head = "a" * 40
+    assert client.main(["lab", "review it", "--repo", "odysseus", "--subject", "odysseus:pr:225", "--head-sha", head]) == 0
+    assert client.main(["ask", "review it", "--repo", "odysseus", "--subject", "odysseus:pr:225", "--head-sha", head]) == 0
+    assert client.main(["lab", "review it", "--repo", "odysseus"]) == 0
+    assert [(b.get("subject"), b.get("head_sha")) for b in bodies[:2]] == [("odysseus:pr:225", head)] * 2
+    assert "subject" not in bodies[2] and "head_sha" not in bodies[2]
