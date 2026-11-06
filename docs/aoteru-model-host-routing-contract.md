@@ -302,6 +302,17 @@ cheap adequate worker -> deterministic checks -> done
 
 Do not pre-emptively send the same context to multiple expensive models.
 
+Prepared Sol items attach only in `estate_router.run_task`'s paid advisory
+branch, after eligibility checks and before `_dispatch_read_only`. One bounded
+request stays within one repository, parent scope and selected route; the pure
+compiler plans with zero wait. Batching is inert until a calibrated, versioned
+`Policy` and authoritative preparation snapshots and compatibility certificates
+are supplied by a trusted Python caller (`packet_authority`), never by the HTTP
+envelope. Otherwise items run singly or require preparation. The router persists
+the namespaced `sol_packet` JSON suffix on the existing escalation reason before
+dispatch and retains it through terminal updates. Parsed verdicts are advisory:
+independent verification remains pending and acceptance remains blocked.
+
 ## Independent verification
 
 Prefer deterministic checks first: tests, schemas, lint/type checks, git diff checks, source/claim checks and domain gates.

@@ -31,6 +31,7 @@ import json
 import re
 import socket
 import uuid
+from dataclasses import asdict, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Optional
@@ -43,6 +44,7 @@ from src.subscription_model_policy import (
 from src.runtime_paths import get_app_root
 from src.park_lease_ops import active_lease_for_repo
 from src import worktree_ops
+from src import sol_packet_compiler as _packets
 from src import estate_worker_procs as _estate_worker_procs
 from src.estate_worker_procs import (
     _kill_process_tree as _worker_kill_process_tree,
@@ -970,16 +972,17 @@ def _update_decision_outcome(decision_id: str, *, status: str, deterministic_gat
                              actual_route: Optional[str] = None,
                              verification_outcome: Optional[str] = None,
                              executed_host_id: Optional[str] = None,
-                             concrete_model: Optional[str] = None) -> None:
+                             concrete_model: Optional[str] = None) -> bool:
     """Execution happens after `resolve_route()` already wrote its
     decision row — update that same row with the real outcome rather than
     writing a second telemetry row for one routed task (`RoutingDecision`
     is 'one row per routed task', not one row per stage). Same
     swallow-and-log discipline as `_record_decision`: a telemetry update
     failing must not turn an actually-successful execution into a
-    reported failure."""
+    reported failure. Returns True only after the row update commits; packet
+    admission requires that confirmation before spending a call."""
     if decision_id.startswith("decision-unrecorded-"):
-        return  # the routing write itself already failed; nothing to update
+        return False  # the routing write itself already failed; nothing to update
     from core.database import RoutingDecision, get_db_session
     try:
         with get_db_session() as db:
@@ -990,7 +993,10 @@ def _update_decision_outcome(decision_id: str, *, status: str, deterministic_gat
                 if latency_ms is not None:
                     row.latency_ms = latency_ms
                 if escalation_reason is not None:
+                    suffix = (row.escalation_reason or "").partition(" | sol_packet=")[2]
                     row.escalation_reason = escalation_reason
+                    if suffix and " | sol_packet=" not in escalation_reason:
+                        row.escalation_reason += " | sol_packet=" + suffix
                 if executor is not None:
                     row.executor = executor
                 if escalated is not None:
@@ -1003,9 +1009,13 @@ def _update_decision_outcome(decision_id: str, *, status: str, deterministic_gat
                     row.executed_host_id = executed_host_id
                 if concrete_model is not None:
                     row.concrete_model = concrete_model
+            else:
+                return False
+        return True
     except Exception:
         import logging
         logging.getLogger(__name__).exception("routing_decisions outcome update failed; execution result is unaffected")
+        return False
 
 
 def _retryable_local_error(exc: Exception) -> bool:
@@ -1603,7 +1613,94 @@ def _dispatch_failure_actual_route(result: dict) -> Optional[str]:
     return f"placement_mismatch:{observed_host}"
 
 
-def run_task(task: dict) -> dict:
+def _run_prepared_items(task: dict, route: dict, authority: Optional[dict]) -> dict:
+    """One request, repo, parent scope and selected route. Authority is server-side only:
+    exact preparation snapshots, context, calibrated Policy and evidenced certificate pairs.
+    Request dictionaries can strengthen requirements, but cannot certify compatibility.
+    """
+    authority = authority or {}
+    policy = authority.get("policy", _packets.Policy())
+    raw, items, certified = task["prepared_items"], [], True
+    verification = task.get("verification") or {}
+    requirements = task.get("requirements") or {}
+    try:
+        if (type(raw) is not list or not 1 <= len(raw) <= 32 or not task.get("repo")
+                or len(json.dumps(raw).encode("utf-8")) > 8 * 1024 * 1024):
+            raise ValueError("invalid collection")
+        names = ("independence_required", "fresh_context_required", "separate_adjudication_required")
+        for controls in (requirements, verification):
+            if any(name in controls and type(controls[name]) is not bool for name in (*names, "independent_model_required")):
+                raise ValueError("unknown parent requirement")
+        for data in raw:
+            item = _packets.Item(**{"independence_required": None, **data})  # unknown fields refuse
+            if _packets.validate_item(item):
+                items.append(item)
+                certified = False
+                continue
+            prepared = (authority.get("items") or {}).get(item.decision_id)
+            trusted = (type(prepared) is _packets.Item and authority.get("repo") == task["repo"]
+                       and authority.get("shared_context") == task.get("objective")
+                       and json.dumps(asdict(prepared), sort_keys=True) == json.dumps(asdict(item), sort_keys=True))
+            certified = certified and trusted
+            flags = {}
+            for name in names:
+                required = (getattr(item, name) is True or requirements.get(name) is True
+                            or verification.get(name) is True or getattr(prepared, name, None) is True)
+                flags[name] = True if required else getattr(item, name)
+                if name == "independence_required" and not trusted and not required:
+                    flags[name] = None
+            if verification.get("independent_model_required") is True or requirements.get("independent_model_required") is True:
+                flags["independence_required"] = True
+            items.append(replace(item, **flags))
+        if len({i.parent_task for i in items}) != 1:
+            raise ValueError("mixed scopes")
+        groups = _packets.plan(items, policy, authority.get("certificates", ()) if certified else (),
+                               datetime.now(timezone.utc), wait_seconds=0)
+    except (TypeError, ValueError, AttributeError):
+        groups = [_packets.Group((), _packets.Decision(_packets.NEEDS_PREPARATION, "invalid_prepared_items"))]
+    submitted_ids = [d["decision_id"] for d in raw[:32] if type(d) is dict and type(d.get("decision_id")) is str] if type(raw) is list else []
+    records = [{"packet_id": str(uuid.uuid4()), "item_ids": [i.decision_id for i in g.items] or submitted_ids,
+                "outcome": g.decision.outcome, "reason": g.decision.reason, "detail": g.decision.detail,
+                "policy_evidence_version": getattr(policy, "evidence_version", None)} for g in groups]
+    code = route.get("escalation_reason") or "insufficient_capability"
+    def reason():
+        return code + " | sol_packet=" + json.dumps({"groups": records}, sort_keys=True)
+    saved = _update_decision_outcome(route["decision_id"], status="needs_escalation", deterministic_gate="pending",
+                                     escalation_reason=reason(), verification_outcome="pending")
+    results, executions = {}, []
+    if saved is not True:
+        for record in records:
+            record["persistence"] = "unconfirmed"
+    else:
+        for group, record in zip(groups, records):
+            if group.decision.outcome not in (_packets.BATCH, _packets.SINGLE):
+                continue
+            try:
+                prompt = _packets.compile_packet(group.items, record["packet_id"], task.get("objective") or "", ())
+            except (TypeError, ValueError):
+                record["result"] = "compilation_refused"
+                continue
+            result = _dispatch_read_only(route["route"]["host"], "codex", {**task, "objective": prompt}, timeout=180.0)
+            executions.append(result)
+            valid = result.get("ok") and (result.get("placement") or {}).get("executed_host") == route["route"]["host"]
+            parsed = _packets.parse_results(group.items, result.get("output"))
+            for ident, value in parsed.items():
+                value = asdict(value) if type(value) is _packets.ItemResult else value
+                results[ident] = {"result": value if valid else "dispatch_failed",
+                                  "verification_outcome": "pending", "acceptance": "blocked"}
+            record["results"] = {ident: "parsed" if valid and type(value) is _packets.ItemResult else value if valid else "dispatch_failed"
+                                 for ident, value in parsed.items()}
+    complete = len(results) == len(items) and bool(items) and all(type(r["result"]) is dict for r in results.values())
+    if saved is True and _update_decision_outcome(route["decision_id"], status="needs_escalation" if complete else "blocked",
+            deterministic_gate="pass" if complete else "fail", escalation_reason=reason(), verification_outcome="pending") is not True:
+        for record in records:
+            record["persistence"] = "unconfirmed"
+    return {**route, "ok": False, "executed": bool(any((e.get("placement") or {}).get("executed_host") for e in executions)),
+            "reason": reason(), "escalation_reason": reason(), "packet_results": results, "executions": executions,
+            "deterministic_gate": "pass" if complete else "fail", "verification_outcome": "pending", "acceptance": "blocked"}
+
+
+def run_task(task: dict, *, packet_authority: Optional[dict] = None) -> dict:
     """Closes the execution gap: `resolve_route()` alone only answers
     WHERE+WHAT, it never calls a model. `run_task()` routes first (same
     `resolve_route()`, unchanged — deterministic-first and parking/domain
@@ -1650,6 +1747,11 @@ def run_task(task: dict) -> dict:
         task["recommended_route"] = recommended_lane_for_task(task)
     route = resolve_route(task)
     executor = (route.get("route") or {}).get("executor")
+    if task.get("prepared_items") is not None and not (
+            executor == "none" and route.get("decision_id") and task.get("objective") is not None
+            and (task.get("routing") or {}).get("allow_paid_escalation")):
+        return {**route, "ok": False, "executed": False,
+                "execution_error": "prepared items require the read-only advisory lane"}
     if executor != "local":
         routing = task.get("routing") or {}
         allow_paid = routing.get("allow_paid_escalation")
@@ -1686,6 +1788,9 @@ def run_task(task: dict) -> dict:
                         "execution_error": f"executor 'codex' not qualified on {paid_host!r}",
                         "escalation_reason": "worker_failed"}
             if implementation_mode:
+                if task.get("prepared_items") is not None:
+                    return {**route, "ok": False, "executed": False,
+                            "execution_error": "prepared items require the read-only advisory lane"}
                 executor_name = f"{provider_name}-write"
                 error = None
                 repo_id = task.get("repo")
@@ -1769,6 +1874,8 @@ def run_task(task: dict) -> dict:
                         "escalation_reason": None, "reason": reason,
                     }
             else:
+                if task.get("prepared_items") is not None:
+                    return _run_prepared_items(task, route, packet_authority)
                 # Dispatched to the worker on route['route']['host'] rather
                 # than called in-process (Stage 3, D2): the worker resolves
                 # `task['repo']` to a real path on *its own* host (see
