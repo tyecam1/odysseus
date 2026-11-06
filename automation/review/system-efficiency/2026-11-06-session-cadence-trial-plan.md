@@ -84,6 +84,53 @@ calls_pr = sum(c for _, _, c, pb in sessions if pb)
 print("calls in sessions that touch any PR:", calls_pr, "of", calls_all, f"({100*calls_pr/calls_all:.0f}%)")
 ```
 
+## Pilot, second step (2026-11-06 12:59Z): segmenting one session by the merge times of the PRs it delivered
+
+A numeric-only demonstration of one candidate attribution method on a single long session (the Claude Code session that produced most of the PRs referenced in these reports): each call is assigned to the segment that **ends** at the next merge of a PR in the Odysseus repository, using the PR merge times from GitHub and the call timestamps from the transcript. Calls counted once per message and request id. Script below (the transcript path is that session's file).
+
+The session has 1,090 calls between 2026-11-02 10:17 and 2026-11-06 12:59 UTC and 26 PRs merged inside that span, giving 27 segments. Median segment: 13 calls. Two segments are far larger: the one ending at the merge of #211 (355 calls, 207 M cache-read tokens, 1.69 M cache-write, 509 k output) and the one ending at #219 (230 calls, 40.5 M, 0.52 M, 116 k). Together these are 585 of 1,090 calls (54%). The documentation-only PRs each close a segment of roughly 13 to 40 calls.
+
+What this shows: the method is mechanically workable and gives a per-delivered-item cost profile for a mixed session, and it is consistent with the owner's observation that repeated review rounds on one design cost far more than small, centralised changes (the #219 segment contains the abandoned larger #216 design and its redesign). What it does **not** show or validate:
+
+- A segment contains everything between two merges, including idle waiting, side work, coordination, memory notes, compaction and the start of the next item, so the figures are upper bounds on the item's own cost and the first segment also absorbs everything before the first merge in the window.
+- Items overlap in time (several branches and reviews in flight), so assigning by the next merge time can misplace calls.
+- It is one session, one repository and one day-range; it says nothing about the arms of the proposed trial, and the earlier first-step finding (sessions mix items) means this method needs a second independent measure to validate it, for example item-boundary markers recorded in the session or per-call `subject` tags, against which these segment totals could be compared.
+- Only calls that end in a merge can be attributed; work that never merged (abandoned or open) falls into the following segment or into none.
+
+Prerequisite 1 therefore stays **open**: this is a candidate method with a worked example, not a validated one. Not independently reviewed.
+
+```python
+import json, os, subprocess, datetime, bisect, collections, sys
+sess = os.path.expanduser("~/.claude/projects/C--Users-tyeca/ad47c56a-df36-467d-8d41-aa787e0b0466.jsonl")
+prs = json.loads(subprocess.run(["gh", "pr", "list", "-R", "tyecam1/odysseus", "--state", "merged", "--limit", "60", "--json", "number,mergedAt,title"],
+                                capture_output=True, text=True, encoding="utf-8").stdout)
+t0 = None; calls = {}
+for line in open(sess, encoding="utf-8", errors="replace"):
+    try: e = json.loads(line)
+    except ValueError: continue
+    m = e.get("message") or {}; u = m.get("usage")
+    if e.get("type") != "assistant" or not u: continue
+    ts = e.get("timestamp") or ""
+    key = (m.get("id"), e.get("requestId"))
+    if key in calls: continue
+    calls[key] = (ts, u.get("cache_read_input_tokens", 0), u.get("cache_creation_input_tokens", 0), u.get("output_tokens", 0))
+rows = sorted(calls.values())
+first, last = rows[0][0], rows[-1][0]
+merged = sorted((p["mergedAt"], p["number"]) for p in prs if first <= p["mergedAt"] <= last)
+print("session calls", len(rows), "| span", first[:16], "->", last[:16], "| PRs merged inside the span:", len(merged))
+bounds = [m[0] for m in merged]
+seg = collections.defaultdict(lambda: [0, 0, 0, 0])
+for ts, cr, cw, out in rows:
+    i = bisect.bisect_left(bounds, ts)           # the call belongs to the segment that ENDS with the next merge
+    label = merged[i][1] if i < len(merged) else "after-last-merge"
+    s = seg[label]; s[0] += 1; s[1] += cr; s[2] += cw; s[3] += out
+print("segment (ends at merge of PR) | calls | cache-read M | cache-write M | output k")
+for label, (c, cr, cw, out) in sorted(seg.items(), key=lambda kv: -kv[1][0])[:14]:
+    print(f"#{label} | {c} | {cr/1e6:.1f} | {cw/1e6:.2f} | {out/1e3:.0f}")
+cs = sorted(v[0] for v in seg.values())
+print("segments", len(seg), "| calls per segment median", cs[len(cs)//2], "max", cs[-1])
+```
+
 ## Prerequisites before any trial
 
 1. **Attribution pilot:** produce and validate an attribution method (item-boundary markers, per-call tags, or another) that gives an item-level token join, including item boundaries inside long sessions and the treatment of shared overhead, checkpoint preparation, worker and review sessions and rework. If it cannot be done, the trial cannot start.
