@@ -16,7 +16,7 @@ Primary: total counted tokens (cache-read + cache-write + input + output) per **
 
 ## Data (candidate sources; the attribution pilot decides whether they suffice)
 
-From the local transcripts, numeric fields only: per session, calls, cache-read, cache-write, input and output tokens, timestamps; the join from session to work item is the PR number or task id the operator records at session start in the checkpoint (one line: `trial: item=<id> arm=<A|B>`). Quality guard from GitHub PR and review records. Long-running sessions naturally mix items, so excluding mixed sessions would remove the practice under test; item boundaries inside a session, and the allocation of shared overhead, checkpoint preparation, worker and review sessions and rework, must be defined and piloted first (see prerequisites). Until then, mixed sessions are reported separately, not silently dropped. The per-call `subject` and `function` tags (#225, #226, #235) may give a more exact join once the lab runs them and their attribution coverage is validated, but the trial is not assumed to depend on them; whether any extra boundary records or instrumentation are needed is a question for the pilot.
+From the local transcripts, numeric fields only: per session, calls, cache-read, cache-write, input and output tokens, timestamps; the join from session to work item was proposed as the PR number or task id the operator records at session start in the checkpoint (one line: `trial: item=<id> arm=<A|B>`); the pilot below suggests (without proving) that a start-of-session marker alone may not be enough because sessions appear to mix items. Quality guard from GitHub PR and review records. Long-running sessions naturally mix items, so excluding mixed sessions would remove the practice under test; item boundaries inside a session, and the allocation of shared overhead, checkpoint preparation, worker and review sessions and rework, must be defined and piloted first (see prerequisites). Until then, mixed sessions are reported separately, not silently dropped. The per-call `subject` and `function` tags (#225, #226, #235) may give a more exact join once the lab runs them and their attribution coverage is validated, but the trial is not assumed to depend on them; whether any extra boundary records or instrumentation are needed is a question for the pilot.
 
 ## Analysis (fixed in advance)
 
@@ -26,9 +26,67 @@ Compare per-item totals between arms with a paired-by-stratum difference in medi
 
 Confounding by item difficulty (mitigated by blocked randomisation using recorded difficulty proxies; residual imbalance remains possible); learning effects as the checkpoint format improves; the operator's own behaviour changing when watched; token counts not equalling allowance; small sample. Any of these can make the result inconclusive, which is an acceptable outcome.
 
+## Pilot, first step (2026-11-06 12:54Z): can sessions be joined to work items?
+
+A numeric-only feasibility check of prerequisite 1 on the two dominant directories (main transcripts; calls counted once per message and request id, but every record's tool-call blocks read; only candidate PR or issue numbers matched in `gh pr <verb> <n>` and `repos/.../pulls|issues/<n>` commands were kept, and no transcript prose was stored; the regex can also capture an arbitrary two-to-four-digit number in such a command and misses single-digit and five-digit identifiers, so these are candidate matches, not verified PR identities). Script below.
+
+| Measure | Value |
+|---|---:|
+| Main sessions | 69 |
+| Sessions with no PR reference | 30 |
+| Sessions with exactly 1 distinct candidate PR number | 8 |
+| Sessions referencing 2-5 PRs | 17 |
+| Sessions referencing 6 or more PRs | 14 |
+| Median distinct PRs per session that references any (39 sessions) | 3 (maximum 43) |
+| Raw reference transitions within a session (adjacent matches that differ; denominator: the 39 sessions with any match): median / maximum | 5 / 62 |
+| Share of calls in sessions that reference at least one PR | 91% (14,352 of 15,686) |
+
+Finding: **this heuristic has not demonstrated reliable session-level attribution; prerequisite 1 remains open.** Only 8 of 69 sessions contain exactly one detected number, and that does not establish their work-item scope (reading or checking references, other repositories, issue numbers and missed references all intervene). Most sessions with any match contain several distinct numbers and many raw transitions (the transition count includes repeated and within-command matches, so it overstates real subject changes); this is consistent with sessions mixing items, but is not proof, so assigning a whole session's tokens to one item is **unvalidated and probably misattributes them**. Call-level attribution by segmenting a session at PR-reference boundaries looks plausible but is noisy and unvalidated: the regex also catches references to PRs that are only being read or checked, may match other repositories' numbers, and 30 sessions have no reference at all (they may be short, or work that does not involve PRs; not examined). The pilot therefore leaves prerequisite 1 **open, not passed**: a validated attribution method is still needed, for example explicit item boundaries recorded in the session (a marker per item start and end, not only at session start) or the per-call `subject` tag extended beyond the estate's paid launches. It does not test the cost of checkpoint preparation or review sessions. Not independently reviewed.
+
+```python
+import glob, json, os, re, collections, statistics
+root = os.path.expanduser("~/.claude/projects")
+PR = re.compile(r"gh\s+pr\s+(?:view|create|merge|checks|ready|edit|diff|close|comment)\b[^\n|;&]*?\b(\d{2,4})\b|repos/[\w.-]+/[\w.-]+/(?:pulls|issues)/(\d{2,4})\b")
+sessions = []
+seen = set()
+for d in ["<home-directory-name>", "<phd-notes-directory-name>"]:   # the two local transcript directory names; substitute your own
+    for p in sorted(glob.glob(os.path.join(root, d, "*.jsonl"))):
+        calls = 0; prs_by_call = []
+        for line in open(p, encoding="utf-8", errors="replace"):
+            try: e = json.loads(line)
+            except ValueError: continue
+            m = e.get("message") or {}
+            if e.get("type") == "assistant" and m.get("usage"):
+                key = (m.get("id"), e.get("requestId"))
+                if key not in seen:      # count each call once, but still read every record's content blocks below
+                    seen.add(key); calls += 1
+            if e.get("type") != "assistant": continue
+            for c in (m.get("content") or []):
+                if isinstance(c, dict) and c.get("type") == "tool_use":
+                    cmd = ((c.get("input") or {}).get("command")) or ""
+                    for g in PR.findall(cmd):
+                        n = g[0] or g[1]
+                        if n: prs_by_call.append((calls, n))
+        sessions.append((d, p, calls, prs_by_call))
+tot = len(sessions)
+dist = collections.Counter()
+for _, _, calls, pb in sessions:
+    k = len({n for _, n in pb})
+    dist["0" if k == 0 else "1" if k == 1 else "2-5" if k <= 5 else "6+"] += 1
+print("main sessions", tot, "| distinct PR numbers touched per session:", dict(dist))
+pc = [len({n for _, n in pb}) for _, _, _, pb in sessions if pb]
+if pc: print("sessions touching any PR:", len(pc), "| median distinct PRs", statistics.median(pc), "max", max(pc))
+# switching: within a session, how many times does the 'most recent PR touched' change
+sw = [sum(1 for a, b in zip(pb, pb[1:]) if a[1] != b[1]) for _, _, _, pb in sessions if pb]
+if sw: print("PR switches within sessions: median", statistics.median(sw), "max", max(sw))
+calls_all = sum(c for _, _, c, _ in sessions)
+calls_pr = sum(c for _, _, c, pb in sessions if pb)
+print("calls in sessions that touch any PR:", calls_pr, "of", calls_all, f"({100*calls_pr/calls_all:.0f}%)")
+```
+
 ## Prerequisites before any trial
 
-1. **Attribution pilot:** show that an item-level token join is possible from the transcripts and the one-line marker, including item boundaries inside long sessions and the treatment of shared overhead, checkpoint preparation, worker and review sessions and rework. If it cannot be done, the trial cannot start.
+1. **Attribution pilot:** produce and validate an attribution method (item-boundary markers, per-call tags, or another) that gives an item-level token join, including item boundaries inside long sessions and the treatment of shared overhead, checkpoint preparation, worker and review sessions and rework. If it cannot be done, the trial cannot start.
 2. **Item and completion definitions:** non-overlapping items with acceptance criteria; rules for abandonment, timeouts and multi-PR tasks; all assigned items reported.
 3. **Allocation:** blocks, difficulty proxies and the randomisation procedure fixed in advance; standardised prompts, assistance and settings.
 4. **Intervention fidelity and carry-over:** session lineage (which session resumes for arm A after arm B), cross-item dependencies, checkpoint content rules and their preparation cost, and a record of arrival gaps and cache conditions with a decision on whether they are controlled or part of the intended operational effect.
