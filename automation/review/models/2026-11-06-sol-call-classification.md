@@ -66,3 +66,58 @@ for k, v in B.most_common():
     xs = sorted(tok[k]); med = xs[len(xs)//2] if xs else 0
     print(f"{k}: {v} ({100*v/n:.0f}%), median uncached input {med}")
 ```
+
+## Addendum: subject extraction (still weak)
+
+A second pass tried to recover each call's subject with regexes over the prompt (a PR number, and 9-40 hex strings as candidate head commits); counts only, script below.
+
+| Measure | Value |
+|---|---:|
+| Sol calls | 714 |
+| Calls whose prompt names a PR number | 63 (9%) |
+| Calls containing any 9-40 character hex string | 457 (64%) |
+| Distinct PRs named | 12 (median 6 calls each, p90 11, max 13) |
+| First call per PR | 12 |
+| Later calls sharing a hex string with an earlier call on the same PR | 46 |
+| Later calls on the same PR sharing none | 5 |
+
+Reading: where the subject is identifiable, repeated calls on one PR are common (51 later calls across 12 PRs, about 4 per PR), and most share a hex string with an earlier call. **This does not establish repeated verification of unchanged work**: a shared hex string may be a base commit or a manifest hash rather than the reviewed head, and 91% of calls name no PR at all, so the PR-level figures describe a small, possibly unrepresentative slice. A reliable split needs the reviewed head recorded at dispatch time (the call-level subject and head commit as structured fields), which the rollouts do not carry. That is a telemetry gap, and the minimal fix is to record `subject` and `head_sha` with each routed Sol call.
+
+```python
+"""Per-call subject extraction from Sol prompts: PR number and head sha only; prints counts, no text."""
+import glob, json, os, re, collections
+PR = re.compile(r"(?:PR|pull request|pull/|#)\s*#?(\d{2,4})\b", re.I)
+SHA = re.compile(r"\b[0-9a-f]{9,40}\b")
+calls = []
+for p in glob.glob(os.path.expanduser("~/.codex/sessions/**/rollout-*.jsonl"), recursive=True):
+    first = None; model = None; ts = None
+    for line in open(p, encoding="utf-8", errors="replace"):
+        try: e = json.loads(line)
+        except ValueError: continue
+        pl = e.get("payload") or {}
+        if e.get("type") == "turn_context" or pl.get("type") == "turn_context": model = pl.get("model") or model
+        if ts is None: ts = e.get("timestamp")
+        if pl.get("type") == "message" and pl.get("role") == "user":
+            t = " ".join(str(c.get("text") or "") for c in (pl.get("content") or []) if isinstance(c, dict))
+            if len(t) > len(first or ""): first = t
+    if not model or "sol" not in model or not first: continue
+    prs = collections.Counter(PR.findall(first)); shas = set(SHA.findall(first))
+    pr = prs.most_common(1)[0][0] if prs else None
+    calls.append((ts, pr, frozenset(s[:9] for s in shas)))
+calls.sort(key=lambda c: c[0] or "")
+n = len(calls); with_pr = [c for c in calls if c[1]]
+print("calls", n, "with a PR number", len(with_pr), "with any sha", sum(1 for c in calls if c[2]))
+by_pr = collections.defaultdict(list)
+for ts, pr, shas in with_pr: by_pr[pr].append(shas)
+print("distinct PRs", len(by_pr))
+rep_same = rev_changed = first_look = 0
+for pr, lst in by_pr.items():
+    seen = []
+    for shas in lst:
+        if not seen: first_look += 1
+        elif shas and any(shas & s for s in seen if s): rep_same += 1      # shares a sha with an earlier call
+        else: rev_changed += 1
+        seen.append(shas)
+print("first call per PR", first_look, "| later call sharing a sha with an earlier call (candidate repeat on unchanged work)", rep_same, "| later call with no shared sha (changed or unidentified)", rev_changed)
+sizes = sorted(len(v) for v in by_pr.values()); print("calls per PR: median", sizes[len(sizes)//2], "p90", sizes[int(len(sizes)*.9)], "max", sizes[-1])
+```
