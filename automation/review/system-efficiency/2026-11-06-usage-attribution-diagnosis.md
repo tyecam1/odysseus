@@ -43,7 +43,7 @@ One row per paid call, joinable on existing ids: `provider`, `model` (resolved),
 
 ## Not done
 
-- Before/after attribution for a representative function, a true function taxonomy from repository activity, and a controlled comparison of session cadences. (Per-session shape is now measured in the addendum.)
+- Before/after attribution for a representative function (not recoverable retroactively; see the third addendum) and a controlled comparison of session cadences. (Per-session shape and a repository-activity taxonomy are now in the addenda.)
 - Claude allowance percent-remaining (no local source), and home-host usage.
 - The independent Sol review of this report.
 
@@ -76,6 +76,29 @@ Same method and scope as the first addendum but all transcripts (main and subage
 | other | 268 | 0 | 27 k | 6.0 k | 11 |
 
 Reading: in these directories Opus calls carry **less** context per call than Sonnet calls (median 197 k vs 357 k), so the "Opus re-reads a larger context" part of hypothesis 2 is not supported. Opus does show about twice Sonnet's mean cache-write per call (11.2 k vs 5.4 k). Possible explanations, none tested here: Opus is used in newer or restarted sessions (cache creation is front-loaded), cache expiry between sparse Opus calls forces re-creation, or the work differs. Token counts are not allowance, and Opus and Sonnet allowance weights are unknown, so nothing here says whether Opus use is costly in allowance terms. The ranked diagnosis keeps Opus as a hypothesis to test with a same-session comparison and cache-expiry timing; it should not drive a policy change on this evidence. The residual model-family bucket labelled "other" (268 calls) includes zero-context records (its median is 0; its mean context is 27 k) and is not interpreted; the script assigns families by model-name substring, not by missing usage.
+
+## Third addendum: repository-activity taxonomy (what was delivered), and why a per-function attribution is not recoverable
+
+One run on 2026-11-06 at 12:06Z over the merged pull requests of the Odysseus repository (`tyecam1/odysseus`) since 2026-06-03, using titles, merge dates and line counts only. 208 PRs were merged between 2026-06-12 and 2026-11-06.
+
+| Conventional-commit type | PRs (share) | Changed lines |
+|---|---:|---:|
+| docs | 66 (32%) | 17,125 |
+| feat | 65 (31%) | 87,788 |
+| fix | 60 (29%) | 21,823 |
+| test | 8 (4%) | 1,958 |
+| other (no type prefix) | 7 (3%) | 12,715 |
+| ci | 2 (1%) | 93 |
+
+194 of the 208 titles carry a scope. The most frequent: `misumi` 74, `estate` 14, `instagram` 13, `ingest` 10, `research` 9, `models` 8, `programme` 8, `system-efficiency` 5. By merge month: June 1, July 19, August 1, September 7, October 157, November 23 (to the 6th). The October peak coincides in time with the peak call volumes noted earlier, but that is a coincidence of dates, not an established relationship.
+
+What this gives: a first taxonomy of the delivered work (about a third documentation, a third features, a third fixes; more than a third of scoped PRs concern Misumi routes and behaviour), usable as the function vocabulary for tagging. What it does **not** give:
+
+- **No session-to-function mapping.** The two dominant usage directories are the control-plane home and the PhD notes repository; sessions there cover many functions, and the transcripts carry no function or work-item tag. Matching sessions to PRs by date would be guesswork and is not attempted.
+- **One repository only.** The PhD notes and Misumi repositories, where much of the usage sits, are not covered. PR count and changed lines are output measures, not effort or allowance.
+- **No before/after attribution** for any function, for the same reason. This remains owed and is gated on tagging calls at dispatch (`subject`, `head_sha` and a function tag), which the merged call telemetry covers only for the estate's paid launches once the lab runs it.
+
+Recommendation: adopt the type and scope vocabulary above as the `function` tag in the proposed telemetry schema, and attribute usage per function only from calls recorded with it.
 
 ## Script
 
@@ -189,4 +212,26 @@ for fam in ("sonnet", "opus", "glm", "other"):
     v = rows[fam]
     if not v: continue
     print(f"{fam} | {len(v)} | {statistics.median(x[0] for x in v):.0f} | {statistics.mean(x[0] for x in v):.0f} | {statistics.mean(x[1] for x in v):.0f} | {statistics.mean(x[2] for x in v):.0f}")
+```
+
+Repository-activity taxonomy script (third addendum):
+
+```python
+import collections, json, re, subprocess
+out = subprocess.run(["gh", "pr", "list", "-R", "tyecam1/odysseus", "--state", "merged", "--limit", "400",
+                      "--json", "number,title,mergedAt,additions,deletions"], capture_output=True, text=True, encoding="utf-8").stdout
+prs = [p for p in json.loads(out) if p["mergedAt"][:10] >= "2026-06-03"]
+print("merged PRs since 2026-06-03:", len(prs), "| merged range", min(p["mergedAt"][:10] for p in prs), max(p["mergedAt"][:10] for p in prs))
+kinds, loc, scopes, months = collections.Counter(), collections.Counter(), collections.Counter(), collections.Counter()
+for p in prs:
+    m = re.match(r"(\w+)(?:\(([^)]+)\))?!?:", p["title"])
+    k = m.group(1).lower() if m else "other"
+    kinds[k] += 1; loc[k] += p["additions"] + p["deletions"]
+    if m and m.group(2): scopes[m.group(2).lower()] += 1
+    months[p["mergedAt"][:7]] += 1
+tot = len(prs)
+print("by type: PRs (share), changed lines")
+for k, c in kinds.most_common(): print(f"  {k}: {c} ({100*c/tot:.0f}%), {loc[k]}")
+print("top scopes:", scopes.most_common(8), "| PRs with a scope:", sum(scopes.values()))
+print("by month:", sorted(months.items()))
 ```
