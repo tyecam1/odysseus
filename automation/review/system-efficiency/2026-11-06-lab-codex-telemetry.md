@@ -22,7 +22,7 @@ Every Sol-class rollout is a single-turn `codex exec` invocation (no multi-turn 
 
 ## Which account
 
-The newest lab `rate_limits` sample (2026-11-02T09:26Z) has a 5-hour window resetting 13:40Z and a weekly window resetting 2026-11-05T17:07Z. The newest laptop sample (2026-11-06T07:00Z) has a weekly reset at 2026-11-11T15:23Z. Weekly windows are fixed-length, so a reset 17:07Z on 11-05 would imply 11-12 on the following cycle, not 11-11 15:23Z. This is **consistent with the lab using a different account or plan anchor than the laptop**, but it is not proof (the samples are four days apart and a plan change would also move the anchor). Credentials were not read or compared.
+The newest lab `rate_limits` sample (2026-11-02T09:26Z) has a 5-hour window resetting 13:40Z and a weekly window resetting 2026-11-05T17:07Z. The newest laptop sample (2026-11-06T07:00Z) has a weekly reset at 2026-11-11T16:03Z. Weekly windows are fixed-length, so a reset 17:07Z on 11-05 would imply 11-12 on the following cycle, not 11-11 16:03Z. This is **consistent with the lab using a different account or plan anchor than the laptop**, but it is not proof (the samples are four days apart and a plan change would also move the anchor). Credentials were not read or compared.
 
 ## Gaps
 
