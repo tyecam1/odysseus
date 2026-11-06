@@ -24,7 +24,7 @@ Concentration: the first two directories hold 84% of calls (17,465), 93% of cach
 ## Ranked diagnosis (hypotheses, each with the measurement that would confirm it)
 
 1. **Two long-context coordination directories dominate consumption.** Evidence: the concentration above. Likely mechanism: very long sessions re-reading a large cached context on every call (cache-read is about 98% of the tokens counted). Not shown: session lengths, compaction behaviour, what the context consists of. Confirm by measuring calls and cache-read per session and per day in these two directories, and the share of calls whose cache-read exceeds a threshold.
-2. **Opus may be disproportionately expensive per call (hypothesis).** Evidence is weak: all Opus calls sit in the two large-context directories, and the earlier baseline's unreconciled average was about 15.6 k cache-write tokens per Opus call. Directory membership does not give Opus-specific context sizes, and token volume is not allowance consumption (allowance is not observable here). Policy already restricts Opus to exceptions. Confirm with model-specific per-call context size (cache-write plus cache-read) in these directories, and by listing Opus calls by day against the exception reasons recorded in the work.
+2. **Opus may be disproportionately expensive per call (hypothesis; the per-call context measurement in the second addendum does not support the context part of it).** Evidence was weak: all Opus calls sit in the two large-context directories, and the earlier baseline's unreconciled average was about 15.6 k cache-write tokens per Opus call. Directory membership does not give Opus-specific context sizes, and token volume is not allowance consumption (allowance is not observable here). Policy already restricts Opus to exceptions. Confirm with model-specific per-call context size (cache-write plus cache-read) in these directories, and by listing Opus calls by day against the exception reasons recorded in the work.
 3. **GLM accounts for 33% of recorded calls; its share of cache-write and cache-read tokens has not been established here** (cache tokens are pooled by project, and the script does not aggregate them by model family). Whether those calls are delegated work is not established (model identity and transcript location do not prove delegation), and GLM allowance is unknown, so this is a call-volume observation only. The `j2 work` row is a project total (591 GLM and 41 other calls; 2.62 M output), not a GLM-only figure.
 4. **Recorded Sol calls are predominantly review-class and templated** (see `2026-11-06-sol-call-classification.md`: 98% review-class, 708 of 714 calls under 7 templates, median prompt about 93 k characters). Consumption by class (tokens or allowance) has not been quantified, so this does not yet identify the dominant saving. The packet compiler (#214, wired inert in #220) is the planned remedy, gated on calibration and replay evidence.
 5. **Lab Codex appears to be a separate account or plan anchor** (weekly window differs from the laptop's), so the laptop's Codex window is not the estate's whole Sol budget. Unconfirmed.
@@ -63,6 +63,19 @@ Median session is 159 calls, p90 585, maximum 1,638. Mean cache-read per call by
 What this shows: consumption in these directories is concentrated in a few long sessions (7 sessions of 500+ calls carry 47% of the calls and 61% of the cache-read tokens), and across those same seven sessions the pooled mean cache-read per call is 69 k early and 420 k late (individual session changes are not reported). This is consistent with hypothesis 1 and with the context simply accumulating as work proceeds.
 
 What it does not show: that shorter or restarted sessions would cost less. A fresh session must re-prime its working context (cache-write), long sessions may reflect task complexity and duration, and cache-read tokens are a volume measure, not allowance consumption. The recommendation to test a cadence change therefore stands as a controlled comparison (cache creation, cache reads, setup overhead and completion quality per work item), not as an instruction. Still unmeasured: what the context consists of, quality per session, and whether the heuristic drops are compactions.
+
+## Second addendum: per-call context by model family (hypothesis 2, measured)
+
+Same method and scope as the first addendum but all transcripts (main and subagent files) in the two dominant directories, taken in one run on 2026-11-06 (09:22Z), de-duplicated on message id plus request id, file order sorted. Context per call is input plus cache-read plus cache-write tokens.
+
+| Family | Calls | Median context | Mean context | Mean cache-write | Mean output |
+|---|---:|---:|---:|---:|---:|
+| Sonnet | 10,664 | 357 k | 412 k | 5.4 k | 928 |
+| Opus | 2,102 | 197 k | 286 k | 11.2 k | 402 |
+| GLM | 4,454 | 99 k | 109 k | 0 | 478 |
+| other | 268 | 0 | 27 k | 6.0 k | 11 |
+
+Reading: in these directories Opus calls carry **less** context per call than Sonnet calls (median 197 k vs 357 k), so the "Opus re-reads a larger context" part of hypothesis 2 is not supported. Opus does show about twice Sonnet's mean cache-write per call (11.2 k vs 5.4 k). Possible explanations, none tested here: Opus is used in newer or restarted sessions (cache creation is front-loaded), cache expiry between sparse Opus calls forces re-creation, or the work differs. Token counts are not allowance, and Opus and Sonnet allowance weights are unknown, so nothing here says whether Opus use is costly in allowance terms. The ranked diagnosis keeps Opus as a hypothesis to test with a same-session comparison and cache-expiry timing; it should not drive a policy change on this evidence. The "other" row (268 calls, median context 0) holds calls with no input or cache tokens recorded and is not interpreted.
 
 ## Script
 
@@ -149,4 +162,31 @@ early = [x[1] for c in long_ for x in c[:10]]; late = [x[1] for c in long_ for x
 print("within the", len(long_), "sessions of 501+ calls: mean cache-read calls 1-10 =", round(sum(early)/len(early)/1e3), "k; calls 501+ =", round(sum(late)/len(late)/1e3), "k")
 ts_bad = sum(1 for _, _, c in sessions for x in c if not x[0].endswith("Z") or len(x[0]) < 20)
 print("calls with missing or non-UTC-Z timestamps:", ts_bad)
+```
+
+Per-model context script (second addendum):
+
+```python
+import glob, json, os, statistics, collections
+root = os.path.expanduser("~/.claude/projects")
+seen = set(); rows = collections.defaultdict(list)
+for d in ["C--Users-tyeca", "C--Users-tyeca-Documents-PhD-notes"]:
+    for p in sorted(glob.glob(os.path.join(root, d, "**", "*.jsonl"), recursive=True)):
+        for line in open(p, encoding="utf-8", errors="replace"):
+            try: e = json.loads(line)
+            except ValueError: continue
+            m = e.get("message") or {}; u = m.get("usage")
+            if not u or e.get("type") != "assistant": continue
+            key = (m.get("id"), e.get("requestId"))
+            if key in seen: continue
+            seen.add(key)
+            model = m.get("model") or ""
+            fam = "opus" if "opus" in model else "sonnet" if "sonnet" in model else "glm" if "glm" in model else "other"
+            ctx = u.get("input_tokens", 0) + u.get("cache_read_input_tokens", 0) + u.get("cache_creation_input_tokens", 0)
+            rows[fam].append((ctx, u.get("cache_creation_input_tokens", 0), u.get("output_tokens", 0)))
+print("family | calls | median context | mean context | mean cache-write | mean output (tokens)")
+for fam in ("sonnet", "opus", "glm", "other"):
+    v = rows[fam]
+    if not v: continue
+    print(f"{fam} | {len(v)} | {statistics.median(x[0] for x in v):.0f} | {statistics.mean(x[0] for x in v):.0f} | {statistics.mean(x[1] for x in v):.0f} | {statistics.mean(x[2] for x in v):.0f}")
 ```
