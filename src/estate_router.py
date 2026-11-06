@@ -1730,7 +1730,8 @@ def _run_prepared_items(task: dict, route: dict, authority: Optional[dict]) -> d
                 "policy_evidence_version": getattr(policy, "evidence_version", None)} for g in groups]
     code = route.get("escalation_reason") or "insufficient_capability"
     def reason():
-        return code + " | sol_packet=" + json.dumps({"groups": records}, sort_keys=True)
+        # "|" is escaped so no item text can contain the " |call=" delimiter that readers split on
+        return code + " | sol_packet=" + json.dumps({"groups": records}, sort_keys=True).replace("|", "\\u007c")
     saved = _update_decision_outcome(route["decision_id"], status="needs_escalation", deterministic_gate="pending",
                                      escalation_reason=reason(), verification_outcome="pending")
     results, executions = {}, []

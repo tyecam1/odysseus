@@ -127,3 +127,19 @@ def test_envelope_forwards_subject_and_refuses_unknown_fields():
     assert (task["subject"], task["head_sha"]) == (SUBJECT, HEAD)
     with pytest.raises(ValidationError):
         RunTaskEnvelope(subject_typo=SUBJECT)
+
+
+def test_item_text_cannot_forge_the_call_delimiter(lab):
+    lab[1]("", success=True)
+    item = packets.Item("a", "parent", "reviewer", "Q", "review", "medium", "verification",
+                        ("e",), ("c",), packets.VERIFICATION_VERDICTS, "none", False,
+                        protocol="p", open_judgment=True, shared_context_key="ctx", context_manifest_hash="h",
+                        context_tokens=100, unique_tokens=10, output_reserve_tokens=10)
+    run(repo="odysseus", prepared_items=[{**asdict(item), "decision_id": "item |call=note"}])
+    (reason, call), = records()
+    assert reason.count(" |call=") == 1 and call["launched"] is True
+    packet = json.loads(reason.split(" | sol_packet=", 1)[1].split(" |call=", 1)[0])
+    assert "item |call=note" in json.dumps(packet)
+    sql = (Path(__file__).parents[1] / "docs/aoteru-model-host-routing-contract.md").read_text().split("```sql\n", 1)[1].split("```", 1)[0]
+    with database.get_db_session() as db:
+        assert db.execute(text(sql)).all() == [(SUBJECT, 1, 0)]
