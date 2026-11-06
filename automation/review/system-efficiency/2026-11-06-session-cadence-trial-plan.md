@@ -1,0 +1,39 @@
+# Session cadence trial plan (proposed, unratified)
+
+Status: **outline only, not executable yet, not run, not approved.** An earlier independent Sol review (of the first draft, which was a fuller design) found that the design could not yet be run without further choices; those are listed under "Prerequisites before any trial" and must be settled first. It specifies the controlled comparison that `2026-11-06-usage-attribution-diagnosis.md` leaves open for hypothesis 1: whether coordination work costs fewer tokens when each work item (or PR) gets a fresh, scoped session resumed from a checkpoint, compared with the current long-running sessions. The diagnosis shows concentration (seven sessions of 500+ calls carry 47% of calls and 61% of cache-read tokens in the two dominant directories) but explicitly does **not** show that shorter sessions cost less: a fresh session may incur additional cache writes to re-prime its context (depending on prefix reuse, cache lifetime and timing), and long sessions may reflect harder work. Produced by Claude Sonnet 5.5; this revised outline has had one further Sol review round, recorded in the pull request.
+
+## Question and outcome measures
+
+Primary: total counted tokens (cache-read + cache-write + input + output) per **assigned work item**, reported for every assigned item including abandoned, timed-out or cancelled ones, with completion reported alongside (analysing only completed items would favour an arm that finishes only easier work). Items must be defined as non-overlapping units with acceptance criteria before assignment; a task that yields several PRs is one item or is split in advance. Secondary, from the same transcripts: calls per work item, cache-write per work item (setup cost), cache-read per call, and elapsed wall time. Quality guard (must not regress): the work item's review outcome, namely Sol or CI verdicts on the first review round (APPROVE vs CHANGES, number of P1 findings) and rework count after merge. Token counts are a volume measure, **not** allowance consumption; allowance is not observable locally, so no claim about allowance is made.
+
+## Design
+
+- **Unit of assignment:** the work item. Eligible items are those of the usual size that can be resumed from the existing checkpoint file (`queue_checkpoint_*.md`-style) without loss.
+- **Arms:** (A) current practice: continue in the running session; (B) fresh session per item: start a new session, load only the checkpoint and the item's brief, work the item to merge, end the session.
+- **Allocation:** randomise within pre-specified blocks, after eligibility and difficulty proxies (type, expected size, number of files) are recorded and before the arm is revealed to the person ordering the work; alternation or type-stratified ordering alone is predictable and does not balance difficulty. Record any deviation and its reason. Standardise the prompt, assistance and execution settings across arms.
+- **Size:** at least 12 items per arm (24 total) before any conclusion; with fewer, the result is "inconclusive". Expect several weeks at the recent rate, so it runs alongside normal work and adds no tasks.
+- **Fixed during the trial:** model per role (no mid-trial model change except forced by availability, then flagged), the same checkpoint format, the same review lane.
+
+## Data (candidate sources; the attribution pilot decides whether they suffice)
+
+From the local transcripts, numeric fields only: per session, calls, cache-read, cache-write, input and output tokens, timestamps; the join from session to work item is the PR number or task id the operator records at session start in the checkpoint (one line: `trial: item=<id> arm=<A|B>`). Quality guard from GitHub PR and review records. Long-running sessions naturally mix items, so excluding mixed sessions would remove the practice under test; item boundaries inside a session, and the allocation of shared overhead, checkpoint preparation, worker and review sessions and rework, must be defined and piloted first (see prerequisites). Until then, mixed sessions are reported separately, not silently dropped. The per-call `subject` and `function` tags (#225, #226, #235) may give a more exact join once the lab runs them and their attribution coverage is validated, but the trial is not assumed to depend on them; whether any extra boundary records or instrumentation are needed is a question for the pilot.
+
+## Analysis (fixed in advance)
+
+Compare per-item totals between arms with a paired-by-stratum difference in medians and a bootstrap 90% interval; report effect sizes, not only direction. Decision rule: adopt fresh-session-per-item as the default only if the median tokens per **assigned** item (over a pre-specified observation window) in arm B is at least 20% lower than in arm A with the interval excluding zero **and** the completion and acceptance guard shows no lower completion rate and the quality guard shows no worse first-round verdicts or rework; an arm must not look cheaper by abandoning difficult work. If B is cheaper but quality is worse, or the interval includes zero, keep current practice. Report setup cost separately so a reader can see where any saving or loss comes from.
+
+## Risks
+
+Confounding by item difficulty (mitigated by blocked randomisation using recorded difficulty proxies; residual imbalance remains possible); learning effects as the checkpoint format improves; the operator's own behaviour changing when watched; token counts not equalling allowance; small sample. Any of these can make the result inconclusive, which is an acceptable outcome.
+
+## Prerequisites before any trial
+
+1. **Attribution pilot:** show that an item-level token join is possible from the transcripts and the one-line marker, including item boundaries inside long sessions and the treatment of shared overhead, checkpoint preparation, worker and review sessions and rework. If it cannot be done, the trial cannot start.
+2. **Item and completion definitions:** non-overlapping items with acceptance criteria; rules for abandonment, timeouts and multi-PR tasks; all assigned items reported.
+3. **Allocation:** blocks, difficulty proxies and the randomisation procedure fixed in advance; standardised prompts, assistance and settings.
+4. **Intervention fidelity and carry-over:** session lineage (which session resumes for arm A after arm B), cross-item dependencies, checkpoint content rules and their preparation cost, and a record of arrival gaps and cache conditions with a decision on whether they are controlled or part of the intended operational effect.
+5. **Analysis fixed in advance:** how pairs are formed, stratum weights, absolute versus relative effect, the resampling unit and bootstrap method, how shared-session dependence is handled, a stopping rule, and a precision justification for the sample size. The decision rule (median at least 20% lower with an interval excluding zero) is coherent but does **not** establish that the true saving reaches 20%.
+6. **Quality endpoints:** comparable measures (CI results and model review verdicts differ), review coverage for items without PRs, regression margins, missing-data rules and equal follow-up for rework (recent merges have had less time); with about twelve items per arm only large harms can be excluded.
+7. **Consent:** the owner's consent to run the trial and to the allocation, since arm B changes working practice.
+
+Only after prerequisites 1 to 7 are satisfied (1 to 6 written down and the pilot passed, 7 consent given) and any applicable execution authority is in place is the trial ready; consent alone is necessary but not sufficient; no new infrastructure, table or scheduler is expected to be needed, but that is a conclusion of the pilot, not an assumption. Existing execution authority and review gates are unchanged.
