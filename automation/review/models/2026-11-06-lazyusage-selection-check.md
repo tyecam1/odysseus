@@ -30,3 +30,29 @@ In all six the stated reason matched the skill text: PhD only when both Claude a
 
 ```python
 ```
+import json, subprocess, sys
+skill = open(".claude/skills/lazyUsage/SKILL.md", encoding="utf-8").read()
+start = open("START-AGENTIC.md", encoding="utf-8").read()
+frontier = """Frontier (already discovered; all three queues each have one eligible, qualified, ready task):
+- PhD queue: P-1 "extend a research analysis note" (needs Claude and Codex review capacity)
+- Odysseus queue: O-1 "backend routing fix with tests" (deliverable by a qualified lab lane)
+- Misumi queue: M-1 "GUI accessibility fix with tests" (deliverable by a qualified lab lane)
+"""
+scenarios = {
+ "A both adequate": "Claude: adequate task-sized allowance (verified). Codex: adequate task-sized allowance (verified). GLM: adequate.",
+ "B claude exhausted": "Claude: exhausted until reset (verified). Codex: adequate (verified). GLM: adequate.",
+ "C codex exhausted": "Claude: adequate (verified). Codex: exhausted until reset (verified). GLM: adequate.",
+ "D codex unknown": "Claude: adequate (verified). Codex: usage could not be read (unknown). GLM: adequate.",
+ "E claude unknown": "Claude: usage could not be read (unknown). Codex: adequate (verified). GLM: adequate.",
+ "F both unknown": "Claude: unknown. Codex: unknown. GLM: unknown.",
+}
+out = {}
+for name, usage in scenarios.items():
+    prompt = ("You are executing the /lazyUsage skill for queue SELECTION only (do not run anything; answer from the text).\n\n=== SKILL ===\n" + skill +
+              "\n=== START-AGENTIC.md ===\n" + start + "\n=== EVIDENCE ===\n" + usage + "\n" + frontier +
+              "\nWhich queue do you select FIRST, and why, in one sentence? Reply with exactly one line of JSON: {\"queue\": \"PhD|Odysseus|Misumi\", \"reason\": \"...\"}")
+    r = subprocess.run(["claude-glm.cmd", "--print"], input=prompt, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=240)
+    out[name] = (r.stdout or r.stderr or "").strip().splitlines()[-1][:300] if (r.stdout or r.stderr) else ""
+    print(name, "=>", out[name], flush=True)
+json.dump(out, open("scen_out.json", "w"), indent=1)
+```
