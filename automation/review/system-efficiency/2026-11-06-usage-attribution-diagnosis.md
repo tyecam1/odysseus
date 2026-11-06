@@ -4,42 +4,42 @@ Continues `2026-09-08-subscription-usage-attribution.md` (stage 1-2 baseline) an
 
 ## Method
 
-Read-only, numeric fields only (`message.usage` token counts, model, request/message ids, project directory name, source file kind main/subagent, timestamp). No message content was read or is reproduced. Records were de-duplicated on message id plus request id across main and subagent transcripts. The script is below. Scope is everything on this laptop (2026-06-03 to 2026-11-06), so counts are larger than the 2026-10-02..11-02 window of the baseline; the two have not been reconciled and should not be subtracted from each other. Native units are not comparable across providers and are not compared.
+Read-only, numeric fields only (`message.usage` token counts, model, request/message ids, project directory name, source file kind main/subagent, timestamp). No message content was read or is reproduced. Records were de-duplicated on message id plus request id across main and subagent transcripts; every record carried a message id, 6,843 lacked a request id (so those are keyed on message id alone), none collapsed onto an empty key, and the first occurrence of a duplicate key was kept without checking that later copies agreed. Counts were taken in one run at 09:06Z on 2026-11-06; the transcripts grow while work continues, so a rerun gives slightly larger numbers. The script is below. Scope is everything on this laptop (2026-06-03 to 2026-11-06), so counts are larger than the 2026-10-02..11-02 window of the baseline; the two have not been reconciled and should not be subtracted from each other. Native units are not comparable across providers and are not compared.
 
 ## Results
 
-20,819 unique calls. By family: Sonnet 11,458 (55%), GLM 6,833 (33%), Opus 2,102 (10%), Haiku and other 427 (2%).
+20,826 unique calls. By family: Sonnet 11,464 (55%), GLM 6,833 (33%), Opus 2,102 (10%), Haiku and other 427 (2%) (the four sum to the total).
 
 | Project directory (proxy for function) | Calls (share) | main / subagent | Sonnet / Opus / GLM / other | Output M | Cache-write M | Cache-read M |
 |---|---:|---:|---|---:|---:|---:|
-| control-plane home (`C--Users-tyeca`) | 11,301 (54%) | 9,689 / 1,612 | 5,510 / 1,221 / 4,444 / 126 | 7.67 | 43.5 | 2,703 |
+| control-plane home (`C--Users-tyeca`) | 11,308 (54%) | 9,696 / 1,612 | 5,517 / 1,221 / 4,444 / 126 | 7.68 | 43.5 | 2,705 |
 | PhD notes repository | 6,157 (30%) | 5,861 / 296 | 5,124 / 881 / 10 / 142 | 5.17 | 39.5 | 2,670 |
 | PhD ROS2 measurement spine | 830 (4%) | 830 / 0 | 823 / 0 / 0 / 7 | 1.04 | 5.8 | 223 |
 | PhD j2 work | 632 (3%) | 609 / 23 | 0 / 0 / 591 / 41 | 2.62 | 0.0 | 13 |
 | aoteru controller | 547 (3%) | 547 / 0 | 0 / 0 / 547 / 0 | 0.19 | 0.0 | 53 |
 | all others (scratchpads, worktrees, review trees) | 1,352 (6%) | | mostly GLM | | | |
 
-Concentration: the first two directories hold 84% of calls, 93% of cache-write tokens (83.0 of 88.8 M), 94% of cache-read tokens (5,373 of 5,736 M) and 70% of output tokens (12.84 of 18.30 M). Opus is 10% of calls and all of it (1,221 + 881 = 2,102) is in those same two directories.
+Concentration: the first two directories hold 84% of calls (17,465), 93% of cache-write tokens (83.0 of 88.8 M), 94% of cache-read tokens (5,375 of 5,738 M) and 70% of output tokens (12.85 of 18.31 M). Opus is 10% of calls and all of it (1,221 + 881 = 2,102) is in those same two directories.
 
 ## Ranked diagnosis (hypotheses, each with the measurement that would confirm it)
 
 1. **Two long-context coordination directories dominate consumption.** Evidence: the concentration above. Likely mechanism: very long sessions re-reading a large cached context on every call (cache-read is about 98% of the tokens counted). Not shown: session lengths, compaction behaviour, what the context consists of. Confirm by measuring calls and cache-read per session and per day in these two directories, and the share of calls whose cache-read exceeds a threshold.
-2. **Opus in the same two directories is the most expensive per call.** Evidence: Opus is 10% of calls but sits entirely in the large-context directories, and the baseline found about 15.6 k cache-write tokens per Opus call. Policy already restricts Opus to exceptions; this checks whether the exceptions are being used for routine coordination. Confirm by listing Opus calls by day against the exception reasons recorded in the work.
-3. **GLM carries a large delegated share but little of the cost drivers.** GLM is 33% of calls with no cache-write and small outputs per call except `j2 work` (2.62 M output over 632 calls). It is the intended overflow lane; its allowance is unknown, so this is a volume observation only.
-4. **Sol/Codex consumption is dominated by templated review calls** (see `2026-11-06-sol-call-classification.md`: 98% review-class, 708 of 714 calls under 7 templates, median prompt about 93 k characters). The packet compiler (#214, wired inert in #220) is the planned remedy, gated on calibration and replay evidence.
+2. **Opus may be disproportionately expensive per call (hypothesis).** Evidence is weak: all Opus calls sit in the two large-context directories, and the earlier baseline's unreconciled average was about 15.6 k cache-write tokens per Opus call. Directory membership does not give Opus-specific context sizes, and token volume is not allowance consumption (allowance is not observable here). Policy already restricts Opus to exceptions. Confirm with model-specific per-call context size (cache-write plus cache-read) in these directories, and by listing Opus calls by day against the exception reasons recorded in the work.
+3. **GLM is a large share of calls (33%) and a small share of the cache-write and cache-read volume.** Whether those calls are delegated work is not established (model identity and transcript location do not prove delegation), and GLM allowance is unknown, so this is a call-volume observation only. The `j2 work` row is a project total (591 GLM and 41 other calls; 2.62 M output), not a GLM-only figure.
+4. **Recorded Sol calls are predominantly review-class and templated** (see `2026-11-06-sol-call-classification.md`: 98% review-class, 708 of 714 calls under 7 templates, median prompt about 93 k characters). Consumption by class (tokens or allowance) has not been quantified, so this does not yet identify the dominant saving. The packet compiler (#214, wired inert in #220) is the planned remedy, gated on calibration and replay evidence.
 5. **Lab Codex appears to be a separate account or plan anchor** (weekly window differs from the laptop's), so the laptop's Codex window is not the estate's whole Sol budget. Unconfirmed.
 
 ## Recommendations (to test, not to apply blindly)
 
 - Measure first (hypotheses 1 and 2): add per-session aggregation to the existing numeric script and compare sessions that were compacted or restarted per work item against long-running ones in the same directories.
-- Prefer one fresh, scoped session per work item or per PR for coordination work that can be resumed from a checkpoint; keep Opus for the recorded exception cases and require the exception reason in the work record.
+- Test, do not adopt, a cadence change: compare fresh scoped sessions per work item or PR against long-running sessions in the same directories on cache creation, cache reads, setup overhead and completion quality (fresh sessions can raise cache creation, and task complexity can explain long sessions' totals). Keep Opus for the recorded exception cases and record the exception reason in the work record.
 - Keep delegating bounded review and implementation to GLM/Sol lanes (already policy); do not move coordination volume onto them without a measurement.
 - Treat Sol call reduction as unmeasured until the replay and regression evidence exists; do not claim savings from #214/#220.
 - Use the new call telemetry to close the attribution loop for Sol: `subject` and `head_sha` are now recorded for advisory and write-lane calls once the lab runs #225/#226/#227 and callers pass the flags.
 
 ## Minimal telemetry schema (proposed)
 
-One row per paid call, joinable on existing ids: `provider`, `model` (resolved), `function` (task class or work-item kind), `subject` and `head_sha` (as in #225/#226), `input_tokens`, `cached_input_tokens`, `output_tokens`, and for Codex the provider `used_percent` for the 5-hour and weekly windows before and after the call. Only `subject`/`head_sha`/timestamps exist today (in the `|call=` suffix); model, token and window fields are not recorded by the estate and would need a separate, reviewed change.
+One row per paid call, joinable on existing ids: `provider`, `model` (resolved), `function` (task class or work-item kind), `subject` and `head_sha` (as in #225/#226), `input_tokens`, `cached_input_tokens`, `output_tokens`, and for Codex the provider `used_percent` for the 5-hour and weekly windows before and after the call. Today the estate records, in the `|call=` suffix of the routing decision, only `subject`, `head_sha`, `started_at`, `launched` (advisory) or `submitted` plus `execution_id` (write lane): execution-level events, not one record per provider inference call. Model, token and window fields are not recorded by the estate; adding them, and correlating execution-level records to provider-call rows, would need a separate, reviewed change.
 
 ## Not done
 
