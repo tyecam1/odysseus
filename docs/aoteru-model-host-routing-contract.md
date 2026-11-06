@@ -313,6 +313,49 @@ the namespaced `sol_packet` JSON suffix on the existing escalation reason before
 dispatch and retains it through terminal updates. Parsed verdicts are advisory:
 independent verification remains pending and acceptance remains blocked.
 
+Advisory call telemetry (first slice) uses a final ` |call=` JSON suffix in
+`routing_decisions.escalation_reason`, retaining the reason prefix and other
+namespaces, including ` | sol_packet=`. Version `v:1` carries caller-supplied
+`subject`, `head_sha`, UTC ISO `started_at`, and boolean `launched`; unknown or
+invalid identifiers are null. Subjects are ASCII, at most 160 characters:
+`[a-z0-9][a-z0-9._-]*:kind:[A-Za-z0-9][A-Za-z0-9_-]*`, using registry repo
+slugs and numeric/datable work-item IDs; kinds are `pr`, `issue`, `task`,
+`work-item`, `decision`, `packet`, `review`, or `commit`. No branch/HEAD inference
+is permitted. Heads must be full 40- or 64-character lowercase hex. The entire
+suffix is bounded to 512 bytes. Only a successful central `Popen` supplies a
+launch timestamp and unique `launch_id`; refusals, transport failures and reused
+results have `launched:false` and no start timestamp. A packet's first attempt
+uses its routing row; additional attempts retain separate snapshots in the same
+existing log, so multiple launches cannot overwrite one another. Recording is
+best effort and fail-open; a lost worker response or telemetry failure can leave
+an unobserved call. This covers only `run_task`'s paid read-only advisory branch,
+including packet launches. The write lane, worker-protocol execute path,
+EstateExecution and polling telemetry are deferred; polling creates no call
+record. There is no schema change or new authority.
+
+This single SQLite query counts observed launches by known subject and launches
+whose known head equals that subject's previous launched call (refusals and
+reuse are excluded before applying `lag`):
+
+```sql
+WITH suffixes AS (
+  SELECT id, substr(escalation_reason, instr(escalation_reason, '|call=') + 6) AS j
+  FROM routing_decisions WHERE instr(escalation_reason, '|call=') > 0
+), calls AS (
+  SELECT id, json_extract(j, '$.subject') AS subject,
+         json_extract(j, '$.head_sha') AS head_sha,
+         json_extract(j, '$.started_at') AS started_at
+  FROM suffixes WHERE json_valid(j) AND json_extract(j, '$.v') = 1
+    AND json_extract(j, '$.launched') = 1 AND json_extract(j, '$.subject') IS NOT NULL
+), ordered AS (
+  SELECT *, lag(head_sha) OVER (PARTITION BY subject ORDER BY started_at, id) AS previous_head
+  FROM calls
+)
+SELECT subject, count(*) AS calls,
+       sum(CASE WHEN head_sha = previous_head THEN 1 ELSE 0 END) AS unchanged_head_calls
+FROM ordered GROUP BY subject;
+```
+
 ## Independent verification
 
 Prefer deterministic checks first: tests, schemas, lint/type checks, git diff checks, source/claim checks and domain gates.

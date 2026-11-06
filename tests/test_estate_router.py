@@ -7,7 +7,9 @@ this machine's actual hostname/tailnet state.
 """
 import socket
 import time
+from datetime import datetime
 from pathlib import Path
+from uuid import UUID
 
 import pytest
 import yaml
@@ -1273,6 +1275,9 @@ def test_execute_codex_with_sandbox_kills_entire_process_group_on_timeout(runtim
     )
     elapsed = time.monotonic() - started
 
+    launch = result.pop("_advisory_launch")
+    assert UUID(launch["id"])
+    assert datetime.fromisoformat(launch["started_at"]).utcoffset().total_seconds() == 0
     assert result == {
         "ok": False,
         "provider": "codex",
@@ -1427,6 +1432,9 @@ def test_execute_codex_with_sandbox_kills_descendant_when_leader_exits_first(run
     )
     elapsed = time.monotonic() - started
 
+    launch = result.pop("_advisory_launch")
+    assert UUID(launch["id"])
+    assert datetime.fromisoformat(launch["started_at"]).utcoffset().total_seconds() == 0
     assert result == {
         "ok": False,
         "provider": "codex",
