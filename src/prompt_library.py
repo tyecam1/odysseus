@@ -46,7 +46,8 @@ def _read(prompt_id: str, version: int) -> tuple[dict, str]:
 def get(prompt_id: str, version: Optional[int] = None) -> tuple[str, int]:
     """(text, version) of the promoted version, or of an explicit one."""
     v = version or current_version(prompt_id)
-    return _read(prompt_id, v)[1].rstrip("\n"), v
+    body = _read(prompt_id, v)[1]
+    return (body[:-1] if body.endswith(chr(10)) else body), v      # exactly the one newline the writer added
 
 
 def text(prompt_id: str) -> str:
@@ -116,3 +117,44 @@ def improvement_report() -> dict:
             weak = {k: round(c[k] / total, 3) for k in ("failed", "rejected", "escalated") if c.get(k, 0) / total > 0.15}
             rep[pid] = {"version": v, "total": total, "weak": weak}
     return rep
+
+
+def outcome(prompt_id: str, ok: bool, **extra: int) -> None:
+    """One-line hook for any pipeline: count a use of the promoted version as ok or failed."""
+    record(prompt_id, current_version(prompt_id), total=1, ok=int(ok), failed=int(not ok), **extra)
+
+
+def lint() -> list[str]:
+    """Structural problems in the library (empty = healthy): missing CURRENT, gaps, bad front matter, orphan parents."""
+    bad: list[str] = []
+    for cur in sorted(LIB.rglob("CURRENT")):
+        pid = cur.parent.relative_to(LIB).as_posix()
+        vs = versions(pid)
+        if not vs or int(cur.read_text().strip()) not in vs:
+            bad.append(f"{pid}: CURRENT does not name an existing version")
+        for v in vs:
+            meta, body = _read(pid, v)
+            if meta.get("id") != pid or meta.get("version") != str(v) or not body.strip():
+                bad.append(f"{pid} v{v}: bad front matter or empty body")
+            elif int(meta.get("parent", 0)) not in (0, *vs):
+                bad.append(f"{pid} v{v}: unknown parent")
+    return bad
+
+
+def cycle() -> dict:
+    """The routine improvement pass: health, weak prompts needing an agent-drafted child, and children ready to promote."""
+    ready = []
+    for pid, by_v in summary().items():
+        for v in versions(pid):
+            if v > current_version(pid) and by_v.get(v, {}).get("total"):
+                ready.append({"id": pid, "version": v})
+    return {"lint": lint(), "weak": improvement_report(), "candidates": ready}
+
+
+if __name__ == "__main__":
+    import sys
+    cmd = sys.argv[1] if len(sys.argv) > 1 else "cycle"
+    if cmd == "promote" and len(sys.argv) == 4:
+        print(json.dumps({"promoted": promote(sys.argv[2], int(sys.argv[3]))}))
+    else:
+        print(json.dumps(cycle(), indent=2))
