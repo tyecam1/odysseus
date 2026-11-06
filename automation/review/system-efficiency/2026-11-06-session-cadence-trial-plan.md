@@ -84,51 +84,50 @@ calls_pr = sum(c for _, _, c, pb in sessions if pb)
 print("calls in sessions that touch any PR:", calls_pr, "of", calls_all, f"({100*calls_pr/calls_all:.0f}%)")
 ```
 
-## Pilot, second step (2026-11-06 12:59Z): segmenting one session by the merge times of the PRs it delivered
+## Pilot, second step (2026-11-06 13:02Z): segmenting one session by the merge times of PRs merged inside its span
 
-A numeric-only demonstration of one candidate attribution method on a single long session (the Claude Code session that produced most of the PRs referenced in these reports): each call is assigned to the segment that **ends** at the next merge of a PR in the Odysseus repository, using the PR merge times from GitHub and the call timestamps from the transcript. Calls counted once per message and request id. Script below (the transcript path is that session's file).
+A numeric-only demonstration of one candidate attribution method on a single long session (the Claude Code session that produced most of the PRs referenced in these reports): the span from the session's first to its last call is cut at the merge times of the Odysseus repository's PRs that were merged inside it, and each call is assigned to the interval that **ends** at the next such merge (a call at exactly a merge time joins the interval ending at that merge; calls after the last merge form a tail interval). All timestamps are parsed to UTC datetimes before comparison. Calls are counted once per (message id, request id) pair, keeping the first usage-bearing record. The merge list came from one query returning 213 merged PRs against a limit of 400, so it was not truncated; merges outside the session's span are excluded, and a merge in the repository need not be work delivered by this session. The procedure only partitions the session's calls; it does not say whose work a call was. Script below (path placeholders to adapt).
 
-The session has 1,090 calls between 2026-11-02 10:17 and 2026-11-06 12:59 UTC and 26 PRs merged inside that span, giving 27 segments. Median segment: 13 calls. Two segments are far larger: the one ending at the merge of #211 (355 calls, 207 M cache-read tokens, 1.69 M cache-write, 509 k output) and the one ending at #219 (230 calls, 40.5 M, 0.52 M, 116 k). Together these are 585 of 1,090 calls (54%). The documentation-only PRs each close a segment of roughly 13 to 40 calls.
+Result of one run: 1,094 calls between 2026-11-02 10:17 and 2026-11-06 13:00 UTC; 26 PRs merged inside that span, giving 27 intervals (26 ending at a merge plus the tail), none empty; median 13 calls per interval. Two intervals are far larger than the rest: the one ending at the merge of #211 (355 calls, 207 M cache-read tokens, 1.69 M cache-write, 509 k output) and the one ending at #219 (230 calls, 40.5 M, 0.52 M, 116 k). Together they hold 585 of the 1,094 calls (53%). Intervals ending at documentation-only PRs hold roughly 13 to 40 calls each.
 
-What this shows: the method is mechanically workable and gives a per-delivered-item cost profile for a mixed session, and it is consistent with the owner's observation that repeated review rounds on one design cost far more than small, centralised changes (the #219 segment contains the abandoned larger #216 design and its redesign). What it does **not** show or validate:
+What this gives: a **merge-bounded activity profile** of a mixed session. It does not give per-item cost, and it cannot test any comparison between review-heavy and small changes: an interval contains everything between two merges (idle waiting, side work, coordination, memory notes, compaction, the start of the next item), items overlap in time, and an item's calls can fall in several intervals, so an interval total can overstate or understate its closing item's cost. The largest interval ending at #219 does contain the abandoned larger design and its redesign, which is consistent with, but does not demonstrate, the owner's observation that repeated review rounds on one design cost far more than small centralised changes. Every call receives an interval, including work that was abandoned or still open; there is no separate attribution for it. It is one session in one repository over a few days, says nothing about the arms of the proposed trial, and has not been checked against an independent measure (item-boundary markers or per-call `subject` tags). Duplicate records of a message are collapsed to the first usage-bearing one without checking that the copies agree or that identifiers are complete.
 
-- A segment contains everything between two merges, including idle waiting, side work, coordination, memory notes, compaction and the start of the next item, so the figures are upper bounds on the item's own cost and the first segment also absorbs everything before the first merge in the window.
-- Items overlap in time (several branches and reviews in flight), so assigning by the next merge time can misplace calls.
-- It is one session, one repository and one day-range; it says nothing about the arms of the proposed trial, and the earlier first-step finding (sessions mix items) means this method needs a second independent measure to validate it, for example item-boundary markers recorded in the session or per-call `subject` tags, against which these segment totals could be compared.
-- Only calls that end in a merge can be attributed; work that never merged (abandoned or open) falls into the following segment or into none.
-
-Prerequisite 1 therefore stays **open**: this is a candidate method with a worked example, not a validated one. Not independently reviewed.
+Prerequisite 1 therefore stays **open**: this is a candidate method with a worked example, not a validated one. Not independently reviewed beyond the review recorded in the pull request.
 
 ```python
-import json, os, subprocess, datetime, bisect, collections, sys
+import json, os, subprocess, datetime, bisect, collections
 sess = os.path.expanduser("~/.claude/projects/<project-directory>/<session-id>.jsonl")
-prs = json.loads(subprocess.run(["gh", "pr", "list", "-R", "tyecam1/odysseus", "--state", "merged", "--limit", "60", "--json", "number,mergedAt,title"],
-                                capture_output=True, text=True, encoding="utf-8").stdout)
-t0 = None; calls = {}
+def utc(ts):
+    return datetime.datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone(datetime.timezone.utc)
+r = subprocess.run(["gh", "pr", "list", "-R", "tyecam1/odysseus", "--state", "merged", "--limit", "400", "--json", "number,mergedAt"],
+                   capture_output=True, text=True, encoding="utf-8")
+assert r.returncode == 0, r.stderr
+prs = json.loads(r.stdout)
+print("merged PRs returned:", len(prs), "(limit 400)")
+calls = {}
 for line in open(sess, encoding="utf-8", errors="replace"):
     try: e = json.loads(line)
     except ValueError: continue
     m = e.get("message") or {}; u = m.get("usage")
-    if e.get("type") != "assistant" or not u: continue
-    ts = e.get("timestamp") or ""
+    if e.get("type") != "assistant" or not u or not e.get("timestamp"): continue
     key = (m.get("id"), e.get("requestId"))
-    if key in calls: continue
-    calls[key] = (ts, u.get("cache_read_input_tokens", 0), u.get("cache_creation_input_tokens", 0), u.get("output_tokens", 0))
-rows = sorted(calls.values())
+    if key in calls: continue                        # first usage-bearing record of a (message id, request id) pair is kept
+    calls[key] = (utc(e["timestamp"]), u.get("cache_read_input_tokens", 0), u.get("cache_creation_input_tokens", 0), u.get("output_tokens", 0))
+rows = sorted(calls.values(), key=lambda x: x[0])
 first, last = rows[0][0], rows[-1][0]
-merged = sorted((p["mergedAt"], p["number"]) for p in prs if first <= p["mergedAt"] <= last)
-print("session calls", len(rows), "| span", first[:16], "->", last[:16], "| PRs merged inside the span:", len(merged))
+merged = sorted((utc(p["mergedAt"]), p["number"]) for p in prs if first <= utc(p["mergedAt"]) <= last)
+print("session calls", len(rows), "| span", first.strftime("%Y-%m-%d %H:%M"), "->", last.strftime("%Y-%m-%d %H:%M"), "UTC | PRs merged inside the span:", len(merged))
 bounds = [m[0] for m in merged]
-seg = collections.defaultdict(lambda: [0, 0, 0, 0])
+labels = [f"#{n}" for _, n in merged] + ["tail (after the last merge)"]
+seg = {l: [0, 0, 0, 0] for l in labels}
 for ts, cr, cw, out in rows:
-    i = bisect.bisect_left(bounds, ts)           # the call belongs to the segment that ENDS with the next merge
-    label = merged[i][1] if i < len(merged) else "after-last-merge"
-    s = seg[label]; s[0] += 1; s[1] += cr; s[2] += cw; s[3] += out
-print("segment (ends at merge of PR) | calls | cache-read M | cache-write M | output k")
-for label, (c, cr, cw, out) in sorted(seg.items(), key=lambda kv: -kv[1][0])[:14]:
-    print(f"#{label} | {c} | {cr/1e6:.1f} | {cw/1e6:.2f} | {out/1e3:.0f}")
-cs = sorted(v[0] for v in seg.values())
-print("segments", len(seg), "| calls per segment median", cs[len(cs)//2], "max", cs[-1])
+    s = seg[labels[bisect.bisect_left(bounds, ts)]]  # a call at exactly a merge time joins the segment ending at that merge
+    s[0] += 1; s[1] += cr; s[2] += cw; s[3] += out
+print("segments (intervals):", len(seg), "| empty:", sum(1 for v in seg.values() if v[0] == 0))
+print("segment | calls | cache-read M | cache-write M | output k")
+for l, (c, cr, cw, out) in sorted(seg.items(), key=lambda kv: -kv[1][0])[:8]:
+    print(f"{l} | {c} | {cr/1e6:.1f} | {cw/1e6:.2f} | {out/1e3:.0f}")
+cs = sorted(v[0] for v in seg.values()); print("calls per interval: median", cs[len(cs)//2], "(all intervals) | max", cs[-1], "| top two share", f"{100*sum(cs[-2:])/len(rows):.0f}%")
 ```
 
 ## Prerequisites before any trial
