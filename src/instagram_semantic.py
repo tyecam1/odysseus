@@ -30,11 +30,8 @@ TIMEOUT_S = 60.0
 DEFAULT_BATCH = 400          # at most this many inferences per run; the rest wait for the next scheduled run
 DEFAULT_DOMAINS = ("misumi", "obsidian-phd")  # model-routed items are a flagged low tier ("model"); PhD evidence is thin (5 holdout leads)
 
-SYSTEM = """You triage one saved Instagram post for two private knowledge owners. Be conservative: when unsure answer N. Reply with JSON only: {"label": "P"|"M"|"N"|"A", "useful": true|false}.
-P = research lead for a PhD on industrial human-robot collaboration. Choose P only if the post itself names a concrete method, system, hardware design, paper, lab, dataset or measured result in robotics, manipulation, sensing/measurement, human factors, manufacturing/automation or research methods. NOT P: PhD-life memes, study or writing tips, motivation, AI-assistant / coding-agent / LLM tooling, finance, product ads, hype or news with no concrete method.
-M = personal reference. Choose M only if the post names a specific film, series, anime, album, artist, recipe, restaurant, place, product, design idea or creative technique that could inform a recommendation. NOT M: memes, quotes, motivation, pets, fitness, relationship or mental-health posts, politics, generic travel or lifestyle hashtags, engagement bait with no named work.
-N = neither. A = almost no text.
-useful = true only for a specific named work, place or concrete method a reviewer would keep; false for anything generic."""
+from src import prompt_library as _prompt_lib
+SYSTEM = _prompt_lib.text("instagram/triage")
 
 
 def semantic_enabled() -> bool:
@@ -113,4 +110,5 @@ def classify_semantic(payload: Any, model: str) -> Optional[dict[str, Any]]:
         logger.warning("Instagram semantic call failed (upstream error body withheld)")      # it can echo the prompt, i.e. caption text
         return None
     verdict = parse_reply(result.get("output"))
+    _prompt_lib.outcome("instagram/triage", verdict is not None)
     return None if verdict is None else {**verdict, "model": model, "prompt": PROMPT_VERSION, "identity": objective_identity(payload)}
