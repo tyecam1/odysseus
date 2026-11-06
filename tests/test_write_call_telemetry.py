@@ -1,7 +1,11 @@
-"""Write acknowledgements update one existing call suffix; observation never counts."""
+"""Admitted submissions count once, independently of worker lifecycle observations."""
 import json
+from datetime import datetime, timezone
+from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
+from sqlalchemy import text
 
 from core import database as cdb
 from src import estate_router as router, estate_write_lane as lane
@@ -23,101 +27,71 @@ def calls():
                 for r in session.query(cdb.RoutingDecision).all() if " |call=" in (r.escalation_reason or "")]
 
 
-def start(**extra):
-    return _dispatch(decision_id="D", subject=SUBJECT, head_sha=HEAD, **extra)
-
-
-def test_envelope_to_write_start_final_suffix_and_polling(db, worker, monkeypatch):
-    from routes.estate_routing_routes import RunTaskEnvelope
-    _lease()
-    decision()
-    route = {"decision_id": "D", "route": {"executor": "none", "host": HOME},
-             "hosts_checked": [{"host_id": HOME, "qualified_executors": ["codex-write"]}]}
-    monkeypatch.setattr(router, "resolve_route", lambda task: route)
-    monkeypatch.setattr(lane, "_trigger_background_reconcile", lambda: None)
-    monkeypatch.setattr(router, "_resolve_paid_provider", lambda alias: {"provider": "codex"})
-    task = RunTaskEnvelope(objective="review", repo="odysseus", mode="implementation",
-                           allow_paid_escalation=True, subject=SUBJECT, head_sha=HEAD).to_task()
-    task["recommended_route"] = "codex"
-    result = router.run_task(task)
-    assert result["ok"] and result["execution"]["dispatch"] == "new"
-    reason, call = calls()[0]
-    assert reason.startswith(PREFIX) and reason.endswith(" |call=" + json.dumps(call, separators=(",", ":")))
-    assert call["subject"] == SUBJECT and call["head_sha"] == HEAD and call["launched"] is True
-    assert call["started_at"].endswith("+00:00") and len(reason.split(" |call=")[1]) < 512
+@pytest.mark.parametrize("mode", ["normal", "lost_after_spawn", "lost_both", "refuse", "self_check"])
+def test_submission_final_suffix_survives_recovery_polling_and_terminal(db, worker, monkeypatch, mode):
+    _lease(); decision()
+    recorder = Mock(wraps=router._call_suffix)
+    monkeypatch.setattr(router, "_call_suffix", recorder)
+    worker.start_mode = mode if mode in ("lost_after_spawn", "refuse") else "normal"
+    real_start = worker._start
+    def answer(payload):
+        assert len(calls()) == 1 and calls()[0][0].startswith(PREFIX)  # committed before start
+        reply = real_start(payload)
+        if mode == "lost_both":
+            worker._raise("worker_unreachable")
+        if mode == "self_check":
+            worker.set_state(payload["execution_id"], "start_failed")
+        return reply
+    monkeypatch.setattr(worker, "_start", answer)
+    result = _dispatch(decision_id="D", subject=SUBJECT, head_sha=HEAD)
     execution = result["execution_id"]
-    lane._dispatch_start(execution)
+    reason, call = calls()[0]
+    assert result["ok"] and reason.endswith(" |call=" + json.dumps(call, separators=(",", ":")))
+    assert call == {"v": 1, "subject": SUBJECT, "head_sha": HEAD, "submitted": True,
+                    "execution_id": execution, "started_at": _row(execution).submitted_at.replace(tzinfo=timezone.utc).isoformat()}
+    assert datetime.fromisoformat(call["started_at"]).utcoffset().total_seconds() == 0
+    assert len(reason.partition(" |call=")[2].encode()) + len(" |call=") <= 512
+    if mode == "lost_both":
+        assert worker.verbs().count("start") == 2 and any(p.get("fence") for _, v, p in worker.calls if v == "status")
+    monkeypatch.setattr(lane, "_trigger_background_reconcile", lambda: None)
+    for _ in range(2):
+        lane._dispatch_start(execution)
+        lane._transition(execution, ("accepted", "running"), last_observed_at=None)
+        lane.get_estate_execution(execution, wait_s=1)
     worker.set_state(execution, "succeeded", result={"ok": True, "output": "reviewed"})
-    lane._transition(execution, ("running",), last_observed_at=None)
-    polled_calls = []
-    monkeypatch.setattr(router, "_record_advisory_call", lambda *a, **k: polled_calls.append(True))
-    for _ in range(2):
-        lane.get_estate_execution(execution, wait_s=20)
-    assert len(calls()) == 1 and calls()[0][1] == call and _row(execution).lifecycle_state == "succeeded"
-    assert calls()[0][0].startswith('insufficient_capability | sol_packet=')
-    assert worker.verbs().count("status") >= 1 and polled_calls == []
+    lane._apply_view(execution, worker._view(execution))
+    assert _row(execution).lifecycle_state == ("failed" if mode in ("refuse", "self_check") else "succeeded")
+    assert len(calls()) == 1 and calls()[0][1] == call and calls()[0][0].endswith(reason[reason.index(" |call="):])
+    assert ' | sol_packet={"groups":[]} | trace={"v":2}' in calls()[0][0] and recorder.call_count == 1
+    sql = Path("docs/aoteru-model-host-routing-contract.md").read_text().split("```sql\n", 1)[1].split("```", 1)[0]
+    with cdb.get_db_session() as session:
+        assert session.execute(text(sql)).all() == [(SUBJECT, 1, 0)]
 
 
-@pytest.mark.parametrize("refusal", ["lease", "dirty", "ambiguous"])
-def test_refusals_and_proven_not_started_never_count(db, worker, refusal):
+@pytest.mark.parametrize("refusal", ["lease", "dirty"])
+def test_pre_admission_refusals_write_nothing(db, worker, refusal):
     decision()
-    if refusal != "lease":
-        _lease()
     if refusal == "dirty":
-        worker.clean = False
-    if refusal == "ambiguous":
-        worker.fail["start"] = ["worker_unreachable", "authority_denied"]
-    result = start()
-    assert result["ok"] is (refusal == "ambiguous")
-    assert all(not call["launched"] and call["started_at"] is None for _, call in calls())
-    if refusal == "ambiguous":
-        assert _row(result["execution_id"]).worktree_resolution == "not_started"
+        _lease(); worker.clean = False
+    result = _dispatch(decision_id="D", subject=SUBJECT, head_sha=HEAD)
+    assert not result["ok"] and result["error_code"] == ("write_lease_missing" if refusal == "lease" else "worktree_not_clean")
+    assert not calls()
+    with cdb.get_db_session() as session:
+        assert session.query(cdb.EstateExecution).count() == 0
 
 
-def test_retry_redrive_reuse_and_status_never_double_count(db, worker):
-    _lease()
-    decision()
-    worker.start_mode = "lost_after_spawn"
-    result = start()
-    first = calls()[0][1]
-    assert first["launched"] is True and worker.verbs().count("start") == 2
-    for _ in range(2):
-        lane._dispatch_start(result["execution_id"])
-        lane.get_estate_execution(result["execution_id"])
-    decision("reuse")
-    reused = _dispatch(decision_id="reuse", subject=SUBJECT, head_sha=HEAD)
-    assert reused["dispatch"] == "reused_in_flight"
-    assert len(calls()) == 2 and sum(c["launched"] for _, c in calls()) == 1
-    assert next(c for _, c in calls() if c["launched"]) == first
-
-
-@pytest.mark.parametrize("subject,head", [(42, {}), ("repo:pr:é", "A" * 40), (None, None)])
-def test_invalid_values_and_absent_head_never_use_admission_head(db, worker, subject, head):
-    _lease()
-    decision()
-    result = _dispatch(decision_id="D", subject=subject, head_sha=head)
-    assert result["ok"] and _row(result["execution_id"]).admission_head_sha
-    assert calls()[0][1]["subject"] is None and calls()[0][1]["head_sha"] is None
-    assert calls()[0][1]["launched"] is True
-
-
-def test_recorder_exception_preserves_result_and_lifecycle(db, worker, monkeypatch):
-    _lease()
-    decision()
-    attempted = []
-    def broken(*args, **kwargs):
-        attempted.append(True)
-        raise RuntimeError("telemetry unavailable")
-    monkeypatch.setattr(router, "_record_advisory_call", broken)
-    result = start()
+@pytest.mark.parametrize("metadata", [(42, {}), ("repo:pr:é", "A" * 40), (None, None), "broken", "no_decision"])
+def test_invalid_missing_metadata_and_failure_are_fail_open(db, worker, monkeypatch, metadata):
+    _lease(); decision()
+    if metadata == "broken":
+        monkeypatch.setattr(router, "_call_suffix", Mock(side_effect=RuntimeError("telemetry unavailable")))
+    subject, head = metadata if isinstance(metadata, tuple) else (SUBJECT, HEAD)
+    result = _dispatch(decision_id=None if metadata == "no_decision" else "D", subject=subject, head_sha=head)
     row = _row(result["execution_id"])
     assert result["ok"] and row.lifecycle_state == "accepted" and row.worktree_resolution == "unresolved"
-    assert attempted == [True, True] and worker.verbs() == ["worktree.verify", "start"] and not calls()
-
-
-def test_no_decision_creates_no_routing_row(db, worker):
-    _lease()
-    result = _dispatch(subject=SUBJECT, head_sha=HEAD)
-    assert result["ok"] and not calls()
-    with cdb.get_db_session() as session:
-        assert session.query(cdb.RoutingDecision).count() == 0
+    assert row.admission_head_sha and worker.verbs() == ["worktree.verify", "start"]
+    if metadata in ("broken", "no_decision"):
+        assert not calls()
+    else:
+        assert calls()[0][1]["subject"] is None and calls()[0][1]["head_sha"] is None
+        assert calls()[0][1]["submitted"] is True

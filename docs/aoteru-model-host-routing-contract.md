@@ -322,24 +322,24 @@ invalid identifiers are null. Subjects are ASCII, at most 160 characters:
 slugs and numeric/datable work-item IDs; kinds are `pr`, `issue`, `task`,
 `work-item`, `decision`, `packet`, `review`, or `commit`. No branch/HEAD inference
 is permitted. Heads must be full 40- or 64-character lowercase hex. The entire
-suffix is bounded to 512 bytes. A successful central `Popen` or acknowledged
-write-worker start supplies a launch timestamp and unique `launch_id`; refusals, transport failures and reused
+suffix is bounded to 512 bytes. Only a successful central `Popen` supplies a
+launch timestamp and unique `launch_id`; refusals, transport failures and reused
 results have `launched:false` and no start timestamp. A packet's first attempt
 uses its routing row; additional attempts retain separate snapshots in the same
 existing log, so multiple launches cannot overwrite one another. Recording is
 best effort and fail-open; a lost worker response or telemetry failure can leave
-an unobserved call. This covers `run_task`'s paid read-only advisory branch,
-including packet launches, and the implementation write lane (also used for
-governed reviews). Write starts update only the existing routing row, at most
-once per execution, using caller-supplied subject/head metadata; the admission
-head is a worktree base and is never inferred as the reviewed head. Admission
-refusals and in-flight reuse do not count. Worker-protocol execute and read-only
-worker `execute` remain deferred; polling creates no call record. There is no
-schema change or new authority.
+an unobserved call. This covers only `run_task`'s paid read-only advisory branch,
+including packet launches. Worker-protocol execute remains deferred; polling
+creates no call record. There is no schema change or new authority.
 
-This single SQLite query counts observed launches by known subject and launches
-whose known head equals that subject's previous launched call (refusals and
-reuse are excluded before applying `lag`):
+The write lane records **admitted submissions** once, synchronously with
+EstateExecution creation, using the same validated caller subject/head and
+`v:1`, UTC submission time in `started_at`, `submitted:true`, and `execution_id`.
+Admission refusals and in-flight reuse write nothing. Recording is fail-open;
+a submitted execution that never starts is a possible overcount. Join
+`execution_id` to EstateExecution and filter its state when actual starts matter;
+`admission_head_sha` is never used as caller head. The query counts observed
+advisory launches or admitted submissions by subject and unchanged head:
 
 ```sql
 WITH suffixes AS (
@@ -350,7 +350,8 @@ WITH suffixes AS (
          json_extract(j, '$.head_sha') AS head_sha,
          json_extract(j, '$.started_at') AS started_at
   FROM suffixes WHERE json_valid(j) AND json_extract(j, '$.v') = 1
-    AND json_extract(j, '$.launched') = 1 AND json_extract(j, '$.subject') IS NOT NULL
+    AND (json_extract(j, '$.launched') = 1 OR json_extract(j, '$.submitted') = 1)
+    AND json_extract(j, '$.subject') IS NOT NULL
 ), ordered AS (
   SELECT *, lag(head_sha) OVER (PARTITION BY subject ORDER BY started_at, id) AS previous_head
   FROM calls

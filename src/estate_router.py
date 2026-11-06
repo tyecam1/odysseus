@@ -986,47 +986,33 @@ def _merge_decision_reason(previous: str, current: str) -> str:
     return re.split(pattern, current or "", maxsplit=1)[0] + "".join(suffixes.values()) + call
 
 
-def _record_advisory_call(decision_id: str, task: Optional[dict], result: dict, *, single_row=False) -> None:
-    """Best-effort per-launch telemetry in existing rows, never launch authority."""
-    from core.database import RoutingDecision, get_db_session
-    if not decision_id:
-        return
-    if single_row:
-        with get_db_session() as db:
-            row = db.get(RoutingDecision, decision_id)
-            if row is None:
-                return
-            expected_reason = row.escalation_reason
-            saved = (expected_reason or "").partition(" |call=")[2]
-            previous = json.loads(saved) if saved else {}
-            if previous.get("launched"):
-                return  # same execution acknowledged again; never clone write routing rows
-            task = previous if task is None else task
-    subject, head = (task or {}).get("subject"), (task or {}).get("head_sha")
+def _call_suffix(task: dict, call: dict) -> Optional[str]:
+    """Validate caller metadata and format the bounded final call namespace."""
+    subject, head = task.get("subject"), task.get("head_sha")
     # Registry repo slugs and dated agent-task IDs; kinds are explicitly bounded.
     shape = r"[a-z0-9][a-z0-9._-]*:(?:pr|issue|task|work-item|decision|packet|review|commit):[A-Za-z0-9][A-Za-z0-9_-]*"
     subject = subject if type(subject) is str and len(subject) <= 160 and re.fullmatch(shape, subject, re.ASCII) else None
     head = head if type(head) is str and re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", head) else None
+    call = {**call, "subject": subject, "head_sha": head}
+    suffix = " |call=" + json.dumps(call, separators=(",", ":"), ensure_ascii=True)
+    return suffix if len(suffix.encode("utf-8")) <= 512 else None
+
+
+def _record_advisory_call(decision_id: str, task: dict, result: dict) -> None:
+    """Best-effort per-launch telemetry in existing rows, never launch authority."""
+    from core.database import RoutingDecision, get_db_session
     launch = result.get("_advisory_launch") or {}
-    call = {"v": 1, "subject": subject, "head_sha": head,
+    call = {"v": 1,
             "started_at": launch.get("started_at"), "launched": bool(launch), "launch_id": launch.get("id")}
     with get_db_session() as db:
         if call["launch_id"] and db.query(RoutingDecision).filter(
                 RoutingDecision.escalation_reason.contains('"launch_id":"' + call["launch_id"] + '"')).first():
-            if single_row:
-                return
             call.update(launched=False, started_at=None, launch_id=None)  # reused result is not another call
-        suffix = " |call=" + json.dumps(call, separators=(",", ":"), ensure_ascii=True)
-        if len(suffix.encode("utf-8")) > 512:
+        suffix = _call_suffix(task, call)
+        if suffix is None:
             return
         row = db.get(RoutingDecision, decision_id)
         if row is None:
-            return
-        reason = _merge_decision_reason(row.escalation_reason, (row.escalation_reason or "").partition(" |call=")[0] + suffix)
-        if single_row:
-            # Compare-and-set: concurrent acknowledgements/outcomes cannot erase a counted call or namespace.
-            db.query(RoutingDecision).filter_by(id=decision_id, escalation_reason=expected_reason).update(
-                {RoutingDecision.escalation_reason: reason}, synchronize_session=False)
             return
         if " |call=" in (row.escalation_reason or ""):
             # A packet request may launch several processes: retain one row per
@@ -1035,24 +1021,16 @@ def _record_advisory_call(decision_id: str, task: Optional[dict], result: dict, 
                                      if c.name not in {"id", "created_at", "updated_at"}})
             row.id = str(uuid.uuid4())
             db.add(row)
-        row.escalation_reason = reason
-
-
-def _record_call(decision_id, task, result, *, single_row=False) -> None:
-    """Shared fail-open boundary for advisory and durable write telemetry."""
-    try:
-        if single_row:
-            _record_advisory_call(decision_id, task, result, single_row=True)
-        else:
-            _record_advisory_call(decision_id, task, result)
-    except Exception:
-        import logging
-        logging.getLogger(__name__).exception("call telemetry failed; dispatch result is unaffected")
+        row.escalation_reason = _merge_decision_reason(row.escalation_reason, (row.escalation_reason or "").partition(" |call=")[0] + suffix)
 
 
 def _dispatch_advisory_call(task: dict, route: dict) -> dict:
     result = _dispatch_read_only(route["route"]["host"], "codex", task, timeout=180.0)
-    _record_call(route["decision_id"], task, result)
+    try:
+        _record_advisory_call(route["decision_id"], task, result)
+    except Exception:
+        import logging
+        logging.getLogger(__name__).exception("advisory call telemetry failed; dispatch result is unaffected")
     return {key: value for key, value in result.items() if key != "_advisory_launch"}
 
 

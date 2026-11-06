@@ -18,7 +18,7 @@ import logging
 import threading
 import time
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta, timezone
 from typing import Any, Optional
 
 from src import park_lease_ops
@@ -224,10 +224,8 @@ def execute_write_via_worker(objective: str, *, repo_id: str, host_id: str,
                              subject=None, head_sha=None,
                              wait_timeout: float = 30.0, timeout: float = 1800.0) -> dict:
     from sqlalchemy.exc import IntegrityError
-    from core.database import EstateExecution, ParkLease, lease_serialized_transaction
+    from core.database import EstateExecution, ParkLease, RoutingDecision, lease_serialized_transaction
 
-    # head_sha is caller-supplied only; admission_head_sha is the lab worktree base, not the reviewed head.
-    _router._record_call(decision_id, {"subject": subject, "head_sha": head_sha}, {}, single_row=True)
     authority = _lease_authority(repo_id, host_id)                                   # step 1
     if not authority["ok"]:
         return {"ok": False, "provider": "codex-write", "authority_denied": True,
@@ -299,6 +297,20 @@ def execute_write_via_worker(objective: str, *, repo_id: str, host_id: str,
                 admission_head_sha=admission_head, submitted_at=now,
             ))
             db.flush()
+            # The execution is still uncommitted: no start/recovery/outcome writer can race this suffix.
+            if decision_id:
+                try:
+                    with db.begin_nested():
+                        decision = db.get(RoutingDecision, decision_id)
+                        suffix = _router._call_suffix({"subject": subject, "head_sha": head_sha}, {
+                            "v": 1, "started_at": now.replace(tzinfo=timezone.utc).isoformat(),
+                            "submitted": True, "execution_id": execution_id})
+                        if decision is not None and suffix is not None:
+                            reason = (decision.escalation_reason or "").partition(" |call=")[0]
+                            decision.escalation_reason = _router._merge_decision_reason(
+                                decision.escalation_reason, reason + suffix)
+                except Exception:
+                    log.exception("submission telemetry failed; execution is unaffected")
     except _Refusal as refusal:
         return {"ok": False, "provider": "codex-write", "authority_denied": refusal.code == "write_lease_missing",
                 "error_code": refusal.code, "error": str(refusal), **refusal.extra}
@@ -404,11 +416,6 @@ def _dispatch_start(execution_id: str) -> None:
             return
         result, exc = _worker(row.host_id, "start", _start_payload(row), deadline_s=60)
         if exc is None:
-            if result.get("accepted") is True and result.get("state") in (
-                    "starting", "running", "succeeded", "failed", "timed_out", "interrupted") and (
-                    result.get("spawned") is True or isinstance(result.get("handle"), dict)):
-                _router._record_call(row.decision_id, None, {"_advisory_launch": {
-                    "id": execution_id, "started_at": datetime.now(timezone.utc).isoformat()}}, single_row=True)
             _apply_view(execution_id, {**result, "state": result.get("state")}, start_answer=True)
             return
         if _is_ambiguous(exc):
