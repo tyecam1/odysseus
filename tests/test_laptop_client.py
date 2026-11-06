@@ -791,7 +791,9 @@ def test_park_status_lists_active_leases(client, monkeypatch, capsys):
     assert "odysseus" in out
 
 
-def test_dispatch_forwards_optional_call_telemetry_and_omits_it_otherwise(client, monkeypatch):
+@pytest.mark.parametrize("command", ["ask", "auto", "lab", "home"])
+@pytest.mark.parametrize("function", ["fix(router)", "INVALID é", ""])
+def test_dispatch_forwards_optional_call_telemetry_and_omits_it_otherwise(client, monkeypatch, command, function):
     client.main(["config", "set", "--url", "http://lab:7001", "--token", "ody_x"])
     bodies = []
 
@@ -801,8 +803,11 @@ def test_dispatch_forwards_optional_call_telemetry_and_omits_it_otherwise(client
     monkeypatch.setattr(client, "_request", fake_request)
 
     head = "a" * 40
-    assert client.main(["lab", "review it", "--repo", "odysseus", "--subject", "odysseus:pr:225", "--head-sha", head]) == 0
+    assert client.main([command, "review it", "--repo", "odysseus", "--subject", "odysseus:pr:225", "--head-sha", head,
+                        "--function", function]) == 0
+    assert bodies[0]["function"] == function
     assert client.main(["ask", "review it", "--repo", "odysseus", "--subject", "odysseus:pr:225", "--head-sha", head]) == 0
     assert client.main(["lab", "review it", "--repo", "odysseus"]) == 0
     assert [(b.get("subject"), b.get("head_sha")) for b in bodies[:2]] == [("odysseus:pr:225", head)] * 2
     assert "subject" not in bodies[2] and "head_sha" not in bodies[2]
+    assert "function" not in bodies[1] and "function" not in bodies[2]

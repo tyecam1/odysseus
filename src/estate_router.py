@@ -993,7 +993,10 @@ def _call_suffix(task: dict, call: dict) -> Optional[str]:
     shape = r"[a-z0-9][a-z0-9._-]*:(?:pr|issue|task|work-item|decision|packet|review|commit):[A-Za-z0-9][A-Za-z0-9_-]*"
     subject = subject if type(subject) is str and len(subject) <= 160 and re.fullmatch(shape, subject, re.ASCII) else None
     head = head if type(head) is str and re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", head) else None
-    call = {**call, "subject": subject, "head_sha": head}
+    function = task.get("function")
+    shape = r"(?:feat|fix|docs|test|ci|refactor|chore|research|ops)(?:\([a-z0-9][a-z0-9._-]{0,31}\))?"
+    function = function if type(function) is str and len(function) <= 48 and re.fullmatch(shape, function, re.ASCII) else None
+    call = {**call, "subject": subject, "head_sha": head, "function": function}
     suffix = " |call=" + json.dumps(call, separators=(",", ":"), ensure_ascii=True)
     return suffix if len(suffix.encode("utf-8")) <= 512 else None
 
@@ -1904,7 +1907,7 @@ def run_task(task: dict, *, packet_authority: Optional[dict] = None) -> dict:
                     }
                 result = provider_fn(paid_objective, repo_id=repo_id, host_id=host_id,
                                       decision_id=route["decision_id"],
-                                      subject=task.get("subject"), head_sha=task.get("head_sha"))
+                                      subject=task.get("subject"), head_sha=task.get("head_sha"), function=task.get("function"))
                 if result.get("authority_denied"):
                     _update_decision_outcome(
                         route["decision_id"], status="blocked", deterministic_gate="fail",

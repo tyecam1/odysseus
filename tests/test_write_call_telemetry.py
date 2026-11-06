@@ -43,11 +43,11 @@ def test_submission_final_suffix_survives_recovery_polling_and_terminal(db, work
             worker.set_state(payload["execution_id"], "start_failed")
         return reply
     monkeypatch.setattr(worker, "_start", answer)
-    result = _dispatch(decision_id="D", subject=SUBJECT, head_sha=HEAD)
+    result = _dispatch(decision_id="D", subject=SUBJECT, head_sha=HEAD, function="fix(write-lane)")
     execution = result["execution_id"]
     reason, call = calls()[0]
     assert result["ok"] and reason.endswith(" |call=" + json.dumps(call, separators=(",", ":")))
-    assert call == {"v": 1, "subject": SUBJECT, "head_sha": HEAD, "submitted": True,
+    assert call == {"v": 1, "subject": SUBJECT, "head_sha": HEAD, "function": "fix(write-lane)", "submitted": True,
                     "execution_id": execution, "started_at": _row(execution).submitted_at.replace(tzinfo=timezone.utc).isoformat()}
     assert datetime.fromisoformat(call["started_at"]).utcoffset().total_seconds() == 0
     assert len(reason.partition(" |call=")[2].encode()) + len(" |call=") <= 512
@@ -66,6 +66,15 @@ def test_submission_final_suffix_survives_recovery_polling_and_terminal(db, work
     sql = Path("docs/aoteru-model-host-routing-contract.md").read_text().split("```sql\n", 1)[1].split("```", 1)[0]
     with cdb.get_db_session() as session:
         assert session.execute(text(sql)).all() == [(SUBJECT, 1, 0)]
+
+
+@pytest.mark.parametrize("function", ["unknown", "FIX", "fix(" + "a" * 49 + ")", "fix(é)", 42, {}, None])
+def test_invalid_function_does_not_change_submission(db, worker, function):
+    _lease(); decision()
+    result = _dispatch(decision_id="D", subject=SUBJECT, head_sha=HEAD, function=function)
+    call = calls()[0][1]
+    assert result["ok"] and _row(result["execution_id"]).lifecycle_state == "accepted"
+    assert call["function"] is None and (call["subject"], call["head_sha"], call["submitted"]) == (SUBJECT, HEAD, True)
 
 
 @pytest.mark.parametrize("refusal", ["lease", "dirty"])

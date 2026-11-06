@@ -168,6 +168,7 @@ class RunTaskEnvelope(TaskEnvelope):
     objective: Optional[Union[str, List[Dict[str, object]]]] = None
     subject: object = None
     head_sha: object = None
+    function: object = None
     model_config = ConfigDict(extra="forbid")
     prepared_items: Optional[List[Dict[str, object]]] = Field(default=None, min_length=1, max_length=32)
     verification: Dict[str, object] = Field(default_factory=dict)
