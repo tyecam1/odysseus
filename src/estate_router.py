@@ -998,6 +998,20 @@ def _call_suffix(task: dict, call: dict) -> Optional[str]:
     return suffix if len(suffix.encode("utf-8")) <= 512 else None
 
 
+def _attach_call_suffix(db, decision_id: str, suffix: str) -> None:
+    """Write the call namespace last; a decision that already holds one is cloned so every call keeps its own row."""
+    from core.database import RoutingDecision
+    row = db.get(RoutingDecision, decision_id)
+    if row is None:
+        return
+    if " |call=" in (row.escalation_reason or ""):
+        row = RoutingDecision(**{c.name: getattr(row, c.name) for c in row.__table__.columns
+                                 if c.name not in {"id", "created_at", "updated_at"}})
+        row.id = str(uuid.uuid4())
+        db.add(row)
+    row.escalation_reason = _merge_decision_reason(row.escalation_reason, (row.escalation_reason or "").partition(" |call=")[0] + suffix)
+
+
 def _record_advisory_call(decision_id: str, task: dict, result: dict) -> None:
     """Best-effort per-launch telemetry in existing rows, never launch authority."""
     from core.database import RoutingDecision, get_db_session
@@ -1011,17 +1025,7 @@ def _record_advisory_call(decision_id: str, task: dict, result: dict) -> None:
         suffix = _call_suffix(task, call)
         if suffix is None:
             return
-        row = db.get(RoutingDecision, decision_id)
-        if row is None:
-            return
-        if " |call=" in (row.escalation_reason or ""):
-            # A packet request may launch several processes: retain one row per
-            # attempt, using the existing outcome log rather than overwriting it.
-            row = RoutingDecision(**{c.name: getattr(row, c.name) for c in row.__table__.columns
-                                     if c.name not in {"id", "created_at", "updated_at"}})
-            row.id = str(uuid.uuid4())
-            db.add(row)
-        row.escalation_reason = _merge_decision_reason(row.escalation_reason, (row.escalation_reason or "").partition(" |call=")[0] + suffix)
+        _attach_call_suffix(db, decision_id, suffix)
 
 
 def _dispatch_advisory_call(task: dict, route: dict) -> dict:

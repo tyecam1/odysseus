@@ -224,7 +224,7 @@ def execute_write_via_worker(objective: str, *, repo_id: str, host_id: str,
                              subject=None, head_sha=None,
                              wait_timeout: float = 30.0, timeout: float = 1800.0) -> dict:
     from sqlalchemy.exc import IntegrityError
-    from core.database import EstateExecution, ParkLease, RoutingDecision, lease_serialized_transaction
+    from core.database import EstateExecution, ParkLease, lease_serialized_transaction
 
     authority = _lease_authority(repo_id, host_id)                                   # step 1
     if not authority["ok"]:
@@ -301,14 +301,11 @@ def execute_write_via_worker(objective: str, *, repo_id: str, host_id: str,
             if decision_id:
                 try:
                     with db.begin_nested():
-                        decision = db.get(RoutingDecision, decision_id)
                         suffix = _router._call_suffix({"subject": subject, "head_sha": head_sha}, {
                             "v": 1, "started_at": now.replace(tzinfo=timezone.utc).isoformat(),
                             "submitted": True, "execution_id": execution_id})
-                        if decision is not None and suffix is not None:
-                            reason = (decision.escalation_reason or "").partition(" |call=")[0]
-                            decision.escalation_reason = _router._merge_decision_reason(
-                                decision.escalation_reason, reason + suffix)
+                        if suffix is not None:
+                            _router._attach_call_suffix(db, decision_id, suffix)
                 except Exception:
                     log.exception("submission telemetry failed; execution is unaffected")
     except _Refusal as refusal:

@@ -95,3 +95,13 @@ def test_invalid_missing_metadata_and_failure_are_fail_open(db, worker, monkeypa
     else:
         assert calls()[0][1]["subject"] is None and calls()[0][1]["head_sha"] is None
         assert calls()[0][1]["submitted"] is True
+
+
+def test_a_second_submission_on_the_same_decision_keeps_its_own_record(db):
+    decision()
+    with cdb.get_db_session() as session:
+        for execution in ("E1", "E2"):
+            router._attach_call_suffix(session, "D", router._call_suffix(
+                {"subject": SUBJECT, "head_sha": HEAD}, {"v": 1, "submitted": True, "execution_id": execution}))
+    saved = sorted(call["execution_id"] for _, call in calls())
+    assert saved == ["E1", "E2"] and all(r.startswith(PREFIX) for r, _ in calls())
