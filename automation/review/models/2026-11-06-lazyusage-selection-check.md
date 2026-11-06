@@ -17,7 +17,7 @@ For each of six usage-evidence scenarios the model received the exact text of `.
 | E | unknown / adequate / adequate | Odysseus | yes (same) |
 | F | unknown / unknown / unknown | Odysseus | yes (same) |
 
-In all six the stated reason matched the skill text: PhD only when both Claude and Codex are verified adequate; otherwise shippable Odysseus backend work; unknown usage is not assumed adequate. The model chose Odysseus over Misumi each time without being told a preference between them.
+These six selections are consistent with the skill's stated preference under this synthetic frontier (prefer PhD when Claude and Codex both have adequate capacity; otherwise shippable Odysseus or Misumi work; treat unknown usage as unknown): the cited text states a preference, not a prohibition, and the PhD task was disclosed as needing both providers, which limits what the results establish. In all five non-PhD selections the model chose Odysseus over Misumi without an explicit tie-break instruction; the fixed listing order and the different task descriptions may have influenced that.
 
 ## What this does not show
 
@@ -27,6 +27,8 @@ In all six the stated reason matched the skill text: PhD only when both Claude a
 - The governed execution half of the second #211 item (preflight, lease, independent verification, return through `/lazyUsage`).
 
 ## Script
+
+Provenance and limits: the `claude-glm` wrapper pins `glm-5.3`, but the run does not echo the resolved model, so the model identity is the wrapper's, not independently confirmed. Inputs were fetched from `dev` at a2a2cb0 but the script does not pin that commit. The script keeps the last line of the output without checking the exit status or validating the JSON; all six replies were complete single-line JSON objects when inspected.
 
 ```python
 import json, subprocess, sys
