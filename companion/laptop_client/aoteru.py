@@ -361,6 +361,11 @@ def cmd_chat(args: argparse.Namespace) -> int:
     return 0 if result["status"] == 200 else 1
 
 
+def _call_telemetry(args: argparse.Namespace) -> dict:
+    """Optional --subject / --head-sha, forwarded verbatim; the backend validates and records them (telemetry only)."""
+    return {k: v for k, v in (("subject", getattr(args, "subject", None)), ("head_sha", getattr(args, "head_sha", None))) if v}
+
+
 def cmd_ask(args: argparse.Namespace) -> int:
     cfg = _load_config()
     objective = _resolve_objective_text(args.objective, args.objective_file)
@@ -373,6 +378,7 @@ def cmd_ask(args: argparse.Namespace) -> int:
     }
     if args.implementation:
         envelope["mode"] = "implementation"
+    envelope.update(_call_telemetry(args))
     result = _request(cfg, "POST", "/api/estate/run", envelope, timeout=args.timeout)
     if result["status"] in (401, 403):
         print(f"denied: {result['body']} — token needs the estate:execute scope for `ask`")
@@ -408,6 +414,7 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
     }
     if args.implementation:
         envelope["mode"] = "implementation"
+    envelope.update(_call_telemetry(args))
     result = _request(cfg, "POST", "/api/estate/run", envelope, timeout=args.timeout)
     if result["status"] in (401, 403):
         print(f"denied: {result['body']} — token needs the estate:execute scope for `{args.command}`")
@@ -625,6 +632,10 @@ def build_parser() -> argparse.ArgumentParser:
                         help="opt in to paid (Codex) escalation if local capability is unbound/unavailable")
     p_ask.add_argument("--implementation", action="store_true",
                        help="request lease-gated Codex workspace-write (requires --repo and --allow-paid)")
+    p_ask.add_argument("--subject", default=None,
+        help="what this call reviews or changes, e.g. odysseus:pr:225 (telemetry only; recorded on paid launches)")
+    p_ask.add_argument("--head-sha", default=None,
+        help="full commit sha under review (telemetry only; never inferred)")
     p_ask.add_argument("--timeout", type=float, default=_DEFAULT_EXECUTION_TIMEOUT)
 
     for mode, mode_help in (
@@ -649,6 +660,10 @@ def build_parser() -> argparse.ArgumentParser:
                              help="opt in to paid (Codex) escalation if local capability is unbound/unavailable")
         p_mode.add_argument("--implementation", action="store_true",
                             help="request lease-gated Codex workspace-write (requires --repo and --allow-paid)")
+        p_mode.add_argument("--subject", default=None,
+            help="what this call reviews or changes, e.g. odysseus:pr:225 (telemetry only; recorded on paid launches)")
+        p_mode.add_argument("--head-sha", default=None,
+            help="full commit sha under review (telemetry only; never inferred)")
         p_mode.add_argument("--timeout", type=float, default=_DEFAULT_EXECUTION_TIMEOUT)
 
     sub.add_parser("where", help="list active logical estate sessions")
