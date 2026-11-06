@@ -54,7 +54,7 @@ except ImportError:  # pragma: no cover - dependency absent
     _idna = None
 
 PROBE_NAME = "finance-mt-probe"
-PROBE_VERSION = "0.10"
+PROBE_VERSION = "0.11"
 USER_AGENT = (
     f"{PROBE_NAME}/{PROBE_VERSION} (odysseus finance MT-00; "
     "household research, read-only public APIs; github.com/tyecam1)"
@@ -431,10 +431,6 @@ def collect_gdelt(
             # anything — count it honestly
             malformed_articles += 1
             continue
-        if source_url in seen_urls:
-            deduped += 1
-            continue
-        seen_urls.add(source_url)
         # Never trust the raw host string for diversity counting:
         # normalise to the registrable domain so m./www. mirrors of one
         # publisher are one source, and count the story once per
@@ -446,18 +442,35 @@ def collect_gdelt(
         domain = registrable_domain(source_url)
         if "." not in domain:
             domain = registrable_domain(art.get("domain") or "")
+        if domain == "unknown":
+            # NO locatable source at all: the URL carries no parseable
+            # host (" ", "https://", a bare sentence, ...) and the
+            # metadata fallback has nothing usable either. A record
+            # here would cite a source that cannot be located —
+            # evidence of nothing — so it is malformed (counted,
+            # skipped), never a phantom-healthy record (round-11
+            # finding 1). It is malformed on EVERY occurrence — the
+            # exact-dedup check below runs only for locatable URLs, so
+            # repeated invalid strings inflate the malformed count, not
+            # deduped_exact (a phantom duplicate of nothing).
+            malformed_articles += 1
+            continue
+        if source_url in seen_urls:
+            deduped += 1
+            continue
+        seen_urls.add(source_url)
         # punctuation-preserving FULL title: the story key must not
         # merge titles that first differ beyond word 12 NOR titles that
         # differ only in stripped punctuation ("C++" vs "C#")
         title = story_key_title(art.get("title") or "")
-        if domain != "unknown" and title:
+        if title:
             story_key = (domain, title)
         else:
-            # An unknown-domain OR unusable-title record must never
-            # syndication-merge with another on the same empty key —
-            # that would drop a distinct story on a technicality
-            # (over-merge destroys evidence; under-merge only loses one
-            # dedup opportunity), so key by the URL itself.
+            # An unusable-title record must never syndication-merge
+            # with another on the same empty key — that would drop a
+            # distinct story on a technicality (over-merge destroys
+            # evidence; under-merge only loses one dedup opportunity),
+            # so key by the URL itself.
             story_key = (domain, source_url)
         if story_key in seen_stories:
             deduped_syndication += 1
@@ -556,9 +569,10 @@ def collect_hackernews(
             continue
         if not isinstance(item, dict) or not isinstance(
             item.get("title"), str
-        ) or not item.get("title"):
-            # a fetched item with no usable title is an item-level
-            # failure: count it, never silently drop it
+        ) or not item.get("title", "").strip():
+            # a fetched item with no usable title (non-string, empty or
+            # whitespace-only) is an item-level failure: count it,
+            # never silently drop it (round-11 finding 2)
             errors += 1
             continue
         url_field = item.get("url")
