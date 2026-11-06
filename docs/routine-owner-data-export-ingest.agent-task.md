@@ -3,7 +3,7 @@ artifact_type: agent-task
 task_schema: agent-task/v1
 task_id: 2026-11-06-routine-owner-data-export-ingest
 title: "Routine owner data export and ingest (ChatGPT, Instagram, others)"
-status: proposed
+status: approved
 priority: normal
 task_type: recurring-governed-ingest
 created_by: claude
@@ -17,7 +17,7 @@ branch: dev
 
 ## Mission
 
-Every ~90 days (and on demand) bring the owner's platform exports through the existing pipelines, with no new service, DB or framework. Cadence is a reminder to the owner, not an unattended login.
+Every 60 days (adjustable by the owner) (and on demand) bring the owner's platform exports through the existing pipelines, with no new service, DB or framework. Cadence is a reminder to the owner, not an unattended login.
 
 ## Sources
 
@@ -43,6 +43,9 @@ Every ~90 days (and on demand) bring the owner's platform exports through the ex
 
 An owner-triggered cycle completes for each enabled source and the report is delivered; failures are reported, not retried silently.
 
-## Open owner decisions
+## Owner decisions (2026-11-06)
 
-Cadence, enabled sources, and the export-approval step per platform.
+- Cadence 60 days, adjustable.  Gates are resolved by a context-aware agent; the owner is asked only for credential, financial,
+  destructive or other-people-consent matters (see ~/.claude/dispatch-controller.md, Escalation minimisation).
+- Family content goes to the Misumi people wing (private store); unparseable conversations may use a low-cost paid lane;
+  the raw archive is deleted once processed.

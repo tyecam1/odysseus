@@ -640,6 +640,75 @@ def resolve_gates(import_id: str, llm: Optional[Llm] = None, *, root: Optional[P
     return counts
 
 
+# ---------------------------------------------------------------- paid-reader escalation (owner-approved, unparseable only)
+
+def unread_cids(import_id: str, *, root: Optional[Path] = None) -> list[str]:
+    """Conversations no local reader managed to parse: never extracted, or top-scored but never strong-read."""
+    work = _private((root or _data_root()) / import_id)
+    manifest = {r["cid"]: r for r in _read_jsonl(work / "manifest.jsonl")}
+    ex = json.loads((work / "extract-done.json").read_text()) if (work / "extract-done.json").is_file() else {}
+    dd = json.loads((work / "deepread-done.json").read_text()) if (work / "deepread-done.json").is_file() else {}
+    skipped = {r["cid"] for r in _read_jsonl(work / "triage.jsonl") if r.get("purpose") in SKIP_PURPOSES}
+    scores = _load_scan(work)
+    cut = _score_cut(scores) if scores else 0
+    top = {c for c, s in scores.items() if s["score"] >= cut}
+    out = [c for c, r in manifest.items() if c not in skipped and not r.get("quarantine") and
+           (c not in ex or (c in top and c not in dd))]
+    return sorted(out)
+
+
+def export_unread(import_id: str, outdir: str, *, root: Optional[Path] = None) -> dict:
+    """Write {system,user} prompt files for the escalation lane.  Private: the caller owns the destination directory."""
+    from src.source_events import read_source_event_payload
+    work = _private((root or _data_root()) / import_id)
+    manifest = {r["cid"]: r for r in _read_jsonl(work / "manifest.jsonl")}
+    out = _private(Path(outdir))
+    n = 0
+    for cid in unread_cids(import_id, root=root):
+        payload = read_source_event_payload(manifest[cid]["ptr"]) if "ptr" in manifest[cid] else None
+        if isinstance(payload, dict):
+            (out / f"{cid}.json").write_text(json.dumps({"system": EXTRACT_SYSTEM + READER_ADDENDUM, "user": _render(payload)}))
+            n += 1
+    return {"exported": n}
+
+
+def import_replies(import_id: str, indir: str, reader: str, *, root: Optional[Path] = None) -> dict:
+    """Ingest escalation-lane replies through the same parse, backstop and supersession path as the local strong reader."""
+    from src.source_events import read_source_event_payload
+    work = _private((root or _data_root()) / import_id)
+    ledger = work / "ledger.jsonl"
+    manifest = {r["cid"]: r for r in _read_jsonl(work / "manifest.jsonl")}
+    counts = {"read": 0, "candidates": 0, "failed": 0}
+    for f in sorted(Path(indir).glob("*.reply")):
+        cid = f.stem
+        rec = manifest.get(cid)
+        payload = read_source_event_payload(rec["ptr"]) if rec and "ptr" in rec else None
+        cands = parse_candidates(f.read_text(encoding="utf-8", errors="replace")) if isinstance(payload, dict) else None
+        if cands is None:
+            counts["failed"] += 1
+            continue
+        ids = {m["id"][:8]: m["id"] for m in payload["messages"]}
+        for old in {r["candidate_id"]: r for r in _read_jsonl(ledger)}.values():
+            if old["conversation_id"] == cid and old["review"] != "superseded" and old.get("source") != "enrich":
+                _append(ledger, {**old, "review": "superseded", "active": False, "ts": _now()})
+        for c in map(postfilter, cands):
+            c["msgs"] = [ids[m[:8]] for m in c["msgs"] if m[:8] in ids] or [m["id"] for m in payload["messages"] if m["role"] == "user"][:1]
+            row = _row(import_id, cid, c, rec["hash"])
+            row["reader"] = reader
+            _append(ledger, row)
+            counts["candidates"] += 1
+        counts["read"] += 1
+        ex_path = work / "extract-done.json"
+        ex = json.loads(ex_path.read_text()) if ex_path.is_file() else {}
+        ex[cid] = f"{rec['hash']}|{PROMPT_VERSION}"
+        ex_path.write_text(json.dumps(ex))
+        dd_path = work / "deepread-done.json"
+        dd = json.loads(dd_path.read_text()) if dd_path.is_file() else {}
+        dd[cid] = f"{rec['hash']}|{PROMPT_VERSION}|{DEEP_VERSION}"
+        dd_path.write_text(json.dumps(dd))
+    return counts
+
+
 # ---------------------------------------------------------------- handoff + report
 
 def handoff(import_id: str, *, root: Optional[Path] = None) -> dict:
@@ -1237,12 +1306,14 @@ def gate_status(root: Optional[Path] = None) -> dict:
 
 def _main(argv: Optional[list[str]] = None) -> int:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("command", choices=("gate", "run", "stage", "extract", "review", "handoff", "report", "digest", "retriage", "refilter", "rescreen", "resolve_gates", "enrich", "lexicon", "scan", "deepread"))
+    p.add_argument("command", choices=("gate", "run", "stage", "extract", "review", "handoff", "report", "digest", "retriage", "refilter", "rescreen", "resolve_gates", "export_unread", "import_replies", "enrich", "lexicon", "scan", "deepread"))
     p.add_argument("--synthetic", action="store_true", help="fixture data only; bypasses Gate A")
     p.add_argument("--zip")
     p.add_argument("--reader", choices=("strong", "classify"), default="strong", help="enrich reader; strong = local-strong (default)")
     p.add_argument("--deep", type=int, default=400, help="max conversations for the strong-reader tier in a full run")
     p.add_argument("--min-score", type=float)
+    p.add_argument("--dir", default="")
+    p.add_argument("--as-reader", default="paid-reader")
     p.add_argument("--embed", action="store_true", help="semantic clustering in the digest (needs a free GPU)")
     p.add_argument("--import-id", default="")
     p.add_argument("--limit", type=int)
@@ -1278,6 +1349,10 @@ def _main(argv: Optional[list[str]] = None) -> int:
             result = retriage(a.import_id)
         elif a.command == "resolve_gates":
             result = resolve_gates(a.import_id)
+        elif a.command == "export_unread":
+            result = export_unread(a.import_id, a.dir)
+        elif a.command == "import_replies":
+            result = import_replies(a.import_id, a.dir, a.as_reader)
         elif a.command == "rescreen":
             result = rescreen(a.import_id)
         elif a.command == "refilter":
