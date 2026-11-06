@@ -101,7 +101,7 @@ Prerequisite 1 therefore stays **open**: this is a candidate method with a worke
 
 ```python
 import json, os, subprocess, datetime, bisect, collections, sys
-sess = os.path.expanduser("~/.claude/projects/C--Users-tyeca/ad47c56a-df36-467d-8d41-aa787e0b0466.jsonl")
+sess = os.path.expanduser("~/.claude/projects/<project-directory>/<session-id>.jsonl")
 prs = json.loads(subprocess.run(["gh", "pr", "list", "-R", "tyecam1/odysseus", "--state", "merged", "--limit", "60", "--json", "number,mergedAt,title"],
                                 capture_output=True, text=True, encoding="utf-8").stdout)
 t0 = None; calls = {}
