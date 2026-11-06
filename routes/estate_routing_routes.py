@@ -166,6 +166,8 @@ class RunTaskEnvelope(TaskEnvelope):
     regression, a separate pre-existing gap fixed here at the same time
     rather than left half-fixed."""
     objective: Optional[Union[str, List[Dict[str, object]]]] = None
+    subject: object = None
+    head_sha: object = None
     model_config = ConfigDict(extra="forbid")
     prepared_items: Optional[List[Dict[str, object]]] = Field(default=None, min_length=1, max_length=32)
     verification: Dict[str, object] = Field(default_factory=dict)

@@ -71,11 +71,15 @@ def test_one_packet_persisted_and_pass_is_only_advice(packet_run):
     assert groups(result)[0]["policy_evidence_version"] == "fixture-v1"
     with session() as db:
         row = db.get(database.RoutingDecision, "d")
-        assert row.escalation_reason == result["reason"] and row.verification_outcome == "pending"
+        prefix, call = row.escalation_reason.split(" |call=", 1)
+        assert prefix == result["reason"] and row.verification_outcome == "pending"
+        assert json.loads(call)["launched"] is False  # placement alone is not a process start
         assert row.status == "needs_escalation" and row.escalation_reason.startswith("quality_floor_not_met |")
     router._update_decision_outcome("d", status="failed", deterministic_gate="fail", escalation_reason="worker_failed")
     with session() as db:
-        assert db.get(database.RoutingDecision, "d").escalation_reason.split(" | ")[1] == result["reason"].split(" | ")[1]
+        reason = db.get(database.RoutingDecision, "d").escalation_reason
+        assert reason.partition(" |call=")[0].split(" | ")[1] == result["reason"].split(" | ")[1]
+        assert reason.endswith(" |call=" + call)
 
 
 @pytest.mark.parametrize("flag", ["independence_required", "fresh_context_required", "separate_adjudication_required", "independent_model_required"])

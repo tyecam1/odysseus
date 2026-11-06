@@ -966,6 +966,67 @@ def resolve_route(task: dict, *, record_decision: bool = True) -> dict:
     return result
 
 
+def _merge_decision_reason(previous: str, current: str) -> str:
+    """Keep namespaced suffixes; incoming values win, and call is always last."""
+    suffixes = {}
+    pattern = r"\s*\|\s*[a-z_]+="
+    for reason in (previous or "", current or ""):
+        pos = 0
+        while match := re.search(pattern, reason[pos:]):
+            start, value_start = pos + match.start(), pos + match.end()
+            try:
+                _, end = json.JSONDecoder().raw_decode(reason, value_start)
+            except ValueError:
+                end = value_start
+            following = re.search(pattern, reason[end:])
+            pos = end + following.start() if following else len(reason)
+            key = reason[start:value_start].strip().lstrip("|").strip()
+            suffixes[key] = reason[start:pos]
+    call = suffixes.pop("call=", "")
+    return re.split(pattern, current or "", maxsplit=1)[0] + "".join(suffixes.values()) + call
+
+
+def _record_advisory_call(decision_id: str, task: dict, result: dict) -> None:
+    """Best-effort per-launch telemetry in existing rows, never launch authority."""
+    from core.database import RoutingDecision, get_db_session
+    subject, head = task.get("subject"), task.get("head_sha")
+    # Registry repo slugs and dated agent-task IDs; kinds are explicitly bounded.
+    shape = r"[a-z0-9][a-z0-9._-]*:(?:pr|issue|task|work-item|decision|packet|review|commit):[A-Za-z0-9][A-Za-z0-9_-]*"
+    subject = subject if type(subject) is str and len(subject) <= 160 and re.fullmatch(shape, subject, re.ASCII) else None
+    head = head if type(head) is str and re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", head) else None
+    launch = result.get("_advisory_launch") or {}
+    call = {"v": 1, "subject": subject, "head_sha": head,
+            "started_at": launch.get("started_at"), "launched": bool(launch), "launch_id": launch.get("id")}
+    with get_db_session() as db:
+        if call["launch_id"] and db.query(RoutingDecision).filter(
+                RoutingDecision.escalation_reason.contains('"launch_id":"' + call["launch_id"] + '"')).first():
+            call.update(launched=False, started_at=None, launch_id=None)  # reused result is not another call
+        suffix = " |call=" + json.dumps(call, separators=(",", ":"), ensure_ascii=True)
+        if len(suffix.encode("utf-8")) > 512:
+            return
+        row = db.get(RoutingDecision, decision_id)
+        if row is None:
+            return
+        if " |call=" in (row.escalation_reason or ""):
+            # A packet request may launch several processes: retain one row per
+            # attempt, using the existing outcome log rather than overwriting it.
+            row = RoutingDecision(**{c.name: getattr(row, c.name) for c in row.__table__.columns
+                                     if c.name not in {"id", "created_at", "updated_at"}})
+            row.id = str(uuid.uuid4())
+            db.add(row)
+        row.escalation_reason = _merge_decision_reason(row.escalation_reason, (row.escalation_reason or "").partition(" |call=")[0] + suffix)
+
+
+def _dispatch_advisory_call(task: dict, route: dict) -> dict:
+    result = _dispatch_read_only(route["route"]["host"], "codex", task, timeout=180.0)
+    try:
+        _record_advisory_call(route["decision_id"], task, result)
+    except Exception:
+        import logging
+        logging.getLogger(__name__).exception("advisory call telemetry failed; dispatch result is unaffected")
+    return {key: value for key, value in result.items() if key != "_advisory_launch"}
+
+
 def _update_decision_outcome(decision_id: str, *, status: str, deterministic_gate: str,
                              latency_ms: Optional[int] = None, escalation_reason: Optional[str] = None,
                              executor: Optional[str] = None, escalated: Optional[bool] = None,
@@ -993,10 +1054,7 @@ def _update_decision_outcome(decision_id: str, *, status: str, deterministic_gat
                 if latency_ms is not None:
                     row.latency_ms = latency_ms
                 if escalation_reason is not None:
-                    suffix = (row.escalation_reason or "").partition(" | sol_packet=")[2]
-                    row.escalation_reason = escalation_reason
-                    if suffix and " | sol_packet=" not in escalation_reason:
-                        row.escalation_reason += " | sol_packet=" + suffix
+                    row.escalation_reason = _merge_decision_reason(row.escalation_reason, escalation_reason)
                 if executor is not None:
                     row.executor = executor
                 if escalated is not None:
@@ -1193,6 +1251,7 @@ def _execute_codex_with_sandbox(objective: str, *, sandbox: str, provider: str,
     with tempfile.TemporaryDirectory(prefix="p12-codex-") as scratch:
         out_path = str(Path(scratch) / "codex-last-message.txt")
         proc, result, stdout, stderr = None, {}, "", ""
+        call_started_at = None
         try:
             proc = subprocess.Popen(
                 [
@@ -1211,6 +1270,11 @@ def _execute_codex_with_sandbox(objective: str, *, sandbox: str, provider: str,
                 text=True,
                 start_new_session=True,
             )
+            if sandbox == "read-only":
+                try:
+                    call_started_at = datetime.now(timezone.utc).isoformat()
+                except Exception:
+                    pass  # optional telemetry cannot interrupt a started process
             # start_new_session=True makes the new process group's id equal
             # to the leader's pid at the moment of creation. Capture it now
             # rather than rediscovering it via os.getpgid(proc.pid) after a
@@ -1272,6 +1336,8 @@ def _execute_codex_with_sandbox(objective: str, *, sandbox: str, provider: str,
                       "latency_ms": int((time.monotonic() - started) * 1000)}
             return result
         finally:
+            if call_started_at is not None:
+                result["_advisory_launch"] = {"started_at": call_started_at, "id": health["outcome_id"]}
             _record_provider_outcome({"stdout": stdout, "stderr": stderr,
                 "exit_code": proc.returncode if proc else None,
                 "state": "completed" if proc and proc.returncode == 0 else "failed", **result}, health["outcome_id"])
@@ -1664,7 +1730,8 @@ def _run_prepared_items(task: dict, route: dict, authority: Optional[dict]) -> d
                 "policy_evidence_version": getattr(policy, "evidence_version", None)} for g in groups]
     code = route.get("escalation_reason") or "insufficient_capability"
     def reason():
-        return code + " | sol_packet=" + json.dumps({"groups": records}, sort_keys=True)
+        # "|" is escaped so no item text can contain the " |call=" delimiter that readers split on
+        return code + " | sol_packet=" + json.dumps({"groups": records}, sort_keys=True).replace("|", "\\u007c")
     saved = _update_decision_outcome(route["decision_id"], status="needs_escalation", deterministic_gate="pending",
                                      escalation_reason=reason(), verification_outcome="pending")
     results, executions = {}, []
@@ -1680,7 +1747,7 @@ def _run_prepared_items(task: dict, route: dict, authority: Optional[dict]) -> d
             except (TypeError, ValueError):
                 record["result"] = "compilation_refused"
                 continue
-            result = _dispatch_read_only(route["route"]["host"], "codex", {**task, "objective": prompt}, timeout=180.0)
+            result = _dispatch_advisory_call({**task, "objective": prompt}, route)
             executions.append(result)
             valid = result.get("ok") and (result.get("placement") or {}).get("executed_host") == route["route"]["host"]
             parsed = _packets.parse_results(group.items, result.get("output"))
@@ -1882,7 +1949,7 @@ def run_task(task: dict, *, packet_authority: Optional[dict] = None) -> dict:
                 # `_verb_execute` -> `resolve_repo_path`), which is what
                 # actually grounds a repo-aware task now that host
                 # selection can name a host other than this backend.
-                result = _dispatch_read_only(route["route"]["host"], "codex", task, timeout=180.0)
+                result = _dispatch_advisory_call(task, route)
                 if (result.get("placement") or {}).get("executed_host") is None:
                     # Same truthful-failure requirement as the local
                     # branch below: a transport/protocol/pre-execution
