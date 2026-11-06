@@ -176,3 +176,15 @@ def test_database_exception_blocks_dispatch_with_reason_intact(packet_run, monke
     result = router.run_task(task, packet_authority=authority)
     assert not calls and groups(result)[0]["persistence"] == "unconfirmed"
     assert groups(result)[0]["reason"] == "all_admission_tests_passed"
+
+
+@pytest.mark.parametrize("lane", ["local", "no_paid_escalation"])
+def test_prepared_items_outside_the_paid_advisory_lane_are_refused(packet_run, monkeypatch, lane):
+    task, authority, calls, route, _ = packet_run
+    if lane == "local":
+        monkeypatch.setattr(router, "resolve_route", lambda t: {**route, "ok": True, "route": {"host": "lab", "executor": "local"}})
+    else:
+        task["routing"] = {}
+    result = router.run_task(task, packet_authority=authority)
+    assert not calls and not result["ok"] and not result["executed"]
+    assert result["execution_error"] == "prepared items require the read-only advisory lane"

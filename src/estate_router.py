@@ -1747,6 +1747,11 @@ def run_task(task: dict, *, packet_authority: Optional[dict] = None) -> dict:
         task["recommended_route"] = recommended_lane_for_task(task)
     route = resolve_route(task)
     executor = (route.get("route") or {}).get("executor")
+    if task.get("prepared_items") is not None and not (
+            executor == "none" and route.get("decision_id") and task.get("objective") is not None
+            and (task.get("routing") or {}).get("allow_paid_escalation")):
+        return {**route, "ok": False, "executed": False,
+                "execution_error": "prepared items require the read-only advisory lane"}
     if executor != "local":
         routing = task.get("routing") or {}
         allow_paid = routing.get("allow_paid_escalation")
