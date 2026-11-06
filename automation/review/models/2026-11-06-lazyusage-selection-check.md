@@ -29,7 +29,6 @@ In all six the stated reason matched the skill text: PhD only when both Claude a
 ## Script
 
 ```python
-```
 import json, subprocess, sys
 skill = open(".claude/skills/lazyUsage/SKILL.md", encoding="utf-8").read()
 start = open("START-AGENTIC.md", encoding="utf-8").read()
