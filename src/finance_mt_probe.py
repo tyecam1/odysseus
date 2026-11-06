@@ -54,7 +54,7 @@ except ImportError:  # pragma: no cover - dependency absent
     _idna = None
 
 PROBE_NAME = "finance-mt-probe"
-PROBE_VERSION = "0.12"
+PROBE_VERSION = "0.13"
 USER_AGENT = (
     f"{PROBE_NAME}/{PROBE_VERSION} (odysseus finance MT-00; "
     "household research, read-only public APIs; github.com/tyecam1)"
@@ -290,10 +290,23 @@ def registrable_domain(url: str) -> str:
         last_two in MULTI_PART_SUFFIXES
         or last_two in HOSTED_PLATFORM_SUFFIXES
     ) and len(parts) >= 3:
-        return ".".join(parts[-3:])
-    if len(parts) >= 2:
-        return last_two
-    return host
+        candidate = ".".join(parts[-3:])
+    elif len(parts) >= 2:
+        candidate = last_two
+    else:
+        candidate = host
+    tld = candidate.rsplit(".", 1)[-1]
+    if not tld or not ("a" <= tld[0] <= "z"):
+        # a dotted "domain" whose TOP label is not alphabetic is not a
+        # registrable domain: real TLDs are alphabetic (IDN TLDs are
+        # punycode, starting "xn--"), so "1.2", "a.-", "-.-" and the
+        # last-two-octet collapse of an IPv4 literal ("0.1") are
+        # publisher-unlocatable shapes, never a healthy record's source
+        # (GLM corroborating read, round-13 findings 1-2; same class as
+        # the round-12 dotted-labelless fix). Numeric NON-top labels
+        # stay valid — "888.com" is a real registrable domain.
+        return "unknown"
+    return candidate
 
 
 def normalize_title(

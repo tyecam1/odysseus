@@ -269,11 +269,24 @@ def _receipt_blockers_inner(
                     f"receipt {receipt.get('_file')}: malformed artifact entry"
                 )
                 continue
-            path = (
-                repo_root / art_path[5:]
-                if art_path.startswith("repo:")
-                else Path(art_path)
-            )
+            if art_path.startswith("repo:"):
+                # a repo:-prefixed artifact must stay INSIDE the repo:
+                # resolve and confine, so a receipt can never point the
+                # verifier at arbitrary host files (a symlink planted
+                # inside the repo that resolves outside is confined away
+                # too). Only the hash verdict would leak, but confinement
+                # is the fail-closed posture (GLM corroborating read,
+                # round-13 finding 4).
+                root = Path(repo_root).resolve()
+                path = (repo_root / art_path[5:]).resolve()
+                if not path.is_relative_to(root):
+                    blockers.append(
+                        f"receipt {receipt.get('_file')}: artifact path "
+                        f"escapes the repository: {art_path}"
+                    )
+                    continue
+            else:
+                path = Path(art_path)
             if not path.exists():
                 blockers.append(
                     f"receipt {receipt.get('_file')}: artifact missing: {art_path}"

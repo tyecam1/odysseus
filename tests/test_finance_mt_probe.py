@@ -1180,3 +1180,49 @@ def test_registrable_domain_empty_label_forms():
     assert mp.registrable_domain("https://a..b/x") == "unknown"
     assert mp.registrable_domain("https://example.com./p") == "example.com"
     assert mp.registrable_domain("https://news.example.com/x") == "example.com"
+
+
+# ---------------------------------------------------------------------
+# round-14 pins: junk-label dotted hosts and IPv4 octet collapses are
+# never domains (GLM corroborating read, findings 1-2)
+# ---------------------------------------------------------------------
+
+
+def test_junk_label_dotted_hosts_are_unknown():
+    # "1.2", "a.-", "-.-" contain a dot (so they pass the "."-check in
+    # collect_gdelt) but their TOP label is not alphabetic — a TLD is
+    # alphabetic (IDN TLDs are punycode "xn--…"), so these are the same
+    # phantom-record class as the round-12 dotted-labelless fix
+    for url in ("https://1.2/x", "https://a.-/x", "https://-.-/x"):
+        assert mp.registrable_domain(url) == "unknown", url
+
+
+def test_ipv4_literal_is_not_last_two_octets():
+    # 192.168.0.1 previously collapsed to the pseudo-domain "0.1"; a
+    # numeric top label makes an IPv4 literal publisher-unlocatable
+    assert mp.registrable_domain("https://192.168.0.1/x") == "unknown"
+    assert mp.registrable_domain("https://1.2.3.4/x") == "unknown"
+
+
+def test_numeric_sld_still_a_domain():
+    # numeric NON-top labels are legal: 888.com is a real registrable
+    # domain and must survive the TLD guard
+    assert mp.registrable_domain("https://888.com/story") == "888.com"
+    assert mp.registrable_domain("https://www.888.com/s") == "888.com"
+
+
+def test_junk_label_host_article_is_malformed():
+    # end-to-end: a GDELT entry with a dotted junk host is malformed on
+    # every occurrence — never a healthy record, never dedup inflation
+    payload = {"articles": [
+        {"url": "https://1.2/story", "title": "Junk"},
+        {"url": "https://1.2/story", "title": "Junk"},
+    ]}
+    result = mp.collect_gdelt(
+        "bitcoin", max_records=10, collected_at="2026-11-06T00:00:00Z",
+        first_seen_index={}, fetch=lambda url, timeout: payload,
+    )
+    assert result.status == "failed"
+    assert result.records == []
+    assert result.deduped_exact == 0
+    assert "malformed=2" in (result.error or "")

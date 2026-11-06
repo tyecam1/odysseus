@@ -980,6 +980,45 @@ def test_directory_artifact_locks_goal_not_response(tmp_path):
     assert any("dir-artifact.json" in b for b in mt00["blockers"])
 
 
+def test_repo_artifact_escape_confined(tmp_path):
+    # GLM corroborating read (round-13 finding 4): a repo:-prefixed
+    # artifact must resolve INSIDE the repo — "../" traversal and an
+    # in-repo symlink pointing outside are per-goal "escapes the
+    # repository" blockers, never hashed host files
+    outside = tmp_path.parent / ("escape-outside-" + tmp_path.name)
+    outside.mkdir(exist_ok=True)
+    target = outside / "secret.txt"
+    target.write_text("host file that must never be hashed\n")
+    (tmp_path / "link.json").symlink_to(target)
+    escape = _receipt("MT-00", fg.KIND_RUN, run_id="run-esc", days_ago=0,
+                      name="escape-artifact.json",
+                      artifacts=[{
+                          "label": "esc",
+                          "sha256": "a" * 64,
+                          "path": f"repo:../{outside.name}/secret.txt",
+                      }])
+    link = _receipt("MT-00", fg.KIND_RUN, run_id="run-lnk", days_ago=0,
+                    name="link-artifact.json",
+                    artifacts=[{
+                        "label": "lnk",
+                        "sha256": "a" * 64,
+                        "path": "repo:link.json",
+                    }])
+    result = fg.evaluate_goals(
+        registries=[MT, FT],
+        receipts=_satisfying_mt00_receipts() + [
+            escape, link, _receipt("MT-00", fg.KIND_OPERATOR_ATTESTATION),
+        ],
+        policy=fg.load_policy(), now=NOW, repo_root=tmp_path,
+    )
+    assert result["ok"] is True
+    mt00 = _goal(result, "MT-00")
+    assert mt00["satisfied"] is False
+    assert any("escapes the repository" in b for b in mt00["blockers"])
+    assert any("escape-artifact.json" in b for b in mt00["blockers"])
+    assert any("link-artifact.json" in b for b in mt00["blockers"])
+
+
 def test_extreme_future_receipt_locks_goal_not_response():
     # observed_at = 9999-12-31T23:59:59Z previously raised OverflowError
     # in observed + timedelta(days=ttl) and lost the WHOLE /goals
