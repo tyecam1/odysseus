@@ -262,7 +262,8 @@ PREF_SYSTEM = (r'''You extract the USER's explicit preferences from their own me
 SENSITIVE_RE = re.compile(
     r"(?i)\b(died|death|passed away|funeral|bereave\w*|diagnos\w*|cancer|copd|illness|surgery|therapy|medication|divorce|"
     r"lawsuit|legal (opinion|action)|solicitor|debt|mortgage|salary|councillor|cllr|council\w*|parish|constituen\w+|"
-    r"residents?|campaign\w*|elector\w*|ward)\b")
+    r"residents?|campaign\w*|elector\w*|ward|planning (application|committee|appeal|officer)|call-in|steering group|"
+    r"ecological management|discharg\w+ (of )?condition)\b")
 IDENTITY_RE = re.compile(r"(?i)\b(identifies as|is the (chair|director|owner|head)|chair of)\b")
 
 
@@ -277,6 +278,8 @@ def numeric_heavy(description: str) -> bool:
     return len(re.findall(r"\d+(?:[.,]\d+)?", body)) >= 3 or bool(UNIT_RE.search(body))
 
 
+THIRD_PERSON_RE = re.compile(r"(?i)^(she|he|they|candidate|applicant|the applicant|the candidate|(?-i:[A-Z][a-z]+ [A-Z][a-z]+) (serves|is|was|has))\b")
+TRANSIENT_RE = re.compile(r"(?i)\b(ci (has )?pass\w*|tests? (has |have )?pass\w*|still working through|remaining gate checks|currently (running|waiting))\b")
 ASSISTANT_RE = re.compile(r"(?i)^(the )?(assistant|chatgpt|ai|model)\b")
 PER_CONV_CAP = 4
 
@@ -289,6 +292,8 @@ def postfilter(c: dict) -> dict:
         c = {**c, "first_pass": "needs_stronger_model"}      # attribution is unproven: never auto-approve
     if IDENTITY_RE.search(c["description"]) and c.get("first_pass") == "approve":
         c = {**c, "first_pass": "needs_stronger_model"}
+    if THIRD_PERSON_RE.search(c["description"]) or TRANSIENT_RE.search(c["description"]):
+        c = {**c, "first_pass": "deny"}      # about someone else, or a status that is stale by tomorrow
     if ASSISTANT_RE.search(c["description"]):
         c = {**c, "first_pass": "deny"}      # assistant statements are not facts about the user
     if ONE_OFF_RE.search(c["description"]) or SUBMIT_RE.search(c["description"]) or numeric_heavy(c["description"]):
@@ -798,6 +803,28 @@ def refilter(import_id: str, *, root: Optional[Path] = None) -> dict:
     return counts
 
 
+def rescreen(import_id: str, *, root: Optional[Path] = None) -> dict:
+    """Apply the current backstops to rows already accepted as candidates (refilter only sees pending rows).
+
+    Third-person or transient rows are rejected (derived row suppressed, source untouched); newly sensitive rows move to the
+    human gate.  Idempotent: a row already rejected or gated is left alone."""
+    work = _private((root or _data_root()) / import_id)
+    ledger = work / "ledger.jsonl"
+    latest = {r["candidate_id"]: r for r in _read_jsonl(ledger)}
+    counts = {"rejected": 0, "gated": 0}
+    for r in latest.values():
+        if r["review"] != "accepted_candidate" or r.get("prompt") != PROMPT_VERSION:
+            continue
+        n = postfilter(dict(r))
+        if n["first_pass"] == "deny":
+            _append(ledger, {**r, "review": "rejected", "active": False, "review_rationale": "rescreen: third-person or transient", "ts": _now()})
+            counts["rejected"] += 1
+        elif n["sensitivity"] != r["sensitivity"] and n["sensitivity"] == "restricted":
+            _append(ledger, {**r, "sensitivity": "restricted", "review": "human_gate", "review_rationale": "rescreen: sensitive", "ts": _now()})
+            counts["gated"] += 1
+    return counts
+
+
 def _parse_list(reply: Optional[str], key: str) -> Optional[list]:
     body = re.sub(r"<think>.*?</think>", "", str(reply or ""), flags=re.S).strip()
     body = re.sub(r"^```(?:json)?\s*|\s*```$", "", body).strip()
@@ -1123,7 +1150,7 @@ def gate_status(root: Optional[Path] = None) -> dict:
 
 def _main(argv: Optional[list[str]] = None) -> int:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("command", choices=("gate", "run", "stage", "extract", "review", "handoff", "report", "digest", "retriage", "refilter", "enrich", "lexicon", "scan", "deepread"))
+    p.add_argument("command", choices=("gate", "run", "stage", "extract", "review", "handoff", "report", "digest", "retriage", "refilter", "rescreen", "enrich", "lexicon", "scan", "deepread"))
     p.add_argument("--synthetic", action="store_true", help="fixture data only; bypasses Gate A")
     p.add_argument("--zip")
     p.add_argument("--reader", choices=("strong", "classify"), default="strong", help="enrich reader; strong = local-strong (default)")
@@ -1162,6 +1189,8 @@ def _main(argv: Optional[list[str]] = None) -> int:
             result = deepread(a.import_id, max_conversations=a.deep, min_score=a.min_score)
         elif a.command == "retriage":
             result = retriage(a.import_id)
+        elif a.command == "rescreen":
+            result = rescreen(a.import_id)
         elif a.command == "refilter":
             result = refilter(a.import_id)
         else:

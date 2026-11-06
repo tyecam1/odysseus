@@ -435,3 +435,18 @@ def test_review_runs_preferences_before_other_kinds(tmp_path):
         return json.dumps({"rows": [{"id": r["id"], "decision": "accept", "destination": "x", "rationale": "ok"} for r in rows]})
     ci.review("imp", llm, root=tmp_path, inv=lambda d: [])
     assert order[0] == "preference"
+
+
+def test_rescreen_rejects_third_person_and_transient_and_gates_planning_rows(tmp_path):
+    work = tmp_path / "imp"
+    work.mkdir()
+    descs = ["She submitted a call-in request for Application 25/01505/OUT", "User confirmed that the CI has passed the full automation tests again",
+             "Objects to the planning application because drainage is unreliable", "User prefers concise answers"]
+    for i, d in enumerate(descs):
+        row = ci._row("imp", f"c{i}", {"kind": "decision", "description": d, "msgs": [], "domain": "neutral", "validity": "unknown",
+                                       "sensitivity": "ordinary", "speaker_basis": "user_first_person", "confidence": 0.9,
+                                       "first_pass": "approve"}, "h")
+        ci._append(work / "ledger.jsonl", {**row, "review": "accepted_candidate"})
+    out = ci.rescreen("imp", root=tmp_path)
+    assert out == {"rejected": 2, "gated": 1}
+    assert ci.rescreen("imp", root=tmp_path) == {"rejected": 0, "gated": 0}
