@@ -362,8 +362,9 @@ def cmd_chat(args: argparse.Namespace) -> int:
 
 
 def _call_telemetry(args: argparse.Namespace) -> dict:
-    """Optional --subject / --head-sha, forwarded verbatim; the backend validates and records them (telemetry only)."""
-    return {k: v for k, v in (("subject", getattr(args, "subject", None)), ("head_sha", getattr(args, "head_sha", None))) if v}
+    """Optional --subject / --head-sha / --function, forwarded verbatim; the backend validates them (telemetry only)."""
+    return {k: v for k, v in (("subject", getattr(args, "subject", None)), ("head_sha", getattr(args, "head_sha", None)),
+                             ("function", getattr(args, "function", None))) if v is not None}
 
 
 def cmd_ask(args: argparse.Namespace) -> int:
@@ -636,6 +637,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="what this call reviews or changes, e.g. odysseus:pr:225 (telemetry only; recorded on paid launches)")
     p_ask.add_argument("--head-sha", default=None,
         help="full commit sha under review (telemetry only; never inferred)")
+    p_ask.add_argument("--function", default=None, help="optional function tag, e.g. fix(router) (telemetry only)")
     p_ask.add_argument("--timeout", type=float, default=_DEFAULT_EXECUTION_TIMEOUT)
 
     for mode, mode_help in (
@@ -664,6 +666,7 @@ def build_parser() -> argparse.ArgumentParser:
             help="what this call reviews or changes, e.g. odysseus:pr:225 (telemetry only; recorded on paid launches)")
         p_mode.add_argument("--head-sha", default=None,
             help="full commit sha under review (telemetry only; never inferred)")
+        p_mode.add_argument("--function", default=None, help="optional function tag, e.g. fix(router) (telemetry only)")
         p_mode.add_argument("--timeout", type=float, default=_DEFAULT_EXECUTION_TIMEOUT)
 
     sub.add_parser("where", help="list active logical estate sessions")

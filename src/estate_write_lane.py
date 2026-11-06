@@ -221,7 +221,7 @@ def _admission_outcome(blocker) -> dict:
 
 def execute_write_via_worker(objective: str, *, repo_id: str, host_id: str,
                              decision_id: Optional[str] = None,
-                             subject=None, head_sha=None,
+                             subject=None, head_sha=None, function=None,
                              wait_timeout: float = 30.0, timeout: float = 1800.0) -> dict:
     from sqlalchemy.exc import IntegrityError
     from core.database import EstateExecution, ParkLease, lease_serialized_transaction
@@ -301,7 +301,7 @@ def execute_write_via_worker(objective: str, *, repo_id: str, host_id: str,
             if decision_id:
                 try:
                     with db.begin_nested():
-                        suffix = _router._call_suffix({"subject": subject, "head_sha": head_sha}, {
+                        suffix = _router._call_suffix({"subject": subject, "head_sha": head_sha, "function": function}, {
                             "v": 1, "started_at": now.replace(tzinfo=timezone.utc).isoformat(),
                             "submitted": True, "execution_id": execution_id})
                         if suffix is not None:

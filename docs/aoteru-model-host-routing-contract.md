@@ -316,7 +316,7 @@ independent verification remains pending and acceptance remains blocked.
 Advisory call telemetry (first slice) uses a final ` |call=` JSON suffix in
 `routing_decisions.escalation_reason`, retaining the reason prefix and other
 namespaces, including ` | sol_packet=`. Version `v:1` carries caller-supplied
-`subject`, `head_sha`, UTC ISO `started_at`, and boolean `launched`; unknown or
+`subject`, `head_sha`, `function`, UTC ISO `started_at`, and boolean `launched`; unknown or
 invalid identifiers are null. Subjects are ASCII, at most 160 characters:
 `[a-z0-9][a-z0-9._-]*:kind:[A-Za-z0-9][A-Za-z0-9_-]*`, using registry repo
 slugs and numeric/datable work-item IDs; kinds are `pr`, `issue`, `task`,
@@ -333,7 +333,7 @@ including packet launches. Worker-protocol execute remains deferred; polling
 creates no call record. There is no schema change or new authority.
 
 The write lane records **admitted submissions** once, synchronously with
-EstateExecution creation, using the same validated caller subject/head and
+EstateExecution creation, using the same validated caller subject/head/function and
 `v:1`, UTC submission time in `started_at`, `submitted:true`, and `execution_id`.
 Admission refusals and in-flight reuse write nothing. Recording is fail-open;
 a submitted execution that never starts is a possible overcount. Join
@@ -359,6 +359,20 @@ WITH suffixes AS (
 SELECT subject, count(*) AS calls,
        sum(CASE WHEN head_sha = previous_head THEN 1 ELSE 0 END) AS unchanged_head_calls
 FROM ordered GROUP BY subject;
+```
+
+The function vocabulary is a candidate pending definition: `feat`, `fix`, `docs`, `test`, `ci`, `refactor`, `chore`, `research`, or `ops`, optionally followed by `([a-z0-9][a-z0-9._-]{0,31})`, with a maximum of 48 ASCII characters.
+Calls per function (including null for absent or invalid tags):
+
+```sql
+WITH suffixes AS (
+  SELECT substr(escalation_reason, instr(escalation_reason, '|call=') + 6) AS j
+  FROM routing_decisions WHERE instr(escalation_reason, '|call=') > 0
+)
+SELECT json_extract(j,'$.function') AS function, count(*) AS calls
+FROM suffixes WHERE json_valid(j) AND json_extract(j, '$.v') = 1
+  AND (json_extract(j, '$.launched') = 1 OR json_extract(j, '$.submitted') = 1)
+GROUP BY json_extract(j,'$.function');
 ```
 
 ## Independent verification

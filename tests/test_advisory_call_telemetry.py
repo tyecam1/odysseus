@@ -38,12 +38,13 @@ def test_actual_launch_and_packets_keep_final_suffix(lab, items):
                             protocol="p", open_judgment=True, shared_context_key="ctx", context_manifest_hash="h",
                             context_tokens=100, unique_tokens=10, output_reserve_tokens=10)
         extra = {"repo": "odysseus", "prepared_items": [{**asdict(item), "decision_id": str(i)} for i in range(items)]}
-    result = run(**extra)
+    result = run(function="research(review)", **extra)
     assert result["executed"]
     saved = records()
     assert len(saved) == max(items, 1) == len(lab[2].read_text().splitlines())
     for reason, call in saved:
         assert call["v"] == 1 and call["subject"] == SUBJECT and call["head_sha"] == HEAD
+        assert call["function"] == "research(review)"
         assert call["launched"] is True and datetime.fromisoformat(call["started_at"]).utcoffset().total_seconds() == 0
         assert len((" |call=" + reason.split(" |call=")[1]).encode()) <= 512
         if items:
@@ -123,10 +124,45 @@ def test_reuse_does_not_count_again_and_full_sha256_is_retained(lab, monkeypatch
 
 
 def test_envelope_forwards_subject_and_refuses_unknown_fields():
-    task = RunTaskEnvelope(subject=SUBJECT, head_sha=HEAD).to_task()
+    task = RunTaskEnvelope(subject=SUBJECT, head_sha=HEAD, function="fix(router)").to_task()
     assert (task["subject"], task["head_sha"]) == (SUBJECT, HEAD)
+    assert task["function"] == "fix(router)" and RunTaskEnvelope().to_task()["function"] is None
     with pytest.raises(ValidationError):
         RunTaskEnvelope(subject_typo=SUBJECT)
+    with pytest.raises(ValidationError):
+        RunTaskEnvelope(function_typo="fix")
+
+
+@pytest.mark.parametrize("function", ["unknown", "Fix", "fix(A)", "feat(" + "a" * 49 + ")", "fix(é)", 42, {}, None,
+                                      "fix()", "fix(-a)", "fix(a/b)", "fix(a)\n", "fix(" + "a" * 33 + ")"])
+def test_invalid_function_does_not_change_advisory_result(lab, function):
+    lab[1]("", success=True)
+    task = RunTaskEnvelope(**{**TASK, "subject": SUBJECT, "head_sha": HEAD, "function": function,
+                             "allow_paid_escalation": True}).to_task()
+    result = router.run_task(task)
+    assert result["ok"] and result["executed"] and result["execution"]["output"] == "review complete"
+    call = records()[0][1]
+    assert call["function"] is None and (call["subject"], call["head_sha"], call["launched"]) == (SUBJECT, HEAD, True)
+
+
+@pytest.mark.parametrize("function", ["feat", "fix", "docs", "test", "ci", "refactor", "chore", "research", "ops",
+                                      "fix(a)", "ops(0._-)", "research(" + "a" * 32 + ")"])
+def test_function_vocabulary_and_suffix_bound(function):
+    suffix = router._call_suffix({"subject": "r:task:" + "x" * 153, "head_sha": "a" * 64, "function": function},
+                                 {"v": 1, "submitted": True, "execution_id": "e" * 36, "started_at": "2026-11-06T00:00:00+00:00"})
+    assert suffix is not None and len(suffix.encode()) <= 512
+    assert json.loads(suffix.split(" |call=", 1)[1])["function"] == function
+
+
+def test_documented_function_reader_counts_launches_and_submissions(lab):
+    query = Path("docs/aoteru-model-host-routing-contract.md").read_text().split("```sql\n")[2].split("```", 1)[0]
+    with database.get_db_session() as db:
+        for i, (function, event) in enumerate([(None, {"launched": True}), ("fix(router)", {"launched": True}),
+                ("fix(router)", {"submitted": True}), ("docs", {"launched": True}), ("docs", {"launched": False})]):
+            db.add(database.RoutingDecision(id=str(i), task_class="code_review", host_id="test-lab",
+                executor="codex", status="complete", escalation_reason=router._call_suffix({"function": function}, {"v": 1, **event})))
+    with database.get_db_session() as db:
+        assert dict(db.execute(text(query)).all()) == {None: 1, "fix(router)": 2, "docs": 1}
 
 
 def test_item_text_cannot_forge_the_call_delimiter(lab):

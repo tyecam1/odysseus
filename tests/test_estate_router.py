@@ -1645,7 +1645,7 @@ def test_scenario_a_implementation_mode_dispatches_codex_write_under_active_leas
     result = estate_router.run_task({
         "task_class": "bounded_code_implementation", "objective": "implement it", "repo": "test-repo",
         "requirements": {"capabilities": ["reasoning-strong"]},
-        "subject": "test-repo:pr:226", "head_sha": "a" * 40,
+        "subject": "test-repo:pr:226", "head_sha": "a" * 40, "function": "feat(router)",
         "routing": {"allow_paid_escalation": True, "mode": "implementation"},
     })
 
@@ -1655,7 +1655,7 @@ def test_scenario_a_implementation_mode_dispatches_codex_write_under_active_leas
     assert result["next_action"]["cli"] == "aoteru execution exec-scenario-a --wait 60"
     assert dispatched == {"objective": "implement it", "repo_id": "test-repo",
                           "host_id": result["route"]["host"], "decision_id": "implementation-decision",
-                          "subject": "test-repo:pr:226", "head_sha": "a" * 40}
+                          "subject": "test-repo:pr:226", "head_sha": "a" * 40, "function": "feat(router)"}
     assert recorded_route["task"]["recommended_route"] == "codex_eligible"
 
 
