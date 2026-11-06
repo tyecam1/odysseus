@@ -450,3 +450,28 @@ def test_rescreen_rejects_third_person_and_transient_and_gates_planning_rows(tmp
     out = ci.rescreen("imp", root=tmp_path)
     assert out == {"rejected": 2, "gated": 1}
     assert ci.rescreen("imp", root=tmp_path) == {"rejected": 0, "gated": 0}
+
+
+def test_resolve_gates_agent_decides_and_escalates_only_credentials(tmp_path):
+    work = tmp_path / "imp"
+    work.mkdir()
+    descs = ["User prefers concise answers", "User stores the api key in a note", "User's mother likes watercolour painting",
+             "Planning matter for a neighbour"]
+    ids = {}
+    for i, d in enumerate(descs):
+        basis = "third_party_or_assistant" if i == 3 else "user_first_person"
+        sens = "restricted" if i == 3 else "ordinary"
+        row = ci._row("imp", f"c{i}", {"kind": "preference", "description": d, "msgs": [], "domain": "misumi", "validity": "unknown",
+                                       "sensitivity": sens, "speaker_basis": basis, "confidence": 0.9, "first_pass": "approve"}, "h")
+        ci._append(work / "ledger.jsonl", {**row, "review": "human_gate"})
+        ids[d] = row["candidate_id"]
+
+    def llm(system, user):
+        rows = json.loads(user)["rows"]
+        return json.dumps({"rows": [{"id": r["id"], "decision": "accept", "rationale": "durable"} for r in rows]})
+    out = ci.resolve_gates("imp", llm, root=tmp_path, inv=lambda d: [])
+    assert out == {"accepted": 1, "rejected": 1, "people_wing": 1, "escalated": 1, "failed": 0}
+    latest = {r["candidate_id"]: r for r in ci._read_jsonl(work / "ledger.jsonl")}
+    assert latest[ids["User's mother likes watercolour painting"]]["wing"] == "people"
+    assert latest[ids["User stores the api key in a note"]]["review"] == "human_gate"
+    assert ci.resolve_gates("imp", llm, root=tmp_path, inv=lambda d: [])["accepted"] == 0
