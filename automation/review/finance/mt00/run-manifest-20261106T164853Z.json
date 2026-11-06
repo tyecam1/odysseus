@@ -1,0 +1,56 @@
+{
+  "probe": "finance-mt-probe",
+  "probe_version": "0.13",
+  "generated_at": "2026-11-06T16:48:53Z",
+  "code_sha256": "29f5bfec8c30dbb4ffa221d97427ce03652dc8c345bd919af89a43aa784fcb59",
+  "params": {
+    "sources": [
+      "gdelt-doc-2.0",
+      "hackernews-official",
+      "kraken-public-spot"
+    ],
+    "gdelt_query": "bitcoin",
+    "max_records": 75,
+    "hn_top": 25,
+    "kraken_pair": "BTCUSD",
+    "kraken_interval": 60,
+    "kraken_candles": 24,
+    "retries": 3
+  },
+  "snapshot": "snapshot-20261106T164853Z.json",
+  "snapshot_sha256": "7aae5836fdffd79e70583547375b9d89b5d42b3e38552e01cdfdc7448e062954",
+  "digest": "digest-20261106T164853Z.md",
+  "digest_sha256": "9f5b80e06919f08e3844b44622e293f789bb7f042b52399e8dd2213e0831f314",
+  "source_status": [
+    {
+      "source": "gdelt-doc-2.0",
+      "status": "failed",
+      "records": 0,
+      "http_status": 429,
+      "retries": 3,
+      "deduped_exact": 0,
+      "deduped_syndication": 0,
+      "error": "https://api.gdeltproject.org/api/v2/doc/doc?query=bitcoin&mode=artlist&maxrecords=75&format=json&sort=datedesc: HTTP Error 429: Too Many Requests after 3 attempts"
+    },
+    {
+      "source": "hackernews-official",
+      "status": "ok",
+      "records": 25,
+      "http_status": 200,
+      "retries": 0,
+      "deduped_exact": 0,
+      "deduped_syndication": 0,
+      "error": null
+    },
+    {
+      "source": "kraken-public-spot",
+      "status": "ok",
+      "records": 24,
+      "http_status": 200,
+      "retries": 0,
+      "deduped_exact": 0,
+      "deduped_syndication": 0,
+      "error": null
+    }
+  ]
+}

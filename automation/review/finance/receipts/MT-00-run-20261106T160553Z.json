@@ -1,0 +1,45 @@
+{
+  "goal_id": "MT-00",
+  "kind": "run",
+  "status": "pass",
+  "observed_at": "2026-11-06T16:05:53Z",
+  "run_id": "mt00-lab-20261106T160553Z",
+  "code_commit": "f05cde2c5c66073f9436beae6d6db1fc961e84c0",
+  "verifier": "self-attested-executor (pending independent verification)",
+  "source_config_hash": "71d4397e3ba3e8e06259d6926a3f240b3b3bde0a47577f5bcd6a7bae16b4bc0c",
+  "data_snapshot_ids": [
+    "automation/review/finance/mt00/snapshot-20261106T160553Z.json"
+  ],
+  "source_access_audit_id": "automation/review/finance/mt00/run-manifest-20261106T160553Z.json",
+  "evaluation_artifacts": [
+    "automation/review/finance/mt00/digest-20261106T160553Z.md"
+  ],
+  "notes": "Live MT-00 probe on hz2-workstation (lab) against the round-11 review-fix code (commit f05cde2, probe v0.11): GDELT DOC 2.0 + HN official API + Kraken public spot candles, all public/no-auth/no-key. Sources at 20261106T160553Z: HN ok (25 records), Kraken ok (24), GDELT failed (0 records; health records http_status=429 retries=3 truthfully when a window is rate-limited; 2/3 healthy satisfies the bounded snapshot, GDELT cadence stays an MT-01 question). Round-11 accounting fixes live in this run (probe v0.11): a GDELT article whose URL has NO locatable host after the metadata fallback (' ', 'https://', a bare sentence, ...) counts as malformed on EVERY occurrence - it is never a phantom record citing an unlocatable source, and repeated invalid strings inflate the malformed count, never deduped_exact (exact-URL dedup only applies to locatable URLs; the metadata fallback still locates hostless URLs like url=' ' + domain=example.com); a fetched HN item with a whitespace-only title is an item error like non-string/empty titles - a blank headline is not usable evidence, so an all-blank source fails with ids/item-errors counts. Earlier-round guarantees carried: missing/ill-typed URL and field skipping, punctuation-preserving story keys, zero-evidence sources failed, HN id range (0, 10^12] with post-loop error totals. First-seen carry-forward live-proven for text (HN 0/25 carry earlier first_seen) AND candles (Kraken 0/24). Offline suite record committed at automation/review/finance/test-suite-round12.txt (8460 passed / 46 skipped / 5 xfailed, 140 finance). Syndication dedup on (registrable domain, punctuation-preserving normalised title); GDELT published_at stays null (seendate is retrieval time, recorded in uncertainty). Excluded by policy: x-cookies, private reddit, youtube internals, retailer scraping, paid APIs. Interpretation reserved for persona L.",
+  "artifacts": [
+    {
+      "label": "mt-probe-code",
+      "path": "repo:src/finance_mt_probe.py",
+      "sha256": "019707373b3fdd881bbd858f99f12bc8ce5429a4340c8fa097d1cc434f3f5f5c"
+    },
+    {
+      "label": "mt-run-manifest",
+      "path": "repo:automation/review/finance/mt00/run-manifest-20261106T160553Z.json",
+      "sha256": "71d4397e3ba3e8e06259d6926a3f240b3b3bde0a47577f5bcd6a7bae16b4bc0c"
+    },
+    {
+      "label": "mt-snapshot",
+      "path": "repo:automation/review/finance/mt00/snapshot-20261106T160553Z.json",
+      "sha256": "8af2206550fed14f24532c06ecb97d31598d04c7e98b9ec1daf1d0d531a7462b"
+    },
+    {
+      "label": "mt-digest",
+      "path": "repo:automation/review/finance/mt00/digest-20261106T160553Z.md",
+      "sha256": "42c97da1ec733aec6f65c4538b845375526906ddf96045c0f648c0680262af96"
+    },
+    {
+      "label": "mt-suite-record",
+      "path": "repo:automation/review/finance/test-suite-round12.txt",
+      "sha256": "b802cd87098fa5de47544950084188b3458395c1bbf3a9e2860d383b1e7c32c1"
+    }
+  ]
+}

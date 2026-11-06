@@ -1,0 +1,52 @@
+{
+  "goal_id": "FT-00",
+  "kind": "run",
+  "status": "pass",
+  "observed_at": "2026-10-29T18:54:36Z",
+  "run_id": "ft00-lab-20261029T1854Z",
+  "code_commit": "cdd12645f402327420be00abc7247ddf530c5c7b",
+  "strategy_hash": "30e3e51435ab8bc7e2d3d89dab1e1dcb1c760edd642b4a69140141f333d2b428",
+  "config_hash": "f330b591b66aeaf4ef82b2f1786137c53597e5461d942e388e488b1c9badcc60",
+  "engine_digest": "freqtradeorg/freqtrade@sha256:9d67afb8eb5f4e1210f4fb067efcbd5e005bd4f1c27f6f3888b8b9fc7f9b5199",
+  "engine_version": "freqtrade 2026.9 (image Python 3.14.7, CCXT 4.5.84)",
+  "data_snapshot": "kraken live public OHLCV during dry-run; historic klines require --dl-trades on kraken (time-boxed attempt exceeded 9min for 3d x 2 pairs; deferred to FT-01)",
+  "independent_verifier": "self-attested-executor (pending independent verification)",
+  "notes": "FT-00 on hz2-workstation (lab) against the round-4 review-fix code (commit cdd1264): docker 29.1.3 (owner-authorized install 2026-10-29). Round-4 fixes live in this run: (a) the executed snapshot must be a REGULAR FILE \u2014 a pre-existing symlink or unexpected file at the content-addressed .verified-<sha12>.json path is refused (proven live: planted symlink -> rc 3 refusal), lstat-checked again immediately before docker runs; (b) the round-trip assert is BYTE-EXACT against the bytes the guard parsed, captured in the same single read that produced the parsed config (parsed-object equality could not distinguish JSON true from 1). Guard unchanged: EXACT pinned official digest at every layer, verified config and executed config the same file inside user_data, overlay routes rejected (add_config_files, raw --extra allowlist). verify-config pass; SEVEN fail-closed refusals rc=3 (dry_run=false, exchange key set, futures + colon pair, add_config_files overlay, --extra=--config CLI overlay, derivatives pair via typed --pairs, pre-existing symlink at the snapshot path) recorded in fail-closed-refusals.json. Dry-run smoke 2/2 cycles reached state=RUNNING heartbeat on live Kraken public data with zero credentials, graceful SIGTERM stop rc=0 both cycles. Spot only, no margin/derivatives, no exchange keys, no public listeners, no telegram, workspace outside knowledgebase. Deployment fact (unchanged): a running freqtrade container recursively re-chowns the mounted user_data to its internal user (uid 1000 = host dmem), so snapshot write/cleanup is delegated to one-shot pinned-image containers when the invoking user cannot write directly; bytes are still re-read from the host and asserted.",
+  "artifacts": [
+    {
+      "label": "ft-config",
+      "path": "repo:automation/review/finance/ft00/config-ft00.json",
+      "sha256": "f330b591b66aeaf4ef82b2f1786137c53597e5461d942e388e488b1c9badcc60"
+    },
+    {
+      "label": "ft-engine-pin",
+      "path": "repo:automation/review/finance/ft00/engine-pin.txt",
+      "sha256": "44e196b7f2c22bb93def934f70a46ae2696b31f140b4e060327bec9494eaad47"
+    },
+    {
+      "label": "ft-strategy",
+      "path": "repo:automation/review/finance/ft00/SMACrossBaseline.py",
+      "sha256": "30e3e51435ab8bc7e2d3d89dab1e1dcb1c760edd642b4a69140141f333d2b428"
+    },
+    {
+      "label": "ft-runner-code",
+      "path": "repo:src/finance_ft_runner.py",
+      "sha256": "27ae89bf93624686b80ba091e588593ee0e7a468457ad2a31e592a706007d8ba"
+    },
+    {
+      "label": "ft-fail-closed-refusals",
+      "path": "repo:automation/review/finance/ft00/fail-closed-refusals.json",
+      "sha256": "631fa868a22d2f56d27be52fb17076a8d6aff58f9c031a505a4a03fa4fe76446"
+    },
+    {
+      "label": "ft-dryrun-cycle1-log",
+      "path": "repo:automation/review/finance/ft00/dryrun-cycle1.log",
+      "sha256": "180360d6f0fb6d57a5d6906b098288f4a3300aacdca4c53165fce10e6a92471c"
+    },
+    {
+      "label": "ft-dryrun-cycle2-log",
+      "path": "repo:automation/review/finance/ft00/dryrun-cycle2.log",
+      "sha256": "a10a7ec67540189c7ebf81b3256c00635c2ef500928946dc0bb781a4b243c58c"
+    }
+  ]
+}

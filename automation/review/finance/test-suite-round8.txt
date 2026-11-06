@@ -1,0 +1,10 @@
+finance slice round-8 offline suite record
+repo: tyecam1/odysseus branch feat/finance-mt00-ft00 (round-8 code, pre-commit working tree)
+host: hz2-workstation lab worker
+date: 2026-10-30T00:24:44Z
+command: venv/bin/python -m pytest -q  (full repository suite)
+finance subset: tests/test_finance_goals.py tests/test_finance_ft_runner.py tests/test_finance_mt_probe.py -> 114 passed
+
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+8434 passed, 46 skipped, 5 xfailed, 1394 warnings in 458.03s (0:07:38)

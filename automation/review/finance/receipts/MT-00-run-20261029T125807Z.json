@@ -1,0 +1,37 @@
+{
+  "goal_id": "MT-00",
+  "kind": "run",
+  "status": "pass",
+  "observed_at": "2026-10-29T12:58:07Z",
+  "run_id": "mt00-lab-20261029T125807Z",
+  "code_commit": "8c39e71f8e2b6770e5e95521b02991fc46e60761",
+  "verifier": "self-attested-executor (pending independent verification)",
+  "source_config_hash": "7978eccc7fa6ccfc00feaee4810828044be99e7f61852621f924359e67f69ca7",
+  "data_snapshot_ids": [
+    "automation/review/finance/mt00/snapshot-20261029T125807Z.json",
+    "automation/review/finance/mt00/snapshot-20261029T163327Z.json"
+  ],
+  "source_access_audit_id": "automation/review/finance/mt00/run-manifest-20261029T125807Z.json",
+  "evaluation_artifacts": [
+    "automation/review/finance/mt00/digest-20261029T125807Z.md",
+    "automation/review/finance/mt00/digest-20261029T163327Z.md"
+  ],
+  "notes": "Live MT-00 probe on hz2-workstation (lab): GDELT DOC 2.0 + HN official API + Kraken public spot candles, all public/no-auth/no-key; 3/3 sources healthy at 125807Z (124 records); GDELT 429 rate-limits bursts (recovered after ~100s gap; 2/3 healthy at 125439Z and 163327Z, recorded honestly per source_health). First-seen carry-forward proven: 13 HN records in the 163327Z snapshot carry first_seen_at 125439Z < collected_at with distinct published_at. Syndication dedup on (registrable domain, normalized title); source diversity counts distinct domains only. Excluded by policy: x-cookies, private reddit, youtube internals, retailer scraping, paid APIs. Interpretation reserved for persona L.",
+  "artifacts": [
+    {
+      "label": "mt-probe-code",
+      "path": "repo:src/finance_mt_probe.py",
+      "sha256": "a26b27f55537d2fda527396c43ced60ee3d81ea4bb224cdce1e8047d34046915"
+    },
+    {
+      "label": "mt-run-manifest",
+      "path": "repo:automation/review/finance/mt00/run-manifest-20261029T125807Z.json",
+      "sha256": "7978eccc7fa6ccfc00feaee4810828044be99e7f61852621f924359e67f69ca7"
+    },
+    {
+      "label": "mt-snapshot",
+      "path": "repo:automation/review/finance/mt00/snapshot-20261029T125807Z.json",
+      "sha256": "0e0c197654732ec075389dd5293611e08fe296573d0e7c42d8b0394743fef1a8"
+    }
+  ]
+}
