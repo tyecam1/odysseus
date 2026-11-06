@@ -4,6 +4,8 @@ Continues `2026-09-08-subscription-usage-attribution.md` (stage 1-2 baseline) an
 
 ## Method
 
+Note on names: project directories are the local transcript directory names (the home directory's encoded path is shown as "control-plane home" in tables); the embedded scripts carry the literal local names and need adapting on another machine. Duplicates keep the first occurrence found; conflicting copies were not checked, and path order was not fixed for the first script when its figures were produced (it is fixed in the later scripts).
+
 Read-only, numeric fields only (`message.usage` token counts, model, request/message ids, project directory name, source file kind main/subagent, timestamp). No message content was read or is reproduced. Records were de-duplicated on message id plus request id across main and subagent transcripts; every record carried a message id, 6,843 lacked a request id (so those are keyed on message id alone), none collapsed onto an empty key, and the first occurrence of a duplicate key was kept without checking that later copies agreed. Counts were taken in one run at 09:06Z on 2026-11-06; the transcripts grow while work continues, so a rerun gives slightly larger numbers. The script is below. Scope is everything on this laptop (2026-06-03 to 2026-11-06), so counts are larger than the 2026-10-02..11-02 window of the baseline; the two have not been reconciled and should not be subtracted from each other. Native units are not comparable across providers and are not compared.
 
 ## Results
@@ -12,7 +14,7 @@ Read-only, numeric fields only (`message.usage` token counts, model, request/mes
 
 | Project directory (proxy for function) | Calls (share) | main / subagent | Sonnet / Opus / GLM / other | Output M | Cache-write M | Cache-read M |
 |---|---:|---:|---|---:|---:|---:|
-| control-plane home (`C--Users-tyeca`) | 11,308 (54%) | 9,696 / 1,612 | 5,517 / 1,221 / 4,444 / 126 | 7.68 | 43.5 | 2,705 |
+| control-plane home (local transcript directory) | 11,308 (54%) | 9,696 / 1,612 | 5,517 / 1,221 / 4,444 / 126 | 7.68 | 43.5 | 2,705 |
 | PhD notes repository | 6,157 (30%) | 5,861 / 296 | 5,124 / 881 / 10 / 142 | 5.17 | 39.5 | 2,670 |
 | PhD ROS2 measurement spine | 830 (4%) | 830 / 0 | 823 / 0 / 0 / 7 | 1.04 | 5.8 | 223 |
 | PhD j2 work | 632 (3%) | 609 / 23 | 0 / 0 / 591 / 41 | 2.62 | 0.0 | 13 |
@@ -23,7 +25,9 @@ Concentration: the first two directories hold 84% of calls (17,465), 93% of cach
 
 ## Ranked diagnosis (hypotheses, each with the measurement that would confirm it)
 
-1. **Two long-context coordination directories dominate consumption.** Evidence: the concentration above. Likely mechanism: very long sessions re-reading a large cached context on every call (cache-read is about 98% of the tokens counted). Not shown: session lengths, compaction behaviour, what the context consists of. Confirm by measuring calls and cache-read per session and per day in these two directories, and the share of calls whose cache-read exceeds a threshold.
+The order is an **investigation-priority ranking** (concentration first), not a ranking by measured cost. Status of each item after the addenda: #1 token-volume concentration supported, mechanism untested; #2 context explanation not supported, allowance-cost hypothesis untested; #3 and #4 supported as descriptive observations, savings untested; #5 untested.
+
+1. **Two long-context coordination directories dominate consumption.** Evidence: the concentration above. Likely mechanism: very long sessions re-reading a large cached context on every call (cache-read is about 98% of the tokens counted). Session lengths and the late-versus-early context size are now measured (first addendum); still not shown: compaction behaviour (the drop heuristic is unverified) and what the context consists of. Still to confirm: per-day patterns and the share of calls whose cache-read exceeds a threshold.
 2. **Opus may be disproportionately expensive per call (hypothesis; the per-call context measurement in the second addendum does not support the context part of it).** Evidence was weak: all Opus calls sit in the two large-context directories, and the earlier baseline's unreconciled average was about 15.6 k cache-write tokens per Opus call. Directory membership does not give Opus-specific context sizes, and token volume is not allowance consumption (allowance is not observable here). Policy already restricts Opus to exceptions. The pooled model-specific per-call context (input plus cache-read plus cache-write) is now measured in the second addendum; still outstanding are a same-session comparison, cache-expiry timing between Opus calls, and listing Opus calls by day against the exception reasons recorded in the work.
 3. **GLM accounts for 33% of recorded calls; its share of cache-write and cache-read tokens has not been established here** (cache tokens are pooled by project, and the script does not aggregate them by model family). Whether those calls are delegated work is not established (model identity and transcript location do not prove delegation), and GLM allowance is unknown, so this is a call-volume observation only. The `j2 work` row is a project total (591 GLM and 41 other calls; 2.62 M output), not a GLM-only figure.
 4. **Recorded Sol calls are predominantly review-class and templated** (see `2026-11-06-sol-call-classification.md`: 98% review-class, 708 of 714 calls under 7 templates, median prompt about 93 k characters). Consumption by class (tokens or allowance) has not been quantified, so this does not yet identify the dominant saving. The packet compiler (#214, wired inert in #220) is the planned remedy, gated on calibration and replay evidence.
@@ -31,7 +35,7 @@ Concentration: the first two directories hold 84% of calls (17,465), 93% of cach
 
 ## Recommendations (to test, not to apply blindly)
 
-- Measure first (hypotheses 1 and 2): per-session shape is now measured (addendum); the open step is comparing sessions that were restarted per work item against long-running ones on cache creation, cache reads and completion quality, and model-specific per-call context for Opus.
+- Measure first (hypotheses 1 and 2): per-session shape is now measured (addendum); model-specific per-call context for Opus is also measured (second addendum). Still open: the controlled comparison of sessions restarted per work item against long-running ones on cache creation, cache reads and completion quality, a matched-session Opus analysis, cache-expiry timing, and context-content analysis.
 - Test, do not adopt, a cadence change: compare fresh scoped sessions per work item or PR against long-running sessions in the same directories on cache creation, cache reads, setup overhead and completion quality (fresh sessions can raise cache creation, and task complexity can explain long sessions' totals). Keep Opus for the recorded exception cases and record the exception reason in the work record.
 - Keep delegating bounded review and implementation to GLM/Sol lanes (already policy); do not move coordination volume onto them without a measurement.
 - Treat Sol call reduction as unmeasured until the replay and regression evidence exists; do not claim savings from #214/#220.
@@ -39,7 +43,7 @@ Concentration: the first two directories hold 84% of calls (17,465), 93% of cach
 
 ## Minimal telemetry schema (proposed)
 
-One row per paid call, joinable on existing ids: `provider`, `model` (resolved), `function` (task class or work-item kind), `subject` and `head_sha` (as in #225/#226), `input_tokens`, `cached_input_tokens`, `output_tokens`, and for Codex the provider `used_percent` for the 5-hour and weekly windows before and after the call. Today the estate records, in the `|call=` suffix of the routing decision, only `subject`, `head_sha`, `started_at`, `launched` (advisory) or `submitted` plus `execution_id` (write lane): execution-level events, not one record per provider inference call. Model, token and window fields are not recorded by the estate; adding them, and correlating execution-level records to provider-call rows, would need a separate, reviewed change.
+One row per paid provider call, with a provider-call identifier, the parent `execution_id` where one exists (the join to the estate's execution record), and a UTC timestamp, plus: `provider`, `model` (resolved), `function` (candidate vocabulary: a conventional-commit style type or type(scope)), `subject` and `head_sha` (as in #225/#226), `input_tokens`, `cache_read_tokens`, `cache_write_tokens` (kept separate: the cadence comparison needs cache creation on its own), `output_tokens`, and for Codex the provider `used_percent` for the 5-hour and weekly windows before and after the call. Today the estate records, in the `|call=` suffix of the routing decision, only `subject`, `head_sha`, an optional `function` (#235), `started_at`, `launched` (advisory) or `submitted` plus `execution_id` (write lane): execution-level events, not one record per provider inference call. Model, token and window fields are not recorded by the estate; adding them, and correlating execution-level records to provider-call rows, would need a separate, reviewed change.
 
 ## Not done
 
@@ -95,7 +99,7 @@ One run on 2026-11-06 at 12:06Z over the merged pull requests of the Odysseus re
 What this gives: a first taxonomy of the delivered work (about a third documentation, a third features, a third fixes; more than a third of scoped PRs carry the `misumi` scope), a candidate vocabulary for tagging, pending definition and review. What it does **not** give:
 
 - **No explicit session-to-function mapping.** The two dominant usage directories are the control-plane home and the PhD notes repository; sessions there cover many functions, and the transcripts carry no function or work-item tag. Matching sessions to PRs by date would be guesswork and was not attempted; reconstruction from subjects, commit hashes or execution records was not assessed.
-- **One repository only.** The PhD notes and Misumi repositories, where much of the usage sits, are not covered. PR count and changed lines are output measures, not effort or allowance.
+- **One repository only.** The PhD notes and Misumi repositories were excluded from this activity survey. Substantial recorded usage is established for the PhD notes directory (30% of calls above); Misumi's share of usage is unknown, because no usage directory is attributed to it here. PR count and changed lines are output measures, not effort or allowance.
 - **Reliable before/after attribution for a function has not been established** from the records examined, for the same reason; it remains owed. For dependable prospective attribution, we recommend tagging calls at dispatch. The merged call telemetry records `subject`, `head_sha`, `started_at`, `launched` or `submitted` and `execution_id` for the estate's paid launches (once the lab runs it) but **no function tag**: capturing one would be a further, reviewed change, to be added and deployed.
 
 Recommendation: treat the type and scope vocabulary above as a candidate `function` tag for the proposed telemetry schema (with rules still to be written for titles without a scope and for work outside this repository), and attribute usage per function only from calls recorded with a tag once that capture exists.
@@ -106,7 +110,7 @@ Recommendation: treat the type and scope vocabulary above as a candidate `functi
 import glob, json, os, collections, datetime
 root = os.path.expanduser("~/.claude/projects")
 seen = set(); agg = collections.defaultdict(lambda: collections.Counter()); days = collections.defaultdict(collections.Counter)
-for p in glob.glob(root + "/*/**/*.jsonl", recursive=True) + glob.glob(root + "/*/*.jsonl"):
+for p in sorted(set(glob.glob(root + "/*/**/*.jsonl", recursive=True) + glob.glob(root + "/*/*.jsonl"))):   # sorted and de-duplicated paths; NOTE the published figures were produced before this line was sorted
     proj = os.path.relpath(p, root).split(os.sep)[0]
     sub = "subagent" if "subagents" in p.replace("\\", "/") else "main"
     try:
