@@ -475,3 +475,11 @@ def test_resolve_gates_agent_decides_and_escalates_only_credentials(tmp_path):
     assert latest[ids["User's mother likes watercolour painting"]]["wing"] == "people"
     assert latest[ids["User stores the api key in a note"]]["review"] == "human_gate"
     assert ci.resolve_gates("imp", llm, root=tmp_path, inv=lambda d: [])["accepted"] == 0
+
+
+import pytest as _pt
+
+
+@_pt.fixture(autouse=True)
+def _lib_outcomes_to_tmp(tmp_path, monkeypatch):
+    monkeypatch.setenv("ODYSSEUS_DATA_DIR", str(tmp_path / "libdata"))
