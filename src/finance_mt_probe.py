@@ -54,7 +54,7 @@ except ImportError:  # pragma: no cover - dependency absent
     _idna = None
 
 PROBE_NAME = "finance-mt-probe"
-PROBE_VERSION = "0.11"
+PROBE_VERSION = "0.12"
 USER_AGENT = (
     f"{PROBE_NAME}/{PROBE_VERSION} (odysseus finance MT-00; "
     "household research, read-only public APIs; github.com/tyecam1)"
@@ -269,6 +269,15 @@ def registrable_domain(url: str) -> str:
         host = host.split("/", 1)[0]
     # tolerate user:pass@ and :port in bare-host input
     host = _canonical_host(host.split("@")[-1].split(":")[0])
+    if host.startswith(".") or ".." in host:
+        # an EMPTY label (".com", "a..b") is not a valid host: the
+        # label-stripping below would silently heal it into a phantom
+        # registrable domain (".com" previously returned ".com" — a
+        # dotted-but-labelless string must be unknown, never a healthy
+        # record's source; round-12 finding 1). A TRAILING dot is
+        # different: _canonical_host already stripped it, and
+        # "example.com." is a valid FQDN spelling of example.com.
+        return "unknown"
     if not re.fullmatch(r"[a-z0-9.-]+", host or ""):
         # brackets (IPv6 literals), spaces or other junk are not a
         # registrable hostname — one bad URL must not abort the source

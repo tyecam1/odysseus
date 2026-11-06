@@ -1145,3 +1145,38 @@ def test_hn_whitespace_title_is_item_error():
     err = hn.error or ""
     assert "no usable items" in err
     assert "ids=1" in err and "item errors=1" in err
+
+
+# ---------------------------------------------------------------------
+# round-13 pins: dotted labelless hosts are malformed, never phantom
+# domains
+# ---------------------------------------------------------------------
+
+
+def test_dotted_labelless_host_never_a_record():
+    # round-12 finding 1: url "https://.com/path" previously produced a
+    # healthy record under gdelt-doc-2.0:.com and repeats incremented
+    # deduped_exact — an empty leftmost label is a malformed host, so
+    # the article is malformed on every occurrence
+    payload = {"articles": [
+        {"url": "https://.com/path", "title": "Phantom"},
+        {"url": "https://.com/path", "title": "Phantom"},
+    ]}
+    result = mp.collect_gdelt(
+        "bitcoin", max_records=10, collected_at="2026-11-06T00:00:00Z",
+        first_seen_index={}, fetch=lambda url, timeout: payload,
+    )
+    assert result.status == "failed"
+    assert result.records == []
+    assert result.deduped_exact == 0
+    err = result.error or ""
+    assert "malformed=2" in err
+
+
+def test_registrable_domain_empty_label_forms():
+    # direct pins: a leading dot and consecutive dots are unknown; a
+    # trailing dot is a VALID FQDN spelling and still heals
+    assert mp.registrable_domain("https://.com/path") == "unknown"
+    assert mp.registrable_domain("https://a..b/x") == "unknown"
+    assert mp.registrable_domain("https://example.com./p") == "example.com"
+    assert mp.registrable_domain("https://news.example.com/x") == "example.com"
