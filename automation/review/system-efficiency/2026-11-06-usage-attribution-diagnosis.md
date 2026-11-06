@@ -49,18 +49,18 @@ One row per paid call, joinable on existing ids: `provider`, `model` (resolved),
 
 ## Addendum: per-session shape in the two dominant directories (hypothesis 1, measured)
 
-Same method and scope as above (numeric fields only, de-duplicated, taken in one run on 2026-11-06 at about 09:30Z), restricted to **main** transcripts in the control-plane home and PhD notes directories (subagent files excluded, so 15,566 of those directories' 17,465 calls): 61 sessions.
+Same method and scope as above (numeric fields only, de-duplicated, taken in one run on 2026-11-06 at about 09:30Z), restricted to **main** transcripts in the control-plane home and PhD notes directories (subagent files excluded, so 15,571 of those directories' 17,465-plus calls; a call present in two files is owned by the first path in sorted order, every call had a message id, and all timestamps were ISO-8601 UTC and sorted chronologically with ties kept in file order): 61 sessions.
 
 | Session length (calls) | Sessions | Calls (share) | Cache-read M | Cache-write M | Output M | Mean cache-read per call |
 |---|---:|---:|---:|---:|---:|---:|
 | 1-20 | 13 | 59 (0%) | 2 | 0.6 | 0.08 | 31 k |
 | 21-100 | 7 | 363 (2%) | 29 | 0.7 | 0.22 | 80 k |
 | 101-500 | 34 | 7,848 (50%) | 1,966 | 27.9 | 5.96 | 251 k |
-| 501 or more | 7 | 7,296 (47%) | 3,084 | 30.8 | 6.43 | 423 k |
+| 501 or more | 7 | 7,301 (47%) | 3,086 | 30.8 | 6.43 | 423 k |
 
-Median session is 159 calls, p90 585, maximum 1,638. Mean cache-read per call by position within a session rises from 54 k (calls 1-10) to 152 k (11-100), 393 k (101-500) and 420 k (501+). A drop of more than half in cache-read between consecutive calls, a heuristic for a compaction or context reset that was **not verified as one**, occurs in 221 of 15,505 consecutive-call steps (1.4%).
+Median session is 159 calls, p90 585, maximum 1,638. Mean cache-read per call by position within a session rises from 54 k (calls 1-10) to 152 k (11-100), 393 k (101-500) and 420 k (501+). A drop of more than half in cache-read between consecutive calls (only counted when the earlier call read more than 20,000 tokens), a heuristic for a compaction or context reset that was **not verified as one**, occurs in 221 of 15,510 consecutive-call steps (1.4%). Within the same seven sessions of 500+ calls, mean cache-read per call is 69 k over their first ten calls and 420 k from call 501 onward (about six-fold); the pooled position figures above mix different sets of sessions and are not themselves evidence of within-session growth.
 
-What this shows: consumption in these directories is concentrated in a few long sessions (7 sessions of 500+ calls carry 47% of the calls and 61% of the cache-read tokens), and the context re-read on each call grows about eight-fold from the start of a session to its long tail. This is consistent with hypothesis 1 and with the context simply accumulating as work proceeds.
+What this shows: consumption in these directories is concentrated in a few long sessions (7 sessions of 500+ calls carry 47% of the calls and 61% of the cache-read tokens), and within those long sessions the context re-read on each call is several times larger late than early (69 k to 420 k). This is consistent with hypothesis 1 and with the context simply accumulating as work proceeds.
 
 What it does not show: that shorter or restarted sessions would cost less. A fresh session must re-prime its working context (cache-write), long sessions may reflect task complexity and duration, and cache-read tokens are a volume measure, not allowance consumption. The recommendation to test a cadence change therefore stands as a controlled comparison (cache creation, cache reads, setup overhead and completion quality per work item), not as an instruction. Still unmeasured: what the context consists of, quality per session, and whether the heuristic drops are compactions.
 
@@ -108,7 +108,7 @@ root = os.path.expanduser("~/.claude/projects")
 dirs = ["C--Users-tyeca", "C--Users-tyeca-Documents-PhD-notes"]
 seen = set(); sessions = []
 for d in dirs:
-    for p in glob.glob(os.path.join(root, d, "*.jsonl")):          # main transcripts only (subagents are in subfolders)
+    for p in sorted(glob.glob(os.path.join(root, d, "*.jsonl"))):   # sorted: a call shared by two files belongs to the first path          # main transcripts only (subagents are in subfolders)
         calls = []
         for line in open(p, encoding="utf-8", errors="replace"):
             try: e = json.loads(line)
@@ -119,7 +119,7 @@ for d in dirs:
             if key in seen: continue
             seen.add(key)
             calls.append((e.get("timestamp") or "", u.get("cache_read_input_tokens", 0), u.get("cache_creation_input_tokens", 0), u.get("output_tokens", 0), m.get("model") or ""))
-        if calls: sessions.append((d, p, sorted(calls)))
+        if calls: sessions.append((d, p, sorted(calls, key=lambda x: x[0])))   # ISO-8601 UTC strings sort chronologically; ties keep file order (stable)
 n = [len(c) for _, _, c in sessions]
 tot = sum(n)
 print("main sessions", len(sessions), "calls", tot, "| calls/session median", statistics.median(n), "p90", sorted(n)[int(.9*len(n))], "max", max(n))
@@ -142,4 +142,11 @@ for _, _, c in sessions:
         steps += 1
         if a[1] > 20000 and b[1] < 0.5 * a[1]: drops += 1
 print("consecutive-call cache-read drops >50%:", drops, "of", steps, "steps")
+
+# within-session growth: the SAME long sessions, early vs late
+long_ = [c for _, _, c in sessions if len(c) >= 501]
+early = [x[1] for c in long_ for x in c[:10]]; late = [x[1] for c in long_ for x in c[500:]]
+print("within the", len(long_), "sessions of 501+ calls: mean cache-read calls 1-10 =", round(sum(early)/len(early)/1e3), "k; calls 501+ =", round(sum(late)/len(late)/1e3), "k")
+ts_bad = sum(1 for _, _, c in sessions for x in c if not x[0].endswith("Z") or len(x[0]) < 20)
+print("calls with missing or non-UTC-Z timestamps:", ts_bad)
 ```
