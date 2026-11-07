@@ -1226,3 +1226,48 @@ def test_junk_label_host_article_is_malformed():
     assert result.records == []
     assert result.deduped_exact == 0
     assert "malformed=2" in (result.error or "")
+
+
+# ---------------------------------------------------------------------
+# round-15 pins: EVERY label of the cited domain must be a valid DNS
+# label (round-14 Sol finding 1 — the TLD check alone let "a.a-"
+# (trailing hyphen) and "-.com" (hyphen-only label) through)
+# ---------------------------------------------------------------------
+
+
+def test_malformed_label_hosts_are_unknown():
+    for url in (
+        "https://a.a-/x",        # trailing hyphen inside the candidate
+        "https://-.com/x",       # hyphen-only label inside the candidate
+        "https://example-.com/x",  # trailing hyphen on the SLD
+        "https://x-.io/x",       # trailing hyphen on the SLD
+    ):
+        assert mp.registrable_domain(url) == "unknown", url
+
+
+def test_valid_label_forms_still_domains():
+    # punycode, single-char and 63-char labels stay valid; an invalid
+    # SUBDOMAIN label above a valid registrable domain still collapses
+    # to the valid domain (the cited source is what must be locatable)
+    long63 = "x" * 63
+    assert mp.registrable_domain("https://bücher.de/x") == "xn--bcher-kva.de"
+    assert mp.registrable_domain("https://a.io/x") == "a.io"
+    assert mp.registrable_domain("https://sub." + long63 + ".com/x") == long63 + ".com"
+    assert mp.registrable_domain("https://news.example.com/x") == "example.com"
+
+
+def test_malformed_label_host_article_is_malformed():
+    # Sol's exact probe: "a.a-" twice must be malformed on every
+    # occurrence — never a healthy record, never dedup inflation
+    payload = {"articles": [
+        {"url": "https://a.a-/story", "title": "Bad"},
+        {"url": "https://a.a-/story", "title": "Bad"},
+    ]}
+    result = mp.collect_gdelt(
+        "bitcoin", max_records=10, collected_at="2026-11-07T00:00:00Z",
+        first_seen_index={}, fetch=lambda url, timeout: payload,
+    )
+    assert result.status == "failed"
+    assert result.records == []
+    assert result.deduped_exact == 0
+    assert "malformed=2" in (result.error or "")

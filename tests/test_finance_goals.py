@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import errno
 import json
 import tempfile
 from datetime import datetime, timedelta, timezone
@@ -1017,6 +1018,40 @@ def test_repo_artifact_escape_confined(tmp_path):
     assert any("escapes the repository" in b for b in mt00["blockers"])
     assert any("escape-artifact.json" in b for b in mt00["blockers"])
     assert any("link-artifact.json" in b for b in mt00["blockers"])
+
+
+def test_nofollow_hasher_refuses_symlinks(tmp_path):
+    # round-14 Sol finding 2: the artifact hash goes through ONE
+    # os.open with O_NOFOLLOW, so a final component swapped to a symlink
+    # between the confinement check and the read is refused at open
+    # (ELOOP) — the pointed-at bytes are never read, even when the
+    # target is itself a regular file
+    real = tmp_path / "real.txt"
+    real.write_text("payload\n")
+    link = tmp_path / "link.txt"
+    link.symlink_to(real)
+    try:
+        fg.sha256_file_nofollow(link)
+        raised = None
+    except OSError as exc:
+        raised = exc
+    assert raised is not None
+    assert raised.errno == errno.ELOOP
+    # regular files still hash identically to the plain hasher
+    assert fg.sha256_file_nofollow(real) == fg.sha256_file(real)
+
+
+def test_nofollow_hasher_refuses_directories(tmp_path):
+    # the OPENED descriptor must be a regular file (fstat), so a path
+    # swapped to a directory mid-check cannot be walked by the reader
+    d = tmp_path / "adir"
+    d.mkdir()
+    try:
+        fg.sha256_file_nofollow(d)
+        raised = None
+    except (ValueError, OSError) as exc:
+        raised = exc
+    assert raised is not None
 
 
 def test_extreme_future_receipt_locks_goal_not_response():

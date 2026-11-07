@@ -54,7 +54,7 @@ except ImportError:  # pragma: no cover - dependency absent
     _idna = None
 
 PROBE_NAME = "finance-mt-probe"
-PROBE_VERSION = "0.13"
+PROBE_VERSION = "0.14"
 USER_AGENT = (
     f"{PROBE_NAME}/{PROBE_VERSION} (odysseus finance MT-00; "
     "household research, read-only public APIs; github.com/tyecam1)"
@@ -113,6 +113,9 @@ EVIDENCE_FIELDS = [
 
 _WS_RE = re.compile(r"\s+")
 _PUNCT_RE = re.compile(r"[^\w\s]")
+# a valid DNS label: letters/digits/hyphen, no leading/trailing hyphen,
+# 1-63 characters (punycode "xn--…" labels match by construction)
+_LABEL_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
 _MAX_TITLE_WORDS = 12
 # HN item ids are sequential integers (~4e7 today); anything outside
 # (0, 10^12] is not a plausible id, only a malformed feed entry
@@ -305,6 +308,14 @@ def registrable_domain(url: str) -> str:
         # (GLM corroborating read, round-13 findings 1-2; same class as
         # the round-12 dotted-labelless fix). Numeric NON-top labels
         # stay valid — "888.com" is a real registrable domain.
+        return "unknown"
+    if any(not _LABEL_RE.fullmatch(part) for part in candidate.split(".")):
+        # EVERY label of the cited domain must be a valid DNS label
+        # (letters/digits/hyphen, no leading/trailing hyphen, 1-63
+        # chars): "a.a-" (trailing hyphen) and "-.com" (hyphen-only
+        # label) previously passed the TLD check and became healthy
+        # record sources (round-14 Sol finding 1). Punycode labels
+        # ("xn--bcher-kva") remain valid by construction.
         return "unknown"
     return candidate
 

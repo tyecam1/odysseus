@@ -39,6 +39,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import stat
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -88,6 +90,27 @@ def sha256_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(65536), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def sha256_file_nofollow(path: Path) -> str:
+    """Hash a file WITHOUT a check-to-open window: one ``os.open`` with
+    ``O_NOFOLLOW`` so the final component cannot be swapped to a symlink
+    between the confinement check and the read (round-14 Sol finding 2),
+    and an ``fstat`` on the OPEN descriptor so the bytes hashed provably
+    belong to a regular file. Raises OSError (ELOOP etc.) on refusal and
+    ValueError when the opened object is not a regular file."""
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise ValueError(f"not a regular file: {path}")
+        digest = hashlib.sha256()
+        with os.fdopen(fd, "rb", closefd=False) as handle:
+            for chunk in iter(lambda: handle.read(65536), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+    finally:
+        os.close(fd)
 
 
 def sha256_bytes(data: bytes) -> str:
@@ -301,11 +324,23 @@ def _receipt_blockers_inner(
                 )
             else:
                 try:
-                    actual = sha256_file(path)
+                    # hash through the nofollow opener: the confinement
+                    # check above resolved this path, but a concurrent
+                    # writer could swap the final component for a symlink
+                    # before a plain open — O_NOFOLLOW + fstat make the
+                    # check-to-open window closed, not merely short
+                    # (round-14 Sol finding 2)
+                    actual = sha256_file_nofollow(path)
                 except OSError:
                     blockers.append(
                         f"receipt {receipt.get('_file')}: artifact "
                         f"unreadable: {art_path}"
+                    )
+                except ValueError:
+                    blockers.append(
+                        f"receipt {receipt.get('_file')}: artifact "
+                        f"unreadable (not a regular file at open): "
+                        f"{art_path}"
                     )
                 else:
                     if actual != recorded:
