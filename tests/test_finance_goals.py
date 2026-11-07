@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 import errno
 import json
+import shutil
 import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1052,6 +1053,91 @@ def test_nofollow_hasher_refuses_directories(tmp_path):
     except (ValueError, OSError) as exc:
         raised = exc
     assert raised is not None
+
+
+def test_confined_hasher_refuses_intermediate_symlink_swap(tmp_path):
+    # round-15 Sol finding 1: O_NOFOLLOW only guards the FINAL
+    # component — a concurrent writer who swaps an INTERMEDIATE
+    # directory for a symlink after the confinement check would be
+    # followed by a plain open. The confined walker opens every
+    # component relative to its verified parent fd with O_NOFOLLOW, so
+    # the swapped state is refused with ELOOP at that component's open.
+    # (Simulates the post-swap state directly: rel_parts were computed
+    # while "sub" was still a real directory; then sub -> outside.)
+    outside = tmp_path.parent / ("swap-outside-" + tmp_path.name)
+    outside.mkdir(exist_ok=True)
+    (outside / "inner.json").write_text("outside bytes\n")
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "inner.json").write_text("inside bytes\n")
+    rel = ("sub", "inner.json")
+    # pre-swap: the walker hashes the in-repo file, matching the plain
+    # hasher
+    assert fg.sha256_file_confined(tmp_path, rel) == fg.sha256_file(
+        tmp_path / "sub" / "inner.json")
+    # post-swap: sub becomes a symlink to the outside dir
+    shutil.rmtree(tmp_path / "sub")
+    (tmp_path / "sub").symlink_to(outside)
+    try:
+        fg.sha256_file_confined(tmp_path, rel)
+        raised = None
+    except OSError as exc:
+        raised = exc
+    assert raised is not None
+    # directory components are opened with O_DIRECTORY too, so a
+    # swapped-to-symlink component refuses with ELOOP or ENOTDIR
+    # (kernel-dependent order); both mean the symlink was NOT followed
+    assert raised.errno in (errno.ELOOP, errno.ENOTDIR)
+    # the closed gap, pinned: the final-component-only nofollow opener
+    # WOULD have followed the swapped intermediate dir and hashed the
+    # outside file — the walker must not
+    assert fg.sha256_file_nofollow(
+        tmp_path / "sub" / "inner.json") == fg.sha256_file(
+        outside / "inner.json")
+
+
+def test_confined_hasher_deep_real_paths_hash_plain(tmp_path):
+    # legitimate deep in-repo paths (no symlinks anywhere) hash
+    # identically to the plain hasher, including a single-component
+    # relative path (leaf opened directly under the root fd)
+    deep = tmp_path / "a" / "b" / "c"
+    deep.mkdir(parents=True)
+    (deep / "leaf.json").write_text("deep payload\n")
+    (tmp_path / "flat.json").write_text("flat payload\n")
+    assert fg.sha256_file_confined(
+        tmp_path, ("a", "b", "c", "leaf.json")) == fg.sha256_file(
+        deep / "leaf.json")
+    assert fg.sha256_file_confined(
+        tmp_path, ("flat.json",)) == fg.sha256_file(tmp_path / "flat.json")
+
+
+def test_intermediate_dir_symlink_escape_confined(tmp_path):
+    # static sibling of the race above: a repo:-prefixed artifact whose
+    # INTERMEDIATE directory is already a symlink pointing outside
+    # resolves outside at the confinement check and is a per-goal
+    # "escapes the repository" blocker, never a hashed host file
+    outside = tmp_path.parent / ("dir-escape-" + tmp_path.name)
+    outside.mkdir(exist_ok=True)
+    (outside / "inner.json").write_text("host file\n")
+    (tmp_path / "sub").symlink_to(outside)
+    swap = _receipt("MT-00", fg.KIND_RUN, run_id="run-diresc", days_ago=0,
+                    name="diresc-artifact.json",
+                    artifacts=[{
+                        "label": "diresc",
+                        "sha256": "a" * 64,
+                        "path": "repo:sub/inner.json",
+                    }])
+    result = fg.evaluate_goals(
+        registries=[MT, FT],
+        receipts=_satisfying_mt00_receipts() + [
+            swap, _receipt("MT-00", fg.KIND_OPERATOR_ATTESTATION),
+        ],
+        policy=fg.load_policy(), now=NOW, repo_root=tmp_path,
+    )
+    assert result["ok"] is True
+    mt00 = _goal(result, "MT-00")
+    assert mt00["satisfied"] is False
+    assert any("escapes the repository" in b for b in mt00["blockers"])
+    assert any("diresc-artifact.json" in b for b in mt00["blockers"])
 
 
 def test_extreme_future_receipt_locks_goal_not_response():

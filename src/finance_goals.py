@@ -92,25 +92,64 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _hash_fd(fd: int) -> str:
+    """Hash the bytes of an ALREADY-OPEN descriptor, refusing anything
+    that is not a regular file (fstat on the open fd)."""
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        raise ValueError(f"not a regular file: fd {fd}")
+    digest = hashlib.sha256()
+    with os.fdopen(fd, "rb", closefd=False) as handle:
+        for chunk in iter(lambda: handle.read(65536), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def sha256_file_nofollow(path: Path) -> str:
     """Hash a file WITHOUT a check-to-open window: one ``os.open`` with
     ``O_NOFOLLOW`` so the final component cannot be swapped to a symlink
     between the confinement check and the read (round-14 Sol finding 2),
     and an ``fstat`` on the OPEN descriptor so the bytes hashed provably
     belong to a regular file. Raises OSError (ELOOP etc.) on refusal and
-    ValueError when the opened object is not a regular file."""
+    ValueError when the opened object is not a regular file. Receipt-loop
+    artifacts use sha256_file_confined, which ALSO refuses symlinked
+    intermediate directories (round-15 Sol finding 1)."""
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     fd = os.open(path, flags)
     try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            raise ValueError(f"not a regular file: {path}")
-        digest = hashlib.sha256()
-        with os.fdopen(fd, "rb", closefd=False) as handle:
-            for chunk in iter(lambda: handle.read(65536), b""):
-                digest.update(chunk)
-        return digest.hexdigest()
+        return _hash_fd(fd)
     finally:
         os.close(fd)
+
+
+def sha256_file_confined(root: Path, rel_parts) -> str:
+    """Hash a repo-relative file with NO symlink followed at ANY
+    component, closing the check-to-open window entirely: each directory
+    component is opened relative to the fd of its already-verified
+    parent (``dir_fd`` chaining) with ``O_DIRECTORY | O_NOFOLLOW``, and
+    the leaf with ``O_RDONLY | O_NOFOLLOW`` — so a concurrent writer who
+    swaps an INTERMEDIATE directory (or the final component) for a
+    symlink after the confinement check is refused with ELOOP at that
+    component's open (round-15 Sol finding 1); the pointed-at bytes are
+    never read. Raises OSError on refusal and ValueError when the opened
+    leaf is not a regular file."""
+    dir_flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
+    leaf_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    parts = [p for p in rel_parts if p not in (".", "")]
+    if not parts:
+        raise ValueError("empty relative path")
+    dir_fd = os.open(root, dir_flags)
+    try:
+        for part in parts[:-1]:
+            next_fd = os.open(part, dir_flags, dir_fd=dir_fd)
+            os.close(dir_fd)
+            dir_fd = next_fd
+        fd = os.open(parts[-1], leaf_flags, dir_fd=dir_fd)
+        try:
+            return _hash_fd(fd)
+        finally:
+            os.close(fd)
+    finally:
+        os.close(dir_fd)
 
 
 def sha256_bytes(data: bytes) -> str:
@@ -308,8 +347,10 @@ def _receipt_blockers_inner(
                         f"escapes the repository: {art_path}"
                     )
                     continue
+                rel_parts = path.relative_to(root).parts
             else:
                 path = Path(art_path)
+                rel_parts = None
             if not path.exists():
                 blockers.append(
                     f"receipt {receipt.get('_file')}: artifact missing: {art_path}"
@@ -324,13 +365,18 @@ def _receipt_blockers_inner(
                 )
             else:
                 try:
-                    # hash through the nofollow opener: the confinement
-                    # check above resolved this path, but a concurrent
-                    # writer could swap the final component for a symlink
-                    # before a plain open — O_NOFOLLOW + fstat make the
-                    # check-to-open window closed, not merely short
-                    # (round-14 Sol finding 2)
-                    actual = sha256_file_nofollow(path)
+                    # hash through the component-wise confined walker: the
+                    # confinement check above resolved this path, but a
+                    # concurrent writer could swap an intermediate
+                    # directory OR the final component for a symlink
+                    # before a plain open — the dir_fd-chained walk opens
+                    # every component with O_NOFOLLOW, so the check-to-
+                    # open window is closed, not merely narrowed
+                    # (round-14/15 Sol findings)
+                    if rel_parts is not None:
+                        actual = sha256_file_confined(root, rel_parts)
+                    else:
+                        actual = sha256_file_nofollow(path)
                 except OSError:
                     blockers.append(
                         f"receipt {receipt.get('_file')}: artifact "
