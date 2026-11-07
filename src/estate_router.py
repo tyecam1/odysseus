@@ -63,7 +63,11 @@ def _provider_outcome(result: dict, now=None, *, host_tz=None) -> dict:
     host_tz = host_tz or now.tzinfo
     states = [result[k] for k in ("status", "state", "terminal_state", "lifecycle_state") if result.get(k) is not None]
     exits = [result[k] for k in ("exit_code", "exit_status", "returncode") if result.get(k) is not None]
-    text = "\n".join(str(result.get(k) or "") for k in ("error", "output", "stdout", "stderr"))
+    # Failure evidence is the error field and genuine provider error lines only: the model's output and the quoted code
+    # in a long transcript ("# noqa: F401", "timeout") must never read as a failure.
+    provider_errors = (line for k in ("stdout", "stderr") for line in str(result.get(k) or "").splitlines()
+                       if re.match(r"\s*(?:\d{4}-\d\d-\d\dT\S+\s+)?ERROR\b", line))
+    text = "\n".join([str(result.get("error") or ""), *provider_errors])
     text = (text + "\n" + "\n".join(map(str, states))).lower().replace("’", "'")
     now = now.replace(tzinfo=host_tz) if now.tzinfo is None else now.astimezone(host_tz)
     retry = now + timedelta(minutes=15)
@@ -100,7 +104,7 @@ def _provider_outcome(result: dict, now=None, *, host_tz=None) -> dict:
             except ValueError:
                 pass
         state = "quota_exhausted"
-    elif re.search(r"unauthorized|authentication|invalid.api.key|not logged in|login required|401", text):
+    elif re.search(r"unauthorized|authentication|invalid.api.key|not logged in|login required|\b401\b", text):
         state, reason = "auth_failed", "provider authentication failed"
     elif re.search(r"unreachable|connection|timed out|timeout|dns|network", text):
         state, reason = "unreachable", "provider transport unavailable"
