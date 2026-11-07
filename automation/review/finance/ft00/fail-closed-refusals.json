@@ -1,9 +1,9 @@
 {
   "goal_id": "FT-00",
-  "note": "fail-closed refusals against the round-14 code",
+  "note": "fail-closed refusals against the round-15 code",
   "refusals": [
     {
-      "case": "t14-dryrun",
+      "case": "t15-dryrun",
       "rc_expected_3": true,
       "fail_closed": true,
       "findings": [
@@ -11,7 +11,7 @@
       ]
     },
     {
-      "case": "t14-key",
+      "case": "t15-key",
       "rc_expected_3": true,
       "fail_closed": true,
       "findings": [
@@ -19,7 +19,7 @@
       ]
     },
     {
-      "case": "t14-futures",
+      "case": "t15-futures",
       "rc_expected_3": true,
       "fail_closed": true,
       "findings": [
@@ -28,7 +28,7 @@
       ]
     },
     {
-      "case": "t14-overlay",
+      "case": "t15-overlay",
       "rc_expected_3": true,
       "fail_closed": true,
       "findings": [
@@ -36,7 +36,7 @@
       ]
     },
     {
-      "case": "t14-extra",
+      "case": "t15-extra",
       "rc_expected_3": true,
       "fail_closed": true,
       "findings": [
@@ -45,7 +45,7 @@
       ]
     },
     {
-      "case": "t14-badpair",
+      "case": "t15-badpair",
       "rc_expected_3": true,
       "fail_closed": true,
       "findings": [
@@ -53,14 +53,14 @@
       ]
     }
   ],
-  "observed_at": "2026-11-06T16:49:50Z",
+  "observed_at": "2026-11-07T12:15:40Z",
   "hardlink_neutralisation": {
-    "case": "t14-hardlink",
+    "case": "t15-hardlink",
     "planted": ".verified-<sha12>.json hardlinked to config-ft00.json (nlink=2 observed in transcript)",
     "result": "cleared by materialise; smoke succeeded on a fresh nlink=1 inode with the container-side sha256 preflight binding the executed bytes"
   },
   "delegated_noclobber_refusal": {
-    "case": "t14-symlink-replant",
+    "case": "t15-symlink-replant",
     "setup": "symlink planted at the content-addressed snapshot path pointing at an innocent file OUTSIDE the workspace mount; the delegated one-shot write (the exact set -C noclobber form build_snapshot_write_argv emits) was then run against it; full command transcript with before/after victim sha256s committed at automation/review/finance/ft00/symlink-refusal-proof.txt",
     "refusal_line_observed": "/bin/sh: 1: cannot create /freqtrade/user_data/.verified-f330b591b66a.json: File exists",
     "write_rc_observed": "write rc=2 (expected NONZERO: noclobber refused to follow/truncate the symlink)",
@@ -69,5 +69,5 @@
     "victim_bytes_unchanged": true,
     "result": "open REFUSED (nonzero rc) and the innocent target file was NOT truncated \u2014 original bytes survived byte-for-byte (sha256 identical)"
   },
-  "symlink_refusal_proof_sha256": "fe7e407ba08798f95a4dc6637e474fc2c61fe824018aa9e0cb1526a361ad464a"
+  "symlink_refusal_proof_sha256": "53a1c3dff0f5cce18fc416de7e0018653cf4594ab7660bd9fe19a3dccdef1806"
 }

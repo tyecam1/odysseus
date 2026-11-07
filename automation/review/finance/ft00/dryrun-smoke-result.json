@@ -11,7 +11,7 @@
       ],
       "stop_returncode": 0,
       "log": "/home/agent/finance-paper/logs/dryrun-cycle1.log",
-      "log_tail": "tegy:* `SMACrossBaseline`\"}\n2026-11-06 16:49:56,317 - freqtrade.rpc.rpc_manager - INFO - Sending rpc message: {'type': startup, 'status': \"Searching for USD pairs to buy and sell based on [{'StaticPairList': 'StaticPairList'}]\"}\n2026-11-06 16:50:11,318 - freqtrade.worker - INFO - Bot heartbeat. PID=1, version='2026.9', state='RUNNING'\n\n=== dry-run-smoke trailer (appended by runner v0.4 after docker stop --time 60) at 2026-11-06T16:50:33Z: stop rc=0; prior-output sha256[:16]=42d906be9b3a22d4 ===\n"
+      "log_tail": "tegy:* `SMACrossBaseline`\"}\n2026-11-07 12:15:45,827 - freqtrade.rpc.rpc_manager - INFO - Sending rpc message: {'type': startup, 'status': \"Searching for USD pairs to buy and sell based on [{'StaticPairList': 'StaticPairList'}]\"}\n2026-11-07 12:16:00,829 - freqtrade.worker - INFO - Bot heartbeat. PID=1, version='2026.9', state='RUNNING'\n\n=== dry-run-smoke trailer (appended by runner v0.4 after docker stop --time 60) at 2026-11-07T12:16:23Z: stop rc=0; prior-output sha256[:16]=c158e6519b7a3754 ===\n"
     },
     {
       "cycle": 2,
@@ -22,7 +22,7 @@
       ],
       "stop_returncode": 0,
       "log": "/home/agent/finance-paper/logs/dryrun-cycle2.log",
-      "log_tail": "tegy:* `SMACrossBaseline`\"}\n2026-11-06 16:50:37,591 - freqtrade.rpc.rpc_manager - INFO - Sending rpc message: {'type': startup, 'status': \"Searching for USD pairs to buy and sell based on [{'StaticPairList': 'StaticPairList'}]\"}\n2026-11-06 16:50:52,593 - freqtrade.worker - INFO - Bot heartbeat. PID=1, version='2026.9', state='RUNNING'\n\n=== dry-run-smoke trailer (appended by runner v0.4 after docker stop --time 60) at 2026-11-06T16:51:15Z: stop rc=0; prior-output sha256[:16]=8d5f6ac137c203f3 ===\n"
+      "log_tail": "tegy:* `SMACrossBaseline`\"}\n2026-11-07 12:16:26,906 - freqtrade.rpc.rpc_manager - INFO - Sending rpc message: {'type': startup, 'status': \"Searching for USD pairs to buy and sell based on [{'StaticPairList': 'StaticPairList'}]\"}\n2026-11-07 12:16:41,907 - freqtrade.worker - INFO - Bot heartbeat. PID=1, version='2026.9', state='RUNNING'\n\n=== dry-run-smoke trailer (appended by runner v0.4 after docker stop --time 60) at 2026-11-07T12:17:04Z: stop rc=0; prior-output sha256[:16]=714a43c185903af8 ===\n"
     }
   ]
 }

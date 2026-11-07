@@ -1,0 +1,45 @@
+{
+  "goal_id": "MT-00",
+  "kind": "run",
+  "status": "pass",
+  "observed_at": "2026-11-07T12:15:07Z",
+  "run_id": "mt00-lab-20261107T121507Z",
+  "code_commit": "50b2b360aaf7c44bdbae7b328496f5d0cf4176b5",
+  "verifier": "self-attested-executor (pending independent verification)",
+  "source_config_hash": "be03c7ad3a5bebe82400a9ee1e2655d2af8628721be25dbe09a9fd99674e156b",
+  "data_snapshot_ids": [
+    "automation/review/finance/mt00/snapshot-20261107T121507Z.json"
+  ],
+  "source_access_audit_id": "automation/review/finance/mt00/run-manifest-20261107T121507Z.json",
+  "evaluation_artifacts": [
+    "automation/review/finance/mt00/digest-20261107T121507Z.md"
+  ],
+  "notes": "Live MT-00 probe on hz2-workstation (lab) against the round-15 review-fix code (commit 50b2b36, probe v0.14): GDELT DOC 2.0 + HN official API + Kraken public spot candles, all public/no-auth/no-key. Sources at 20261107T121507Z: HN ok (25 records), Kraken ok (24), GDELT ok (72 records; health records http_status=200 retries=0 truthfully when a window is rate-limited; this window served all three sources healthy). Round-15 fixes live in this run (probe v0.14, closing the round-14 Sol findings): EVERY label of the cited domain must be a valid DNS label (letters/digits/hyphen, no leading/trailing hyphen, 1-63 chars) IN ADDITION to the alphabetic-TLD rule - 'a.a-' (trailing hyphen) and '-.com' (hyphen-only label) previously passed the TLD check and became healthy record sources; punycode labels (xn--bcher-kva) stay valid by construction, an invalid SUBDOMAIN above a valid registrable domain still collapses to the valid domain (the cited source is what must be locatable), and 63-char labels stay valid. Goals evaluator hardened (round-14 Sol finding 2): the artifact hash goes through ONE os.open with O_NOFOLLOW plus fstat on the OPENED descriptor, closing the check-to-open window where a concurrent writer could swap the final component for a symlink. Earlier-round guarantees carried: junk-labelless dotted hosts and IPv4 octet collapses unknown (round-14), empty-label hosts unknown (round-13), unlocatable URLs malformed on every occurrence (round-11), whitespace-only HN titles item errors (round-11), punctuation-preserving story keys, zero-evidence sources failed, HN id range (0, 10^12]. First-seen carry-forward live-proven for text (HN 1/25 carry earlier first_seen) AND candles (Kraken 4/24). Offline suite record committed at automation/review/finance/test-suite-round15.txt (8472 passed / 46 skipped / 5 xfailed, 152 finance). Syndication dedup on (registrable domain, punctuation-preserving normalised title); GDELT published_at stays null (seendate is retrieval time, recorded in uncertainty). Excluded by policy: x-cookies, private reddit, youtube internals, retailer scraping, paid APIs. Interpretation reserved for persona L.",
+  "artifacts": [
+    {
+      "label": "mt-probe-code",
+      "path": "repo:src/finance_mt_probe.py",
+      "sha256": "f178861c99ac49c00a9c0d005d387edfe8749a0d97339685a72e5b871276f567"
+    },
+    {
+      "label": "mt-run-manifest",
+      "path": "repo:automation/review/finance/mt00/run-manifest-20261107T121507Z.json",
+      "sha256": "be03c7ad3a5bebe82400a9ee1e2655d2af8628721be25dbe09a9fd99674e156b"
+    },
+    {
+      "label": "mt-snapshot",
+      "path": "repo:automation/review/finance/mt00/snapshot-20261107T121507Z.json",
+      "sha256": "c0cdfe57f356432f8fefa48dafde2ca9541689e45de75192514544932d70048b"
+    },
+    {
+      "label": "mt-digest",
+      "path": "repo:automation/review/finance/mt00/digest-20261107T121507Z.md",
+      "sha256": "dbcefc511f53b7ffa3c07694f8a131e1d0d79d5b80a97a23f335e1eafebae8c1"
+    },
+    {
+      "label": "mt-suite-record",
+      "path": "repo:automation/review/finance/test-suite-round15.txt",
+      "sha256": "949cc320f75562e3049c7828956f7f8814c4fa4877fbbc06560fa67c5585da3c"
+    }
+  ]
+}
