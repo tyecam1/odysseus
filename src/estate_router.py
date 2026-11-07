@@ -63,11 +63,13 @@ def _provider_outcome(result: dict, now=None, *, host_tz=None) -> dict:
     host_tz = host_tz or now.tzinfo
     states = [result[k] for k in ("status", "state", "terminal_state", "lifecycle_state") if result.get(k) is not None]
     exits = [result[k] for k in ("exit_code", "exit_status", "returncode") if result.get(k) is not None]
-    # Failure evidence is the error field and genuine provider error lines only: the model's output and the quoted code
-    # in a long transcript ("# noqa: F401", "timeout") must never read as a failure.
-    provider_errors = (line for k in ("stdout", "stderr") for line in str(result.get(k) or "").splitlines()
-                       if re.match(r"\s*(?:\d{4}-\d\d-\d\dT\S+\s+)?ERROR\b", line))
-    text = "\n".join([str(result.get("error") or ""), *provider_errors])
+    if (result.get("ok") is True and not result.get("error") and not result.get("evidence_truncated") and exits and states
+            and all(type(code) in (int, str) and code in (0, "0") for code in exits)
+            and all(s in {"complete", "completed", "succeeded"} for s in states)):
+        # Structural success is decided before any text is read: a long transcript that quotes "# noqa: F401", "timeout"
+        # or an old error line must never turn a clean run into a failure. Text only explains runs that did not succeed.
+        return {"state": "ok", "retry_after": None, "reason": "no provider error", "retry_after_assumed": False}
+    text = "\n".join(str(result.get(k) or "") for k in ("error", "output", "stdout", "stderr"))
     text = (text + "\n" + "\n".join(map(str, states))).lower().replace("’", "'")
     now = now.replace(tzinfo=host_tz) if now.tzinfo is None else now.astimezone(host_tz)
     retry = now + timedelta(minutes=15)
@@ -109,14 +111,7 @@ def _provider_outcome(result: dict, now=None, *, host_tz=None) -> dict:
     elif re.search(r"unreachable|connection|timed out|timeout|dns|network", text):
         state, reason = "unreachable", "provider transport unavailable"
     else:
-        success = (result.get("ok") is True and not result.get("error")
-                   and not result.get("evidence_truncated")
-                   and all(type(code) in (int, str) and code in (0, "0") for code in exits)
-                   and all(s in {"complete", "completed", "succeeded"} for s in states)
-                   and bool(exits) and bool(states)
-                   and not re.search(r"\b(error|failed|failure|exception|interrupted|cancelled|canceled)\b", text))
-        state, reason = ("ok", "no provider error") if success else ("unknown", "unclassified provider outcome")
-        retry = None
+        state, reason, retry = "unknown", "unclassified provider outcome", None
     return {"state": state, "retry_after": min(retry, now + timedelta(days=7)).astimezone(timezone.utc).isoformat() if retry else None,
             "reason": reason, "retry_after_assumed": "retry_after_assumed" in reason}
 

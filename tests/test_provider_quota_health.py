@@ -430,9 +430,9 @@ def test_simultaneous_admissions_reserve_only_one_attempt(lab):
 @pytest.mark.parametrize("result,state", [
     ({"ok": True, "error": LIMIT, "exit_code": 1}, "quota_exhausted"),
     ({"ok": True, "exit_code": 1}, "unknown"),
-    ({"ok": True, "exit_code": 0, "stderr": LIMIT}, "quota_exhausted"),
+    ({"ok": True, "exit_code": 0, "output": LIMIT}, "quota_exhausted"),
     ({"ok": True, "exit_code": 0, "error": "401 Unauthorized"}, "auth_failed"),
-    ({"ok": True, "exit_code": 0, "stderr": "ERROR: connection failed"}, "unreachable"),
+    ({"ok": True, "exit_code": 0, "stderr": "connection failed"}, "unreachable"),
     ({"ok": True, "exit_code": 0, "state": "completed", "output": "done"}, "ok"),
     ({"ok": True, "exit_code": 0}, "unknown"),
     ({"ok": True, "state": "completed"}, "unknown"),
@@ -447,7 +447,7 @@ def test_failure_first_fresh_and_recorded_outcomes(lab, result, state):
 
 def test_quota_beyond_clip_limit_keeps_authoritative_reset(lab):
     # Persistence used to retain the early connection token and clip quota.
-    lab[1]("connection recovered " + "x" * 3000 + "\n" + LIMIT, stream="stdout", success=True)
+    lab[1]("connection recovered " + "x" * 3000 + LIMIT, stream="stdout", success=False)  # a real limit exits non-zero
     run()
     health = router.provider_allows_dispatch("codex")
     assert health["state"] == "quota_exhausted"
@@ -479,9 +479,13 @@ def test_refused_retry_preserves_reset_at_1216(lab):
 def test_failure_first_property_table():
     for ok, code, error, quota, terminal in product(
             (False, True), (0, 1), ("", "tool exception"), ("", LIMIT), ("succeeded", "failed")):
-        result = {"ok": ok, "exit_code": code, "error": error, "stderr": quota, "state": terminal}
+        result = {"ok": ok, "exit_code": code, "error": error, "output": quota, "state": terminal}
         state = router._provider_outcome(result)["state"]
-        assert (state == "ok") == (ok and code == 0 and not error and not quota and terminal == "succeeded"), result
+        # Structural success (ok, exit 0, no error, accepted state) is ok whatever text the transcript holds; any other
+        # run is explained by its text, so quota text in a failed run still wins.
+        assert (state == "ok") == (ok and code == 0 and not error and terminal == "succeeded"), result
+        if not (ok and code == 0 and not error and terminal == "succeeded") and quota:
+            assert state == "quota_exhausted", result
 
 
 def test_reader_trusts_stored_health_without_reclassifying(lab, monkeypatch):
@@ -635,17 +639,20 @@ print(json.dumps(r.execute_codex('review')))
     assert not lab[2].exists()
 
 
-def test_quoted_code_in_a_successful_runs_transcript_is_not_a_failure():
-    transcript = "\n".join(["from x import y  # noqa: F401", "timeout = 30", "retry the network connection on timeout; DNS unreachable?",
-                            "plain log line mentioning authentication and a 401 status in the code under review"])
-    ok = {"ok": True, "status": "succeeded", "exit_code": 0, "output": transcript, "stdout": transcript, "stderr": transcript}
-    assert router._provider_outcome(ok)["state"] == "ok"
+def test_clean_success_is_ok_whatever_its_transcript_quotes():
+    quoted = "\n".join(["from x import y  # noqa: F401", "timeout = 30", "retry the network connection on timeout; DNS unreachable?",
+                        "ERROR: You've hit your usage limit. Please try again at 11:59 PM.", "error: 401 Unauthorized, failed twice"])
+    ok = {"ok": True, "status": "succeeded", "exit_code": 0, "output": quoted, "stdout": quoted, "stderr": quoted}
+    assert router._provider_outcome(ok) == {"state": "ok", "retry_after": None, "reason": "no provider error", "retry_after_assumed": False}
 
 
-@pytest.mark.parametrize("line,state", [
-    ("ERROR: You've hit your usage limit. Please try again at 5:39 PM.", "quota_exhausted"),
-    ("2026-11-07T12:00:00.000Z ERROR codex: 401 Unauthorized", "auth_failed"),
-    ("ERROR: connection timed out", "unreachable"),
-])
-def test_genuine_provider_error_lines_still_classify_after_the_scope_fix(line, state):
-    assert router._provider_outcome({"ok": False, "stderr": "noise\n" + line, "exit_code": 1})["state"] == state
+def test_a_failed_run_is_still_explained_by_its_whole_text_including_continuation_lines():
+    stderr = "ERROR: You've hit your usage limit.\nPlease try again at 5:39 PM.\n" + "x" * 3000
+    health = router._provider_outcome({"ok": False, "exit_code": 1, "error": "codex exec exited 1: " + stderr[:40], "stderr": stderr},
+                                      now=datetime(2026, 11, 5, 12, 0, tzinfo=timezone.utc), host_tz=timezone.utc)
+    assert health["state"] == "quota_exhausted" and health["retry_after"] == "2026-11-05T17:39:00+00:00"
+
+
+def test_word_boundaries_stop_a_lint_code_reading_as_an_auth_failure():
+    assert router._provider_outcome({"ok": False, "exit_code": 1, "stderr": "ruff: # noqa: F401 on line 3"})["state"] == "unknown"
+    assert router._provider_outcome({"ok": False, "exit_code": 1, "stderr": "HTTP 401 from upstream"})["state"] == "auth_failed"
