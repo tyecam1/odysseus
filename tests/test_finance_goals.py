@@ -1140,6 +1140,47 @@ def test_intermediate_dir_symlink_escape_confined(tmp_path):
     assert any("diresc-artifact.json" in b for b in mt00["blockers"])
 
 
+def test_confined_hasher_refuses_swapped_root_ancestor(tmp_path):
+    # round-16 Sol finding 1: O_NOFOLLOW on the ABSOLUTE root open
+    # guarded only the root's final component — a swapped ANCESTOR of
+    # the repository was followed during root acquisition. The walker
+    # now starts at / and opens every component, so the swapped
+    # ancestor is refused. (The root passed in is the pre-swap resolved
+    # path, exactly as the receipt loop captured it before the swap.)
+    outside = tmp_path.parent / ("root-swap-" + tmp_path.name)
+    (outside / "repo").mkdir(parents=True, exist_ok=True)
+    (outside / "repo" / "f.json").write_text("outside bytes\n")
+    root = tmp_path / "deep" / "repo"
+    root.mkdir(parents=True)
+    (root / "f.json").write_text("inside bytes\n")
+    assert fg.sha256_file_confined(root, ("f.json",)) == fg.sha256_file(
+        root / "f.json")
+    # post-swap: an ancestor of the repo becomes a symlink to a mirror
+    # tree outside (same names, attacker-chosen bytes)
+    shutil.rmtree(tmp_path / "deep")
+    (tmp_path / "deep").symlink_to(outside)
+    try:
+        fg.sha256_file_confined(root, ("f.json",))
+        raised = None
+    except OSError as exc:
+        raised = exc
+    assert raised is not None
+    assert raised.errno in (errno.ELOOP, errno.ENOTDIR)
+
+
+def test_confined_hasher_requires_absolute_root(tmp_path):
+    # fail-closed on a relative root: the walk must start at the
+    # filesystem root, so a relative root is a usage error, never a
+    # silent best-effort
+    (tmp_path / "f.json").write_text("x\n")
+    try:
+        fg.sha256_file_confined(Path("relative"), ("f.json",))
+        raised = None
+    except ValueError as exc:
+        raised = exc
+    assert raised is not None
+
+
 def test_extreme_future_receipt_locks_goal_not_response():
     # observed_at = 9999-12-31T23:59:59Z previously raised OverflowError
     # in observed + timedelta(days=ttl) and lost the WHOLE /goals

@@ -123,21 +123,30 @@ def sha256_file_nofollow(path: Path) -> str:
 
 def sha256_file_confined(root: Path, rel_parts) -> str:
     """Hash a repo-relative file with NO symlink followed at ANY
-    component, closing the check-to-open window entirely: each directory
-    component is opened relative to the fd of its already-verified
-    parent (``dir_fd`` chaining) with ``O_DIRECTORY | O_NOFOLLOW``, and
-    the leaf with ``O_RDONLY | O_NOFOLLOW`` — so a concurrent writer who
-    swaps an INTERMEDIATE directory (or the final component) for a
-    symlink after the confinement check is refused with ELOOP at that
-    component's open (round-15 Sol finding 1); the pointed-at bytes are
-    never read. Raises OSError on refusal and ValueError when the opened
-    leaf is not a regular file."""
+    component — including the ANCESTORS of the repository itself: the
+    walk starts at the filesystem root (``/``) and opens EVERY component
+    of the caller-provided ABSOLUTE, ALREADY-RESOLVED ``root`` path and
+    then every relative part relative to the fd of its already-verified
+    parent (``dir_fd`` chaining) with ``O_DIRECTORY | O_NOFOLLOW`` for
+    directories and ``O_RDONLY | O_NOFOLLOW`` for the leaf. A concurrent
+    writer who swaps any component — an intermediate directory inside
+    the repo (round-15 Sol finding 1), the final component (round-14
+    Sol finding 2), or an ancestor of the repository (round-16 Sol
+    finding 1) — is refused with ELOOP/ENOTDIR at that component's
+    open; the pointed-at bytes are never read. ``root`` is NOT
+    re-resolved here: re-resolution at hash time would itself follow a
+    swapped ancestor into a real-looking outside path, reopening the
+    window the walk exists to close. Raises ValueError for a non-
+    absolute or empty path, OSError on refusal, and ValueError when the
+    opened leaf is not a regular file."""
     dir_flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
     leaf_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-    parts = [p for p in rel_parts if p not in (".", "")]
+    if not root.is_absolute():
+        raise ValueError(f"confined hashing requires an absolute root: {root}")
+    parts = [p for p in (*root.parts, *rel_parts) if p not in (os.sep, ".", "")]
     if not parts:
-        raise ValueError("empty relative path")
-    dir_fd = os.open(root, dir_flags)
+        raise ValueError("empty path")
+    dir_fd = os.open(os.sep, dir_flags)
     try:
         for part in parts[:-1]:
             next_fd = os.open(part, dir_flags, dir_fd=dir_fd)
