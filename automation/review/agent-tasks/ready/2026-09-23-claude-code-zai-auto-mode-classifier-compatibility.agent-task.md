@@ -2,18 +2,18 @@
 artifact_type: agent-task
 task_schema: agent-task/v2
 task_id: 2026-09-23-claude-code-zai-auto-mode-classifier-compatibility
-title: "Diagnose and resolve Claude Code auto-mode classifier compatibility on the Z.AI route"
+title: "Restore safe Auto Mode on Claude Code Z.AI GLM launchers after v2.1.319"
 status: ready
-priority: medium
+priority: high
 task_type: implementation
 created_by: gpt-5.6-sol
 created_at: 2026-09-23T12:18:00+01:00
-updated_at: 2026-09-23T12:18:00+01:00
+updated_at: 2026-11-09
 executor: codex_subscription
 execution_mode: implementation
 architecture: single-owner-plus-bounded-verifier
-architecture_rationale: "This is one transport/configuration fault domain. One Codex owner should trace the live Claude Code -> launcher -> endpoint path, make only the smallest justified change, and independently verify that model routing and ordinary tool use still work. Parallel agents would mostly duplicate network/config inspection."
-single_agent_baseline: "A single high-reasoning coding agent can inspect the local launchers, current Claude Code behaviour, upstream compatibility contract, and repository routing authority, then either implement a bounded local fix or close with an evidence-backed upstream blocker."
+architecture_rationale: "One Codex owner should reproduce the v2.1.319 Auto Mode regression on both Windows GLM launchers, compare supported classifier and version-isolated alternatives, implement one minimal safe launcher-scoped remedy, and obtain independent real-path verification. Avoid a duplicate gateway or task owner."
+single_agent_baseline: "A single high-reasoning coding agent should restore genuinely working unattended safe-tool approval on claude-glm and claude-glm-flash, without altering native claude, or demonstrate a narrow upstream blocker with a tested reversible operational fallback."
 execution_host: laptop
 context_budget: medium
 coordination_reason: "Keep diagnosis and mutation in one owner so request-path evidence, launcher edits, and regression checks remain causally linked."
@@ -51,13 +51,14 @@ denied_paths:
   - automation/docs/**
 inputs:
   - AGENTS.md
-  - automation/AGENTS.md
-  - automation/docs/central-operating-contract.md
-  - automation/docs/path-authority.md
-  - automation/config/model_execution_policy.yaml
-  - automation/config/agent_routing.yaml
+  - automation/review/agent-tasks/README.md
+  - docs/aoteru-model-host-routing-contract.md
+  - docs/subscription-model-currency-policy.md
+  - config/models.yaml
   - https://code.claude.com/docs/en/auto-mode-classifier-billing
   - https://code.claude.com/docs/en/gateway
+  - https://code.claude.com/docs/en/permission-modes
+  - https://github.com/zai-org/feedback/issues/785
   - C:\Users\tyeca\.local\bin\claude-glm.ps1
   - C:\Users\tyeca\.local\bin\claude-glm-flash.ps1
 outputs:
@@ -65,6 +66,8 @@ outputs:
   - smallest justified local launcher/configuration fix, if available
   - explicit upstream Z.AI compatibility blocker, if local remediation cannot enable server-side checks
   - regression evidence for both Z.AI-backed Claude Code launchers
+  - a verified, reversible launcher-scoped workaround for v2.1.319 if upstream server-side review remains unsupported
+  - explicit no-regression evidence for unmodified native claude
   - concise Z.AI support packet when upstream work is required
 result_path: automation/review/2026-09-23-claude-code-zai-auto-mode-classifier-compatibility.md
 review_report_path: automation/review/2026-09-23-claude-code-zai-auto-mode-classifier-compatibility.md
@@ -72,12 +75,35 @@ handoff_model: gpt-5.6-sol-independent-review
 operator_decision_path: automation/review/2026-09-23-claude-code-zai-auto-mode-classifier-compatibility.md
 supersedes: []
 duplicates: []
-notes: "The observed warning names api.z.ai. Do not assume Odysseus is in this runtime request path. Do not emulate or fabricate safeguard_results merely to suppress the warning. If Z.AI cannot support Claude Code's server-side auto-mode checks, preserve the safe legacy classifier path and document the upstream requirement."
+notes: "2026-11-09 priority update: v2.1.319 now stops autonomous execution on api.z.ai. This supersedes the original non-fatal billed-classifier warning. Resolve the user-visible regression, not merely billing or warning suppression. No fake safeguard_results, no permission bypass, no effect on native claude. Coordinate with separate 2026-11-09 lab GLM worker qualification task; this card owns laptop interactive Auto Mode only."
 ---
 
-# Diagnose Claude Code auto-mode classifier compatibility on the Z.AI route
+# Restore safe Claude Code Auto Mode for Z.AI GLM launchers
 
-## Trigger
+## Current regression (operator report, 9 November 2026)
+
+On Windows, `claude-glm` and `claude-glm-flash` are **distinct local launch commands** from normal `claude`. The operator observed Claude Code **v2.1.319** using `glm-5.3-flash[1m]` and the Z.AI Anthropic-compatible endpoint. During a legitimate Documents-directory reorganisation task, Auto Mode stopped with:
+
+> Auto mode can't check actions in this session. Its safety check runs on the server, and your requests go through api.z.ai, which doesn't pass it through. Claude Code will now ask for your approval.
+
+This is a **loss of autonomous safe operation**, not just an extra billing notice. The previous task packet below describes the September 2026 server-side classifier billing rollout; treat that as historical context, not current expected behaviour. Re-check the exact v2.1.319 change and current upstream docs/release notes, rather than trusting conversational claims. The prior suggested remedies have not been proven on the user's machine.
+
+**Outcome priority:** restore working, real, classified Auto Mode for both GLM launchers without altering the ordinary Anthropic `claude` command. If that is impossible, demonstrate the most restrictive reversible functional fallback and isolate the upstream blocker.
+
+## Regression-specific implementation contract
+
+1. **Live entry points and environment.** On the actual Windows laptop, resolve the full command chains for `claude`, `claude-glm`, and `claude-glm-flash`, including PowerShell function/alias/shim/script, Claude binary selected, flags, parent/child environment and effective model identity. The previously recorded `C:\Users\tyeca\.local\bin\claude-glm.ps1` and `claude-glm-flash.ps1` paths are leads, not assumptions. Read current `AGENTS.md`, task ownership and preflight contracts. Never expose secrets. Confirm whether an existing change, task or branch already fixed the regression before editing.
+2. **Reproduce deterministically.** On both launchers, record the exact Claude Code version, `/status` permission mode, `Auto mode server` state, harmless classified shell operation, behaviour on an operation requiring confirmation and debug classifier events. Compare with the unmodified native `claude` entry. Redact local paths/private filenames where appropriate. Never run a destructive operation to prove a denial.
+3. **Test supported fixes, not presumed fixes.** In an isolated child-process environment, first test current Claude Code with `CLAUDE_CODE_AUTO_MODE_SERVER=0` and inspect whether a **genuine separate classifier request and valid decision** occur through the GLM endpoint. Only if necessary evaluate `CLAUDE_CODE_AUTO_MODE_MODEL`, checking the current supported model identifier and response format rather than guessing aliases. If classification fails, distinguish request rejection, model selection, thinking payload incompatibility, classifier output parse failure and Claude Code feature/config gating.
+4. **Test version-isolated rollback.** If the current version cannot classify safely, test a locally isolated known pre-regression Claude Code version (candidate: `2.1.318`) through each existing GLM launcher **without downgrading the globally used `claude`**. Compare actual results and safe denial behaviour. Choose a maintained, documented version-isolation mechanism only if it works. Include how to remove the pin and resume current releases. A previous-version assumption is not acceptance evidence.
+5. **Adjudicate alternatives by evidence.** Assess official current support for Z.AI server-side `safeguards`/`safeguard_results` transparently, but do not pretend a local shim can manufacture valid safety review. Compare local-classifier current version, isolated version pin, and tightly scoped `acceptEdits`/allowlisting as a **different, non-Auto permission mode**. Never use `--dangerously-skip-permissions`, blanket `Bash(*)`, fabricated classifications or permissive fallback while describing it as Auto Mode.
+6. **Implement the smallest reversible change.** Mutate only the two proven GLM launcher entry points or their established shared launcher authority. Do not globally set Claude environment variables, change native `claude`, replace model route/authentication, add another proxy or copy credentials into Git. If an upstream patch resolves the issue, remove obsolete workarounds. Preserve original launchers and capture exact rollback steps.
+7. **Real-path acceptance.** Verify independent standard GLM and Flash sessions can autonomously execute an ordinary safe tool operation, correctly ask/deny when approval is genuinely required, process a benign file edit, preserve intended model identities and authentication, and restart successfully. Verify native `claude` remains unchanged. Record before/after `/status`, debug events, tool outcomes, chosen classifier version/model, additional classifier billing/latency if measurable, and source-backed limitation. An unexplained disappearance of a warning is not sufficient.
+8. **Cross-task boundary.** The separate `2026-11-09-qualify-glm-and-glm-flash-on-lab-odysseus` card owns Linux lab and backend `/api/estate/run` model qualification. Do not widen this laptop Claude Code issue to that integration; share findings as dependencies only.
+
+**Stop rule:** Close only on verified safe autonomy for both GLM launchers, or a reproducible upstream blocker plus a tested non-deceptive alternative, exact next trigger, and rollback. Do not declare a prompt-heavy manual approval workflow to be a working Auto Mode fix.
+
+## Historical trigger (September 2026)
 
 Claude Code reports:
 
@@ -101,10 +127,7 @@ Treat the upstream documentation as authoritative and re-read it at execution ti
 
 Determine the actual reason the Z.AI-backed Claude Code sessions are ineligible for no-charge server-side auto-mode classification, then implement the smallest safe remediation that is genuinely under local control.
 
-The task succeeds in either of two ways:
-
-1. **Local fix:** server-side checks become genuinely functional through the existing Z.AI route without changing intended model routing; or
-2. **Bounded upstream result:** evidence shows Z.AI does not implement/pass the required protocol, the local launchers are made explicit about the supported legacy behaviour if useful, and a precise upstream support request is prepared.
+The task succeeds when the November regression-specific acceptance above is met. Server-side no-charge review is desirable but **not required**: a verified safe separate classifier is an acceptable solution. If the upstream route still cannot support Auto Mode, preserve a clear, tested least-permissive fallback and a precise support packet; do not mark Auto Mode restored.
 
 Suppressing the warning without understanding the request path is not success.
 
@@ -266,7 +289,7 @@ The actual launcher files are local user-managed runtime files, not vault resear
 
 This task may modify the two named local launcher files if justified.
 
-Within `tyecam1/obsidian-PhD`, write only review-side evidence/results declared by this task. Do not commit machine-specific secrets or duplicate launcher copies into the vault.
+Within `tyecam1/odysseus`, write only the bounded review-side evidence/results declared by this task; historical `obsidian-PhD` ownership references are not write authority. Do not commit machine-specific secrets or duplicate launcher copies into the vault.
 
 If a durable estate-level launcher/configuration authority is discovered in another repository, do not create a shadow copy here. Record the correct owner and route a bounded cross-repository follow-up if needed.
 
@@ -312,6 +335,12 @@ It must contain:
 ## Acceptance criteria
 
 Complete only when:
+
+- the November 2026 v2.1.319 regression is reproduced and assessed separately for both local launcher commands;
+- actual classified safe tool execution and correct guarded behaviour are verified, or Auto Mode remains explicitly unresolved with a tested honest fallback;
+- current-version local classifier and isolated previous-version approaches are compared using real results, not just suggested commands;
+- native `claude` settings, auth and executable remain unchanged;
+- a real-path rollback works and stale pins or unnecessary global env changes are absent;
 
 - the actual request path is established rather than assumed;
 - the issue is classified as local, controlled-gateway, Z.AI upstream, or rollout/credential support;
