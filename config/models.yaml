@@ -43,11 +43,12 @@
 # maps to which provider) a config value instead. The actual dispatch
 # (the callable that talks to a given provider's CLI/API) necessarily
 # stays in code — a provider implementation can't itself live in YAML —
-# only one exists today (`execute_codex`), so this does not invent a
-# second paid provider that has no real implementation.
+# The implemented providers are Codex and read-only advisory GLM; host
+# qualification remains a separate evidence-backed gate.
 paid_providers:
   - name: codex
     concrete_model_label: codex-cli
+  - name: glm
 default_paid_provider: codex
 
 capabilities:

@@ -78,6 +78,8 @@ def _unit_task(unit: dict, capabilities: list[str]) -> dict:
         "objective": unit.get("objective"),
         "requirements": {"capabilities": capabilities},
         "placement": unit.get("placement") or {},
+        "routing": {**({"paid_provider": unit["paid_provider"]} if unit.get("paid_provider") is not None else {}),
+                    "allow_paid_escalation": unit.get("allow_paid_escalation", False)},
     }
 
 
@@ -117,6 +119,15 @@ def delegation_preflight(units: Iterable[dict]) -> dict:
 
     for index, unit in enumerate(unit_list):
         structural_lane = recommended_lane_for_task(unit)
+        explicit_provider = unit.get("paid_provider")
+        if explicit_provider is not None:
+            choice = estate_router._resolve_paid_provider(None, explicit_provider=explicit_provider)
+            if choice.get("provider") is None:
+                recommendations.append({"index": index, "task_class": unit.get("task_class") or "unclassified",
+                                        "classification": structural_lane, "recommended_route": None,
+                                        "ok": False, "error_code": "unknown_provider",
+                                        "reason": choice["reason"]})
+                continue
         reason = unit.get("nondelegation_reason")
         retention_requested = (
             unit.get("requested_route") == "controller_retained"
@@ -164,6 +175,47 @@ def delegation_preflight(units: Iterable[dict]) -> dict:
         for resolved in route.get("capability_resolutions") or []:
             alias_resolutions[resolved["alias"]] = resolved
 
+        if (explicit_provider == "glm" and (route.get("route") or {}).get("executor") == "none"
+                and task["routing"]["allow_paid_escalation"] and task.get("objective") is not None):
+            unit_host = (route.get("route") or {}).get("host")
+            unit_entry = next((h for h in (route.get("hosts_checked") or [])
+                               if h.get("host_id") == unit_host), None) or {}
+            qualified = "glm" in (unit_entry.get("qualified_executors") or [])
+            try:
+                live = bool((worker_health(unit_host).get("glm") or {}).get("available")) if unit_host else False
+            except WorkerTransportError:
+                live = False
+            glm_health = estate_router.provider_allows_dispatch("glm")
+            glm_write_requested = (unit.get("mode") == "implementation"
+                                   or unit.get("write") is True
+                                   or unit.get("requires_repo_write") is True)
+            ok = bool(unit_host and qualified and live and glm_health["allowed"]
+                      and not glm_write_requested)
+            recommendations.append({"index": index, "task_class": task["task_class"],
+                                    "classification": structural_lane,
+                                    "recommended_route": "glm" if ok else None,
+                                    "ok": ok, "error_code": None if ok else "provider_unqualified",
+                                    "route": route.get("route"), "hosts_checked": route.get("hosts_checked") or hosts,
+                                    "provider_health": glm_health,
+                                    "reason": "GLM has no qualified write route in phase 1" if glm_write_requested else
+                                              "GLM read-only advisory is ready" if ok else
+                                              "GLM read-only advisory is not qualified for this unit on the routed host"})
+            continue
+        if explicit_provider == "glm":
+            recommendations.append({
+                "index": index,
+                "task_class": task["task_class"],
+                "classification": structural_lane,
+                "recommended_route": route.get("route"),
+                "ok": bool(route.get("ok")),
+                "requires_justification": False,
+                "nondelegation_reason": None,
+                "route": route.get("route"),
+                "hosts_checked": route.get("hosts_checked") or hosts,
+                "capability_resolutions": route.get("capability_resolutions") or [],
+                "reason": route.get("reason") or route.get("error"),
+            })
+            continue
         if structural_lane == "codex_eligible":
             alias = capabilities[0] if capabilities else None
             provider = estate_router._resolve_paid_provider(alias).get("provider")
