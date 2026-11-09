@@ -40,8 +40,23 @@ RANK = {"running": 0, "ready": 1, "review": 2, "odysseus": 3, "claude": 3,
         "codex": 3, "local": 3, "inbox": 4, "blocked": 9, "blocked-human": 9}
 
 
+def _host_local_root(var: str | None) -> str:
+    """Host-local root variable from ~/.aoteru/config.local.json (the registry's documented convention), so a
+    non-interactive SSH discovery needs no exported environment. The environment still takes precedence; an unreadable
+    or absent file or value yields '' and the caller reports root_environment_unset, never a guess."""
+    if not var:
+        return ""
+    try:
+        data = json.loads((Path.home() / ".aoteru" / "config.local.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    value = data.get(var) if isinstance(data, dict) else None
+    return value if isinstance(value, str) else ""
+
+
 def resolve_roots(odysseus_root: Path, overrides: dict[str, Path | None]) -> tuple[dict[str, Path], dict[str, str]]:
-    """Read repo registration; never infer, clone or silently ignore an unavailable repo."""
+    """Read repo registration; never infer, clone or silently ignore an unavailable repo. Root variables come from the
+    environment, else the host-local ~/.aoteru/config.local.json."""
     odysseus = odysseus_root.resolve(strict=True)
     registry = yaml.safe_load((odysseus / "config" / "repositories.yaml").read_text(encoding="utf-8"))
     entries = {r["id"]: r for r in registry["repos"]}
@@ -55,7 +70,7 @@ def resolve_roots(odysseus_root: Path, overrides: dict[str, Path | None]) -> tup
                 unavailable[rid] = "not_registered"
                 continue
             var = entry.get("root_var")
-            value = os.environ.get(var or "")
+            value = os.environ.get(var or "") or _host_local_root(var)
             pattern = "$" + "{" + str(var or "") + "}/"
             template = entry.get("path", "")
             if not value:

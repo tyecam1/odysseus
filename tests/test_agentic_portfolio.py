@@ -45,6 +45,7 @@ def estate(tmp_path, monkeypatch):
     }), encoding="utf-8")
     monkeypatch.setenv("HOUSEHOLD_ROOT", str(tmp_path))
     monkeypatch.setenv("PHD_ROOT", str(tmp_path))
+    monkeypatch.setattr(ap.Path, "home", lambda: tmp_path / "no-home")  # isolate from the real host-local config
     make_card(ody, "automation/review/agent-tasks/ready/o.md", "Odysseus work", raw_status="ready")
     make_card(misumi, "agent-tasks/inbox/m.md", "Misumi work")
     make_card(phd, "automation/review/agent-tasks/ready/p.md", "PhD work", raw_status="ready")
@@ -1467,3 +1468,34 @@ def test_r18_the_producer_still_refuses_to_list_what_this_host_cannot_read(tmp_p
     monkeypatch.setattr(ap, "FS_IS_UTF8", False)
     rows, _, warnings = ap.collect("misumi", misumi)
     assert not any("café" in row["ref"] for row in rows) and "misumi:inbox:unsupported_filename" in warnings
+
+
+def _write_host_local(tmp_path, monkeypatch, payload):
+    home = tmp_path / "home"
+    (home / ".aoteru").mkdir(parents=True)
+    (home / ".aoteru" / "config.local.json").write_text(payload, encoding="utf-8")
+    monkeypatch.setattr(ap.Path, "home", lambda: home)
+
+
+def test_roots_resolve_from_host_local_config_without_environment(tmp_path, monkeypatch):
+    ody, misumi, phd = estate(tmp_path, monkeypatch)
+    monkeypatch.delenv("HOUSEHOLD_ROOT")
+    monkeypatch.delenv("PHD_ROOT")
+    _write_host_local(tmp_path, monkeypatch, json.dumps({"HOUSEHOLD_ROOT": str(tmp_path), "PHD_ROOT": str(tmp_path)}))
+    roots, missing = ap.resolve_roots(ody, {})
+    assert missing == {} and roots["misumi"] == misumi.resolve() and roots["obsidian-phd"] == phd.resolve()
+
+
+def test_environment_takes_precedence_over_host_local_config(tmp_path, monkeypatch):
+    ody, misumi, _ = estate(tmp_path, monkeypatch)
+    _write_host_local(tmp_path, monkeypatch, json.dumps({"HOUSEHOLD_ROOT": str(tmp_path / "wrong")}))
+    roots, missing = ap.resolve_roots(ody, {})
+    assert roots["misumi"] == misumi.resolve() and "misumi" not in missing
+
+
+def test_malformed_host_local_config_stays_explicitly_unavailable(tmp_path, monkeypatch):
+    ody, _, _ = estate(tmp_path, monkeypatch)
+    monkeypatch.delenv("PHD_ROOT")
+    _write_host_local(tmp_path, monkeypatch, "{not json")
+    _, missing = ap.resolve_roots(ody, {})
+    assert missing == {"obsidian-phd": "root_environment_unset"}
