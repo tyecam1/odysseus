@@ -1509,3 +1509,10 @@ def test_host_local_config_with_wrong_shape_or_relative_root_is_unavailable(tmp_
     _, missing = ap.resolve_roots(ody, {})
     assert missing == {"obsidian-phd": "root_environment_unset"}
 
+
+def test_root_with_embedded_nul_is_unavailable_not_a_crash(tmp_path, monkeypatch):
+    ody, _, _ = estate(tmp_path, monkeypatch)
+    monkeypatch.delenv("PHD_ROOT")
+    _write_host_local(tmp_path, monkeypatch, json.dumps({"PHD_ROOT": "/tmp/" + chr(0) + "bad"}))
+    _, missing = ap.resolve_roots(ody, {})
+    assert missing == {"obsidian-phd": "repository_checkout_missing"}

@@ -86,7 +86,7 @@ def resolve_roots(odysseus_root: Path, overrides: dict[str, Path | None]) -> tup
                 roots[rid] = actual
             else:
                 unavailable[rid] = "repository_checkout_missing"
-        except OSError:
+        except (OSError, ValueError):  # ValueError: e.g. an embedded NUL in a configured root
             unavailable[rid] = "repository_checkout_missing"
     return roots, unavailable
 
