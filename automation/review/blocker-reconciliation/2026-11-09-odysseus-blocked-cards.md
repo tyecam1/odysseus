@@ -1,6 +1,6 @@
 # Odysseus blocked-card reconciliation, 2026-11-09 (first pass)
 
-Task: `2026-11-09-autonomous-blocker-reconciliation-and-opus-escalation`, steps 1-3, **Odysseus `blocked/` bucket only** (8 cards). Misumi (3 `blocked-human`) is not covered; the obsidian-PhD `blocked` bucket (10 cards) is covered read-only in the addendum below. Both are owned by their repositories; this is not a backlog-wide inventory. Source revision: Odysseus `dev` at `ba8f1762`; public evidence retrieved 2026-11-09 UTC. No package was installed or executed; GitHub and registry metadata only.
+Task: `2026-11-09-autonomous-blocker-reconciliation-and-opus-escalation`, steps 1-3, **Odysseus `blocked/` bucket only** (8 cards). The obsidian-PhD `blocked` bucket (10 cards) and the Misumi `blocked-human` bucket (3 cards) are covered read-only in the addenda below. Both are owned by their repositories; this is not a backlog-wide inventory. Source revision: Odysseus `dev` at `ba8f1762`; public evidence retrieved 2026-11-09 UTC. No package was installed or executed; GitHub and registry metadata only.
 
 | Card | Claimed blocker | Classification | Evidence | Next recheck |
 |---|---|---|---|---|
@@ -34,3 +34,19 @@ Source: obsidian-PhD `main` at `c479f91`. Read-only: no PhD card or file was cha
 | `2026-06-23-zotero-library-vault-alignment` | no reason recorded | **not examined** | |
 
 Counts for this bucket: genuine protected gates identified 2 (branch deletion; credentials/privacy), real dependency 1, stale numeric claim 1, needs deeper recheck 1, not re-verified 5. Misumi's 3 `blocked-human` cards were **not** examined. The branch-hygiene card supplies the pilot's "genuine protected action stays gated" example; no stale false-positive human gate was found in the PhD bucket by this pass.
+
+## Addendum: Misumi `blocked-human` bucket (3 cards), read-only, 2026-11-09
+
+Source: Misumi `main` at `49a0c14` (lab checkout). Read-only; no Misumi file was changed.
+
+| Card | Claimed blocker | Classification | Evidence |
+|---|---|---|---|
+| `add-odysseus-fork-deploy-key` | operator must add a read-only deploy key on GitHub | **likely superseded; not verified live** (`obsolete_or_superseded` candidate) | the card's own `disposition_note` (2026-10-03) records a working read-only HTTPS pull path from the home host and says it awaits operator confirmation that the route is acceptable, then close. The home host was unreachable from the lab (SSH timeout) during this pass, so the path was not re-proven. The credential-bearing deploy-key action is not needed if the HTTPS route stands. Closing is a Misumi-owner queue change and needs the route-acceptance decision | re-prove the HTTPS pull when home is reachable, then close through a Misumi PR |
+| `complete-bbc-grapheneos-live-gate` | physical Pixel 8 GrapheneOS PWA acceptance (device enumerated over MTP, no ADB transport) | **protected, physical human gate** | requires a person with the handset; not agent-resolvable; tests and TLS evidence already exist per the card |
+| `phase-b-write-surface-spec` | Phase B (Odysseus writes) needs the operator's written approval | **protected human gate** | `docs/odysseus-contract.md` allows Phase B only with explicit approval; the card is subordinate to the write-consent-and-rollback task |
+
+Counts for this bucket: genuine protected gates 2; superseded candidate 1; no stale false-positive gate resolved here.
+
+## Overall counts across the three queues (this pass, first sample only)
+
+Odysseus `blocked/` 8, obsidian-PhD `blocked/` 10, Misumi `blocked-human/` 3 (21 cards). Unblocked: 1 (MarkItDown). Genuine protected gates: 4 (branch deletion, credentials and privacy, physical device acceptance, Phase B write consent). Real dependencies or unowned work: 6. Superseded candidate: 1. Stale numeric claims: 1. Not re-verified or needing deeper recheck: 8. No claim here is a verdict that a whole backlog is covered; the six-case independent verification, a completed-and-closed agent-resolvable task, the protected-gate regression test and Opus adjudication remain open.
