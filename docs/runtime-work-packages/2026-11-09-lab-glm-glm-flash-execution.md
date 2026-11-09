@@ -25,6 +25,21 @@ Run on the lab with stdin supplied by a pipe, no terminal, 120 s timeout, exit s
 
 A launcher-only pass does not satisfy the task's acceptance, and it does not grant independent-review equivalence.
 
+## Design decision (Sol `gpt-6-sol` read-only consultation, 2026-11-09)
+
+Provider selection is an **explicit** `paid_provider: "glm"` field on `/api/estate/run`, validated against the paid-provider registry and host qualification. Omission keeps Codex. Unknown or unqualified providers are rejected; Flash is never inferred from a GLM request. No new router, queue, lease owner or credential store.
+
+| Phase | Scope | Rollback |
+|---|---|---|
+| 1 | Explicit GLM **read-only advisory** only: `paid_provider` field in `RunTaskEnvelope.to_task()` and `DelegationPreflightUnit`; provider-aware `_resolve_paid_provider`, `_select_host`, `_dispatch_read_only`; `execute_glm` plus a dispatch-table entry; `glm-readonly` verb, readiness and inventory in `estate_worker.py`; `glm` health keyed separately in the existing `provider_outcome` records; registry entry in `config/models.yaml`; `glm` added to a host's `qualified_executors` only after a real backend proof. | remove host qualification and the registry route |
+| 2 | Flash: discover entitlement and launcher; separate `glm-flash` key and adapter after its own proof; until then `provider_unqualified`, no substitution. | remove `glm-flash` qualification |
+| 3 | Per-route write qualification under the existing lease, worktree, recovery and review gates (`execute_write_via_worker`, `_WRITE_KINDS`, `_validate_start`, `_run_spooled`). | remove that route's write qualification |
+| 4 | Quota-only Codex-to-qualified-GLM failover; explicit `no_qualified_fallback` when none. | disable automatic failover |
+
+Typed errors: `launcher_missing`, `entitlement_missing`, `auth_failed`, `quota_exhausted`, `rate_limited`, `transport_unreachable`, `timeout`, `model_mismatch`, `sandbox_failure`, worker or placement failure. Quota is classified from trusted failure evidence, never echoed prompt text. `--print` alone is not a read-only boundary; phase 1 must enforce one (for example the read-only tool allow-list) and test it.
+
+Main risks to live Codex: GLM readiness displacing Codex in `_select_host`, an explicit request overriding the `code-strong` default, shared health keys, and any edit to `_execute_codex_with_sandbox` in phase 1 (left unchanged).
+
 ## Open, in order
 
 1. Flash: find a genuine entitlement and concrete model identity, or record the precise blocker. Any credential or account action belongs to the operator and is not attempted here.
