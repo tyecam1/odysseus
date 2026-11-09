@@ -15,6 +15,14 @@ Before selecting, gather trustworthy current Claude, Codex and GLM usage evidenc
 
 Execute through each task's owning repository, existing preflight, qualified execution route, ParkLease and verification gates. Do not ask the operator to verify ordinary implementation. Reserve operator review for materials meant for other humans, subjective styling not determined by accepted precedent, and explicitly protected actions. Missing laptop checkout, a moving PR or a quota error is an execution-route issue, not a reason to halt all work.
 
+Before leaving a task parked or escalating it to the operator, enforce
+`AGENTS.md` § "Standing operator preference: autonomous blocker resolution".
+Recheck claimed blockers against live evidence, close false/stale blockers,
+and use a qualified, authenticated Opus `opus` route at **medium effort** for
+consequential unresolved judgement when available. Do not treat an unconfigured
+Opus provider as operational or weaken protected human-only gates. Preserve
+the owning queue, recheck event and exact remaining dependency.
+
 Use progressive disclosure and record actual acceptance evidence. After delivering a task, update usage/priority and continue. Keep the initializer's application/evolution trace under the central register.
 
 **Stable Claude Code command:** `/lazyUsage` from the Odysseus project (or from a user-level skill installation pointing to this checkout).

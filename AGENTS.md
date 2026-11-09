@@ -43,6 +43,58 @@ review debt. Never treat an unmerged GLM candidate, launcher smoke test,
 alias name, or credential discovery as worker qualification.
 
 
+## Standing operator preference: autonomous blocker resolution (2026-11-09)
+
+**Operator instruction:** Minimise human attention spent on the agentic backlog. A
+`blocked`/human-gated task card is a claim to verify, not permission to park work
+indefinitely. This governs work selection across the three existing owner
+queues, without transferring task ownership or creating another router.
+
+1. **Re-adjudicate before escalating.** Inspect current repository HEAD,
+   acceptance evidence, dependencies, applicable permission contract, available
+   transport and qualified model routes. Distinguish stale/superseded, already
+   delivered, agent-resolvable, temporarily externally unavailable, and
+   genuinely protected human-only gates. Do not infer a human gate merely from
+   `executor: human`, `approval_required`, a failed tool, or old task metadata.
+2. **Resolve within existing authority.** For agent-resolvable blockers, perform
+   deterministic checks, retrieve missing public evidence, repair configuration,
+   use an alternative qualified route, complete the authorised work, or
+   close/supersede obsolete tasks with provenance and acceptance evidence.
+   Avoid asking the operator to troubleshoot, select routine implementation
+   approaches, verify ordinary code, reconcile status, or perform agent-accessible
+   administrative steps. Keep shipping the next eligible item.
+3. **Use strong reasoning where it changes the outcome.** For a consequential
+   blocker with unresolved conceptual, architectural, evidential or
+   cross-repository ambiguity after a bounded cheap assessment, prefer the
+   **current authenticated Claude Opus rolling alias at medium effort** to
+   adjudicate and propose or execute the smallest authorised resolution.
+   Check real provider availability, subscription currency and permission/worker
+   qualification first; the present Odysseus paid router must not be assumed to
+   support Opus merely because a contract mentions it. Do not hard-pin a
+   historical model version, bypass the central routing authority, send every
+   trivial blocker to Opus, or repeat an expensive review without new evidence.
+   When Opus is unavailable, use other qualified lanes for separable work,
+   preserve the exact escalation debt and treat missing Opus integration as an
+   engineering dependency, not an automatic human blocker.
+4. **Keep protected gates real.** Do not self-authorise credentials or account
+   access, irreversible/destructive actions, financial commitments, security
+   permissions, external human-facing publication or sends, physical safety,
+   research ethics, canonical research/evidence promotion or any release/merge
+   explicitly reserved to the operator. For a truly necessary human decision,
+   exhaust safe alternatives, present one minimal, specific approval or choice
+   with the evidence and consequence, and continue independent work. Never
+   manufacture approval or silently weaken an existing verification gate.
+5. **Recheck and measure.** Record the blocker reason, attempted routes,
+   decision/evidence revision, next event-based recheck, owner, and outcome
+   in the existing task/provenance surface. Revisit when the condition changes;
+   avoid noisy repeated prompts or polling. Track resolved false blockers,
+   actual human-only gates, time-to-resolution and missed rechecks. Maintain the
+   current shipping-first priority and repository-local task authority.
+
+This is an **operator preference**, not proof that automatic Opus escalation or
+a blocker-reconciliation controller is already deployed. Implement and validate
+those mechanics through the existing Odysseus task-engine/routing contracts.
+
 ## Temporary operating priority: ship the existing backlog (2026-10-17)
 
 **Operator instruction; effective until the accepted backlog is shipped, or the operator explicitly changes this priority.** Shipping takes precedence over optional refinement, optimisation, refactoring, speculative research, workflow redesign, prompt tuning, new feature ideation and new planning artifacts. This changes *work selection*, not safety, authority or acceptance thresholds.
