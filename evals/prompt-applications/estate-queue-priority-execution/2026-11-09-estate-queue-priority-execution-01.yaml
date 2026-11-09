@@ -1,0 +1,40 @@
+schema_version: 1
+application_id: 2026-11-09-estate-queue-priority-execution-01
+prompt_id: estate-queue-priority-execution
+prompt_version: 2
+repository: tyecam1/odysseus
+branch: dev
+session_started_at: "2026-11-09T13:10:00Z"
+session_ended_at: null
+start_commit: af856608def0e9e7620fe7855b55a3d102089db4
+end_commit: null
+outcome_status: partial
+stop_reason: "checkpoint only; run continues under a standing goal. Owed: Sol review of af856608 and of the usage-attribution diagnosis after the stated Codex reset (3:18 PM GMT)."
+commits:
+  - "bc069478 docs(system-efficiency): correct stale statements in usage-attribution diagnosis (#254)"
+models_routes:
+  - "claude-sonnet-5-5 coordinator (laptop control plane)"
+  - "glm-5.3 via claude-glm.cmd --print, read-only screening (newest known GLM)"
+  - "codex gpt-6-sol (newest Sol-class; astra excluded) attempted on lab: usage-limit error, reset stated 3:18 PM"
+verification:
+  - "lab Misumi 7c17268 -> 49a0c14 and PhD 1863dfe -> c479f91 by --ff-only, clean trees"
+  - "lab service restarted after #246 was in checkout; health 200, 74 classifier tests passed; rollback cbf7d43b"
+  - "GLM-5.3 reviews are same-family screening, not a Sol or cross-family verdict; six quotations re-checked mechanically"
+failure_tags:
+  - "sol_quota_unavailable"
+  - "no_eligible_task_without_approval_gate_at_start"
+rating:
+  scale: 1-5
+  goal_progress: 3
+  correctness_verification: 3
+  authority_scope_discipline: 4
+  routing_resource_efficiency: 3
+  continuity_handoff_quality: 3
+  agent_overall: 3
+  operator_overall: null
+  operator_note: null
+prompt_revision_recommended: false
+revision_reason: null
+evidence:
+  - "Sol error text: You've hit your usage limit ... try again at 3:18 PM"
+  - "frontier discovery scope_complete true over lab SSH; all ready candidates approval_required true"
