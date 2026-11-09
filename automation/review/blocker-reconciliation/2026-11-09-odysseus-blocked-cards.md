@@ -1,6 +1,6 @@
 # Odysseus blocked-card reconciliation, 2026-11-09 (first pass)
 
-Task: `2026-11-09-autonomous-blocker-reconciliation-and-opus-escalation`, steps 1-3, **Odysseus `blocked/` bucket only** (8 cards). Misumi (3 `blocked-human`) and PhD (10 `blocked`) are owned by their repositories and are **not covered here**; this is not a backlog-wide inventory. Source revision: Odysseus `dev` at `ba8f1762`; public evidence retrieved 2026-11-09 UTC. No package was installed or executed; GitHub and registry metadata only.
+Task: `2026-11-09-autonomous-blocker-reconciliation-and-opus-escalation`, steps 1-3, **Odysseus `blocked/` bucket only** (8 cards). Misumi (3 `blocked-human`) is not covered; the obsidian-PhD `blocked` bucket (10 cards) is covered read-only in the addendum below. Both are owned by their repositories; this is not a backlog-wide inventory. Source revision: Odysseus `dev` at `ba8f1762`; public evidence retrieved 2026-11-09 UTC. No package was installed or executed; GitHub and registry metadata only.
 
 | Card | Claimed blocker | Classification | Evidence | Next recheck |
 |---|---|---|---|---|
@@ -18,3 +18,19 @@ Delivered or unblocked: 1. Verified real, implementation unowned: 2. Real depend
 
 ## Not done
 Misumi and PhD queues; the pilot with six independently verified cases; a completed-and-closed agent-resolvable task; the regression test for a protected gate; independent (Sol) verification of this record (limit until 8:22 PM).
+
+## Addendum: obsidian-PhD `blocked/` bucket (10 cards), read-only, 2026-11-09
+
+Source: obsidian-PhD `main` at `c479f91`. Read-only: no PhD card or file was changed by this pass (any remedy belongs to a PhD PR under its own gate). Only claims that could be checked against live state are marked verified; the rest are listed as **not re-verified**, not assumed.
+
+| Card | Claimed blocker | Classification | Evidence |
+|---|---|---|---|
+| `2026-07-02-branch-hygiene-sweep-and-ttl` | 91 remote branches remain against a fewer-than-20 criterion; needs human approval of a deletion manifest | **protected human gate, genuine** (destructive, irreversible); the numeric claim is **stale** | live remote branch count is **164** (GitHub API, 2026-11-09), so the gap is larger than recorded; deletion stays gated, and a refreshed manifest is the agent-resolvable preparatory step |
+| `2026-07-09-decide-autolab-lane-fate` | `declared_source_artifacts_unavailable` | **real** (`temporary_external_dependency`) | all six declared input artifacts are missing from the working tree, absent from the git history of every branch, and not found on the lab filesystem; they were apparently never committed. Recheck when they are supplied, or re-scope the card to the surviving inputs |
+| `2026-08-07-voice-audit-pr-stack-closeout` | no reason recorded (`updated_at` 2026-10-30) | **needs deeper recheck** | PRs #459 and #461, which the card names, are both **merged** (2026-08-07); whether the remaining independent re-verification and truth-contract correction are done was not examined |
+| `2026-09-02-university-schedule-adapters` | external systems, credentials, privacy | **protected human gate by its text** (credentials, privacy boundary) | not re-verified; the text names a gate that this pass would not override |
+| `2026-07-04-j1-positive-programme-evidence-balance`, `2026-07-04-j1-s4-verification-economics-source-scout`, `2026-07-04-j1-skill-formation-transfer-reporting-scout`, `2026-07-31-j1-comparator-contextual-focality-novelty-check` | manuscript or section triggers not reached (`manuscript_trigger_not_reached`, `no_live_S4_claim_requires_search`, "§6 drafting start", `j1_section_3_structure_pass_not_complete`) | **owner research-sequencing gates; not re-verified** | whether the J1 sections are now drafted was not examined; these are PhD-owned research gates and are not to be overridden from here |
+| `2026-07-17-workshop-genai-source-completion` | transcripts and timing not supplied | **external dependency; not re-verified** | `executor: human` alone is not proof, but no route to the media was examined |
+| `2026-06-23-zotero-library-vault-alignment` | no reason recorded | **not examined** | |
+
+Counts for this bucket: genuine protected gates identified 2 (branch deletion; credentials/privacy), real dependency 1, stale numeric claim 1, needs deeper recheck 1, not re-verified 5. Misumi's 3 `blocked-human` cards were **not** examined. The branch-hygiene card supplies the pilot's "genuine protected action stays gated" example; no stale false-positive human gate was found in the PhD bucket by this pass.
