@@ -3,13 +3,8 @@ artifact_type: agent-task
 task_schema: agent-task/v1
 task_id: 2026-07-27-markitdown-extraction-backend-pilot
 title: "Pilot MarkItDown inside the governed extraction registry"
-status: blocked
-blocked_reason: >-
-  The upstream MarkItDown tool lacks verified licence, concrete version,
-  and single-repository identity evidence.
-recheck_condition: >-
-  A quarantine-first discovery pass verifies the upstream MarkItDown
-  tool's licence, concrete version, and single-repository identity.
+status: ready
+unblocked_evidence: automation/review/blocker-reconciliation/2026-11-09-odysseus-blocked-cards.md
 priority: medium
 task_type: extraction-backend-pilot
 created_by: chatgpt
