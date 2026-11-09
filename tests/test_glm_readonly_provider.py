@@ -210,7 +210,7 @@ def test_glm_exact_stdin_readonly_args_and_model_unverified(tmp_path, monkeypatc
     assert args[:2] == ["--print", "--tools"]
     assert args[2].split(",") == ["Read", "Grep", "Glob"]
     assert args[3] == "--disallowedTools"
-    assert set(args[4].split(",")) == {"Bash", "Write", "Edit", "NotebookEdit", "WebFetch", "WebSearch"}
+    assert set(args[4].split(",")) == {"Bash", "Write", "Edit", "NotebookEdit", "WebFetch", "WebSearch", "Task", "Skill"}
     assert not set(args[2].split(",")) & {"Bash", "Write", "Edit", "NotebookEdit"}
     assert len(args) == 5
     assert result["provider"] == "glm" and result["host_id"] == "lab"
