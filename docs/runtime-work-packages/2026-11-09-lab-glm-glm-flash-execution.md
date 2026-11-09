@@ -7,7 +7,7 @@ Task: `2026-11-09-qualify-glm-and-glm-flash-on-lab-odysseus`. Status of this doc
 - PR #38 (candidate GLM paid executor) is **closed unmerged**; PR #133 (commissioning and smoke-test gap record) is merged. Neither proves a live backend route.
 - `src/` and `config/` contain no GLM paid-provider adapter or dispatch path; `config/models.yaml` mentions GLM only in a comment about an earlier local-model list. Codex remains the only qualified paid dispatch implementation, as the task states.
 - The lab has a host-local launcher `~/.local/bin/claude-glm` (a Bourne shell script) which, by its own header, owns endpoint, model and credential setup. Its default model is `glm-5.3` (override variable `GLM_MODEL`). No separate Flash launcher exists on the lab and the launcher names no Flash model, so **Flash availability and entitlement are unverified**. No Flash model identity was assumed.
-- Credential material was not read, printed or copied; only non-credential lines were inspected.
+- Credential values were not inspected, printed or copied by this work; only non-credential lines of the launcher were read. The launcher itself may have read its stored credential when it ran.
 
 ## Launcher smoke test (standard GLM only)
 
@@ -15,10 +15,12 @@ Run on the lab with stdin supplied by a pipe, no terminal, 120 s timeout, exit s
 
 | Item | Result |
 |---|---|
-| Prompt | one line asking for an exact sentinel string (`SENTINEL-<epoch>-QX7`) and nothing else |
+| Command | `printf 'Reply with exactly this string and nothing else: %s
+' "$S" \| timeout 120 ~/.local/bin/claude-glm --print` on the lab, at about 2026-11-09 17:05 UTC (the sentinel epoch 1794241500 is the observed value) |
+| Sentinel | `SENTINEL-1794241500-QX7` |
 | Exit status | 0 |
-| Response | exactly the sentinel |
-| Effective model | `glm-5.3`, from the client's own stderr line (`unrecognized_model` notice naming `glm-5.3`); provider-side attestation of model currency was not obtained |
+| Response | `SENTINEL-1794241500-QX7`, identical to the sentinel |
+| Model | the client reported `glm-5.3` in its stderr `unrecognized_model` notice; that notice does not attest which model served the response, and provider-side attestation was not obtained |
 | Scope | launcher only; not an Odysseus backend test |
 
 A launcher-only pass does not satisfy the task's acceptance, and it does not grant independent-review equivalence.
