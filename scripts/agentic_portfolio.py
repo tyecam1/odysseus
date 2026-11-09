@@ -51,7 +51,7 @@ def _host_local_root(var: str | None) -> str:
     except (OSError, ValueError):
         return ""
     value = data.get(var) if isinstance(data, dict) else None
-    return value if isinstance(value, str) else ""
+    return value if isinstance(value, str) and Path(value).is_absolute() else ""
 
 
 def resolve_roots(odysseus_root: Path, overrides: dict[str, Path | None]) -> tuple[dict[str, Path], dict[str, str]]:

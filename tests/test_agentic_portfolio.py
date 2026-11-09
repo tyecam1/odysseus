@@ -1499,3 +1499,13 @@ def test_malformed_host_local_config_stays_explicitly_unavailable(tmp_path, monk
     _write_host_local(tmp_path, monkeypatch, "{not json")
     _, missing = ap.resolve_roots(ody, {})
     assert missing == {"obsidian-phd": "root_environment_unset"}
+
+
+@pytest.mark.parametrize("payload", ['["a"]', json.dumps({"PHD_ROOT": 7}), json.dumps({"PHD_ROOT": "relative/dir"})])
+def test_host_local_config_with_wrong_shape_or_relative_root_is_unavailable(tmp_path, monkeypatch, payload):
+    ody, _, _ = estate(tmp_path, monkeypatch)
+    monkeypatch.delenv("PHD_ROOT")
+    _write_host_local(tmp_path, monkeypatch, payload)
+    _, missing = ap.resolve_roots(ody, {})
+    assert missing == {"obsidian-phd": "root_environment_unset"}
+
