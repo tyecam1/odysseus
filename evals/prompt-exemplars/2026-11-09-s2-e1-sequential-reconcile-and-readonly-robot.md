@@ -25,6 +25,7 @@ The user requested reusable **sequential** rather than separate parallel agent/h
 
 ## Task-specific assumptions and limitations
 
+- Laptop-launched Claude Code: local checkout is the starting point, Jetson access is conditional on existing authorised SSH/host routing, and remote facts cannot be inferred from laptop state.
 - Targets one specific S2-E1 repo and stacked PRs #10/#11. Live refs, delivery states and tool permissions must be verified before application.
 - Prompt is unexecuted and unevaluated. Candidate capture does not establish run success.
 - The canonical generic planning template is owned by `tyecam1/obsidian-PhD/08-template/planning/sequential-experiment-execution.md`.
@@ -32,11 +33,14 @@ The user requested reusable **sequential** rather than separate parallel agent/h
 ## Exact prompt
 
 ```text
-Work from the registered checkout of `tyecam1/s2-e1-ros2-measurement-spine` via the governed lab SSH route. Execute **sequentially**.
+From my laptop, use the existing local checkout of `tyecam1/s2-e1-ros2-measurement-spine`. Verify cwd, Git remote, branch and dirty worktrees first; discover the registered checkout if needed. Use only existing authorised Odysseus/SSH access for Jetson inspection. Never assume the laptop checkout is the Jetson checkout.
 
-**1. Reconcile (read-only):** Inspect live main, experiment branches, draft PRs #10/#11, registered local and Jetson worktrees, dirty/unpushed commits, and retained E1a raw-data manifests/SHA-256. Preserve all histories and data. Report what was directly verified versus inaccessible. Stop before writes if safe branch ancestry cannot be established.
+Execute sequentially:
 
-**2. Finish the read-only uArm gate:** In an isolated worktree/branch, inspect and improve the existing uArm query-only script, tests and operator runbook in PR #11. Verify query codes and reply handling against the manufacturer; record raw responses, identifiers, units, timestamps, failures and serial-open reset risk. Add bounded synthetic tests and a reviewable PR against the reconciled branch. No hardware port opening, servo/pump/gripper/mode/motion commands, firmware changes or physical measurements. Treat firmware-reported position as non-independent evidence.
+1. **Read-only reconciliation:** Inspect live `main`, experimental branches, draft PRs #10/#11, laptop and accessible Jetson checkouts/worktrees, dirty/unpushed commits, E1a raw evidence and checksum ledgers. Do not alter history or raw data. Clearly distinguish directly verified, ledger-only and inaccessible evidence. If safe branch ancestry is uncertain, stop before writes.
+2. **Read-only uArm software gate:** Inspect PR #11's existing probe, tests, CI and mounting runbook before changing code. In an isolated worktree, fix only demonstrated defects or missing requirements; test allowlisted informational queries, raw/error logging, time/units, serial-reset risk and failure behaviour. If changes are justified, open a reviewable PR against the reconciled review branch, preserving the PR #10/#11 stack. Do not duplicate working tooling.
 
-Stop at **human step 3: mount the unpowered uArm**. Report the reconciliation evidence, tested software state, PR and exact mounting handoff. Do not claim hardware verification or merge an unapproved PR.
+No serial-port opening, robot actuation, firmware changes, calibration measurements, motion commands or merges. If Jetson access is unavailable, report that limit and complete only safely isolated software checks.
+
+Stop before **human step 3: mount the unpowered uArm**. Report findings, tests, PR (if needed), unresolved gates and precise physical handoff.
 ```
