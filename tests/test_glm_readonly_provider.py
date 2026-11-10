@@ -260,7 +260,7 @@ def test_glm_exact_stdin_readonly_args_and_model_unverified(tmp_path, monkeypatc
     assert args[3] == "--disallowedTools"
     assert set(args[4].split(",")) == {"Bash", "Write", "Edit", "NotebookEdit", "WebFetch", "WebSearch", "Task", "Skill"}
     assert not set(args[2].split(",")) & {"Bash", "Write", "Edit", "NotebookEdit"}
-    assert args[5:] == ["--strict-mcp-config", "--setting-sources", "user",
+    assert args[5:] == ["--strict-mcp-config", "--bare",
                         "--disable-slash-commands", "--no-session-persistence"]
     assert "--mcp-config" not in args
     assert result["provider"] == "glm" and result["host_id"] == "lab"

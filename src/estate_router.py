@@ -1458,8 +1458,9 @@ def execute_glm(objective: str, *, timeout: float = 180.0, cwd: Optional[str] = 
         proc = subprocess.Popen(
             [str(launcher), "--print", "--tools", "Read,Grep,Glob",
              "--disallowedTools", "Bash,Write,Edit,NotebookEdit,WebFetch,WebSearch,Task,Skill",
-             # Repository hooks, project settings and MCP are deliberately excluded.
-             "--strict-mcp-config", "--setting-sources", "user",
+             # --bare skips hooks (repository and user), project settings, plugins and CLAUDE.md discovery; MCP is excluded by
+             # --strict-mcp-config. Verified live with a hook that writes a file: it runs without --bare and not with it.
+             "--strict-mcp-config", "--bare",
              "--disable-slash-commands", "--no-session-persistence"],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, start_new_session=True, cwd=cwd,
