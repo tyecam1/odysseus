@@ -1,0 +1,127 @@
+{
+  "program_id": "finance-market-media-intelligence-2026-10-29",
+  "version": "0.1",
+  "owner_persona": "l",
+  "owner_repository": "tyecam1/misumi",
+  "runtime_owner": "tyecam1/odysseus",
+  "canonical_note": "docs/core/finance-market-media-trend-goals-v0.1.md",
+  "status": "planned-not-executing",
+  "autonomy": "read-analyse-propose",
+  "orders_or_payments_allowed": false,
+  "external_publication_allowed": false,
+  "existing_goal_registry": "config/finance-paper-trading-goals.json",
+  "status_rule": "Derive unlocked status at each Odysseus preflight only from current independently verified dependency receipts and matching data/source/code/config fingerprints. All stages are locked except MT-00 eligibility. Do not interpret these files as an implemented /goals runtime.",
+  "invalidation": [
+    "material source or licensing change",
+    "source outage or stale timestamps",
+    "change to algorithm or source configuration",
+    "retracted/unverifiable evidence",
+    "verification not independent or expired",
+    "attempted order/payment/publication"
+  ],
+  "receipt_fields": [
+    "goal_id",
+    "run_id",
+    "status: pass|fail|insufficient",
+    "observed_at",
+    "code_commit",
+    "source_config_hash",
+    "data_snapshot_ids",
+    "source_access_audit_id",
+    "evaluation_artifacts",
+    "verifier",
+    "notes"
+  ],
+  "goals": [
+    {
+      "id": "MT-00",
+      "title": "Audit sources and reproduce one local trend report",
+      "depends_on": [],
+      "unlock_when": "Simulation-only and research-only operator intent; source terms/rate/cost eligibility explicitly checked.",
+      "acceptance": [
+        "Run TrendScope offline demo or public-source-only smoke in isolated environment, without adopting its independent scheduler, persistence or credential integrations.",
+        "Confirm public source access and terms for GDELT DOC 2.0, HN API, crypto exchange public candles; Google Trends RSS/Bluesky are optional and may be blocked if terms uncertain.",
+        "No Reddit, X-cookie, YouTube internal scraping, Amazon captcha bypass, paid API or credential harvesting.",
+        "Evaluate integration complexity, license and service binding; report keep/drop with observed outputs and costs."
+      ],
+      "failed_gate": "Blocked until verified lawful source and safe runtime."
+    },
+    {
+      "id": "MT-01",
+      "title": "Acquire timestamped evidence and market joins",
+      "depends_on": [
+        "MT-00"
+      ],
+      "unlock_when": "MT-00 current independently verified pass.",
+      "acceptance": [
+        "Collect daily public-source snapshots over seven days with source URL, publisher timestamp, first-seen timestamp, geography, entity/topic and collection error status.",
+        "Normalize and deduplicate stories without conflating syndicated duplicates with independent evidence.",
+        "If prices joined, use identical public exchange candles and instrument identity from FT data contract where available; no new exchange/trading keys.",
+        "Store source licensing metadata and avoid republishing copyrighted full text.",
+        "Data completeness, latency, timezone, source changes, id mapping and basic tests verified."
+      ],
+      "failed_gate": "No downstream claims from unverifiable or retrospective-only sources."
+    },
+    {
+      "id": "MT-02",
+      "title": "Produce interpretable attention and opportunity signals",
+      "depends_on": [
+        "MT-01"
+      ],
+      "unlock_when": "MT-01 complete and snapshot freshness checks pass.",
+      "acceptance": [
+        "Compute explainable first-seen topic count, source diversity, rolling attention velocity and novelty against simple historical baseline; do not equate sentiment with predicted price direction.",
+        "Separate market-moving-event hypotheses, general attention trends and potential unmet-demand opportunities.",
+        "Produce one weekly top-five evidence-linked digest, with counterevidence, uncertainty and source coverage; no automated publishing or outreach.",
+        "No unbounded LLM/topic optimisation; proposed insights are candidates, not ratified findings."
+      ],
+      "failed_gate": "If signals are mostly duplicates, noise or retrospective, revise or stop."
+    },
+    {
+      "id": "MT-03",
+      "title": "Blind forward-check signal quality and operator value",
+      "depends_on": [
+        "MT-02"
+      ],
+      "unlock_when": "MT-02 has timestamped reproducible daily outputs and a frozen evaluation rubric.",
+      "acceptance": [
+        "At least 14 calendar days of unattended shadow monitoring with time-of-observation evidence; use more time if fewer than 30 distinct dated topic/events.",
+        "Compare relevance, novelty, false-alert rate, source coverage, missingness and summarisation accuracy with simple keyword and popularity baselines.",
+        "Record delivered versus rejected signals, human review effort, running cost, and whether trends were actionable rather than merely popular.",
+        "Independent reviewer reports pass, fail or insufficient; do not infer price predictive edge from this gate."
+      ],
+      "failed_gate": "Insufficient evidence stays locked; no automatic higher-complexity build."
+    },
+    {
+      "id": "MT-04",
+      "title": "Test additional predictive value in paper trading",
+      "depends_on": [
+        "MT-03",
+        "FT-02"
+      ],
+      "unlock_when": "MT-03 pass and current FT-02 backtesting validity receipt available; cross-program dependency enforced by existing Odysseus evaluator when implemented.",
+      "acceptance": [
+        "Define event timestamp at first observable collection time, not article publication alone; apply realistic collection, inference and order-decision delay.",
+        "Freeze one media-feature hypothesis and compare the same Freqtrade spot strategy with and without the media feature using chronological holdouts and matched costs.",
+        "Report false positives, multiple testing, returns, drawdown and baseline-relative metrics; keep trading simulation only.",
+        "Paper signal export disabled by default and fail-closed on stale/unsupported observations."
+      ],
+      "failed_gate": "No media-feature promotion if it does not beat price-only benchmark; paper trading never authorises live trading."
+    },
+    {
+      "id": "MT-05",
+      "title": "Assess repeatable intelligence product opportunity",
+      "depends_on": [
+        "MT-03"
+      ],
+      "unlock_when": "MT-03 demonstrates useful and reliable evidence with current rights audit.",
+      "acceptance": [
+        "Identify one bounded buyer problem solvable from collected signals and compare with freely available reporting.",
+        "Estimate incremental running cost, operator oversight, repeatability, copyright/API commercial rights and plausible distribution channel.",
+        "Produce a human-reviewed one-page opportunity/no-go assessment, not a business launch.",
+        "Any external commercial outreach, subscription, payments, redistribution or live financial action needs explicit new approval."
+      ],
+      "failed_gate": "No monetisation assumption based only on trend popularity."
+    }
+  ]
+}

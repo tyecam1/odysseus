@@ -1,0 +1,67 @@
+{
+  "goal_id": "FT-00",
+  "kind": "run",
+  "status": "pass",
+  "observed_at": "2026-11-06T16:08:17Z",
+  "run_id": "ft00-lab-20261106T1608Z",
+  "code_commit": "f05cde2c5c66073f9436beae6d6db1fc961e84c0",
+  "strategy_hash": "30e3e51435ab8bc7e2d3d89dab1e1dcb1c760edd642b4a69140141f333d2b428",
+  "config_hash": "f330b591b66aeaf4ef82b2f1786137c53597e5461d942e388e488b1c9badcc60",
+  "engine_digest": "freqtradeorg/freqtrade@sha256:9d67afb8eb5f4e1210f4fb067efcbd5e005bd4f1c27f6f3888b8b9fc7f9b5199",
+  "engine_version": "freqtrade 2026.9 (image Python 3.14.7, CCXT 4.5.84)",
+  "data_snapshot": "kraken live public OHLCV during dry-run; historic klines require --dl-trades on kraken (time-boxed attempt exceeded 9min for 3d x 2 pairs; deferred to FT-01)",
+  "independent_verifier": "self-attested-executor (pending independent verification)",
+  "notes": "FT-00 on hz2-workstation (lab) against the round-11 review-fix code (commit f05cde2; runner v0.4 UNCHANGED this round - the round-11 findings were both in the MT probe): docker 29.1.3. Guard invariants unchanged and re-proven live: EXACT pinned official digest at every layer; dry_run strictly true; spot only; zero exchange credentials; overlay routes rejected; the executed config is the CONTAINER-PRIVATE copy (bot log: Using config: /tmp/ft-verified-config.json) whose sha256 is verified inside the container after the copy and before freqtrade execs; the snapshot is a fresh nlink=1 inode (a planted HARDLINK is neutralised live, again); the delegated write is noclobber - a planted SYMLINK at the snapshot path is refused and the RAW COMMAND TRANSCRIPT is committed (symlink-refusal-proof.txt: plant rc, the dash cannot-create refusal line, write rc, and the victim file's sha256 before and after, byte-identical); the two dry-run cycle logs END with the runner-appended stop trailer (stop rc plus sha256 of the prior output) and every receipt-cited .log artifact is COMMITTED (.gitignore negation; a fresh checkout can hash-check every cited path). SIX fail-closed config refusals rc=3 (dry_run=false, exchange key set, futures + colon pair, add_config_files overlay, --extra=--config CLI overlay, derivatives pair via typed --pairs) recorded in fail-closed-refusals.json. Dry-run smoke 2/2 cycles reached state=RUNNING heartbeat on live Kraken public data, graceful SIGTERM stop rc=0 both cycles (trailer-proven), zero leftover snapshots. Offline suite record committed at automation/review/finance/test-suite-round12.txt (8460 passed / 46 skipped / 5 xfailed, 140 finance). Spot only, no margin/derivatives, no exchange keys, no public listeners, no telegram, workspace outside knowledgebase.",
+  "artifacts": [
+    {
+      "label": "ft-config",
+      "path": "repo:automation/review/finance/ft00/config-ft00.json",
+      "sha256": "f330b591b66aeaf4ef82b2f1786137c53597e5461d942e388e488b1c9badcc60"
+    },
+    {
+      "label": "ft-engine-pin",
+      "path": "repo:automation/review/finance/ft00/engine-pin.txt",
+      "sha256": "44e196b7f2c22bb93def934f70a46ae2696b31f140b4e060327bec9494eaad47"
+    },
+    {
+      "label": "ft-strategy",
+      "path": "repo:automation/review/finance/ft00/SMACrossBaseline.py",
+      "sha256": "30e3e51435ab8bc7e2d3d89dab1e1dcb1c760edd642b4a69140141f333d2b428"
+    },
+    {
+      "label": "ft-runner-code",
+      "path": "repo:src/finance_ft_runner.py",
+      "sha256": "89760911af8935142b474a25443e5e7c5f0c13477e102d3c9df84c6ad9c56765"
+    },
+    {
+      "label": "ft-fail-closed-refusals",
+      "path": "repo:automation/review/finance/ft00/fail-closed-refusals.json",
+      "sha256": "1761583f293875ccabb9cc08be9f2d389f5d4506650f779df795726bfc6d022a"
+    },
+    {
+      "label": "ft-symlink-refusal-proof",
+      "path": "repo:automation/review/finance/ft00/symlink-refusal-proof.txt",
+      "sha256": "bcfef39db167721c04762ff23558f27fc732a041d6985b167d7d607a30e843bf"
+    },
+    {
+      "label": "ft-dryrun-cycle1-log",
+      "path": "repo:automation/review/finance/ft00/dryrun-cycle1.log",
+      "sha256": "cffc8e24125e21958dde93a9fe64fd06114e95ee3fae3fc23aff21ea74bfbe49"
+    },
+    {
+      "label": "ft-dryrun-cycle2-log",
+      "path": "repo:automation/review/finance/ft00/dryrun-cycle2.log",
+      "sha256": "874ce2ede0663fbdde592d7f2214a335e17f55305cb39a1aecc6aab40cfd150a"
+    },
+    {
+      "label": "ft-smoke-result",
+      "path": "repo:automation/review/finance/ft00/dryrun-smoke-result.json",
+      "sha256": "b97ef3b38444a55d871d950b4838c0772b2a140e8a99938e9d9c295eb13f52ca"
+    },
+    {
+      "label": "ft-suite-record",
+      "path": "repo:automation/review/finance/test-suite-round12.txt",
+      "sha256": "b802cd87098fa5de47544950084188b3458395c1bbf3a9e2860d383b1e7c32c1"
+    }
+  ]
+}

@@ -1,0 +1,47 @@
+GLM corroborating review (same-family, NOT the independent Sol gate) - round-13 interrupted by a Codex usage limit (reset 2026-11-11 16:03 per the error text); this pass is labelled corroborating-only and closes no gate. Dispositions of its findings 1-5: 1+2 fixed (TLD guard, commit follows), 4 fixed (repo: confinement), 3 REFUTED by mechanical re-check (https://b%C3%BCcher.de./x heals to xn--bcher-kva.de - rstrip precedes idna.encode), 5 documented residual (corrupt runtime-evaluation.json falls back to the STRICTEST defaults; response shape deliberately unchanged). Strategy-from-mount observation recorded as an FT-01 residual.
+
+<!-- lane: GLM read-only (CORROBORATING ONLY - not an independent security sign-off; re-run Codex when it returns) -->
+Static review complete — every battery case hand-traced (dynamic execution is blocked in this lane). Here is the corroborating report.
+
+---
+
+# GLM corroborating review — PR #207 finance slice, round 13 (same-family, not the Sol gate)
+
+**Verdict: PASS-with-nits.** The round-12 fix is correct and complete for its stated scope, and I found no regression in the four focus areas. Five low-severity nits below, none of which reproduces the round-12 phantom-record/inflation defect class with a realistic input. The Sol re-run is still owed.
+
+## Focus 1 — round-12 fix, `registrable_domain` (`src/finance_mt_probe.py`)
+
+**Holds.** I traced the guard at `src/finance_mt_probe.py:272-280` against a hostile battery by hand:
+
+- **Empty labels are fully covered.** An empty label can only appear as a leading dot or two consecutive dots (a trailing dot is stripped in `_canonical_host` before the check, and the check runs *after* the second `_canonical_host` call, so percent-encoded forms `%2Ecom` / `a%2E%2Eb.com` decode *before* the `startswith(".")`/`".."` test). `".com"`, `"a..b"`, `".example.com"`, `"a...b"`, `"...com"`, `"com..net"`, `"..tr"`, `"./"`, `"...."` all → `"unknown"`.
+- **Trailing dot still heals**: `https://example.com./p` → `example.com` (hostname's trailing dot stripped at `finance_mt_probe.py:229`, then normal two-label logic). Pinned by `test_registrable_domain_empty_label_forms`.
+- **Single-label keeps the metadata fallback**: `https://com./x` → `"com"` (no dot) → `collect_gdelt` falls back to the `domain` metadata at `finance_mt_probe.py:452-453`.
+- **IDN still canonicalises**: `faß.de` → `xn--fa-hia.de` via UTS-46; idna-absent and undecodable hosts return `""` → `"unknown"` (never an IDNA-2003 ß→ss split).
+- **No legitimate form broken**: leading-dot and consecutive-dot hosts are invalid DNS, so nothing valid is newly rejected. IPv6 literals, brackets, port-only, `user:pass@` with no host, spaces, ill-typed input, `""` — all `"unknown"`.
+- **Integration is right**: `"unknown"` contains no dot, so the metadata fallback runs; if metadata is also unusable the article is malformed *before* the exact-dedup check (`finance_mt_probe.py:454-470`), so repeats inflate `malformed`, never `deduped_exact` — exactly the pinned test.
+
+## Focus 2 — `collect_gdelt` pipeline
+
+**Holds.** Locatability (URL host → metadata fallback) precedes dedup; malformed counting is honest per-occurrence; story keys are NFKC + lowercase + whitespace-collapse, full length, punctuation-preserving, with empty titles keyed by URL so they never over-merge; a zero-evidence source returns `status="failed"` with an error naming all four counts (`finance_mt_probe.py:522-533`).
+
+## Focus 3 — `finance_ft_runner.py` (v0.4)
+
+**Holds.** The exact digest-pinned reference is enforced in `verify_config`, `build_docker_argv`, and both snapshot delegation argvs (`finance_ft_runner.py:585-616`); `dry_run is not True` rejection; spot-only; credential-field rejection; `add_config_files` + `--extra` overlay rejection duplicated at builder level; the sha-bound entrypoint script contains no shell metacharacters (config_name and digest are grammar-bound) and passes freqtrade args as positional params; snapshot write uses `set -C` + O_EXCL + inode/nlink/byte round-trip assertions; stop trailer (with prior-output digest) is appended after `docker stop` on both the success and ready-timeout paths, and stop rc≠0 fails the cycle. The `crashed_early` path returns without `docker rm`, but that branch fires only on "No such container" — there is nothing to remove; an exited-but-present container flows to the ready-timeout path which does `rm -f`.
+
+## Focus 4 — `finance_goals.py`
+
+**Holds.** `_receipt_blockers` is a true fail-closed wrapper (any exception → blocker, never a lost response); newest-run-governs with unparseable timestamps sorted newest; verifier identity is exact list membership against `independent_verifiers` (`finance_goals.py:513-520`), so `"glm-codex"` cannot ride on `"codex"`; run and verification receipts both require artifacts; verification must cite an exact `(sha256, path)` pair of the run and not predate it; dependency satisfaction is recursion-safe with a cycle guard and cross-program deps included; unattributable receipts lock every goal.
+
+## Findings (all low severity — none blocks)
+
+1. **Low / `src/finance_mt_probe.py:281-296`** — Junk-label dotted hosts still become a healthy record's source: `registrable_domain("https://1.2/x")` → `"1.2"`, `"https://a.-/x"` → `"a.-"`, `"https://-.-/x"` → `"-.-"`. These pass the `"." not in domain` check at `finance_mt_probe.py:452`, so (absent metadata) such an article produces a healthy record citing a pseudo-domain — the same *class* as round-12 finding 1, but with non-empty, individually non-resolvable labels (no TLD `2`; `-` is not a valid DNS label). Failure scenario: a GDELT feed entry with url `https://1.2/story` yields `gdelt-doc-2.0:1.2` as a counted distinct publisher. No dedup-inflation synergy (distinct URLs dedup once by URL only). Plausibility is very low; a last-label-must-be-alphabetic guard would close it.
+2. **Nit / `src/finance_mt_probe.py:294-296`** — IPv4 literals collapse to their last two octets (`192.168.0.1` → `"0.1"`), a mislabelled but locatable source; distinct IPs remain distinct, so only cosmetics.
+3. **Nit / `src/finance_mt_probe.py:230-237`** — IDN + trailing dot (`https://bücher.de./x`) does not heal: `idna.encode` rejects the trailing dot → `""` → `"unknown"`, while the ASCII spelling heals. Conservative direction only (under-count, never phantom).
+4. **Nit / `src/finance_goals.py:272-276`** — the `repo:` artifact prefix does `repo_root / art_path[5:]` without confining the result to `repo_root`; a receipt can name `repo:../../any/file` and have it hashed. No content is disclosed (only missing/mismatch verdicts) and receipts are committed evidence, but resolving then checking `resolve().is_relative_to(repo_root)` would be tidier.
+5. **Nit / `src/finance_goals.py:99-103`** — a corrupt `runtime-evaluation.json` is silently swallowed and defaults applied. Defaults *are* the strict standing rules so no gate can weaken, but it is an outlier against the module's fail-closed posture.
+
+**Observation (possibly adjudicated in earlier rounds; runner unchanged this round):** the sha-bound entrypoint protects the *config* bytes, but freqtrade also loads strategy `.py` files from the same host-writable `user_data` mount (`--userdir /freqtrade/user_data`), so a workspace writer can still swap strategy code between verification and exec. In dry-run with no credentials the blast radius is minimal; noting it only for completeness.
+
+## Statement of lane
+
+This is a **same-family GLM corroborating read, not the independent gate**. Dynamic execution was blocked in this lane, so the hostile-input battery was hand-traced statically rather than run; the two round-12 pinned tests were verified by manual execution against the code as written. **The Sol (gpt-6-sol-class Codex) round-13 re-review remains owed after quota returns and should not be considered discharged by this pass.**

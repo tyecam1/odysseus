@@ -1,0 +1,45 @@
+{
+  "goal_id": "MT-00",
+  "kind": "run",
+  "status": "pass",
+  "observed_at": "2026-11-06T16:48:53Z",
+  "run_id": "mt00-lab-20261106T164853Z",
+  "code_commit": "9134ac7fba810073d3788028865656301c7fbcb8",
+  "verifier": "self-attested-executor (pending independent verification)",
+  "source_config_hash": "0678d8fe3384a77b81f96e5164ccb3eb9855eb771195d2ad8d959a2790e57ade",
+  "data_snapshot_ids": [
+    "automation/review/finance/mt00/snapshot-20261106T164853Z.json"
+  ],
+  "source_access_audit_id": "automation/review/finance/mt00/run-manifest-20261106T164853Z.json",
+  "evaluation_artifacts": [
+    "automation/review/finance/mt00/digest-20261106T164853Z.md"
+  ],
+  "notes": "Live MT-00 probe on hz2-workstation (lab) against the round-14 review-fix code (commit 9134ac7, probe v0.13): GDELT DOC 2.0 + HN official API + Kraken public spot candles, all public/no-auth/no-key. Sources at 20261106T164853Z: HN ok (25 records), Kraken ok (24), GDELT failed (0 records; health records http_status=429 retries=3 truthfully when a window is rate-limited; 2/3 healthy satisfies the bounded snapshot, GDELT cadence stays an MT-01 question). Round-14 fixes live in this run (probe v0.13, from the GLM corroborating read committed at automation/review/finance/review-round13-glm-corroborating.txt): a dotted 'domain' whose TOP label is not alphabetic resolves unknown ('1.2', 'a.-', '-.-', and the last-two-octet collapse of an IPv4 literal '0.1') - a TLD is alphabetic (IDN TLDs are punycode 'xn--') - while numeric NON-top labels stay valid ('888.com' is a real registrable domain) and every legitimate form is pinned unchanged (trailing dot heals, IDN UTS-46, hosted-platform suffixes, single-label metadata fallback). GLM finding 3 (IDN+trailing-dot does not heal) was REFUTED by mechanical re-check. Earlier-round guarantees carried: empty-label hosts unknown (round-13), unlocatable URLs malformed on every occurrence (round-11), whitespace-only HN titles item errors (round-11), punctuation-preserving story keys, zero-evidence sources failed, HN id range (0, 10^12]. First-seen carry-forward live-proven for text (HN 24/25 carry earlier first_seen) AND candles (Kraken 24/24). Offline suite record committed at automation/review/finance/test-suite-round14.txt (8467 passed / 46 skipped / 5 xfailed, 147 finance). Syndication dedup on (registrable domain, punctuation-preserving normalised title); GDELT published_at stays null (seendate is retrieval time, recorded in uncertainty). Excluded by policy: x-cookies, private reddit, youtube internals, retailer scraping, paid APIs. Interpretation reserved for persona L.",
+  "artifacts": [
+    {
+      "label": "mt-probe-code",
+      "path": "repo:src/finance_mt_probe.py",
+      "sha256": "29f5bfec8c30dbb4ffa221d97427ce03652dc8c345bd919af89a43aa784fcb59"
+    },
+    {
+      "label": "mt-run-manifest",
+      "path": "repo:automation/review/finance/mt00/run-manifest-20261106T164853Z.json",
+      "sha256": "0678d8fe3384a77b81f96e5164ccb3eb9855eb771195d2ad8d959a2790e57ade"
+    },
+    {
+      "label": "mt-snapshot",
+      "path": "repo:automation/review/finance/mt00/snapshot-20261106T164853Z.json",
+      "sha256": "7aae5836fdffd79e70583547375b9d89b5d42b3e38552e01cdfdc7448e062954"
+    },
+    {
+      "label": "mt-digest",
+      "path": "repo:automation/review/finance/mt00/digest-20261106T164853Z.md",
+      "sha256": "9f5b80e06919f08e3844b44622e293f789bb7f042b52399e8dd2213e0831f314"
+    },
+    {
+      "label": "mt-suite-record",
+      "path": "repo:automation/review/finance/test-suite-round14.txt",
+      "sha256": "572fd8a1be05e72f9d1eec1264f17dee2195846de732ffcb95e4cd6f6314ca24"
+    }
+  ]
+}

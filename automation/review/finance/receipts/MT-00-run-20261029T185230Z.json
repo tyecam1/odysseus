@@ -1,0 +1,40 @@
+{
+  "goal_id": "MT-00",
+  "kind": "run",
+  "status": "pass",
+  "observed_at": "2026-10-29T18:52:30Z",
+  "run_id": "mt00-lab-20261029T185230Z",
+  "code_commit": "cdd12645f402327420be00abc7247ddf530c5c7b",
+  "verifier": "self-attested-executor (pending independent verification)",
+  "source_config_hash": "b935503afc8c5525d0e75d25de35053fa8827edd08cb04cd2db8a7d1ce3682a4",
+  "data_snapshot_ids": [
+    "automation/review/finance/mt00/snapshot-20261029T185230Z.json"
+  ],
+  "source_access_audit_id": "automation/review/finance/mt00/run-manifest-20261029T185230Z.json",
+  "evaluation_artifacts": [
+    "automation/review/finance/mt00/digest-20261029T185230Z.md"
+  ],
+  "notes": "Live MT-00 probe on hz2-workstation (lab) against the round-4 review-fix code (commit cdd1264, probe v0.4): GDELT DOC 2.0 + HN official API + Kraken public spot candles, all public/no-auth/no-key. Sources at 20261029T185230Z: HN ok (25 records), Kraken ok (24), GDELT ok (62 records; GDELT has had 429 windows today \u2014 honest source_health per run). Round-4 fixes live in this run: hosts are canonicalised (percent-decode, lowercase, trailing dot, IDNA) so a publisher's Unicode and punycode hostname spellings count as ONE domain \u2014 URL host still takes precedence over GDELT's free-text domain metadata; redirector hosts counting as their own domains is a documented deliberate residual (resolving them would require fetching every article URL). First-seen index merge validates snapshot STRUCTURE (records must be a list of objects each with event_id and first_seen_at) and fails closed on any anomaly instead of skipping or crashing. First-seen carry-forward live-proven for text (HN 24/25 carry earlier first_seen) AND candles (Kraken 24/24). Syndication dedup on (registrable domain, normalised title); GDELT published_at stays null (seendate is retrieval time, recorded in uncertainty). Excluded by policy: x-cookies, private reddit, youtube internals, retailer scraping, paid APIs. Interpretation reserved for persona L.",
+  "artifacts": [
+    {
+      "label": "mt-probe-code",
+      "path": "repo:src/finance_mt_probe.py",
+      "sha256": "919c26dd7b9bca7e3f6a7c5f6f10025a85c0c6c709bbfc6be75423603ff847da"
+    },
+    {
+      "label": "mt-run-manifest",
+      "path": "repo:automation/review/finance/mt00/run-manifest-20261029T185230Z.json",
+      "sha256": "b935503afc8c5525d0e75d25de35053fa8827edd08cb04cd2db8a7d1ce3682a4"
+    },
+    {
+      "label": "mt-snapshot",
+      "path": "repo:automation/review/finance/mt00/snapshot-20261029T185230Z.json",
+      "sha256": "da6a3250e5fab27ed23f667a3e53955222602ef826384664266ea4f41680e86f"
+    },
+    {
+      "label": "mt-digest",
+      "path": "repo:automation/review/finance/mt00/digest-20261029T185230Z.md",
+      "sha256": "df1f8b166d18cb75c505945cb6e18f079993e4a60d13c4489e8fcecf68f49fa2"
+    }
+  ]
+}

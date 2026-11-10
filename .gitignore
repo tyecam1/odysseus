@@ -104,3 +104,7 @@ compound.config.json
 *.error.log
 _scratch/
 /odysseus/
+
+# finance evidence: receipt-cited *.log artifacts under automation/review/finance
+# are committed evidence (FT-00 dry-run cycles), not runtime logs
+!automation/review/finance/ft00/*.log
