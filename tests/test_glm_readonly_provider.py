@@ -335,6 +335,44 @@ def test_glm_bad_output_has_no_provider_cooldown(tmp_path, monkeypatch, glm_heal
         assert len(rows) == 1 and rows[0].task_class == "provider_attempt"
 
 
+@pytest.mark.parametrize("prompt,expected,cooled", [
+    ("Review the patch", "quota_exhausted", True),
+    ("usage limit reached", "bad_output", False),
+])
+def test_glm_garbled_nonzero_stdout_uses_scrubbed_stderr(
+        tmp_path, monkeypatch, glm_health_db, prompt, expected, cooled):
+    _launcher(tmp_path, monkeypatch,
+              "import sys\nprint('not json')\n"
+              "print('usage limit reached', file=sys.stderr)\nsys.exit(7)")
+    result = estate_router.execute_glm(prompt, timeout=2)
+    assert result["error_code"] == expected and result["exit_code"] == 7
+    health = estate_router.provider_allows_dispatch("glm")
+    assert health["allowed"] is not cooled
+    assert health["state"] == ("quota_exhausted" if cooled else "unknown")
+
+
+@pytest.mark.parametrize("status,expected,cooled", [
+    (429, "rate_limited", True),
+    (401, "auth_failed", True),
+    (403, "auth_failed", True),
+    (500, "nonzero_exit", False),
+    (None, "nonzero_exit", False),
+])
+def test_glm_error_result_uses_api_status_without_result_text(
+        tmp_path, monkeypatch, glm_health_db, status, expected, cooled):
+    response = {"type": "result", "is_error": True, "result": "usage limit reached"}
+    if status is not None:
+        response["api_error_status"] = status
+    _launcher(tmp_path, monkeypatch,
+              "import sys\n" + f"print({json.dumps(response)!r})\n"
+              "print('quota exhausted', file=sys.stderr)")
+    result = estate_router.execute_glm("Review the patch", timeout=2)
+    assert result["error_code"] == expected and result["ok"] is False
+    health = estate_router.provider_allows_dispatch("glm")
+    assert health["allowed"] is not cooled
+    assert health["state"] == (expected if cooled else "unknown")
+
+
 @pytest.mark.parametrize("stderr,expected", [
     ("authentication failed", "auth_failed"),
     ("quota exceeded", "quota_exhausted"),

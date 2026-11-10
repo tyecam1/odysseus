@@ -91,7 +91,7 @@ hosts:
     worker:
       enabled: true
       transport: local
-      qualified_executors: [deterministic, local, codex, codex-write, glm]
+      qualified_executors: [deterministic, local, codex, codex-write]
       qualification_evidence:
         - docs/aoteru-lm4-production-canary-evidence.md
         - docs/aoteru-p12-active-estate-convergence-evidence.md

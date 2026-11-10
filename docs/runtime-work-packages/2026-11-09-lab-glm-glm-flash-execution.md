@@ -42,7 +42,7 @@ Main risks to live Codex: GLM readiness displacing Codex in `_select_host`, an e
 
 ## Phase 1 live proof (read-only GLM, real router and worker path, in-process), 2026-11-10
 
-Run on the lab (`hz2-workstation`) from a worktree containing the qualification change, with `DATABASE_URL` pointing at a throwaway SQLite file created for the run (no production database touched, application server not started). The request went through `estate_router.run_task` with the capability `code-strong`, `allow_paid_escalation` true and `paid_provider: "glm"`; route resolution, host qualification, the `glm-readonly` worker verb over the local transport and the restricted launcher (`--tools Read,Grep,Glob`, write and agent tools disallowed, `--strict-mcp-config`, `--bare`, `--disable-slash-commands`, `--no-session-persistence`) all ran for real. This is **not** an HTTP-level `/api/estate/run` call; that is a separate follow-up after deploy.
+Run on the lab (`hz2-workstation`) from a worktree that temporarily carried a one-line `qualified_executors` entry for `glm` (**that entry is not part of this change and no host is qualified**), with `DATABASE_URL` pointing at a throwaway SQLite file created for the run (no production database touched, application server not started). The request went through `estate_router.run_task` with the capability `code-strong`, `allow_paid_escalation` true and `paid_provider: "glm"`; route resolution, host qualification, the `glm-readonly` worker verb over the local transport and the restricted launcher (`--tools Read,Grep,Glob`, write and agent tools disallowed, `--strict-mcp-config`, `--bare`, `--disable-slash-commands`, `--no-session-persistence`) all ran for real. This is **not** an HTTP-level `/api/estate/run` call; that is a separate follow-up after deploy.
 
 | Item | Observed |
 |---|---|
@@ -57,7 +57,13 @@ Negative controls (same setup, nothing launched; no `claude-glm` process existed
 - `paid_provider: "glm"` with `mode: implementation` and a repository: refused, `error_code: provider_unqualified`, "provider 'glm' has no qualified write route", `executed: false`.
 - `paid_provider: "nonesuch"`: refused, `error_code: unknown_provider`, `executed: false`.
 
-Not shown and still open: the HTTP `/api/estate/run` path after deploy, a Codex-quota-to-GLM failover (phase 4, not implemented), any write route (phase 3), GLM Flash (phase 2), a provider-side assertion that the answering model is the newest offered, and a run through the restarted production service. Rollback: revert the one-line `qualified_executors` change in `config/estate.yaml` and restart `odysseus-aoteru-lab.service`.
+Not shown and still open: the HTTP `/api/estate/run` path after deploy, a Codex-quota-to-GLM failover (phase 4, not implemented), any write route (phase 3), GLM Flash (phase 2), a provider-side assertion that the answering model is the newest offered, and a run through the restarted production service. 
+
+## Qualification withheld: currency policy gate (precise blocker)
+
+`docs/subscription-model-currency-policy.md` ("Other subscription execution paths") says other subscription CLIs such as GLM "must NOT be claimed compliant or silently routed under this policy until a tested provider-specific latest resolver, effective-version record and fail-closed guard exist." This change supplies the **effective-version record** (the model is attested from the provider usage response and the call fails closed on a mismatch) but **not a latest-model resolver**: nothing here can tell whether `glm-5.3` is the newest model the plan offers, and reading the provider's model list would need the launcher-owned credential, which Odysseus must not duplicate. Therefore `glm` is deliberately **not** added to any host's `qualified_executors`; an explicit GLM request is refused with `provider_unqualified` on every host, and Codex routing is unchanged.
+
+To unblock: either (a) a tested provider-specific latest resolver (for example a launcher-owned `--list-models` or an approved read of the provider's model list under the launcher's credential) with a fail-closed guard, or (b) an owner decision, recorded in the currency policy, that an explicit, advisory-only, effective-model-attested GLM route may be qualified without a latest resolver, labelled as such. Once either exists, the one-line registry change, an HTTP-level `/api/estate/run` canary and a recorded rollback (revert the entry and restart `odysseus-aoteru-lab.service`) complete phase 1.
 
 ## Open, in order
 
