@@ -1,0 +1,52 @@
+# Odysseus blocked-card reconciliation, 2026-11-09 (first pass)
+
+Task: `2026-11-09-autonomous-blocker-reconciliation-and-opus-escalation`, steps 1-3, **Odysseus `blocked/` bucket only** (8 cards). The obsidian-PhD `blocked` bucket (10 cards) and the Misumi `blocked-human` bucket (3 cards) are covered read-only in the addenda below. Both are owned by their repositories; this is not a backlog-wide inventory. Source revision: Odysseus `dev` at `ba8f1762`; public evidence retrieved 2026-11-09 UTC. No package was installed or executed; GitHub and registry metadata only.
+
+| Card | Claimed blocker | Classification | Evidence | Next recheck |
+|---|---|---|---|---|
+| `2026-07-27-markitdown-extraction-backend-pilot` | no verified licence, version or single-repository identity | **blocker satisfied; moved to `ready/`** (`agent_resolvable`) | MIT; v0.1.9 on both PyPI (uploaded 2026-10-21, re-checked against the PyPI JSON and simple index after a same-family GLM screen wrongly reported 0.1.7) and the GitHub release v0.1.9; PyPI `Source` is `https://github.com/microsoft/markitdown`; GitHub search shows other same-named repos, none linked from the PyPI project | card's own approval and V2 verification still apply |
+| `2026-07-27-repo-intelligence-bakeoff` | no verified licence, version or identity for RepoWise and Graphify | **RepoWise half fully satisfied; Graphify half open** (`temporary_external_dependency`); a **new** decision item is raised, not part of the original blocker: whether AGPL-3.0 use is acceptable | RepoWise: PyPI `repowise` 0.60.1, AGPL-3.0-or-later, repository `repowise-dev/repowise` (GitHub v0.60.1, AGPL-3.0), consistent. The npm package `repowise` points at `nirhemo/repowise`, which does not exist (404): a collision hazard. Graphify: `Graphify-Labs/graphify` (Apache-2.0, v0.9.105) is the leading repository but **no PyPI `graphify`** (404) and the npm `graphify` points at a non-existent repository, so package identity is not corroborated | a licence-policy decision on AGPL-3.0 use (new item), and a corroborated package source for Graphify |
+| `2026-06-19-odysseus-remote-compute-dispatch-guard` | draft PR 2 closed, no implementation, no owner | claim **verified** (`agent_resolvable`, implementation work) | PR #2 CLOSED 2026-08-29, unmerged; no doctor or liveness code in `src`/`scripts` | admission by an executing owner (card has `approval_required: true`) |
+| `2026-06-19-odysseus-schedule-attestation-and-heartbeat-gating` | self-refusal remained in draft PR 2, undeployed | claim **verified** (same) | as above | as above |
+| `2026-09-01-human-attention-wip-autonomous-dispatch` | `blocked_by: capability-path-convergence` | **real, dangling dependency** (`temporary_external_dependency`) | no card named `capability-path-convergence` exists; the card's inputs (`Scripts/automation`, `automation/config`) still live in obsidian-PhD, not in Odysseus (`Scripts/` absent in `odysseus-aoteru`). Convergence is therefore not complete and has no owning card | create or identify an owning convergence card; candidate successor `2026-11-07-capability-utilisation-integration-retirement` (inbox) |
+| `2026-08-30-karpathy-llm-wiki-comment-learning-loop` | same | **only the part shared by all three is verified**: no card named `capability-path-convergence` exists. The path evidence above was checked for the human-attention card only; this card's own inputs were not individually examined | same | same |
+| `2026-09-02-claude-chatgpt-project-browser-bridge` | same | **only the part shared by all three is verified**: no card named `capability-path-convergence` exists. The path evidence above was checked for the human-attention card only; this card's own inputs were not individually examined | same | same |
+| `2026-07-27-route-skill-and-registry` | awaits PR-1 and PR-2 | **not re-verified** | card is `executor: human`, `V3_BLOCKED`, empty `allowed_paths`; PR-1 and PR-2 identities were not resolved in this pass. `executor: human` alone is not proof of a human-only gate | resolve PR-1/PR-2 identities |
+
+## Counts (this pass, Odysseus `blocked/` only)
+Delivered or unblocked: 1. Verified real, implementation unowned: 2. Real dependency without an owning card: 3. Partly satisfied, policy or source decision pending: 1. Not re-verified: 1. Protected human-only gates identified: 0 (cards with `approval_required: true` need owner admission, which this pass does not treat as a human-only gate; it is recorded as the next step where it applies). Opus adjudication: **not attempted and unqualified**; the central paid router is Codex plus the explicit read-only GLM provider under review (#261), so no Opus route exists in Odysseus and none is claimed.
+
+## Not done
+Misumi and PhD queues; the pilot with six independently verified cases; a completed-and-closed agent-resolvable task; the regression test for a protected gate; independent (Sol) verification of this record (limit until 8:22 PM).
+
+## Addendum: obsidian-PhD `blocked/` bucket (10 cards), read-only, 2026-11-09
+
+Source: obsidian-PhD `main` at `c479f91`. Read-only: no PhD card or file was changed by this pass (any remedy belongs to a PhD PR under its own gate). Only claims that could be checked against live state are marked verified; the rest are listed as **not re-verified**, not assumed.
+
+| Card | Claimed blocker | Classification | Evidence |
+|---|---|---|---|
+| `2026-07-02-branch-hygiene-sweep-and-ttl` | 91 remote branches remain against a fewer-than-20 criterion; needs human approval of a deletion manifest | **protected human gate, genuine** (destructive, irreversible); the numeric claim is **stale** | live remote branch count is **164** (GitHub API, 2026-11-09), so the gap is larger than recorded; deletion stays gated, and a refreshed manifest is the agent-resolvable preparatory step |
+| `2026-07-09-decide-autolab-lane-fate` | `declared_source_artifacts_unavailable` | **real** (`temporary_external_dependency`) | all six declared input artifacts are missing from the working tree, absent from the git history of every branch, and not found on the lab filesystem; they were apparently never committed. Recheck when they are supplied, or re-scope the card to the surviving inputs |
+| `2026-08-07-voice-audit-pr-stack-closeout` | no reason recorded (`updated_at` 2026-10-30) | **needs deeper recheck** | PRs #459 and #461, which the card names, are both **merged** (2026-08-07); whether the remaining independent re-verification and truth-contract correction are done was not examined |
+| `2026-09-02-university-schedule-adapters` | external systems, credentials, privacy | **protected human gate by its text** (credentials, privacy boundary) | not re-verified; the text names a gate that this pass would not override |
+| `2026-07-04-j1-positive-programme-evidence-balance`, `2026-07-04-j1-s4-verification-economics-source-scout`, `2026-07-04-j1-skill-formation-transfer-reporting-scout`, `2026-07-31-j1-comparator-contextual-focality-novelty-check` | manuscript or section triggers not reached (`manuscript_trigger_not_reached`, `no_live_S4_claim_requires_search`, "§6 drafting start", `j1_section_3_structure_pass_not_complete`) | **owner research-sequencing gates; not re-verified** | whether the J1 sections are now drafted was not examined; these are PhD-owned research gates and are not to be overridden from here |
+| `2026-07-17-workshop-genai-source-completion` | transcripts and timing not supplied | **external dependency; not re-verified** | `executor: human` alone is not proof, but no route to the media was examined |
+| `2026-06-23-zotero-library-vault-alignment` | no reason recorded | **not examined** | |
+
+Counts for this bucket: genuine protected gates identified 2 (branch deletion; credentials/privacy), real dependency 1, stale numeric claim 1, needs deeper recheck 1, not re-verified 5. Misumi's 3 `blocked-human` cards were **not** examined. The branch-hygiene card supplies the pilot's "genuine protected action stays gated" example; no stale false-positive human gate was found in the PhD bucket by this pass.
+
+## Addendum: Misumi `blocked-human` bucket (3 cards), read-only, 2026-11-09
+
+Source: Misumi `main` at `49a0c14` (lab checkout). Read-only; no Misumi file was changed.
+
+| Card | Claimed blocker | Classification | Evidence |
+|---|---|---|---|
+| `add-odysseus-fork-deploy-key` | operator must add a read-only deploy key on GitHub | **likely superseded; not verified live** (`obsolete_or_superseded` candidate) | the card's own `disposition_note` (2026-10-03) records a working read-only HTTPS pull path from the home host and says it awaits operator confirmation that the route is acceptable, then close. The home host was unreachable from the lab (SSH timeout) during this pass, so the path was not re-proven. The credential-bearing deploy-key action is not needed if the HTTPS route stands. Closing is a Misumi-owner queue change and needs the route-acceptance decision | re-prove the HTTPS pull when home is reachable, then close through a Misumi PR |
+| `complete-bbc-grapheneos-live-gate` | physical Pixel 8 GrapheneOS PWA acceptance (device enumerated over MTP, no ADB transport) | **protected, physical human gate** | requires a person with the handset; not agent-resolvable; tests and TLS evidence already exist per the card |
+| `phase-b-write-surface-spec` | Phase B (Odysseus writes) needs the operator's written approval | **protected human gate** | `docs/odysseus-contract.md` allows Phase B only with explicit approval; the card is subordinate to the write-consent-and-rollback task |
+
+Counts for this bucket: genuine protected gates 2; superseded candidate 1; no stale false-positive gate resolved here.
+
+## Overall counts across the three queues (this pass, first sample only)
+
+Odysseus `blocked/` 8, obsidian-PhD `blocked/` 10, Misumi `blocked-human/` 3 (21 cards). Unblocked: 1 (MarkItDown). Genuine protected gates: 4 (branch deletion, credentials and privacy, physical device acceptance, Phase B write consent). Real dependencies or unowned work: 6. Superseded candidate: 1. Stale numeric claims: 1. Not re-verified or needing deeper recheck: 8. No claim here is a verdict that a whole backlog is covered; the six-case independent verification, a completed-and-closed agent-resolvable task, the protected-gate regression test and Opus adjudication remain open.
