@@ -34,6 +34,26 @@ Subscription model version/tier is never a task-controlled variable. Apply
 the newest authenticated model and fail closed rather than fall back. Local
 models retain their separate qualification policy.
 
+## Standing operator preference: economical review models (2026-11-10)
+
+For **review work across Odysseus, Misumi and obsidian-PhD**, select the
+cheapest *qualified and currently available* reviewer from **Haiku 5.5,
+Terra 6.1, or GLM-Flash**. Match task difficulty to the model and use
+independent parallel reviews only for separable evidence. **Do not dispatch
+Sol, Opus, Fable or other premium reasoning models for routine/deep/repeated
+reviews by default.** Escalation outside the approved reviewer set requires
+an explicit operator decision for that bounded review, with documented need,
+expected benefit and quota impact; otherwise keep the review debt visible and
+continue independent eligible work. No unchanged-HEAD repeat reviews.
+
+This preference governs review *selection*, not implementation, architecture,
+research evidence authority or protected signoff. Review-only provider/model
+currency exceptions and fail-closed implementation requirements are owned by
+`docs/aoteru-model-host-routing-contract.md` and
+`docs/subscription-model-currency-policy.md`; do not create repo-local routers.
+This is a persistent operator policy, **not proof that all three model routes
+are executable in the deployed Odysseus runtime**.
+
 **Usage-limit failover:** For a verified Codex quota/usage-limit response, do not
 park otherwise eligible work until reset. Apply the existing routing contract's
 "Codex usage-limit → GLM failover" section: prefer an actually qualified GLM
