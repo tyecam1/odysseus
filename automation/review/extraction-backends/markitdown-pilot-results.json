@@ -1,0 +1,240 @@
+{
+ "markitdown_version": "0.1.9",
+ "python": "3.10.12",
+ "network_connect_attempts": 0,
+ "attempt_samples": [],
+ "results": [
+  {
+   "file": "bad_empty.docx",
+   "sha256_12": "e3b0c44298fc",
+   "bytes": 0,
+   "markitdown": {
+    "ok": false,
+    "exc": "FileConversionException",
+    "msg": "File conversion failed after 1 attempts:\n - DocxConverter threw BadZipFile with message: File is not",
+    "ms": 0.5
+   },
+   "naive": {
+    "ok": false,
+    "exc": "PackageNotFoundError"
+   }
+  },
+  {
+   "file": "bad_random.pptx",
+   "sha256_12": "bb4f432f4360",
+   "bytes": 2048,
+   "markitdown": {
+    "ok": false,
+    "exc": "FileConversionException",
+    "msg": "File conversion failed after 1 attempts:\n - PptxConverter threw BadZipFile with message: File is not",
+    "ms": 3.0
+   },
+   "naive": {
+    "ok": false,
+    "exc": "PackageNotFoundError"
+   }
+  },
+  {
+   "file": "bad_text_as.xlsx",
+   "sha256_12": "7815fac04acc",
+   "bytes": 22,
+   "markitdown": {
+    "ok": true,
+    "chars": 22,
+    "headings": 0,
+    "table_rows": 0,
+    "links": 0,
+    "bullets": 0,
+    "ms": 3.1,
+    "sample": "this is not a workbook"
+   },
+   "naive": {
+    "ok": false,
+    "exc": "BadZipFile"
+   }
+  },
+  {
+   "file": "bad_truncated.docx",
+   "sha256_12": "b4d0382551e9",
+   "bytes": 18423,
+   "markitdown": {
+    "ok": false,
+    "exc": "FileConversionException",
+    "msg": "File conversion failed after 1 attempts:\n - DocxConverter threw BadZipFile with message: File is not",
+    "ms": 2.3
+   },
+   "naive": {
+    "ok": false,
+    "exc": "PackageNotFoundError"
+   }
+  },
+  {
+   "file": "bad_unclosed.html",
+   "sha256_12": "2ea5ec3d3409",
+   "bytes": 47,
+   "markitdown": {
+    "ok": true,
+    "chars": 33,
+    "headings": 1,
+    "table_rows": 0,
+    "links": 0,
+    "bullets": 0,
+    "ms": 2.8,
+    "sample": "# Unclosed para | | | --- | | x |"
+   },
+   "naive": {
+    "ok": true,
+    "chars": 20,
+    "headings": 0,
+    "table_rows": 0,
+    "links": 0,
+    "bullets": 0
+   }
+  },
+  {
+   "file": "ok.docx",
+   "sha256_12": "1e93b908b4ee",
+   "bytes": 36847,
+   "markitdown": {
+    "ok": true,
+    "chars": 138,
+    "headings": 1,
+    "table_rows": 4,
+    "links": 0,
+    "bullets": 2,
+    "ms": 129.9,
+    "sample": "# Quarterly Report\n\nNormal text with **bold**\n\n* item one\n* item two\n\n|  |  |  |\n| --- | --- | --- |\n| Name | Qty | Cost |\n| A | 1 | 2.5 |"
+   },
+   "naive": {
+    "ok": true,
+    "chars": 56,
+    "headings": 0,
+    "table_rows": 0,
+    "links": 0,
+    "bullets": 0
+   }
+  },
+  {
+   "file": "ok.epub",
+   "sha256_12": "3483e1d8646f",
+   "bytes": 3074,
+   "markitdown": {
+    "ok": true,
+    "chars": 96,
+    "headings": 2,
+    "table_rows": 0,
+    "links": 1,
+    "bullets": 0,
+    "ms": 5.8,
+    "sample": "**Title:** T\n**Language:** en\n**Identifier:** id1\n\n## T\n\n1. [C1](c1.xhtml)\n\n# Chapter\n\nepub text"
+   },
+   "naive": {
+    "ok": false,
+    "exc": "ValueError"
+   }
+  },
+  {
+   "file": "ok.html",
+   "sha256_12": "3175647f3b2f",
+   "bytes": 196,
+   "markitdown": {
+    "ok": true,
+    "chars": 97,
+    "headings": 1,
+    "table_rows": 3,
+    "links": 2,
+    "bullets": 0,
+    "ms": 3.4,
+    "sample": "# Title\n\nSee [link](https://example.org/x)\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\n![alt text](x.png)"
+   },
+   "naive": {
+    "ok": true,
+    "chars": 42,
+    "headings": 0,
+    "table_rows": 0,
+    "links": 0,
+    "bullets": 0
+   }
+  },
+  {
+   "file": "ok.pptx",
+   "sha256_12": "093fafd325a4",
+   "bytes": 32895,
+   "markitdown": {
+    "ok": true,
+    "chars": 83,
+    "headings": 2,
+    "table_rows": 0,
+    "links": 0,
+    "bullets": 0,
+    "ms": 7.7,
+    "sample": "<!-- Slide number: 1 -->\n# Slide Title\npoint one\npoint two\n\n### Notes:\nspeaker note"
+   },
+   "naive": {
+    "ok": true,
+    "chars": 31,
+    "headings": 0,
+    "table_rows": 0,
+    "links": 0,
+    "bullets": 0
+   }
+  },
+  {
+   "file": "ok.xlsx",
+   "sha256_12": "c82776aeedaf",
+   "bytes": 4890,
+   "markitdown": {
+    "ok": true,
+    "chars": 58,
+    "headings": 1,
+    "table_rows": 4,
+    "links": 0,
+    "bullets": 0,
+    "ms": 7.9,
+    "sample": "## Data\n| id | value |\n| --- | --- |\n| 1 | 10 |\n| 2 | 20 |"
+   },
+   "naive": {
+    "ok": true,
+    "chars": 30,
+    "headings": 0,
+    "table_rows": 0,
+    "links": 0,
+    "bullets": 0
+   }
+  },
+  {
+   "file": "unsupported.bin",
+   "sha256_12": "2a70ed759b46",
+   "bytes": 516,
+   "markitdown": {
+    "ok": false,
+    "exc": "UnsupportedFormatException",
+    "msg": "Could not convert stream to Markdown. No converter attempted a conversion, suggesting that the filet",
+    "ms": 2.7
+   },
+   "naive": {
+    "ok": false,
+    "exc": "ValueError"
+   }
+  },
+  {
+   "file": "zip_ratio.zip",
+   "sha256_12": "ec4f06b5e925",
+   "bytes": 4987,
+   "markitdown": {
+    "ok": true,
+    "chars": 5000082,
+    "headings": 1,
+    "table_rows": 0,
+    "links": 0,
+    "bullets": 0,
+    "ms": 141.8,
+    "sample": "Content from the zip file `/tmp/mdpilot/corpus/zip_ratio.zip`:\n\n## File: big.txt\n\nAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+   },
+   "naive": {
+    "ok": false,
+    "exc": "ValueError"
+   }
+  }
+ ]
+}
