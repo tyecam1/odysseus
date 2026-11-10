@@ -43,6 +43,12 @@ def _launcher(tmp_path, monkeypatch, body):
     return launcher
 
 
+def _json_stdout(result="advice", model_usage=None, is_error=False):
+    response = {"type": "result", "subtype": "success", "is_error": is_error,
+                "result": result, "modelUsage": {"glm-5.3": {}} if model_usage is None else model_usage}
+    return f"print({json.dumps(response)!r})"
+
+
 def test_default_codex_and_explicit_glm_envelope():
     default = RunTaskEnvelope(objective="advise", allow_paid_escalation=True).to_task()
     assert "paid_provider" not in default["routing"]
@@ -242,30 +248,32 @@ def test_glm_dispatch_rechecks_worker_readiness(monkeypatch):
     assert result["error_code"] == "provider_unavailable" and result["executed"] is False
 
 
-def test_glm_exact_stdin_readonly_args_and_model_unverified(tmp_path, monkeypatch, glm_admission):
+def test_glm_exact_stdin_readonly_args_and_attested_model(tmp_path, monkeypatch, glm_admission):
     capture = tmp_path / "stdin"
     args_capture = tmp_path / "args"
     _launcher(tmp_path, monkeypatch,
               "import pathlib, sys\n"
               f"pathlib.Path({str(capture)!r}).write_text(sys.stdin.read())\n"
               f"pathlib.Path({str(args_capture)!r}).write_text(repr(sys.argv[1:]))\n"
-              "print('advice')")
+              + _json_stdout())
     prompt = "A prompt with --flag and quota exhausted quoted text\n"
     result = estate_router.execute_glm(prompt, timeout=2)
     assert result["ok"] is True
     assert capture.read_text() == prompt
     args = ast.literal_eval(args_capture.read_text())
-    assert args[:2] == ["--print", "--tools"]
-    assert args[2].split(",") == ["Read", "Grep", "Glob"]
-    assert args[3] == "--disallowedTools"
-    assert set(args[4].split(",")) == {"Bash", "Write", "Edit", "NotebookEdit", "WebFetch", "WebSearch", "Task", "Skill"}
-    assert not set(args[2].split(",")) & {"Bash", "Write", "Edit", "NotebookEdit"}
-    assert args[5:] == ["--strict-mcp-config", "--bare",
+    assert args[:4] == ["--print", "--output-format", "json", "--tools"]
+    assert args[4].split(",") == ["Read", "Grep", "Glob"]
+    assert args[5] == "--disallowedTools"
+    assert set(args[6].split(",")) == {"Bash", "Write", "Edit", "NotebookEdit", "WebFetch", "WebSearch", "Task", "Skill"}
+    assert not set(args[4].split(",")) & {"Bash", "Write", "Edit", "NotebookEdit"}
+    assert args[7:] == ["--strict-mcp-config", "--bare",
                         "--disable-slash-commands", "--no-session-persistence"]
     assert "--mcp-config" not in args
     assert result["provider"] == "glm" and result["host_id"] == "lab"
-    assert result["exit_code"] == 0 and result["concrete_model"] is None
-    assert result["model_unverified"] is True
+    assert result["exit_code"] == 0 and result["concrete_model"] == "glm-5.3"
+    assert result["output"] == "advice" and result["model_unverified"] is False
+    assert result["model_attestation"] == "provider-usage-response"
+    assert result["model_currency_attested"] is False
     assert glm_admission[-1]["state"] == "completed"
 
 
@@ -278,6 +286,55 @@ def test_glm_empty_prompt_and_missing_launcher(tmp_path, monkeypatch, glm_admiss
     assert missing["executed"] is False
 
 
+@pytest.mark.parametrize("usage,observed", [
+    ({}, []),
+    ({"claude-sonnet": {}}, ["claude-sonnet"]),
+    ({"glm-5.3": {}, "glm-5.2": {}}, ["glm-5.3", "glm-5.2"]),
+])
+def test_glm_model_usage_mismatch_has_no_provider_cooldown(
+        tmp_path, monkeypatch, glm_health_db, usage, observed):
+    _launcher(tmp_path, monkeypatch,
+              "import sys\n" + _json_stdout(model_usage=usage)
+              + "\nprint('quota exceeded', file=sys.stderr)")
+    result = estate_router.execute_glm("Review the patch", timeout=2)
+    assert result["ok"] is False and result["error_code"] == "model_mismatch"
+    assert result["model_unverified"] is True and result["concrete_model"] is None
+    assert result["observed_models"] == observed
+    assert result["model_currency_attested"] is False
+    assert estate_router.provider_allows_dispatch("glm")["allowed"] is True
+    with cdb.get_db_session() as db:
+        rows = db.query(cdb.RoutingDecision).filter_by(executor="glm").all()
+        assert len(rows) == 1 and rows[0].task_class == "provider_attempt"
+
+
+def test_glm_missing_model_usage_fails_closed(tmp_path, monkeypatch, glm_admission):
+    response = {"type": "result", "subtype": "success", "is_error": False, "result": "advice"}
+    _launcher(tmp_path, monkeypatch, f"print({json.dumps(response)!r})")
+    result = estate_router.execute_glm("Review the patch", timeout=2)
+    assert result["error_code"] == "model_mismatch" and result["observed_models"] == []
+
+
+def test_glm_error_result_is_failure(tmp_path, monkeypatch, glm_admission):
+    _launcher(tmp_path, monkeypatch, _json_stdout(is_error=True))
+    result = estate_router.execute_glm("Review the patch", timeout=2)
+    assert result["ok"] is False and result["error_code"] == "nonzero_exit"
+    assert result["model_unverified"] is True
+    assert glm_admission[-1]["state"] == "failed"
+
+
+@pytest.mark.parametrize("stdout", ["not json", json.dumps({"type": "other", "is_error": False, "result": "advice"})])
+def test_glm_bad_output_has_no_provider_cooldown(tmp_path, monkeypatch, glm_health_db, stdout):
+    _launcher(tmp_path, monkeypatch,
+              f"import sys\nprint({stdout!r})\nprint('quota exceeded', file=sys.stderr)")
+    result = estate_router.execute_glm("Review the patch", timeout=2)
+    assert result["ok"] is False and result["error_code"] == "bad_output"
+    assert result["model_unverified"] is True
+    assert estate_router.provider_allows_dispatch("glm")["allowed"] is True
+    with cdb.get_db_session() as db:
+        rows = db.query(cdb.RoutingDecision).filter_by(executor="glm").all()
+        assert len(rows) == 1 and rows[0].task_class == "provider_attempt"
+
+
 @pytest.mark.parametrize("stderr,expected", [
     ("authentication failed", "auth_failed"),
     ("quota exceeded", "quota_exhausted"),
@@ -287,9 +344,9 @@ def test_glm_empty_prompt_and_missing_launcher(tmp_path, monkeypatch, glm_admiss
 def test_glm_nonzero_classifies_only_launcher_stderr(tmp_path, monkeypatch, glm_admission, stderr, expected):
     _launcher(tmp_path, monkeypatch,
               "import sys\n"
-              "print('quota exceeded in echoed prompt')\n"
-              f"print({stderr!r}, file=sys.stderr)\n"
-              "sys.exit(7)")
+              + _json_stdout("quota exceeded in echoed prompt") + "\n"
+              + f"print({stderr!r}, file=sys.stderr)\n"
+              + "sys.exit(7)")
     result = estate_router.execute_glm("sensitive prompt", timeout=2)
     assert result["error_code"] == expected and result["exit_code"] == 7
     assert "sensitive prompt" not in str(result)
@@ -301,8 +358,9 @@ def test_glm_echoed_prompt_cannot_exhaust_quota(tmp_path, monkeypatch, glm_admis
     prompt = "Review this text: quota exhausted"
     _launcher(tmp_path, monkeypatch,
               "import sys\n"
-              "print(sys.stdin.read(), file=sys.stderr)\n"
-              "sys.exit(7)")
+              + _json_stdout() + "\n"
+              + "print(sys.stdin.read(), file=sys.stderr)\n"
+              + "sys.exit(7)")
     result = estate_router.execute_glm(prompt, timeout=2)
     assert result["error_code"] == "nonzero_exit"
     assert glm_admission[-1]["stderr"].strip() == " ".join(["\ue000"] * len(prompt.split()))
@@ -321,8 +379,9 @@ def test_glm_echoed_prompt_cannot_exhaust_quota(tmp_path, monkeypatch, glm_admis
 def test_glm_stderr_removes_prompt_tokens_before_classification(
         tmp_path, monkeypatch, glm_admission, prompt, stderr, expected, retained):
     _launcher(tmp_path, monkeypatch, "import sys\n"
-              f"print({stderr!r}, file=sys.stderr)\n"
-              "sys.exit(7)")
+              + _json_stdout() + "\n"
+              + f"print({stderr!r}, file=sys.stderr)\n"
+              + "sys.exit(7)")
     result = estate_router.execute_glm(prompt, timeout=2)
     assert result["error_code"] == expected
     assert glm_admission[-1]["stderr"] == retained
@@ -335,7 +394,7 @@ def test_glm_stderr_removes_prompt_tokens_before_classification(
 
 def test_scrubbing_cannot_create_quota_marker_or_cooldown(tmp_path, monkeypatch, glm_health_db):
     _launcher(tmp_path, monkeypatch,
-              "import sys\nprint('quota zexceeded', file=sys.stderr)\nsys.exit(7)")
+              "import sys\n" + _json_stdout() + "\nprint('quota zexceeded', file=sys.stderr)\nsys.exit(7)")
     result = estate_router.execute_glm("z", timeout=2)
     assert result["error_code"] == "nonzero_exit" and result["exit_code"] == 7
     health = estate_router.provider_allows_dispatch("glm")
@@ -344,7 +403,7 @@ def test_scrubbing_cannot_create_quota_marker_or_cooldown(tmp_path, monkeypatch,
 
 def test_generic_429_is_not_glm_provider_limit(tmp_path, monkeypatch, glm_health_db):
     _launcher(tmp_path, monkeypatch,
-              "import sys\nprint('MCP tool failed: 429', file=sys.stderr)\nsys.exit(7)")
+              "import sys\n" + _json_stdout() + "\nprint('MCP tool failed: 429', file=sys.stderr)\nsys.exit(7)")
     result = estate_router.execute_glm("Review the patch", timeout=2)
     assert result["error_code"] == "nonzero_exit"
     health = estate_router.provider_allows_dispatch("glm")
@@ -381,7 +440,7 @@ def test_glm_host_local_failure_does_not_cool_provider(
 
 def test_glm_provider_quota_still_cools_provider(tmp_path, monkeypatch, glm_health_db):
     _launcher(tmp_path, monkeypatch,
-              "import sys\nprint('quota exceeded', file=sys.stderr)\nsys.exit(7)")
+              "import sys\n" + _json_stdout() + "\nprint('quota exceeded', file=sys.stderr)\nsys.exit(7)")
     result = estate_router.execute_glm("Review the implementation", timeout=2)
     assert result["error_code"] == "quota_exhausted"
     health = estate_router.provider_allows_dispatch("glm")

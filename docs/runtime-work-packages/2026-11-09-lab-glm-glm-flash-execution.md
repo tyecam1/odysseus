@@ -46,10 +46,10 @@ Run on the lab (`hz2-workstation`) from a worktree containing the qualification 
 
 | Item | Observed |
 |---|---|
-| Prompt | one line asking for the exact string `GLM-PROOF-<epoch>` and nothing else (epoch 1794313009 in the recorded run) |
+| Prompt | one line asking for the exact string `GLM-PROOF-<epoch>` and nothing else (epoch 1794313697 in the final recorded run) |
 | Response | exactly the sentinel (`sentinel_match: True`) |
 | Route | `executor: glm`, `host: hz2-workstation`, alias `code-strong`; reason "local capability was insufficient; glm executed on hz2-workstation read-only" |
-| Execution record | `provider: glm`, `host_id: hz2-workstation`, `exit_code: 0`, `ok: true`, `latency_ms` about 4,000, `concrete_model: null`, **`model_unverified: true`** (the effective model is not attested; the client only reports `glm-5.3`, which is not an attestation) |
+| Execution record | `provider: glm`, `host_id: hz2-workstation`, `exit_code: 0`, `ok: true`, `latency_ms` about 5,300, **`concrete_model: "glm-5.3"`, `model_unverified: false`**. The model is attested from the provider's own usage response (`modelUsage` in the launcher's JSON output must hold exactly one key starting with `glm-`; otherwise the call fails closed with `model_mismatch`). An earlier run before this change recorded `concrete_model: null`, `model_unverified: true`. **Currency is not attested** (`model_currency_attested: false`): the route proves which model answered, not that it is the newest GLM offered; `glm-5.3` is the newest the estate knows of |
 | Backend trace | a decision row for the task (`executor: glm`, `escalation_reason: insufficient_capability`) and a `provider_outcome` row for `glm` with health `ok`, recorded separately from Codex |
 | Provider health before the run | `unknown`, "no recorded outcome; initial attempt permitted", allowed |
 
@@ -57,7 +57,7 @@ Negative controls (same setup, nothing launched; no `claude-glm` process existed
 - `paid_provider: "glm"` with `mode: implementation` and a repository: refused, `error_code: provider_unqualified`, "provider 'glm' has no qualified write route", `executed: false`.
 - `paid_provider: "nonesuch"`: refused, `error_code: unknown_provider`, `executed: false`.
 
-Not shown and still open: the HTTP `/api/estate/run` path after deploy, a Codex-quota-to-GLM failover (phase 4, not implemented), any write route (phase 3), GLM Flash (phase 2), effective-model attestation, and a run through the restarted production service. Rollback: revert the one-line `qualified_executors` change in `config/estate.yaml` and restart `odysseus-aoteru-lab.service`.
+Not shown and still open: the HTTP `/api/estate/run` path after deploy, a Codex-quota-to-GLM failover (phase 4, not implemented), any write route (phase 3), GLM Flash (phase 2), a provider-side assertion that the answering model is the newest offered, and a run through the restarted production service. Rollback: revert the one-line `qualified_executors` change in `config/estate.yaml` and restart `odysseus-aoteru-lab.service`.
 
 ## Open, in order
 

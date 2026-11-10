@@ -59,6 +59,9 @@ _CONFIG_DIR = Path(get_app_root()) / "config"
 
 def _provider_outcome(result: dict, now=None, *, host_tz=None) -> dict:
     """Failure evidence always wins; reset clocks are relative to the outcome."""
+    if result.get("provider") == "glm" and result.get("error_code") in {"bad_output", "model_mismatch"}:
+        return {"state": "unknown", "retry_after": None, "reason": "GLM output could not be verified",
+                "retry_after_assumed": False}
     now = now or datetime.now().astimezone()
     host_tz = host_tz or now.tzinfo
     states = [result[k] for k in ("status", "state", "terminal_state", "lifecycle_state") if result.get(k) is not None]
@@ -1434,7 +1437,8 @@ def execute_glm(objective: str, *, timeout: float = 180.0, cwd: Optional[str] = 
     import time
 
     base = {"provider": "glm", "host_id": current_host_id(),
-            "concrete_model": None, "model_unverified": True, "exit_code": None}
+            "concrete_model": None, "model_unverified": True,
+            "model_currency_attested": False, "exit_code": None}
     if not isinstance(objective, str) or not objective.strip():
         return {**base, "ok": False, "executed": False, "error_code": "nonzero_exit",
                 "error": "GLM objective must be a non-empty string"}
@@ -1456,7 +1460,7 @@ def execute_glm(objective: str, *, timeout: float = 180.0, cwd: Optional[str] = 
             return {**base, "ok": False, "executed": False, "error_code": "launcher_missing",
                     "error": "GLM launcher is missing or not executable"}
         proc = subprocess.Popen(
-            [str(launcher), "--print", "--tools", "Read,Grep,Glob",
+            [str(launcher), "--print", "--output-format", "json", "--tools", "Read,Grep,Glob",
              "--disallowedTools", "Bash,Write,Edit,NotebookEdit,WebFetch,WebSearch,Task,Skill",
              # --bare skips hooks (repository and user), project settings, plugins and CLAUDE.md discovery; MCP is excluded by
              # --strict-mcp-config. Verified live with a hook that writes a file: it runs without --bare and not with it.
@@ -1475,8 +1479,28 @@ def execute_glm(objective: str, *, timeout: float = 180.0, cwd: Optional[str] = 
                    "exit_code": proc.returncode, "stderr": stderr}
         common = {**base, "executed": True, "exit_code": proc.returncode,
                   "latency_ms": int((time.monotonic() - started) * 1000)}
-        if proc.returncode == 0:
-            return {**common, "ok": True, "output": stdout.strip()}
+        try:
+            response = json.loads(stdout)
+        except (TypeError, ValueError):
+            response = None
+        if (not isinstance(response, dict) or response.get("type") != "result"
+                or type(response.get("is_error")) is not bool
+                or not isinstance(response.get("result"), str)):
+            outcome.update(ok=False, state="failed", error_code="bad_output")
+            return {**common, "ok": False, "error_code": "bad_output",
+                    "error": "GLM launcher returned an invalid result object"}
+        if proc.returncode == 0 and not response["is_error"]:
+            usage = response.get("modelUsage")
+            models = list(usage) if isinstance(usage, dict) else []
+            if len(models) != 1 or not isinstance(models[0], str) or not models[0].startswith("glm-"):
+                outcome.update(ok=False, state="failed", error_code="model_mismatch")
+                return {**common, "ok": False, "error_code": "model_mismatch",
+                        "error": "GLM result has no single GLM model attestation",
+                        "observed_models": [str(model)[:80] for model in models[:5]]}
+            return {**common, "ok": True, "output": response["result"],
+                    "concrete_model": models[0], "model_unverified": False,
+                    "model_attestation": "provider-usage-response"}
+        outcome.update(ok=False, state="failed")
         if re.search(r"usage limit|quota (?:exhausted|exceeded)|insufficient_quota", stderr, re.I):
             code = "quota_exhausted"
         elif re.search(r"unauthorized|authentication|invalid.api.key|not logged in|login required|\b401\b", stderr, re.I):
@@ -1485,7 +1509,9 @@ def execute_glm(objective: str, *, timeout: float = 180.0, cwd: Optional[str] = 
             code = "rate_limited"
         else:
             code = "nonzero_exit"
-        return {**common, "ok": False, "error_code": code, "error": f"GLM launcher exited {proc.returncode}"}
+        outcome["error_code"] = code
+        error = "GLM launcher returned an error result" if proc.returncode == 0 else f"GLM launcher exited {proc.returncode}"
+        return {**common, "ok": False, "error_code": code, "error": error}
     except subprocess.TimeoutExpired:
         cleanup = _kill_process_tree(proc.pid, proc.pid)
         try:
