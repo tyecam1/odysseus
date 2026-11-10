@@ -1,6 +1,6 @@
-# Lab GLM and GLM Flash execution: partial evidence (steps 1-2 only)
+# Lab GLM and GLM Flash execution: partial evidence (phase 1 implemented, not qualified)
 
-Task: `2026-11-09-qualify-glm-and-glm-flash-on-lab-odysseus`. Status of this document: **partial**. Only reconciliation and the host-local launcher smoke test were done. No backend integration, no `/api/estate/run` proof, no write-mode proof and no Flash qualification exist yet; the task stays unfinished.
+Task: `2026-11-09-qualify-glm-and-glm-flash-on-lab-odysseus`. Status of this document: **partial**. Reconciliation and the launcher smoke test came first. Since then phase 1 (explicit read-only GLM, #261) was merged and deployed, and this change adds effective-model attestation, failure classification from provider evidence and an in-process real-path proof (see below). **No host is qualified for GLM** (a policy blocker is recorded below), there is no HTTP-level `/api/estate/run` proof, no write-mode route and no Flash qualification; the task stays unfinished. The sections below this status line are written in the order they were produced; where they say that no code exists they describe the state at that time.
 
 ## Reconciliation (read-only, 2026-11-09, lab `hz2-workstation`, `dev` at `6a67f639`)
 
@@ -73,4 +73,4 @@ To unblock: either (a) a tested provider-specific latest resolver (for example a
 
 ## Rollback
 
-None needed: no code, configuration or service was changed.
+For the reconciliation and smoke-test steps nothing was changed. For the code in #261 and this change: revert the merge and, if deployed, restart `odysseus-aoteru-lab.service`; since no host lists `glm` in `qualified_executors`, an explicit GLM request is refused with `provider_unqualified` and no GLM process can be launched through the backend.
