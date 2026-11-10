@@ -1,6 +1,6 @@
 # Lab GLM and GLM Flash execution: partial evidence (phase 1 implemented, not qualified)
 
-Task: `2026-11-09-qualify-glm-and-glm-flash-on-lab-odysseus`. Status of this document: **partial**. Reconciliation and the launcher smoke test came first. Since then phase 1 (explicit read-only GLM, #261) was merged and deployed, and this change adds effective-model attestation, failure classification from provider evidence and an in-process real-path proof (see below). **No host is qualified for GLM** (a policy blocker is recorded below), there is no HTTP-level `/api/estate/run` proof, no write-mode route and no Flash qualification; the task stays unfinished. The sections below this status line are written in the order they were produced; where they say that no code exists they describe the state at that time.
+Task: `2026-11-09-qualify-glm-and-glm-flash-on-lab-odysseus`. Status of this document: **partial**. Reconciliation and the launcher smoke test came first. Since then phase 1 (explicit read-only GLM, #261) was merged and deployed, and this change adds effective-model attestation, failure classification from provider evidence and an in-process real-path proof (see below). **No host is qualified for GLM** (a policy blocker is recorded below), there is only a negative HTTP-level `/api/estate/run` proof (the explicit route is refused while no host is qualified) and **no positive qualified-route proof**, no write-mode route and no Flash qualification; the task stays unfinished. The sections below this status line are written in the order they were produced; where they say that no code exists they describe the state at that time.
 
 ## Reconciliation (read-only, 2026-11-09, lab `hz2-workstation`, `dev` at `6a67f639`)
 
@@ -57,7 +57,7 @@ Negative controls (same setup, nothing launched; no `claude-glm` process existed
 - `paid_provider: "glm"` with `mode: implementation` and a repository: refused, `error_code: provider_unqualified`, "provider 'glm' has no qualified write route", `executed: false`.
 - `paid_provider: "nonesuch"`: refused, `error_code: unknown_provider`, `executed: false`.
 
-Not shown and still open: the HTTP `/api/estate/run` path after deploy, a Codex-quota-to-GLM failover (phase 4, not implemented), any write route (phase 3), GLM Flash (phase 2), a provider-side assertion that the answering model is the newest offered, and a run through the restarted production service. 
+Not shown and still open: a positive HTTP `/api/estate/run` run through a qualified route, a Codex-quota-to-GLM failover (phase 4, not implemented), any write route (phase 3), GLM Flash (phase 2), a provider-side assertion that the answering model is the newest offered, and a run through the restarted production service. 
 
 ## HTTP-level check after deploy (2026-11-10, production service restarted at `c3213368`)
 
@@ -66,7 +66,7 @@ Through the live `/api/estate/run` using the merged client (`am ask --capability
 - `--paid-provider nonesuch`: `ok: false`, `executed: false`, `error_code: unknown_provider`.
 - No `claude-glm` process existed on the lab afterwards; no GLM call was made. Health was 200 after the restart and no park lease was active. Rollback target for this deploy: `ab37d4c9`.
 
-This is a **negative** HTTP proof (the explicit route is refused while no host is qualified). A positive HTTP proof remains blocked by the currency policy gate above.
+This is a **negative** HTTP proof (the explicit route is refused while no host is qualified). A positive HTTP proof remains blocked by the currency policy gate below.
 
 ## Qualification withheld: currency policy gate (precise blocker)
 
