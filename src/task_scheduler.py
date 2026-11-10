@@ -354,6 +354,10 @@ class TaskScheduler:
         self._instagram_import_next_monotonic = 0.0
         self._instagram_import_in_flight = False
         self._instagram_import_task = None
+        self._instagram_export_registration = None
+        self._instagram_export_next_monotonic = 0.0
+        self._instagram_export_in_flight = False
+        self._instagram_export_task = None
 
     def _set_run_progress(self, run_id: str, message: str):
         """Persist short live progress text for Activity while a run is active."""
@@ -540,10 +544,15 @@ class TaskScheduler:
 
         self._running = True
         from src.instagram_import_job import instagram_import_job_registration
+        from src.instagram_export_job import instagram_export_job_registration
         self._instagram_import_registration = instagram_import_job_registration()
         self._instagram_import_next_monotonic = 0.0
         self._instagram_import_in_flight = False
         self._instagram_import_task = None
+        self._instagram_export_registration = instagram_export_job_registration()
+        self._instagram_export_next_monotonic = 0.0
+        self._instagram_export_in_flight = False
+        self._instagram_export_task = None
         self._task = asyncio.create_task(self._loop())
         # Internal background scanner that isn't a user-facing "task" — pure
         # infra (no LLM), shouldn't clutter the Tasks UI, fires on its own
@@ -642,6 +651,94 @@ class TaskScheduler:
         except Exception:
             logger.exception("Infrastructure job %s failed", job_id)
 
+    async def _run_instagram_export_if_due(self):
+        """Start the weekly policy-gated acquisition job off the event loop."""
+        registration = self._instagram_export_registration
+        if not registration or time.monotonic() < self._instagram_export_next_monotonic:
+            return
+        self._instagram_export_next_monotonic = (
+            time.monotonic() + registration["interval_seconds"]
+        )
+        if self._instagram_export_in_flight:
+            logger.info(
+                "Infrastructure job %s skipped: previous run still in flight",
+                registration["id"],
+            )
+            return
+
+        self._instagram_export_in_flight = True
+        task = asyncio.create_task(asyncio.to_thread(
+            registration["runner"],
+            registration["state_path"],
+            registration["exports_dir"],
+            registration["profile_dir"],
+        ))
+        self._instagram_export_task = task
+        task.add_done_callback(self._instagram_export_done)
+
+    def _instagram_export_done(self, task: asyncio.Task) -> None:
+        """Consume an acquisition result and release the overlap guard."""
+        if task is self._instagram_export_task:
+            self._instagram_export_task = None
+            self._instagram_export_in_flight = False
+        registration = self._instagram_export_registration or {}
+        job_id = registration.get("id", "instagram_saved_export")
+        if task.cancelled():
+            return
+        try:
+            state = task.result()
+            state_name = state.get("state")
+            if state_name == "transient_failure" and not state.get("retry_exhausted"):
+                retry_at = state.get("next_retry_at")
+                try:
+                    due = datetime.fromisoformat(str(retry_at).replace("Z", "+00:00"))
+                    delay = max(
+                        0.0,
+                        (due - datetime.now(timezone.utc)).total_seconds(),
+                    )
+                except (TypeError, ValueError):
+                    delay = registration.get("pending_poll_interval_seconds", 15 * 60)
+                self._instagram_export_next_monotonic = time.monotonic() + delay
+            elif state_name == "complete":
+                # Honour the persisted weekly deadline across restarts: a
+                # completed cycle must re-arm at its recorded
+                # next_scheduled_at, not a fresh full interval from now.
+                try:
+                    due = datetime.fromisoformat(
+                        str(state.get("next_scheduled_at")).replace("Z", "+00:00")
+                    )
+                    self._instagram_export_next_monotonic = time.monotonic() + max(
+                        0.0, (due - datetime.now(timezone.utc)).total_seconds()
+                    )
+                except (TypeError, ValueError):
+                    pass
+            elif state_name in {
+                "awaiting_email", "downloading", "validating", "needs_operator_auth"
+            }:
+                # The creation cadence remains weekly, but a pending cycle must
+                # observe delayed email, auth acknowledgement, or retry deadlines
+                # without waiting a week. An unacknowledged auth state performs
+                # no browser work when polled.
+                self._instagram_export_next_monotonic = (
+                    time.monotonic()
+                    + registration.get("pending_poll_interval_seconds", 15 * 60)
+                )
+            summary = {
+                key: state[key]
+                for key in (
+                    "state", "cycle_id", "updated_at", "retry_count",
+                    "retry_exhausted", "completed_at", "result",
+                )
+                if key in state
+            }
+            logger.info(
+                "Infrastructure job %s completed: %s",
+                job_id,
+                json.dumps(summary, sort_keys=True),
+            )
+        except Exception:
+            logger.exception("Infrastructure job %s failed", job_id)
+
     async def _note_pings_loop(self):
         """Built-in note-due scanner — ticks every 60s inside the scheduler.
         Pure infra (no LLM), doesn't surface in the Tasks UI. Iterates
@@ -715,6 +812,7 @@ class TaskScheduler:
         await asyncio.sleep(10)
         while self._running:
             try:
+                await self._run_instagram_export_if_due()
                 await self._run_instagram_import_if_due()
                 await self._check_due_tasks()
             except Exception:

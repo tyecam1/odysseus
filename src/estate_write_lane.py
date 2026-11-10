@@ -18,7 +18,7 @@ import logging
 import threading
 import time
 import uuid
-from datetime import timedelta
+from datetime import timedelta, timezone
 from typing import Any, Optional
 
 from src import park_lease_ops
@@ -130,6 +130,10 @@ def _transition(execution_id: str, from_states: tuple, **fields) -> bool:
     from core.database import EstateExecution, get_db_session
     assert "worktree_resolution" not in fields
     with get_db_session() as db:
+        if fields.get("result_json") is not None:
+            result = json.loads(fields["result_json"])
+            result["provider_health"] = _router._provider_outcome(result)
+            fields["result_json"] = json.dumps(result)
         updated = db.query(EstateExecution).filter(
             EstateExecution.id == execution_id,
             EstateExecution.lifecycle_state.in_(from_states),
@@ -160,6 +164,7 @@ def _record_outcome(row, state: str, host_id: str, result: Optional[dict] = None
         escalation_reason="insufficient_capability" if gate == "pass" else "worker_failed",
         executor="codex-write", escalated=True, actual_route="codex-write",
         verification_outcome=gate, executed_host_id=host_id,
+        concrete_model=(result or {}).get("concrete_model"),
     )
 
 
@@ -216,6 +221,7 @@ def _admission_outcome(blocker) -> dict:
 
 def execute_write_via_worker(objective: str, *, repo_id: str, host_id: str,
                              decision_id: Optional[str] = None,
+                             subject=None, head_sha=None, function=None,
                              wait_timeout: float = 30.0, timeout: float = 1800.0) -> dict:
     from sqlalchemy.exc import IntegrityError
     from core.database import EstateExecution, ParkLease, lease_serialized_transaction
@@ -291,6 +297,17 @@ def execute_write_via_worker(objective: str, *, repo_id: str, host_id: str,
                 admission_head_sha=admission_head, submitted_at=now,
             ))
             db.flush()
+            # The execution is still uncommitted: no start/recovery/outcome writer can race this suffix.
+            if decision_id:
+                try:
+                    with db.begin_nested():
+                        suffix = _router._call_suffix({"subject": subject, "head_sha": head_sha, "function": function}, {
+                            "v": 1, "started_at": now.replace(tzinfo=timezone.utc).isoformat(),
+                            "submitted": True, "execution_id": execution_id})
+                        if suffix is not None:
+                            _router._attach_call_suffix(db, decision_id, suffix)
+                except Exception:
+                    log.exception("submission telemetry failed; execution is unaffected")
     except _Refusal as refusal:
         return {"ok": False, "provider": "codex-write", "authority_denied": refusal.code == "write_lease_missing",
                 "error_code": refusal.code, "error": str(refusal), **refusal.extra}
