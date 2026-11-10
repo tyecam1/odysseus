@@ -332,6 +332,8 @@ def _verb_health(payload: dict) -> dict:
         raise WorkerError("bad_request", "health payload must be empty")
     reachable, _models, ollama_error = _ollama_inventory()
     codex_available, codex_detail = estate_router._codex_available()
+    glm_launcher = estate_router._glm_launcher_path()
+    glm_available = glm_launcher.is_file() and os.access(glm_launcher, os.X_OK)
     gpu_active, gpu_reason = estate_router.experiment_priority_active()
     # Raw GPU readings only, and only on a host whose registry entry opts in (worker.gpu_admission); the
     # router classifies them. No block -> no sampling cost and no behaviour change.
@@ -340,6 +342,8 @@ def _verb_health(payload: dict) -> dict:
     return {
         "ollama": {"reachable": reachable, "base_url": _OLLAMA_BASE, "error": ollama_error},
         "codex": {"available": codex_available, "detail": codex_detail},
+        "glm": {"available": glm_available,
+                "detail": "launcher present" if glm_available else "launcher missing or not executable"},
         "gpu_yield": {"active": gpu_active, "reason": gpu_reason},
         "gpu_load": gpu_load,
         "in_flight": _in_flight_execution_ids(),
@@ -393,6 +397,8 @@ def _verb_inventory(payload: dict) -> dict:
             length, known = 0, False
         context[model] = {"length": length, "known": known}
     codex_available, _detail = estate_router._codex_available()
+    glm_launcher = estate_router._glm_launcher_path()
+    glm_available = glm_launcher.is_file() and os.access(glm_launcher, os.X_OK)
     registry = estate_router._load_yaml("repositories")
     repos = []
     for entry in registry.get("repos", []):
@@ -413,6 +419,7 @@ def _verb_inventory(payload: dict) -> dict:
             "deterministic": True,
             "local": reachable,
             "codex": codex_available,
+            "glm": glm_available,
             "codex-write": codex_available and _detached_spawn_verified() and _write_prerequisites_ok(),
         },
         "repos": repos,
@@ -469,6 +476,23 @@ def _verb_execute(payload: dict) -> dict:
         result.setdefault("concrete_model", "codex-cli")
         result.setdefault("retries", 0)
         return result
+    if kind == "glm-readonly":
+        if not isinstance(objective, str):
+            raise WorkerError("bad_request", "glm-readonly objective must be a string")
+        host_id = estate_router.current_host_id()
+        host = next((entry for entry in estate_router._load_yaml("estate").get("hosts", [])
+                     if entry.get("id") == host_id), None)
+        if "glm" not in (estate_router.host_static_state(host)["qualified_executors"] if host else []):
+            raise WorkerError("executor_unqualified", f"executor 'glm' not qualified on {host_id!r}")
+        repo_id = payload.get("repo_id")
+        cwd = None
+        if repo_id is not None:
+            if not isinstance(repo_id, str) or not repo_id:
+                raise WorkerError("bad_request", "repo_id must be a non-empty string")
+            cwd = estate_router.resolve_repo_path(repo_id)
+            if cwd is None:
+                raise WorkerError("repo_unavailable", f"repo {repo_id!r} does not resolve on this worker")
+        return estate_router.execute_glm(objective, timeout=timeout_s, cwd=cwd)
     raise WorkerError("bad_request", f"unsupported execute kind {kind!r}")
 
 

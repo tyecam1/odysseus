@@ -21,6 +21,13 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/mcp", tags=["mcp"])
 
 
+def _refuse_stdio_when_isolated(transport, command) -> None:
+    """A stdio MCP server is an arbitrary executable: refused while deployment isolation is required."""
+    from src import deployment_isolation
+    if (command or (transport or "") == "stdio") and deployment_isolation.shell_blocked():
+        raise HTTPException(403, "Stdio MCP servers are disabled for this isolated deployment")
+
+
 def _mcp_oauth_base_dir() -> Path:
     """Directory that may contain OAuth files managed by Odysseus."""
     return Path(MCP_OAUTH_DIR).resolve(strict=False)
@@ -171,6 +178,7 @@ def setup_mcp_routes(mcp_manager: McpManager):
         registering a stdio server is equivalent to executing arbitrary
         binaries on the host."""
         require_admin(request)
+        _refuse_stdio_when_isolated(transport, command)
         server_id = str(uuid.uuid4())[:8]
 
         # Validate

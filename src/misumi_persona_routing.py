@@ -60,6 +60,9 @@ def _keyword_present(text: str, keyword: str) -> bool:
     ) is not None
 
 
+_PERSONAS_CACHE: dict[str, tuple[tuple[str, int, int], Any]] = {}
+
+
 def load_personas(root: str | os.PathLike[str] | None = None) -> Mapping[str, Any] | None:
     """Load ``config/personas.yaml`` from the canonical seed root (or ``root``)."""
     if yaml is None:
@@ -73,7 +76,14 @@ def load_personas(root: str | os.PathLike[str] | None = None) -> Mapping[str, An
             path.relative_to(resolved)
         except ValueError:
             return None
-        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+        stat = path.stat()
+        signature = (str(path), stat.st_mtime_ns, stat.st_size)
+        cached = _PERSONAS_CACHE.get(str(path))
+        if cached is not None and cached[0] == signature:
+            raw = cached[1]  # round 10: parsed once per file version, not on every auto turn
+        else:
+            raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+            _PERSONAS_CACHE[str(path)] = (signature, raw)
     except Exception as exc:
         logger.debug("Misumi routing manifest unavailable: %s", exc, exc_info=True)
         return None

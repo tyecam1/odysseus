@@ -119,6 +119,20 @@ def builtin_python_env(base_dir: str) -> dict[str, str]:
     return {"PYTHONPATH": os.pathsep.join(parts)}
 
 
+def is_trusted_builtin_launch(server_id: str, command, args) -> bool:
+    """True only for the exact launch the application makes for one of its own built-in servers. A saved row that
+    merely has a built-in-looking id (or prefix) but a different executable or script is NOT trusted."""
+    args = [str(a) for a in (args or [])]
+    if server_id in _BUILTIN_SERVERS:
+        script = os.path.join(get_app_root(), _BUILTIN_SERVERS[server_id][0])
+        return (command == sys.executable and len(args) == 1
+                and os.path.normcase(os.path.realpath(args[0])) == os.path.normcase(os.path.realpath(script)))
+    cfg = _BUILTIN_NPX_SERVERS.get(server_id)
+    if cfg is None:
+        return False
+    return str(command or "") == str(_find_npx()) and args == list(cfg["args"])
+
+
 async def register_builtin_servers(mcp_manager):
     """Connect all built-in MCP servers to the manager."""
     if MCP_DISABLED:

@@ -31,14 +31,20 @@ import json
 import re
 import socket
 import uuid
+from dataclasses import asdict, replace
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
 import yaml
 
+from src.subscription_model_policy import (
+    SubscriptionModelError, resolve_latest_codex_model, subscription_effort,
+)
 from src.runtime_paths import get_app_root
 from src.park_lease_ops import active_lease_for_repo
 from src import worktree_ops
+from src import sol_packet_compiler as _packets
 from src import estate_worker_procs as _estate_worker_procs
 from src.estate_worker_procs import (
     _kill_process_tree as _worker_kill_process_tree,
@@ -49,6 +55,156 @@ from src.estate_worker_procs import (
 )
 
 _CONFIG_DIR = Path(get_app_root()) / "config"
+
+
+def _provider_outcome(result: dict, now=None, *, host_tz=None) -> dict:
+    """Failure evidence always wins; reset clocks are relative to the outcome."""
+    now = now or datetime.now().astimezone()
+    host_tz = host_tz or now.tzinfo
+    states = [result[k] for k in ("status", "state", "terminal_state", "lifecycle_state") if result.get(k) is not None]
+    exits = [result[k] for k in ("exit_code", "exit_status", "returncode") if result.get(k) is not None]
+    if (result.get("ok") is True and not result.get("error") and not result.get("evidence_truncated") and exits and states
+            and all(type(code) in (int, str) and code in (0, "0") for code in exits)
+            and all(s in {"complete", "completed", "succeeded"} for s in states)):
+        # Structural success is decided before any text is read: a long transcript that quotes "# noqa: F401", "timeout"
+        # or an old error line must never turn a clean run into a failure. Text only explains runs that did not succeed.
+        return {"state": "ok", "retry_after": None, "reason": "no provider error", "retry_after_assumed": False}
+    text = "\n".join(str(result.get(k) or "") for k in ("error", "output", "stdout", "stderr"))
+    text = (text + "\n" + "\n".join(map(str, states))).lower().replace("’", "'")
+    now = now.replace(tzinfo=host_tz) if now.tzinfo is None else now.astimezone(host_tz)
+    retry = now + timedelta(minutes=15)
+    if re.search(r"usage limit|quota (?:exhausted|exceeded)|insufficient_quota", text):
+        reason = "provider usage limit; retry_after_assumed"
+        reset = text.partition("try again at")[2]
+        clock = re.search(r"(?<!\d)(\d{1,2}:\d{2})\s*(am|pm)?\b", reset)
+        if clock:
+            try:
+                stamp = datetime.strptime("".join(clock.groups(default="")),
+                                          "%I:%M%p" if clock[2] else "%H:%M")
+                cleaned = re.sub(r"(\d)(st|nd|rd|th)\b", r"\1", reset).replace(",", "")
+                date = re.search(r"\d{4}-\d{2}-\d{2}|(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]* \d{1,2}(?: \d{4})?", cleaned)
+                day = now
+                if " on " in cleaned and date is None:
+                    raise ValueError("unparseable reset date")
+                if date:
+                    for fmt in ("%Y-%m-%d", "%b %d %Y", "%B %d %Y", "%b %d", "%B %d"):
+                        try:
+                            day = datetime.strptime(date[0], fmt)
+                            if "%Y" not in fmt:
+                                day = day.replace(year=now.year)
+                            break
+                        except ValueError:
+                            continue
+                    else:
+                        raise ValueError("unparseable reset date")
+                retry = now.replace(year=day.year, month=day.month, day=day.day,
+                                    hour=stamp.hour, minute=stamp.minute, second=0, microsecond=0)
+                if retry <= now:
+                    retry = now.replace(hour=stamp.hour, minute=stamp.minute, second=0,
+                                        microsecond=0) + timedelta(days=1)
+                reason = "provider usage limit; host wall-clock reset"
+            except ValueError:
+                pass
+        state = "quota_exhausted"
+    elif re.search(r"unauthorized|authentication|invalid.api.key|not logged in|login required|\b401\b", text):
+        state, reason = "auth_failed", "provider authentication failed"
+    elif result.get("provider") == "glm" and (re.search(r"rate.limit|too many requests", text)
+            or _glm_contextual_429(str(result.get("stderr") or ""))):
+        state, reason = "rate_limited", "provider rate limited"
+    elif result.get("provider") == "glm" and result.get("error_code") in {"launcher_missing", "timeout"}:
+        state, reason = "unreachable", "GLM launcher unavailable or timed out"
+    elif re.search(r"unreachable|connection|timed out|timeout|dns|network", text):
+        state, reason = "unreachable", "provider transport unavailable"
+    else:
+        state, reason, retry = "unknown", "unclassified provider outcome", None
+    return {"state": state, "retry_after": min(retry, now + timedelta(days=7)).astimezone(timezone.utc).isoformat() if retry else None,
+            "reason": reason, "retry_after_assumed": "retry_after_assumed" in reason}
+
+
+def _glm_contextual_429(stderr: str) -> bool:
+    return any(re.search(r"\b429\b", line) and
+               re.search(r"rate.limit|too many requests|usage limit|quota", line, re.I)
+               for line in stderr.splitlines())
+
+
+def provider_allows_dispatch(provider: str, *, now: Optional[datetime] = None,
+                             launch_timeout: Optional[float] = None) -> dict:
+    """Read health; launch admission atomically reserves one provider attempt."""
+    from core.database import RoutingDecision, get_db_session
+    from sqlalchemy import text
+    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    health = {"state": "unknown", "retry_after": None, "reason": "no recorded outcome; initial attempt permitted"}
+    outcome_id = None
+    try:
+        with get_db_session() as db:
+            if launch_timeout is not None:
+                # Serialize even an empty history, before reading admission.
+                if db.get_bind().dialect.name == "sqlite":
+                    db.execute(text("BEGIN IMMEDIATE"))
+                elif db.get_bind().dialect.name == "postgresql":
+                    db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:scope))"),
+                               {"scope": "provider_outcome:" + provider})
+                else:
+                    raise ValueError("unsupported admission database")
+            row = db.query(RoutingDecision).filter_by(
+                executor=provider, task_class="provider_outcome",
+            ).order_by(RoutingDecision.created_at.desc(), RoutingDecision.id.desc()).first()
+            allowed = row is None
+            if row is not None:
+                health = json.loads(row.escalation_reason)["provider_health"]
+                state, retry = health["state"], health["retry_after"]
+                if not isinstance(health["reason"], str) or type(health["retry_after_assumed"]) is not bool:
+                    raise ValueError("incomplete stored provider health")
+                reset = datetime.fromisoformat(retry) if retry else None
+                if (state not in {"launching", "ok", "unknown", "quota_exhausted", "auth_failed", "rate_limited", "unreachable"}
+                        or (reset is not None and reset.tzinfo is None)):
+                    raise ValueError("invalid stored provider health")
+                allowed = state == "ok" or (state != "unknown" and reset is not None and now >= reset)
+                if state == "launching":
+                    launched_at = datetime.fromisoformat(health["launched_at"])
+                    if launched_at.tzinfo is None or reset is None or reset <= launched_at:
+                        raise ValueError("invalid launch marker")
+                    health = {**health, "state": "unknown", "reason": "launch outcome not recorded"}
+            if allowed and launch_timeout is not None:
+                outcome_id = str(uuid.uuid4())
+                launch_health = {"state": "launching", "launched_at": now.isoformat(),
+                    "retry_after": (now + timedelta(seconds=launch_timeout, minutes=15)).isoformat(),
+                    "reason": "launch outcome not recorded", "retry_after_assumed": False}
+                # Preserve latest-row ordering even within one clock tick.
+                created_at = max(now.replace(tzinfo=None), row.created_at + timedelta(microseconds=1)) if row else now.replace(tzinfo=None)
+                db.add(RoutingDecision(id=outcome_id, task_class="provider_outcome",
+                    host_id=socket.gethostname(), executor=provider, status="launching",
+                    created_at=created_at, escalation_reason=json.dumps({"provider_health": launch_health})))
+    except Exception:
+        health = {"state": "unknown", "retry_after": None,
+                  "reason": "latest outcome unreadable or unparseable; launch intent not committed"}
+        allowed = False
+    return {**health, "provider": provider, "allowed": allowed,
+            **({"outcome_id": outcome_id} if allowed and outcome_id else {}),
+            "reason": f"provider {provider}: {health['state']}: {health['reason']}"}
+
+
+def _record_provider_outcome(result: dict, outcome_id: str) -> Optional[str]:
+    """Finalize the launch marker; GLM host-local failures remain attempt-only."""
+    from core.database import RoutingDecision, get_db_session
+    health = _provider_outcome(result)
+    try:
+        with get_db_session() as db:
+            row = db.query(RoutingDecision).filter_by(id=outcome_id, task_class="provider_outcome").one()
+            health["launched_at"] = json.loads(row.escalation_reason)["provider_health"]["launched_at"]
+            row.status = "complete" if health["state"] == "ok" else "failed"
+            if result.get("provider") == "glm" and health["state"] not in {
+                    "ok", "quota_exhausted", "rate_limited", "auth_failed"}:
+                health["retry_after"] = None
+                row.task_class = "provider_attempt"
+                row.escalation_reason = json.dumps({"attempt_outcome": health,
+                                                    "error_code": result.get("error_code")})
+            else:
+                row.escalation_reason = json.dumps({"provider_health": health})
+        return outcome_id
+    except Exception:
+        import logging
+        logging.getLogger(__name__).exception("provider outcome update failed; launch marker retained: %s", outcome_id)
 
 
 class RoutingConfigError(RuntimeError):
@@ -122,6 +278,17 @@ _HOST_LOCAL_ROOT_VAR_RE = re.compile(r"\$\{(\w+)\}")
 
 
 def resolve_repo_path(repo_id: str) -> Optional[str]:
+    """Resolve a repo id on THIS host, refusing a path outside the deployment when isolation is required."""
+    from src import deployment_isolation
+    path = _resolve_repo_path_unconfined(repo_id)
+    if path is not None and not deployment_isolation.path_allowed(path):
+        import logging
+        logging.getLogger(__name__).warning("Isolation refused repo %r: resolves outside this deployment", repo_id)
+        return None
+    return path
+
+
+def _resolve_repo_path_unconfined(repo_id: str) -> Optional[str]:
     """Resolve a `config/repositories.yaml` repo id to a real, existing
     filesystem path on THIS host, using the same `${ROOT_VAR}/...`
     template + `~/.aoteru/config.local.json` root-var convention
@@ -569,7 +736,7 @@ _UNVERIFIABLE_BUDGET_FIELDS = (
 )
 
 
-def _select_host(eligible: list[dict], capabilities: list[str]) -> tuple[dict, list[dict], str]:
+def _select_host(eligible: list[dict], capabilities: list[str], *, paid_provider: Optional[str] = None) -> tuple[Optional[dict], list[dict], str]:
     """Stage 5's host+model selection (plan §E, Stage 5, replacing the old
     `host = eligible[0]`). `eligible` is already in `config/estate.yaml`
     order (`eligible_hosts()` preserves file order), so "first host that
@@ -584,15 +751,16 @@ def _select_host(eligible: list[dict], capabilities: list[str]) -> tuple[dict, l
        requested alias actually resolves *on that host* (model present,
        gpu_yield clear) — real per-host truth, not lab's own Ollama used
        as a proxy for every host (D5);
-    2. the first host with `codex` qualified and a live, worker-attested
-       `health.codex.available` — a paid-escalation candidate, decided by
+    2. the first host with the requested paid provider qualified and a live,
+       worker-attested provider readiness result — a paid-escalation candidate, decided by
        the caller opting in later, not automatic;
     3. failing both, the first eligible host with `needs_escalation` — the
        paid lane then fails `executor_unavailable` truthfully rather than
        this function inventing a placement.
 
     Returns `(host, capability_resolutions, executor)`. `executor` is one
-    of `deterministic` / `local` / `none` — `resolve_route` decides the
+    of `deterministic` / `local` / `none`; an explicit GLM request returns
+    no host when every qualified host reports GLM unavailable. `resolve_route` decides the
     final recorded status (a `local` candidate can still be downgraded to
     `needs_escalation` by a quality-floor/context failure `resolve_alias`
     itself can't see)."""
@@ -611,14 +779,17 @@ def _select_host(eligible: list[dict], capabilities: list[str]) -> tuple[dict, l
     # the single-host messaging this replaced (still real evidence, just
     # not necessarily every candidate's).
     from src.estate_worker_client import WorkerTransportError, worker_health
+    provider_qualified = False
     for host in eligible:
-        if "codex" not in (host.get("qualified_executors") or []):
+        provider = paid_provider or "codex"
+        if provider not in (host.get("qualified_executors") or []):
             continue
+        provider_qualified = True
         try:
             health = worker_health(host["host_id"])
         except WorkerTransportError:
             continue
-        if (health.get("codex") or {}).get("available"):
+        if (health.get(provider) or {}).get("available"):
             # capability_resolutions must describe *this* host, not
             # whichever host happened to be eligible[0] -- a route whose
             # route.host is this host must never carry alias/capability
@@ -626,6 +797,9 @@ def _select_host(eligible: list[dict], capabilities: list[str]) -> tuple[dict, l
             # finding).
             resolutions = [resolve_alias(alias, host["host_id"]) for alias in capabilities]
             return host, resolutions, "none"
+
+    if paid_provider == "glm" and provider_qualified:
+        return None, [], "none"
 
     # No host resolved every alias locally and no codex-qualified host is
     # healthy either -- capability_resolutions for the response/telemetry
@@ -678,6 +852,12 @@ def resolve_route(task: dict, *, record_decision: bool = True) -> dict:
     and ignored rather than rejected, so callers can send the real
     envelope now without this module needing to understand every field.
     """
+    explicit_provider = (task.get("routing") or {}).get("paid_provider")
+    if explicit_provider is not None:
+        choice = _resolve_paid_provider(None, explicit_provider=explicit_provider)
+        if choice.get("provider") is None:
+            return {"ok": False, "executed": False, "error_code": "unknown_provider",
+                    "error": choice["reason"], "reason": choice["reason"], "decision_id": None}
     repo_id = task.get("repo")
     hosts = eligible_hosts(repo_id)
     eligible = [h for h in hosts if h["eligible"]]
@@ -717,7 +897,18 @@ def resolve_route(task: dict, *, record_decision: bool = True) -> dict:
         }
 
     capabilities = (task.get("requirements") or {}).get("capabilities") or []
-    host, capability_resolutions, candidate_executor = _select_host(eligible, capabilities)
+    host, capability_resolutions, candidate_executor = (
+        _select_host(eligible, capabilities) if explicit_provider is None else
+        _select_host(eligible, capabilities, paid_provider=explicit_provider))
+    if host is None:
+        reason = "GLM is unavailable on every qualified eligible host"
+        decision_id = _record_decision(
+            task, host_id=None, executor="none", model_alias=None,
+            concrete_model=None, status="blocked",
+        ) if record_decision else None
+        return {"ok": False, "executed": False, "error_code": "provider_unavailable",
+                "error": reason, "reason": reason, "hosts_checked": hosts,
+                "decision_id": decision_id}
     alias = capabilities[0] if capabilities else None
     alias_result = capability_resolutions[0] if capability_resolutions else {
         "resolved": False, "reason": "no capability requested",
@@ -768,6 +959,16 @@ def resolve_route(task: dict, *, record_decision: bool = True) -> dict:
     else:
         executor, status = "none", "needs_escalation"
 
+    if executor == "none" and explicit_provider is not None and explicit_provider not in (host.get("qualified_executors") or []):
+        reason = f"paid provider {explicit_provider!r} is not qualified on {host['host_id']!r}"
+        decision_id = _record_decision(
+            task, host_id=host["host_id"], executor="none", model_alias=None,
+            concrete_model=None, status="blocked",
+        ) if record_decision else None
+        return {"ok": False, "executed": False, "error_code": "provider_unqualified",
+                "error": reason, "reason": reason, "hosts_checked": hosts,
+                "decision_id": decision_id}
+
     decision_id = _record_decision(
         task, host_id=host["host_id"], executor=executor, model_alias=alias,
         concrete_model=alias_result.get("concrete_model"), status=status,
@@ -808,9 +1009,89 @@ def resolve_route(task: dict, *, record_decision: bool = True) -> dict:
         result["context_error"] = context_error
     if context_note:
         result["context_note"] = context_note
+    if executor == "none":
+        choice = (_resolve_paid_provider(alias) if explicit_provider is None else
+                  _resolve_paid_provider(alias, explicit_provider=explicit_provider))
+        result["provider_health"] = provider_allows_dispatch(choice.get("provider"))
+        result["reason"] += "; " + result["provider_health"]["reason"]
     if unverified_constraints:
         result["unverified_constraints"] = unverified_constraints
     return result
+
+
+def _merge_decision_reason(previous: str, current: str) -> str:
+    """Keep namespaced suffixes; incoming values win, and call is always last."""
+    suffixes = {}
+    pattern = r"\s*\|\s*[a-z_]+="
+    for reason in (previous or "", current or ""):
+        pos = 0
+        while match := re.search(pattern, reason[pos:]):
+            start, value_start = pos + match.start(), pos + match.end()
+            try:
+                _, end = json.JSONDecoder().raw_decode(reason, value_start)
+            except ValueError:
+                end = value_start
+            following = re.search(pattern, reason[end:])
+            pos = end + following.start() if following else len(reason)
+            key = reason[start:value_start].strip().lstrip("|").strip()
+            suffixes[key] = reason[start:pos]
+    call = suffixes.pop("call=", "")
+    return re.split(pattern, current or "", maxsplit=1)[0] + "".join(suffixes.values()) + call
+
+
+def _call_suffix(task: dict, call: dict) -> Optional[str]:
+    """Validate caller metadata and format the bounded final call namespace."""
+    subject, head = task.get("subject"), task.get("head_sha")
+    # Registry repo slugs and dated agent-task IDs; kinds are explicitly bounded.
+    shape = r"[a-z0-9][a-z0-9._-]*:(?:pr|issue|task|work-item|decision|packet|review|commit):[A-Za-z0-9][A-Za-z0-9_-]*"
+    subject = subject if type(subject) is str and len(subject) <= 160 and re.fullmatch(shape, subject, re.ASCII) else None
+    head = head if type(head) is str and re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", head) else None
+    function = task.get("function")
+    shape = r"(?:feat|fix|docs|test|ci|refactor|chore|research|ops)(?:\([a-z0-9][a-z0-9._-]{0,31}\))?"
+    function = function if type(function) is str and len(function) <= 48 and re.fullmatch(shape, function, re.ASCII) else None
+    call = {**call, "subject": subject, "head_sha": head, "function": function}
+    suffix = " |call=" + json.dumps(call, separators=(",", ":"), ensure_ascii=True)
+    return suffix if len(suffix.encode("utf-8")) <= 512 else None
+
+
+def _attach_call_suffix(db, decision_id: str, suffix: str) -> None:
+    """Write the call namespace last; a decision that already holds one is cloned so every call keeps its own row."""
+    from core.database import RoutingDecision
+    row = db.get(RoutingDecision, decision_id)
+    if row is None:
+        return
+    if " |call=" in (row.escalation_reason or ""):
+        row = RoutingDecision(**{c.name: getattr(row, c.name) for c in row.__table__.columns
+                                 if c.name not in {"id", "created_at", "updated_at"}})
+        row.id = str(uuid.uuid4())
+        db.add(row)
+    row.escalation_reason = _merge_decision_reason(row.escalation_reason, (row.escalation_reason or "").partition(" |call=")[0] + suffix)
+
+
+def _record_advisory_call(decision_id: str, task: dict, result: dict) -> None:
+    """Best-effort per-launch telemetry in existing rows, never launch authority."""
+    from core.database import RoutingDecision, get_db_session
+    launch = result.get("_advisory_launch") or {}
+    call = {"v": 1,
+            "started_at": launch.get("started_at"), "launched": bool(launch), "launch_id": launch.get("id")}
+    with get_db_session() as db:
+        if call["launch_id"] and db.query(RoutingDecision).filter(
+                RoutingDecision.escalation_reason.contains('"launch_id":"' + call["launch_id"] + '"')).first():
+            call.update(launched=False, started_at=None, launch_id=None)  # reused result is not another call
+        suffix = _call_suffix(task, call)
+        if suffix is None:
+            return
+        _attach_call_suffix(db, decision_id, suffix)
+
+
+def _dispatch_advisory_call(task: dict, route: dict, provider: str = "codex") -> dict:
+    result = _dispatch_read_only(route["route"]["host"], provider, task, timeout=180.0)
+    try:
+        _record_advisory_call(route["decision_id"], task, result)
+    except Exception:
+        import logging
+        logging.getLogger(__name__).exception("advisory call telemetry failed; dispatch result is unaffected")
+    return {key: value for key, value in result.items() if key != "_advisory_launch"}
 
 
 def _update_decision_outcome(decision_id: str, *, status: str, deterministic_gate: str,
@@ -818,16 +1099,18 @@ def _update_decision_outcome(decision_id: str, *, status: str, deterministic_gat
                              executor: Optional[str] = None, escalated: Optional[bool] = None,
                              actual_route: Optional[str] = None,
                              verification_outcome: Optional[str] = None,
-                             executed_host_id: Optional[str] = None) -> None:
+                             executed_host_id: Optional[str] = None,
+                             concrete_model: Optional[str] = None) -> bool:
     """Execution happens after `resolve_route()` already wrote its
     decision row — update that same row with the real outcome rather than
     writing a second telemetry row for one routed task (`RoutingDecision`
     is 'one row per routed task', not one row per stage). Same
     swallow-and-log discipline as `_record_decision`: a telemetry update
     failing must not turn an actually-successful execution into a
-    reported failure."""
+    reported failure. Returns True only after the row update commits; packet
+    admission requires that confirmation before spending a call."""
     if decision_id.startswith("decision-unrecorded-"):
-        return  # the routing write itself already failed; nothing to update
+        return False  # the routing write itself already failed; nothing to update
     from core.database import RoutingDecision, get_db_session
     try:
         with get_db_session() as db:
@@ -838,7 +1121,7 @@ def _update_decision_outcome(decision_id: str, *, status: str, deterministic_gat
                 if latency_ms is not None:
                     row.latency_ms = latency_ms
                 if escalation_reason is not None:
-                    row.escalation_reason = escalation_reason
+                    row.escalation_reason = _merge_decision_reason(row.escalation_reason, escalation_reason)
                 if executor is not None:
                     row.executor = executor
                 if escalated is not None:
@@ -849,9 +1132,15 @@ def _update_decision_outcome(decision_id: str, *, status: str, deterministic_gat
                     row.verification_outcome = verification_outcome
                 if executed_host_id is not None:
                     row.executed_host_id = executed_host_id
+                if concrete_model is not None:
+                    row.concrete_model = concrete_model
+            else:
+                return False
+        return True
     except Exception:
         import logging
         logging.getLogger(__name__).exception("routing_decisions outcome update failed; execution result is unaffected")
+        return False
 
 
 def _retryable_local_error(exc: Exception) -> bool:
@@ -870,7 +1159,7 @@ def _retryable_local_error(exc: Exception) -> bool:
 
 
 def execute_local(concrete_model: str, objective: "str | list[dict]", *, timeout: float = 60.0,
-                   max_retries: int = 1) -> dict:
+                   max_retries: int = 1, think: Optional[bool] = None) -> dict:
     """WHAT actually happens once WHERE+WHAT have been resolved: the one
     provider-neutral bounded execution/result path this lab-first slice
     can run for real right now (no claude/codex binary or paid
@@ -923,7 +1212,7 @@ def execute_local(concrete_model: str, objective: "str | list[dict]", *, timeout
     while attempts <= max_retries:
         attempts += 1
         try:
-            output = llm_call(_OLLAMA_BASE, concrete_model, messages, timeout=int(timeout), num_ctx=num_ctx)
+            output = llm_call(_OLLAMA_BASE, concrete_model, messages, timeout=int(timeout), num_ctx=num_ctx, think=think)
         except HTTPException as e:
             # A deterministic upstream rejection (bad request, model not
             # found, etc.) — retrying would not change it.
@@ -999,31 +1288,43 @@ def _kill_process_tree(root_pid: int, process_group_id: int, *, reap_timeout: fl
 def _execute_codex_with_sandbox(objective: str, *, sandbox: str, provider: str,
                                 timeout: float = 180.0, cwd: Optional[str] = None,
                                 on_started: Optional[Callable[[int], None]] = None) -> dict:
-    """Share bounded CLI mechanics without making sandbox choice policy.
-
-    Only the public advisory/write functions choose the sandbox. Keeping
-    credential checks, ephemeral execution, timeout, and error handling in
-    one place prevents the narrow write lane drifting from the established
-    paid-worker behavior.
-    """
+    """The sole paid launch point; workers must use the authoritative DATABASE_URL."""
     import os
     import signal
     import subprocess
     import tempfile
     import time
 
+    health = provider_allows_dispatch("codex", launch_timeout=timeout) if os.getenv("DATABASE_URL") else {
+        "allowed": False, "state": "unknown", "retry_after": None,
+        "reason": "provider codex: unknown: authoritative DATABASE_URL required"}
+    if not health["allowed"]:
+        return {"ok": False, "provider": provider, "error": health["reason"],
+                "executed": False}
     available, detail = _codex_available()
     if not available:
         return {"ok": False, "error": f"codex unavailable: {detail}", "provider": provider}
     codex_binary = detail  # _codex_available() returns the resolved binary path on success
+    # Resolve afresh from the authenticated Codex subscription catalogue.
+    # Omitting --model inherits potentially stale host configuration.
+    try:
+        subscription_model = resolve_latest_codex_model(codex_binary)
+        reasoning_effort = subscription_effort()
+    except SubscriptionModelError as exc:
+        return {"ok": False, "provider": provider, "model_policy": "fail_closed",
+                "error": str(exc)}
 
     started = time.monotonic()
     with tempfile.TemporaryDirectory(prefix="p12-codex-") as scratch:
         out_path = str(Path(scratch) / "codex-last-message.txt")
+        proc, result, stdout, stderr = None, {}, "", ""
+        call_started_at = None
         try:
             proc = subprocess.Popen(
                 [
                     codex_binary, "exec",
+                    "--model", subscription_model,
+                    "-c", f"model_reasoning_effort={reasoning_effort}",
                     "--sandbox", sandbox,
                     "--ephemeral",
                     "--skip-git-repo-check",
@@ -1036,6 +1337,11 @@ def _execute_codex_with_sandbox(objective: str, *, sandbox: str, provider: str,
                 text=True,
                 start_new_session=True,
             )
+            if sandbox == "read-only":
+                try:
+                    call_started_at = datetime.now(timezone.utc).isoformat()
+                except Exception:
+                    pass  # optional telemetry cannot interrupt a started process
             # start_new_session=True makes the new process group's id equal
             # to the leader's pid at the moment of creation. Capture it now
             # rather than rediscovering it via os.getpgid(proc.pid) after a
@@ -1051,15 +1357,20 @@ def _execute_codex_with_sandbox(objective: str, *, sandbox: str, provider: str,
             stdout, stderr = proc.communicate(timeout=timeout)
             latency_ms = int((time.monotonic() - started) * 1000)
             if proc.returncode != 0:
-                return {
-                    "ok": False, "provider": provider, "latency_ms": latency_ms,
-                    "error": f"codex exec exited {proc.returncode}: {(stderr or '')[-500:]}",
+                result = {
+                    "ok": False, "exit_code": proc.returncode, "provider": provider, "latency_ms": latency_ms,
+                    "error": f"codex exec exited {proc.returncode}: {(stdout or '')[-1000:]}\n{(stderr or '')[-1000:]}",
                     "codex_binary": codex_binary,
                 }
+                return result
             output = Path(out_path).read_text().strip() if Path(out_path).exists() else ""
-            return {"ok": True, "provider": provider, "output": output, "latency_ms": latency_ms,
-                    "codex_binary": codex_binary}
-        except subprocess.TimeoutExpired:
+            result = {"ok": True, "exit_code": 0, "stdout": stdout, "stderr": stderr,
+                    "provider": provider, "output": output, "latency_ms": latency_ms,
+                    "codex_binary": codex_binary, "concrete_model": subscription_model,
+                    "reasoning_effort": reasoning_effort,
+                    "model_catalogue": "authenticated-codex-debug-models"}
+            return result
+        except subprocess.TimeoutExpired as exc:
             # Tree-aware cleanup: killpg alone is insufficient when a
             # descendant (observed live: the MCP server codex spawns)
             # has moved into its own process group while staying in the
@@ -1069,8 +1380,9 @@ def _execute_codex_with_sandbox(objective: str, *, sandbox: str, provider: str,
             cleanup = _kill_process_tree(process_group_id, process_group_id)
             cleanup_incomplete = not cleanup["ok"]
             try:
-                proc.communicate(timeout=5)
+                stdout, stderr = proc.communicate(timeout=5)
             except subprocess.TimeoutExpired:
+                stdout, stderr = exc.stdout, exc.stderr
                 # Bounded reap so a cleanup call itself can never hang
                 # indefinitely - but if it still hasn't drained by then,
                 # something is holding the output pipes open past a
@@ -1087,8 +1399,15 @@ def _execute_codex_with_sandbox(objective: str, *, sandbox: str, provider: str,
                 result["cleanup_still_alive_pids"] = cleanup["still_alive_pids"]
             return result
         except Exception as e:
-            return {"ok": False, "provider": provider, "error": str(e),
-                    "latency_ms": int((time.monotonic() - started) * 1000)}
+            result = {"ok": False, "provider": provider, "error": str(e),
+                      "latency_ms": int((time.monotonic() - started) * 1000)}
+            return result
+        finally:
+            if call_started_at is not None:
+                result["_advisory_launch"] = {"started_at": call_started_at, "id": health["outcome_id"]}
+            _record_provider_outcome({"stdout": stdout, "stderr": stderr,
+                "exit_code": proc.returncode if proc else None,
+                "state": "completed" if proc and proc.returncode == 0 else "failed", **result}, health["outcome_id"])
 
 
 def execute_codex(objective: str, *, timeout: float = 180.0, cwd: Optional[str] = None) -> dict:
@@ -1102,6 +1421,90 @@ def execute_codex(objective: str, *, timeout: float = 180.0, cwd: Optional[str] 
     return _execute_codex_with_sandbox(
         objective, sandbox="read-only", provider="codex", timeout=timeout, cwd=cwd,
     )
+
+
+def _glm_launcher_path() -> Path:
+    return Path.home() / ".local" / "bin" / "claude-glm"
+
+
+def execute_glm(objective: str, *, timeout: float = 180.0, cwd: Optional[str] = None) -> dict:
+    """Run the host-local GLM launcher as bounded read-only advice."""
+    import os
+    import subprocess
+    import time
+
+    base = {"provider": "glm", "host_id": current_host_id(),
+            "concrete_model": None, "model_unverified": True, "exit_code": None}
+    if not isinstance(objective, str) or not objective.strip():
+        return {**base, "ok": False, "executed": False, "error_code": "nonzero_exit",
+                "error": "GLM objective must be a non-empty string"}
+    health = provider_allows_dispatch("glm", launch_timeout=timeout) if os.getenv("DATABASE_URL") else {
+        "allowed": False, "reason": "provider glm: authoritative DATABASE_URL required", "state": "unknown"}
+    if not health["allowed"]:
+        state = health.get("state")
+        code = state if state in {"auth_failed", "quota_exhausted"} else "rate_limited" if state == "rate_limited" else "nonzero_exit"
+        return {**base, "ok": False, "executed": False, "error_code": code, "error": health["reason"]}
+
+    launcher = _glm_launcher_path()
+    proc = None
+    stderr = ""
+    outcome = {"ok": False, "provider": "glm", "state": "failed", "exit_code": None, "stderr": ""}
+    started = time.monotonic()
+    try:
+        if not launcher.is_file() or not os.access(launcher, os.X_OK):
+            outcome["error_code"] = "launcher_missing"
+            return {**base, "ok": False, "executed": False, "error_code": "launcher_missing",
+                    "error": "GLM launcher is missing or not executable"}
+        proc = subprocess.Popen(
+            [str(launcher), "--print", "--tools", "Read,Grep,Glob",
+             "--disallowedTools", "Bash,Write,Edit,NotebookEdit,WebFetch,WebSearch,Task,Skill",
+             # --bare skips hooks (repository and user), project settings, plugins and CLAUDE.md discovery; MCP is excluded by
+             # --strict-mcp-config. Verified live with a hook that writes a file: it runs without --bare and not with it.
+             "--strict-mcp-config", "--bare",
+             "--disable-slash-commands", "--no-session-persistence"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, start_new_session=True, cwd=cwd,
+        )
+        stdout, stderr = proc.communicate(input=objective, timeout=timeout)
+        # A non-word sentinel prevents removed tokens joining adjacent words
+        # into a false provider-limit marker.
+        for token in objective.split():
+            stderr = re.sub(re.escape(token), "\ue000", stderr, flags=re.I)
+        stderr = stderr[:2000]
+        outcome = {"ok": proc.returncode == 0, "provider": "glm", "state": "completed" if proc.returncode == 0 else "failed",
+                   "exit_code": proc.returncode, "stderr": stderr}
+        common = {**base, "executed": True, "exit_code": proc.returncode,
+                  "latency_ms": int((time.monotonic() - started) * 1000)}
+        if proc.returncode == 0:
+            return {**common, "ok": True, "output": stdout.strip()}
+        if re.search(r"usage limit|quota (?:exhausted|exceeded)|insufficient_quota", stderr, re.I):
+            code = "quota_exhausted"
+        elif re.search(r"unauthorized|authentication|invalid.api.key|not logged in|login required|\b401\b", stderr, re.I):
+            code = "auth_failed"
+        elif re.search(r"rate.limit|too many requests", stderr, re.I) or _glm_contextual_429(stderr):
+            code = "rate_limited"
+        else:
+            code = "nonzero_exit"
+        return {**common, "ok": False, "error_code": code, "error": f"GLM launcher exited {proc.returncode}"}
+    except subprocess.TimeoutExpired:
+        cleanup = _kill_process_tree(proc.pid, proc.pid)
+        try:
+            proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+        outcome = {"ok": False, "provider": "glm", "state": "failed", "exit_code": proc.returncode,
+                   "stderr": "", "error_code": "timeout"}
+        return {**base, "ok": False, "executed": True, "exit_code": proc.returncode,
+                "error_code": "timeout", "error": f"GLM launcher timed out after {timeout}s",
+                "cleanup_incomplete": not cleanup["ok"],
+                "latency_ms": int((time.monotonic() - started) * 1000)}
+    except OSError:
+        outcome["error_code"] = "launcher_missing"
+        return {**base, "ok": False, "executed": False, "error_code": "launcher_missing",
+                "error": "GLM launcher could not be started"}
+    finally:
+        if health.get("outcome_id"):
+            _record_provider_outcome(outcome, health["outcome_id"])
 
 
 def _codex_write_authority(repo_id: str, host_id: str) -> dict:
@@ -1302,8 +1705,7 @@ def execute_codex_write_durable(objective: str, *, repo_id: str, host_id: str,
 # executor/concrete_model, comes from config/models.yaml
 # (paid_providers/default_paid_provider/per-alias paid_provider) via
 # `_resolve_paid_provider` below — this dict is only the unavoidable code
-# side (an actual callable can't live in YAML). Only `codex` has a real
-# implementation today; adding a second provider means adding both a real
+# side (an actual callable can't live in YAML). Each provider needs a real
 # `execute_<provider>` function and an entry here, not just a config line.
 #
 # Maps provider name -> this module's own function *name* rather than the
@@ -1311,26 +1713,28 @@ def execute_codex_write_durable(objective: str, *, repo_id: str, host_id: str,
 # (and any future caller) monkeypatch `estate_router.execute_codex` the
 # same way they already monkeypatch `execute_local`; binding the object
 # here at import time would silently stop honouring that patch.
-_PAID_PROVIDER_FUNCTION_NAMES = {"codex": "execute_codex"}
+_PAID_PROVIDER_FUNCTION_NAMES = {"codex": "execute_codex", "glm": "execute_glm"}
 # Stage 6: the write lane dispatches through the worker on route.host.
 _PAID_PROVIDER_WRITE_FUNCTION_NAMES = {"codex": "execute_write_via_worker"}
 
 
-def _resolve_paid_provider(alias: Optional[str]) -> dict:
+def _resolve_paid_provider(alias: Optional[str], *, explicit_provider: Optional[str] = None) -> dict:
     """Which paid provider backs `alias`'s escalation, read from
-    config/models.yaml rather than hardcoded. Resolution order: the
-    alias's own `paid_provider` (if the alias is registered and sets
-    one) -> `default_paid_provider` -> unresolved (a caller with no paid
+    config/models.yaml rather than hardcoded. Resolution order: explicit
+    request -> alias's own `paid_provider` -> `default_paid_provider` ->
+    unresolved (a caller with no paid
     provider configured at all gets a truthful failure, not a silent
     guess). Returns `{"provider": name, "concrete_model_label": label}`
     or `{"provider": None, "reason": ...}`."""
     models = _load_yaml("models")
     entry = next((c for c in models.get("capabilities", []) if c.get("alias") == alias), None) if alias else None
-    provider_name = (entry or {}).get("paid_provider") or models.get("default_paid_provider")
+    provider_name = explicit_provider if explicit_provider is not None else (entry or {}).get("paid_provider") or models.get("default_paid_provider")
     if not provider_name:
         return {"provider": None, "reason": "no paid_provider configured for this alias and no default_paid_provider set"}
     registry = {p["name"]: p for p in models.get("paid_providers", []) if p.get("name")}
-    provider_entry = registry.get(provider_name, {})
+    if provider_name not in registry:
+        return {"provider": None, "reason": f"unknown paid provider {provider_name!r}", "error_code": "unknown_provider"}
+    provider_entry = registry[provider_name]
     return {
         "provider": provider_name,
         "concrete_model_label": provider_entry.get("concrete_model_label", provider_name),
@@ -1340,7 +1744,7 @@ def _resolve_paid_provider(alias: Optional[str]) -> dict:
 def _dispatch_read_only(host_id: str, executor: str, task: dict, *, concrete_model: Optional[str] = None,
                         timeout: Optional[float] = None) -> dict:
     """Dispatch one read-only execution (`local` inference or advisory
-    `codex`) to the worker on `host_id`, replacing the historical
+    `codex` or `glm`) to the worker on `host_id`, replacing the historical
     in-process `execute_local`/`execute_codex` calls from `run_task`
     (Stage 3, D1/D2: host selection was metadata because nothing between
     selection and execution actually read `route.host`). Every call —
@@ -1382,9 +1786,9 @@ def _dispatch_read_only(host_id: str, executor: str, task: dict, *, concrete_mod
             "objective": objective,
             "timeout_s": float(timeout or 60.0),
         }
-    elif executor == "codex":
+    elif executor in {"codex", "glm"}:
         payload = {
-            "kind": "codex-readonly",
+            "kind": f"{executor}-readonly",
             "objective": objective if isinstance(objective, str) else str(objective),
             "timeout_s": float(timeout or 180.0),
         }
@@ -1405,7 +1809,7 @@ def _dispatch_read_only(host_id: str, executor: str, task: dict, *, concrete_mod
 
     result = dict(response["result"])
     attested_host = response["attestation"]["host_id"]
-    placement["executed_host"] = attested_host
+    placement["executed_host"] = None if result.get("executed") is False else attested_host
     placement["attested"] = attested_host == host_id
     result["placement"] = placement
     return result
@@ -1427,7 +1831,95 @@ def _dispatch_failure_actual_route(result: dict) -> Optional[str]:
     return f"placement_mismatch:{observed_host}"
 
 
-def run_task(task: dict) -> dict:
+def _run_prepared_items(task: dict, route: dict, authority: Optional[dict]) -> dict:
+    """One request, repo, parent scope and selected route. Authority is server-side only:
+    exact preparation snapshots, context, calibrated Policy and evidenced certificate pairs.
+    Request dictionaries can strengthen requirements, but cannot certify compatibility.
+    """
+    authority = authority or {}
+    policy = authority.get("policy", _packets.Policy())
+    raw, items, certified = task["prepared_items"], [], True
+    verification = task.get("verification") or {}
+    requirements = task.get("requirements") or {}
+    try:
+        if (type(raw) is not list or not 1 <= len(raw) <= 32 or not task.get("repo")
+                or len(json.dumps(raw).encode("utf-8")) > 8 * 1024 * 1024):
+            raise ValueError("invalid collection")
+        names = ("independence_required", "fresh_context_required", "separate_adjudication_required")
+        for controls in (requirements, verification):
+            if any(name in controls and type(controls[name]) is not bool for name in (*names, "independent_model_required")):
+                raise ValueError("unknown parent requirement")
+        for data in raw:
+            item = _packets.Item(**{"independence_required": None, **data})  # unknown fields refuse
+            if _packets.validate_item(item):
+                items.append(item)
+                certified = False
+                continue
+            prepared = (authority.get("items") or {}).get(item.decision_id)
+            trusted = (type(prepared) is _packets.Item and authority.get("repo") == task["repo"]
+                       and authority.get("shared_context") == task.get("objective")
+                       and json.dumps(asdict(prepared), sort_keys=True) == json.dumps(asdict(item), sort_keys=True))
+            certified = certified and trusted
+            flags = {}
+            for name in names:
+                required = (getattr(item, name) is True or requirements.get(name) is True
+                            or verification.get(name) is True or getattr(prepared, name, None) is True)
+                flags[name] = True if required else getattr(item, name)
+                if name == "independence_required" and not trusted and not required:
+                    flags[name] = None
+            if verification.get("independent_model_required") is True or requirements.get("independent_model_required") is True:
+                flags["independence_required"] = True
+            items.append(replace(item, **flags))
+        if len({i.parent_task for i in items}) != 1:
+            raise ValueError("mixed scopes")
+        groups = _packets.plan(items, policy, authority.get("certificates", ()) if certified else (),
+                               datetime.now(timezone.utc), wait_seconds=0)
+    except (TypeError, ValueError, AttributeError):
+        groups = [_packets.Group((), _packets.Decision(_packets.NEEDS_PREPARATION, "invalid_prepared_items"))]
+    submitted_ids = [d["decision_id"] for d in raw[:32] if type(d) is dict and type(d.get("decision_id")) is str] if type(raw) is list else []
+    records = [{"packet_id": str(uuid.uuid4()), "item_ids": [i.decision_id for i in g.items] or submitted_ids,
+                "outcome": g.decision.outcome, "reason": g.decision.reason, "detail": g.decision.detail,
+                "policy_evidence_version": getattr(policy, "evidence_version", None)} for g in groups]
+    code = route.get("escalation_reason") or "insufficient_capability"
+    def reason():
+        # "|" is escaped so no item text can contain the " |call=" delimiter that readers split on
+        return code + " | sol_packet=" + json.dumps({"groups": records}, sort_keys=True).replace("|", "\\u007c")
+    saved = _update_decision_outcome(route["decision_id"], status="needs_escalation", deterministic_gate="pending",
+                                     escalation_reason=reason(), verification_outcome="pending")
+    results, executions = {}, []
+    if saved is not True:
+        for record in records:
+            record["persistence"] = "unconfirmed"
+    else:
+        for group, record in zip(groups, records):
+            if group.decision.outcome not in (_packets.BATCH, _packets.SINGLE):
+                continue
+            try:
+                prompt = _packets.compile_packet(group.items, record["packet_id"], task.get("objective") or "", ())
+            except (TypeError, ValueError):
+                record["result"] = "compilation_refused"
+                continue
+            result = _dispatch_advisory_call({**task, "objective": prompt}, route)
+            executions.append(result)
+            valid = result.get("ok") and (result.get("placement") or {}).get("executed_host") == route["route"]["host"]
+            parsed = _packets.parse_results(group.items, result.get("output"))
+            for ident, value in parsed.items():
+                value = asdict(value) if type(value) is _packets.ItemResult else value
+                results[ident] = {"result": value if valid else "dispatch_failed",
+                                  "verification_outcome": "pending", "acceptance": "blocked"}
+            record["results"] = {ident: "parsed" if valid and type(value) is _packets.ItemResult else value if valid else "dispatch_failed"
+                                 for ident, value in parsed.items()}
+    complete = len(results) == len(items) and bool(items) and all(type(r["result"]) is dict for r in results.values())
+    if saved is True and _update_decision_outcome(route["decision_id"], status="needs_escalation" if complete else "blocked",
+            deterministic_gate="pass" if complete else "fail", escalation_reason=reason(), verification_outcome="pending") is not True:
+        for record in records:
+            record["persistence"] = "unconfirmed"
+    return {**route, "ok": False, "executed": bool(any((e.get("placement") or {}).get("executed_host") for e in executions)),
+            "reason": reason(), "escalation_reason": reason(), "packet_results": results, "executions": executions,
+            "deterministic_gate": "pass" if complete else "fail", "verification_outcome": "pending", "acceptance": "blocked"}
+
+
+def run_task(task: dict, *, packet_authority: Optional[dict] = None) -> dict:
     """Closes the execution gap: `resolve_route()` alone only answers
     WHERE+WHAT, it never calls a model. `run_task()` routes first (same
     `resolve_route()`, unchanged — deterministic-first and parking/domain
@@ -1474,13 +1966,21 @@ def run_task(task: dict) -> dict:
         task["recommended_route"] = recommended_lane_for_task(task)
     route = resolve_route(task)
     executor = (route.get("route") or {}).get("executor")
+    if task.get("prepared_items") is not None and not (
+            executor == "none" and route.get("decision_id") and task.get("objective") is not None
+            and (task.get("routing") or {}).get("allow_paid_escalation")):
+        return {**route, "ok": False, "executed": False,
+                "execution_error": "prepared items require the read-only advisory lane"}
     if executor != "local":
         routing = task.get("routing") or {}
         allow_paid = routing.get("allow_paid_escalation")
         implementation_mode = routing.get("mode") == "implementation"
         if route.get("route", {}).get("executor") == "none" and route.get("decision_id") \
                 and allow_paid and (task.get("objective") is not None):
-            provider_choice = _resolve_paid_provider(route["route"].get("model_alias"))
+            explicit_provider = routing.get("paid_provider")
+            provider_choice = (
+                _resolve_paid_provider(route["route"].get("model_alias")) if explicit_provider is None else
+                _resolve_paid_provider(route["route"].get("model_alias"), explicit_provider=explicit_provider))
             provider_name = provider_choice.get("provider")
             provider_functions = (
                 _PAID_PROVIDER_WRITE_FUNCTION_NAMES if implementation_mode
@@ -1488,6 +1988,10 @@ def run_task(task: dict) -> dict:
             )
             provider_fn_name = provider_functions.get(provider_name)
             provider_fn = globals().get(provider_fn_name) if provider_fn_name else None
+            if implementation_mode and provider_name == "glm":
+                return {**route, "ok": False, "executed": False,
+                        "error_code": "provider_unqualified",
+                        "execution_error": "provider 'glm' has no qualified write route"}
             if provider_name is None or provider_fn is None:
                 return {**route, "executed": False, "execution_error": provider_choice.get(
                     "reason", f"paid provider {provider_name!r} has no "
@@ -1498,7 +2002,7 @@ def run_task(task: dict) -> dict:
             executor_name = provider_name
             paid_host = route["route"].get("host")
             paid_entry = next((h for h in (route.get("hosts_checked") or []) if h.get("host_id") == paid_host), None) or {}
-            if not implementation_mode and "codex" not in (paid_entry.get("qualified_executors") or []):
+            if not implementation_mode and provider_name not in (paid_entry.get("qualified_executors") or []):
                 # Stage 5 rule, enforced for the paid lane too (Stage 7
                 # finding 2): never dispatch an executor not qualified on
                 # route.host.
@@ -1507,9 +2011,26 @@ def run_task(task: dict) -> dict:
                     escalation_reason="worker_failed", verification_outcome="fail",
                 )
                 return {**route, "ok": False, "executed": False,
-                        "execution_error": f"executor 'codex' not qualified on {paid_host!r}",
-                        "escalation_reason": "worker_failed"}
+                        "execution_error": f"executor {provider_name!r} not qualified on {paid_host!r}",
+                        "error_code": "provider_unqualified", "escalation_reason": "worker_failed"}
+            if not implementation_mode and provider_name == "glm":
+                from src.estate_worker_client import WorkerTransportError, worker_health
+                try:
+                    glm_ready = bool((worker_health(paid_host).get("glm") or {}).get("available"))
+                except WorkerTransportError:
+                    glm_ready = False
+                if not glm_ready:
+                    _update_decision_outcome(
+                        route["decision_id"], status="blocked", deterministic_gate="fail",
+                        escalation_reason="worker_failed", verification_outcome="fail",
+                    )
+                    return {**route, "ok": False, "executed": False,
+                            "execution_error": f"GLM is unavailable on {paid_host!r}",
+                            "error_code": "provider_unavailable", "escalation_reason": "worker_failed"}
             if implementation_mode:
+                if task.get("prepared_items") is not None:
+                    return {**route, "ok": False, "executed": False,
+                            "execution_error": "prepared items require the read-only advisory lane"}
                 executor_name = f"{provider_name}-write"
                 error = None
                 repo_id = task.get("repo")
@@ -1544,7 +2065,8 @@ def run_task(task: dict) -> dict:
                         "verification_outcome": "fail",
                     }
                 result = provider_fn(paid_objective, repo_id=repo_id, host_id=host_id,
-                                      decision_id=route["decision_id"])
+                                      decision_id=route["decision_id"],
+                                      subject=task.get("subject"), head_sha=task.get("head_sha"), function=task.get("function"))
                 if result.get("authority_denied"):
                     _update_decision_outcome(
                         route["decision_id"], status="blocked", deterministic_gate="fail",
@@ -1593,13 +2115,18 @@ def run_task(task: dict) -> dict:
                         "escalation_reason": None, "reason": reason,
                     }
             else:
+                if task.get("prepared_items") is not None and provider_name == "glm":
+                    return {**route, "ok": False, "executed": False, "error_code": "provider_unqualified",
+                            "execution_error": "GLM prepared-item dispatch is not qualified"}
+                if task.get("prepared_items") is not None:
+                    return _run_prepared_items(task, route, packet_authority)
                 # Dispatched to the worker on route['route']['host'] rather
                 # than called in-process (Stage 3, D2): the worker resolves
                 # `task['repo']` to a real path on *its own* host (see
                 # `_verb_execute` -> `resolve_repo_path`), which is what
                 # actually grounds a repo-aware task now that host
                 # selection can name a host other than this backend.
-                result = _dispatch_read_only(route["route"]["host"], "codex", task, timeout=180.0)
+                result = _dispatch_advisory_call(task, route, provider_name)
                 if (result.get("placement") or {}).get("executed_host") is None:
                     # Same truthful-failure requirement as the local
                     # branch below: a transport/protocol/pre-execution
@@ -1642,6 +2169,7 @@ def run_task(task: dict) -> dict:
                     actual_route=executor_name,
                     verification_outcome=gate,
                     executed_host_id=(result.get("placement") or {}).get("executed_host"),
+                    concrete_model=result.get("concrete_model"),
                 )
             # implementation_mode, terminal within execute_codex_write_durable's
             # wait_timeout: the decision outcome was already recorded by
@@ -1655,7 +2183,8 @@ def run_task(task: dict) -> dict:
                 **route, "ok": gate == "pass", "reason": reason,
                 "route": {
                     **route["route"], "executor": executor_name,
-                    "concrete_model": provider_choice["concrete_model_label"],
+                    "concrete_model": (result.get("concrete_model") or provider_choice["concrete_model_label"])
+                    if provider_name == "codex" else result.get("concrete_model"),
                     "reason": reason,
                 },
             }
