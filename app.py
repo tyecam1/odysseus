@@ -799,6 +799,8 @@ app.include_router(setup_misumi_transcript_routes(stt_service=stt_service))
 # Misumi compatibility surface above.
 from routes.estate_routing_routes import setup_estate_routing_routes
 app.include_router(setup_estate_routing_routes())
+from routes.lazy_usage_routes import setup_lazy_usage_routes
+app.include_router(setup_lazy_usage_routes())
 
 # Calendar (CalDAV)
 from routes.calendar_routes import setup_calendar_routes
@@ -1299,10 +1301,24 @@ async def _startup_event():
     from src.cookbook_serve_lifecycle import cookbook_serve_lifecycle_loop
     _startup_tasks.append(asyncio.create_task(cookbook_serve_lifecycle_loop()))
 
+    # Observes durable activations; an empty run table never dispatches.
+    # Disabling the observer does not erase budgets, checkpoints or workers.
+    if os.getenv("ODYSSEUS_LAZY_USAGE_OBSERVER", "1").strip().lower() not in {"0", "false", "no", "off", ""}:
+        from src.lazy_usage_runtime import lazy_usage_lifecycle_loop
+        app.state.lazy_usage_task = asyncio.create_task(lazy_usage_lifecycle_loop())
+        _startup_tasks.append(app.state.lazy_usage_task)
+
     logger.info("Application startup complete")
 
 async def _shutdown_event():
     logger.info("Application shutting down...")
+    lazy_usage_task = getattr(app.state, "lazy_usage_task", None)
+    if lazy_usage_task:
+        lazy_usage_task.cancel()
+        try:
+            await lazy_usage_task
+        except asyncio.CancelledError:
+            pass
     if upload_cleanup_task:
         upload_cleanup_task.cancel()
         try:

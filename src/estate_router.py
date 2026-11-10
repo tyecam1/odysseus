@@ -1816,6 +1816,16 @@ def _dispatch_read_only(host_id: str, executor: str, task: dict, *, concrete_mod
         "routed_host": host_id, "executed_host": None, "attested": False, "transport": None,
         "observed_host": None,
     }
+    activation_deadline = task.get("_activation_deadline")
+    if activation_deadline is not None:
+        # Internal bounded-continuation metadata, never an HTTP envelope
+        # option. Clamp the existing worker timeout, including local retry.
+        remaining = (datetime.fromisoformat(activation_deadline) - datetime.now(timezone.utc)).total_seconds()
+        if remaining <= 1:
+            return {"ok": False, "executed": False, "error_code": "activation_deadline_exhausted",
+                    "error": "activation wall-clock budget exhausted", "placement": placement}
+        available = (remaining - 1) / 2 if executor == "local" else remaining
+        timeout = min(float(timeout or (60 if executor == "local" else 180)), available)
     try:
         host_cfg = _load_yaml("estate")
         host_entry = next((h for h in host_cfg.get("hosts", []) if h.get("id") == host_id), None)

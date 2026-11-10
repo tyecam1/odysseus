@@ -398,7 +398,7 @@ def active_lease_for_repo(repo_id: str, host_id: str) -> Optional[dict]:
         return None
 
 
-def release_repo(repo_id: str, host_id: Optional[str] = None) -> dict:
+def release_repo(repo_id: str, host_id: Optional[str] = None, *, expected_lease_id: Optional[str] = None) -> dict:
     """Release the caller's active lease (S6.2 ordinary release). Inside
     one S6.5 serialized transaction, refused with
     LeaseHasUnresolvedExecution while any execution under the lease is
@@ -410,6 +410,8 @@ def release_repo(repo_id: str, host_id: Optional[str] = None) -> dict:
         q = db.query(ParkLease).filter(ParkLease.repo_id == repo_id, ParkLease.status == "active")
         if host_id:
             q = q.filter(ParkLease.host_id == host_id)
+        if expected_lease_id is not None:
+            q = q.filter(ParkLease.id == expected_lease_id)
         lease = q.first()
         if lease is None:
             raise NoActiveLease(f"no active lease for {repo_id!r}" + (f" on {host_id!r}" if host_id else ""))
