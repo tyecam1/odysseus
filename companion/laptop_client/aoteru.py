@@ -367,6 +367,13 @@ def _call_telemetry(args: argparse.Namespace) -> dict:
                              ("function", getattr(args, "function", None))) if v is not None}
 
 
+def _paid_provider(args: argparse.Namespace) -> dict:
+    """Optional --paid-provider, forwarded verbatim as the envelope's `paid_provider` (omitted when not given, so the
+    backend default, Codex, is unchanged). The backend validates the name and the host's qualification."""
+    value = getattr(args, "paid_provider", None)
+    return {"paid_provider": value} if value is not None else {}
+
+
 def cmd_ask(args: argparse.Namespace) -> int:
     cfg = _load_config()
     objective = _resolve_objective_text(args.objective, args.objective_file)
@@ -380,6 +387,7 @@ def cmd_ask(args: argparse.Namespace) -> int:
     if args.implementation:
         envelope["mode"] = "implementation"
     envelope.update(_call_telemetry(args))
+    envelope.update(_paid_provider(args))
     result = _request(cfg, "POST", "/api/estate/run", envelope, timeout=args.timeout)
     if result["status"] in (401, 403):
         print(f"denied: {result['body']} — token needs the estate:execute scope for `ask`")
@@ -416,6 +424,7 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
     if args.implementation:
         envelope["mode"] = "implementation"
     envelope.update(_call_telemetry(args))
+    envelope.update(_paid_provider(args))
     result = _request(cfg, "POST", "/api/estate/run", envelope, timeout=args.timeout)
     if result["status"] in (401, 403):
         print(f"denied: {result['body']} — token needs the estate:execute scope for `{args.command}`")
@@ -638,6 +647,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_ask.add_argument("--head-sha", default=None,
         help="full commit sha under review (telemetry only; never inferred)")
     p_ask.add_argument("--function", default=None, help="optional function tag, e.g. fix(router) (telemetry only)")
+    p_ask.add_argument("--paid-provider", default=None,
+                       help="explicit paid provider for the paid lane, e.g. glm (read-only advisory); omit for the default")
     p_ask.add_argument("--timeout", type=float, default=_DEFAULT_EXECUTION_TIMEOUT)
 
     for mode, mode_help in (
@@ -667,6 +678,8 @@ def build_parser() -> argparse.ArgumentParser:
         p_mode.add_argument("--head-sha", default=None,
             help="full commit sha under review (telemetry only; never inferred)")
         p_mode.add_argument("--function", default=None, help="optional function tag, e.g. fix(router) (telemetry only)")
+        p_mode.add_argument("--paid-provider", default=None,
+                            help="explicit paid provider for the paid lane, e.g. glm (read-only advisory); omit for the default")
         p_mode.add_argument("--timeout", type=float, default=_DEFAULT_EXECUTION_TIMEOUT)
 
     sub.add_parser("where", help="list active logical estate sessions")
