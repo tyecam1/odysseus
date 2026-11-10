@@ -3,13 +3,8 @@ artifact_type: agent-task
 task_schema: agent-task/v1
 task_id: 2026-07-27-repo-intelligence-bakeoff
 title: "Bake off RepoWise, Graphify and native repository intelligence"
-status: blocked
-blocked_reason: >-
-  RepoWise and Graphify lack verified licence, concrete version, and
-  single-repository identity evidence.
-recheck_condition: >-
-  A quarantine-first discovery pass verifies licence, concrete version,
-  and single-repository identity for both RepoWise and Graphify.
+status: ready
+unblocked_evidence: automation/review/blocker-reconciliation/2026-11-09-odysseus-blocked-cards.md
 priority: medium
 task_type: platform-evaluation
 created_by: chatgpt
