@@ -33,7 +33,7 @@ Source: obsidian-PhD `main` at `c479f91`. Read-only: no PhD card or file was cha
 | `2026-07-17-workshop-genai-source-completion` | transcripts and timing not supplied | **external dependency; not re-verified** | `executor: human` alone is not proof, but no route to the media was examined |
 | `2026-06-23-zotero-library-vault-alignment` | no reason recorded | **not examined** | |
 
-Counts for this bucket (10 cards): genuine protected gate verified 1 (branch deletion, destructive; the same card also has the stale numeric claim); real dependency 1 (autolab artifacts); needs deeper recheck 1 (voice audit); names protected steps but not re-verified 1 (university schedule); not re-verified or not examined 6 (four J1 cards, workshop, Zotero). Misumi's 3 `blocked-human` cards were **not** examined. The branch-hygiene card supplies the pilot's "genuine protected action stays gated" example; no stale false-positive human gate was found in the PhD bucket by this pass.
+Counts for this bucket (10 cards): genuine protected gate verified 1 (branch deletion, destructive; the same card also has the stale numeric claim); real dependency 1 (autolab artifacts); needs deeper recheck 1 (voice audit); names protected steps but not re-verified 1 (university schedule); not re-verified or not examined 6 (four J1 cards, workshop, Zotero). (Misumi's `blocked-human` cards are covered separately in the Misumi addendum below.) The branch-hygiene card supplies the pilot's "genuine protected action stays gated" example; no stale false-positive human gate was found in the PhD bucket by this pass.
 
 ## Addendum: Misumi `blocked-human` bucket (3 cards), read-only, 2026-11-09
 
