@@ -150,6 +150,45 @@ Terra-class inference is normally the routine implementation worker. Sonnet-clas
 
 Sol-class inference is the normal expensive escalation for difficult engineering, debugging, scientific reasoning and deep review. Opus-class inference is reserved for frontier ambiguity, long-horizon architecture/synthesis, high-consequence arbitration or independent review where its measured advantage justifies the quota cost.
 
+## Standing review-model budget preference (operator, 2026-11-10)
+
+Applies to independent code/PR reviews, review passes, ultrareview component
+checks, and repeated review/test feedback across `tyecam1/odysseus`,
+`tyecam1/misumi`, and `tyecam1/obsidian-PhD`. It changes **review model
+selection only**, not implementer selection, verification floors, independent
+review requirements, merge permission, or canonical PhD evidence authority.
+
+- Approved review pool: **Claude Haiku 5.5**, **Codex Terra 6.1**, and
+  **GLM-Flash** (provider-qualified/current available Flash variant). Choose
+  the *cheapest adequate qualified* route by task complexity, live provider
+  health, quota and measured reliability, not a fixed per-repository model.
+  Haiku/GLM-Flash should take bounded routine and parallel independent review;
+  Terra can take more demanding integration/logic review when qualified.
+- Run deterministic diff, tests, lint, type/schema and source checks before
+  model inference. Narrow review to changed files and new evidence since the
+  last accepted review. Reuse still-valid prior findings; do not repeatedly
+  review an unchanged HEAD merely because a review slot exists.
+- **No automatic Sol, Opus, Fable or comparable premium-model review.** A
+  necessary premium reviewer is an explicit *per-review* operator exception
+  with reason, context bound, estimated quota impact and retained verification
+  requirements. If none of the approved models is eligible, fail closed for
+  that model review, record the review debt and continue separate eligible work.
+  Never substitute a premium model silently.
+- Respect qualification, account-specific model availability, subscription
+  currency and cross-provider independence. The operator-authorised review
+  role exception to the premium-only subscription rule is specified in
+  `docs/subscription-model-currency-policy.md`. Resolve exact model/version
+  at dispatch with evidence; no fake qualification, stale pin or downgrade.
+- Record reviewer identity, examined commit/HEAD, changed scope, result,
+  actionable findings, costs or quota observed, and reasons for any exception.
+  No reduction in safety/ethics/research/merge gates or independent verification.
+
+**Implementation status:** standing review-selection policy recorded in Git;
+not evidence of runtime enforcement. Current `src/estate_router.py` / paid
+provider dispatch does not yet expose a fully qualified, budget-aware selector
+for all three requested review models. Changes to routing code, provider adapters
+and tests must be verified and deployed before claiming an automatic default.
+
 ## Model aliases
 
 Business logic must target capability aliases rather than concrete model brands:
