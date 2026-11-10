@@ -1,0 +1,49 @@
+schema_version: 1
+application_id: 2026-11-10-estate-queue-priority-execution-02
+prompt_id: estate-queue-priority-execution
+prompt_version: 2
+repository: tyecam1/odysseus
+branch: dev
+session_started_at: "2026-11-09T13:10:00Z"
+session_ended_at: null
+start_commit: af856608def0e9e7620fe7855b55a3d102089db4
+end_commit: 7670b030
+outcome_status: partial
+stop_reason: "continuation checkpoint under a standing goal; the run is not closed. Open: lazyUsage skill install on the laptop (classifier denied self-modification; operator approval needed), GLM Flash entitlement (operator credential or account evidence), MarkItDown and repo-intelligence pilots (approval_required, owner admission), blocker-task acceptance (six-case verification, closed agent-resolvable task, protected-gate regression test, Opus qualification), PhD PRs 668 and 669 (owner merge)."
+commits:
+  - "bc069478 docs(system-efficiency): correct stale statements in usage-attribution diagnosis (#254)"
+  - "c32a5782 docs(prompt-applications): application 01 checkpoint trace (#255)"
+  - "c9146979 fix(portfolio): embedded-NUL root is unavailable, not a crash (#256), found by the owed Sol review of af856608"
+  - "usage-attribution Sol corrections (#257); lazyUsage bounded persistence skill text (#258); lab GLM partial evidence (#259); GLM phased design (#260)"
+  - "af1d8463 feat(estate): explicit read-only GLM paid provider, phase 1, inert (#261); deployed to the lab with rollback 02c76736"
+  - "blocker reconciliation record and addenda (#262, #263, #264) and Sol corrections (#267): MarkItDown and repo-intelligence cards unblocked"
+models_routes:
+  - "claude-sonnet-5-5 coordinator (laptop control plane)"
+  - "gpt-6-sol (newest Sol-class; astra never used) via codex 0.155.1 on the lab: owed reviews, design consultation, phase 1 implementation and eight review rounds"
+  - "glm-5.3 via claude-glm, read-only same-family screening only (labelled; not a Sol verdict)"
+verification:
+  - "Sol limit hit twice (reset times stated by the provider: 3:18 PM and 8:22 PM); work switched to labelled GLM screening and resumed on Sol after the reset"
+  - "#261: 1000 passed across 58 estate/worker/preflight/provider/routing test files, final Sol round APPROVE, live control proving --bare blocks hooks"
+  - "Sol reviews of the usage-attribution diagnosis (6 findings) and blocker record (corrections incl. Graphify package graphifyy) applied; Sol re-check of corrected text not run"
+  - "GLM reader findings re-checked mechanically; two GLM claims were wrong (MarkItDown version, rate_limited cooldown) and one Sol-caught error was mine (Graphify identity)"
+failure_tags:
+  - "sol_quota_unavailable"
+  - "self_modification_denied_skill_install"
+  - "own_error_graphify_package_name_unchecked"
+  - "wrong_pr_number_merge_attempt_rejected"
+  - "stop_hook_idle_pause_between_wakeups"
+rating:
+  scale: 1-5
+  goal_progress: 4
+  correctness_verification: 4
+  authority_scope_discipline: 4
+  routing_resource_efficiency: 3
+  continuity_handoff_quality: 4
+  agent_overall: 4
+  operator_overall: null
+  operator_note: null
+prompt_revision_recommended: true
+revision_reason: "Recurring pattern: ending a turn on a scheduled wakeup while a stop hook demands continuation, and treating a stated provider reset time as a wait rather than checking the clock and re-running; the persistence rules added to the lazyUsage skill (#258) address this, but a v3 of the initialiser should state that a past reset means retry immediately."
+evidence:
+  - "Sol errors: usage limit, try again at 3:18 PM; try again at 8:22 PM"
+  - "classifier denial: Self-Modification when copying the merged skill over the installed one"
