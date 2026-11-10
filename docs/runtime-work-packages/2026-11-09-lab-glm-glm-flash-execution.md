@@ -40,6 +40,25 @@ Typed errors: `launcher_missing`, `entitlement_missing`, `auth_failed`, `quota_e
 
 Main risks to live Codex: GLM readiness displacing Codex in `_select_host`, an explicit request overriding the `code-strong` default, shared health keys, and any edit to `_execute_codex_with_sandbox` in phase 1 (left unchanged).
 
+## Phase 1 live proof (read-only GLM, real router and worker path, in-process), 2026-11-10
+
+Run on the lab (`hz2-workstation`) from a worktree containing the qualification change, with `DATABASE_URL` pointing at a throwaway SQLite file created for the run (no production database touched, application server not started). The request went through `estate_router.run_task` with the capability `code-strong`, `allow_paid_escalation` true and `paid_provider: "glm"`; route resolution, host qualification, the `glm-readonly` worker verb over the local transport and the restricted launcher (`--tools Read,Grep,Glob`, write and agent tools disallowed, `--strict-mcp-config`, `--bare`, `--disable-slash-commands`, `--no-session-persistence`) all ran for real. This is **not** an HTTP-level `/api/estate/run` call; that is a separate follow-up after deploy.
+
+| Item | Observed |
+|---|---|
+| Prompt | one line asking for the exact string `GLM-PROOF-<epoch>` and nothing else (epoch 1794313009 in the recorded run) |
+| Response | exactly the sentinel (`sentinel_match: True`) |
+| Route | `executor: glm`, `host: hz2-workstation`, alias `code-strong`; reason "local capability was insufficient; glm executed on hz2-workstation read-only" |
+| Execution record | `provider: glm`, `host_id: hz2-workstation`, `exit_code: 0`, `ok: true`, `latency_ms` about 4,000, `concrete_model: null`, **`model_unverified: true`** (the effective model is not attested; the client only reports `glm-5.3`, which is not an attestation) |
+| Backend trace | a decision row for the task (`executor: glm`, `escalation_reason: insufficient_capability`) and a `provider_outcome` row for `glm` with health `ok`, recorded separately from Codex |
+| Provider health before the run | `unknown`, "no recorded outcome; initial attempt permitted", allowed |
+
+Negative controls (same setup, nothing launched; no `claude-glm` process existed afterwards):
+- `paid_provider: "glm"` with `mode: implementation` and a repository: refused, `error_code: provider_unqualified`, "provider 'glm' has no qualified write route", `executed: false`.
+- `paid_provider: "nonesuch"`: refused, `error_code: unknown_provider`, `executed: false`.
+
+Not shown and still open: the HTTP `/api/estate/run` path after deploy, a Codex-quota-to-GLM failover (phase 4, not implemented), any write route (phase 3), GLM Flash (phase 2), effective-model attestation, and a run through the restarted production service. Rollback: revert the one-line `qualified_executors` change in `config/estate.yaml` and restart `odysseus-aoteru-lab.service`.
+
 ## Open, in order
 
 1. Flash: find a genuine entitlement and concrete model identity, or record the precise blocker. Any credential or account action belongs to the operator and is not attempted here.
