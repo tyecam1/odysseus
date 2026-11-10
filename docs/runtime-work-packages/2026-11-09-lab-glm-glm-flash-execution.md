@@ -59,6 +59,15 @@ Negative controls (same setup, nothing launched; no `claude-glm` process existed
 
 Not shown and still open: the HTTP `/api/estate/run` path after deploy, a Codex-quota-to-GLM failover (phase 4, not implemented), any write route (phase 3), GLM Flash (phase 2), a provider-side assertion that the answering model is the newest offered, and a run through the restarted production service. 
 
+## HTTP-level check after deploy (2026-11-10, production service restarted at `c3213368`)
+
+Through the live `/api/estate/run` using the merged client (`am ask --capability code-strong --allow-paid --paid-provider <name>`), from the laptop:
+- `--paid-provider glm`: `ok: false`, `executed: false`, `error_code: provider_unqualified`, "paid provider 'glm' is not qualified on 'hz2-workstation'"; the lab's `qualified_executors` are `deterministic, local, codex, codex-write`.
+- `--paid-provider nonesuch`: `ok: false`, `executed: false`, `error_code: unknown_provider`.
+- No `claude-glm` process existed on the lab afterwards; no GLM call was made. Health was 200 after the restart and no park lease was active. Rollback target for this deploy: `ab37d4c9`.
+
+This is a **negative** HTTP proof (the explicit route is refused while no host is qualified). A positive HTTP proof remains blocked by the currency policy gate above.
+
 ## Qualification withheld: currency policy gate (precise blocker)
 
 `docs/subscription-model-currency-policy.md` ("Other subscription execution paths") says other subscription CLIs such as GLM "must NOT be claimed compliant or silently routed under this policy until a tested provider-specific latest resolver, effective-version record and fail-closed guard exist." This change supplies the **effective-version record** (the model is attested from the provider usage response and the call fails closed on a mismatch) but **not a latest-model resolver**: nothing here can tell whether `glm-5.3` is the newest model the plan offers, and reading the provider's model list would need the launcher-owned credential, which Odysseus must not duplicate. Therefore `glm` is deliberately **not** added to any host's `qualified_executors`; an explicit GLM request is refused with `provider_unqualified` on every host, and Codex routing is unchanged.
