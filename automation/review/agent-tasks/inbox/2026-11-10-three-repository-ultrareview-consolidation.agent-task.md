@@ -14,10 +14,10 @@ execution_mode: review-first
 architecture: single-plus-verifier
 architecture_rationale: "One Fable-led integrator, bounded deterministic branch/PR discovery and verification, one independent adversarial reviewer; uses existing Odysseus routing and each domain repository authority."
 single_agent_baseline: "Enumerate live refs/worktrees; select safe candidate merge set; create frozen review branches and provenance manifests, then request operator release of three review credits."
-execution_host: compute-box
+execution_host: hz2-workstation
 context_budget: high
 coordination_reason: "Three independent Git repositories with stack ancestry, conflicting work, human-approved scientific evidence and premium review scope limits."
-requires_remote_compute: false
+requires_remote_compute: true
 requires_local_model: false
 requires_zotero: false
 requires_mcp: false
@@ -70,6 +70,10 @@ Prepare **one review candidate per repository**, each integrating the largest co
 - Odysseus: 12 open PRs; `dev` is a significant integration base, including GLM phase-1 PR #261. Verify its actual current source of truth.
 - PhD: 54 open PRs, many stacked and review-only. PR #658 alone has 203 files, 7,521 additions and 2,396 deletions relative to its stacked base; #650 adds 6,848 lines across 298 files. Both cannot be indiscriminately combined under the usual Ultrareview limits.
 - Claude Code Ultrareview currently defaults to a maximum of **500 changed files and 8,000 changed lines** (`additions + deletions`) for a branch/PR diff. Confirm the installed CLI's actual bounds before use. Rejected oversized reviews do not consume a free run.
+
+## Host and controller boundary
+
+Start from the laptop controller only for dispatch and supervision. The registered lab worker is `hz2-workstation` (`dmem-HP-Z2-Tower-G9-Workstation-Desktop-PC`); resolve this from live `config/estate.yaml`, preflight, host health, repository checkout and executor qualification before any write. Run all Git integration, tests, and review-branch mutation on an authorised lab checkout via the existing Odysseus routing/lease transport. Do not assume laptop-local checkouts are lab checkouts or that laptop-to-lab SSH works: the estate records successful Odysseus HTTP control and previously SSH policy-blocked access. Verify any Claude Code/Fable availability on lab rather than assuming it is qualified there. If access is not eligible, stop at this precise transport/qualification gate, without relocating the backend or attempting unauthorized local execution.
 
 ## Method
 
