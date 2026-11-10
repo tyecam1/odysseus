@@ -28,7 +28,6 @@ invariant asks for).
 """
 from __future__ import annotations
 
-import json
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -352,11 +351,6 @@ def get_decision_by_id(decision_id: str) -> Optional[dict]:
         row = db.query(RoutingDecision).filter(RoutingDecision.id == decision_id).first()
         if row is None:
             return None
-        reason = row.escalation_reason
-        try:
-            reason = json.loads(reason)["reason"]
-        except (TypeError, ValueError, KeyError):
-            pass  # legacy scalar reason codes retain their existing meaning
         return {
             "id": row.id,
             "task_class": row.task_class,
@@ -372,7 +366,7 @@ def get_decision_by_id(decision_id: str) -> Optional[dict]:
             "deterministic_gate": row.deterministic_gate,
             "retries": row.retries,
             "escalated": row.escalated,
-            "escalation_reason": reason,
+            "escalation_reason": row.escalation_reason,
             "verification_outcome": row.verification_outcome,
             "nondelegation_reason": row.nondelegation_reason,
             "recommended_route": row.recommended_route,

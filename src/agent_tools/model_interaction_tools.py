@@ -17,8 +17,14 @@ from typing import Dict, Optional
 logger = logging.getLogger(__name__)
 
 
-from src import prompt_library as _prompt_lib
-_TEACHER_SYSTEM_PROMPT = _prompt_lib.text("teacher/system")
+_TEACHER_SYSTEM_PROMPT = (
+    "You are a senior AI mentor. A less capable model is stuck on a problem and asking for help. "
+    "Provide clear, actionable guidance:\n"
+    "1. Brief analysis of the problem\n"
+    "2. Recommended approach (step by step)\n"
+    "3. Key things to watch out for\n\n"
+    "Be concise and practical. No preamble."
+)
 
 
 async def chat_with_model(content: str, session_id: Optional[str] = None, owner: Optional[str] = None) -> Dict:

@@ -120,23 +120,20 @@ def _stream_timeout(read_timeout) -> httpx.Timeout:
 
 # Cache for LLM responses
 def _get_cache_key(url: str, model: str, messages: List[Dict], 
-                   temperature: float, max_tokens: int, think: Optional[bool] = None) -> str:
+                   temperature: float, max_tokens: int) -> str:
     """Generate cache key for LLM requests."""
     hashable_messages = []
     for msg in messages:
         sorted_items = tuple(sorted(msg.items()))
         hashable_messages.append(sorted_items)
     
-    key = {
+    content = json.dumps({
         'url': url,
         'model': model, 
         'messages': hashable_messages,
         'temp': temperature,
         'max_tokens': max_tokens
-    }
-    if think is not None:                 # absent for default calls, so existing cache keys are unchanged
-        key['think'] = think
-    content = json.dumps(key, sort_keys=True)
+    }, sort_keys=True)
     return hashlib.sha256(content.encode()).hexdigest()
 
 _response_cache = {}
@@ -620,11 +617,8 @@ def _build_ollama_payload(
     stream: bool = False,
     tools: Optional[List[Dict]] = None,
     num_ctx: Optional[int] = None,
-    think: Optional[bool] = None,
 ) -> Dict:
     """Build the JSON payload for Ollama's /api/chat endpoint.
-
-    ``think`` is emitted only when explicitly set (False turns reasoning off for bounded classification calls).
 
     ``num_ctx`` sets the input context window. Ollama defaults to 2048
     when the option is omitted, so a model with a larger advertised
@@ -651,8 +645,6 @@ def _build_ollama_payload(
         payload["options"] = options
     if tools:
         payload["tools"] = tools
-    if think is not None:
-        payload["think"] = think
     return payload
 
 
@@ -1770,10 +1762,8 @@ def normalize_model_id(
 def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LLMConfig.DEFAULT_TEMPERATURE,
              max_tokens: int = LLMConfig.DEFAULT_MAX_TOKENS, headers: Optional[Dict] = None,
              timeout: int = LLMConfig.DEFAULT_TIMEOUT, prompt_type: Optional[str] = None,
-             num_ctx: Optional[int] = None, think: Optional[bool] = None) -> str:
+             num_ctx: Optional[int] = None) -> str:
     """Synchronous LLM call with optional prompt type enhancement.
-
-    ``think`` (Ollama only): explicit reasoning switch; omitted keeps the model default.
 
     ``num_ctx`` (Ollama only): explicit context-window override. When
     omitted, behaviour is unchanged — the Ollama branch discovers and
@@ -1814,7 +1804,7 @@ def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LL
         messages_copy = non_sys
 
     provider = _detect_provider(url)
-    cache_key = _get_cache_key(url, model, messages_copy, temperature, max_tokens, think)
+    cache_key = _get_cache_key(url, model, messages_copy, temperature, max_tokens)
     cached_response = _get_cached_response(cache_key)
     if cached_response:
         logger.debug(f"Returning cached response for key: {cache_key}")
@@ -1828,7 +1818,7 @@ def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LL
         target_url = _normalize_ollama_url(url)
         payload = _build_ollama_payload(
             model, messages_copy, temperature, max_tokens,
-            stream=False, num_ctx=(num_ctx if num_ctx is not None else get_context_length(url, model)), think=think,
+            stream=False, num_ctx=(num_ctx if num_ctx is not None else get_context_length(url, model)),
         )
     else:
         target_url = _normalize_openai_chat_url(url)

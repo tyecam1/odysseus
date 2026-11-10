@@ -41,8 +41,33 @@ SUMMARY_MAX_TOKENS = 1024
 SMALL_CONTEXT_LIMIT = 8192  # Models with context <= this get aggressive trimming
 
 # Cursor-style self-summarization prompt — produces structured, dense summaries
-from src import prompt_library as _prompt_lib
-SELF_SUMMARY_SYSTEM_PROMPT = _prompt_lib.text("context/self-summary")
+SELF_SUMMARY_SYSTEM_PROMPT = """You are summarizing a conversation to preserve context after compaction. Produce a structured summary that lets the conversation continue seamlessly.
+
+Use this format:
+
+## Conversation Summary
+**Turns summarized:** {count}  |  **Compactions so far:** {n}
+
+### User Goal
+One sentence describing what the user is trying to accomplish.
+
+### What Was Done
+- Bullet points of completed actions, decisions made, and key outputs
+- Include specific file paths, function names, variable names, URLs, and config values
+- Note any errors encountered and how they were resolved
+
+### Current State
+What is the system/code/task state right now? What was the last thing discussed?
+
+### Pending / Next Steps
+- What remains to be done
+- Any open questions or blockers
+
+### Key Context
+- Important constraints, preferences, or decisions that must not be forgotten
+- Specific values: model names, ports, paths, credentials references, versions
+
+Keep the summary under 1000 tokens. Be dense — every token should carry information. Do not include pleasantries or meta-commentary."""
 
 
 def _sanitize_tool_messages(msgs: List[Dict]) -> List[Dict]:
