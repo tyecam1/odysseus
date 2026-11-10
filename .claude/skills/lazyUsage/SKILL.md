@@ -14,6 +14,8 @@ Do not require a laptop-local checkout. Use the existing registered lab SSH/remo
 
 ## Bounded persistence
 
+Durable backend activation is now available via `am lazy start/status/stop/resume` against the existing Odysseus service. The interactive session route remains available for interactive use; all ceilings below are unchanged.
+
 A single invocation keeps working through recoverable blockers; it does not end after inventory or after one blocked lane. This adds no scheduler, daemon or router: the lab executes, Odysseus keeps authority, and the laptop is the control surface.
 
 - **End a turn only for a named terminal condition**, and say which: (a) after the last delivery a fresh frontier read shows no eligible task whose owner authority permits it; (b) operator stop or interrupt, or a permission refusal that covers the whole authorised scope (a refusal of one action is recorded and independent work continues); (c) a budget is spent: 8 consecutive continuation turns with no delivered task, where delivery means the owning task's acceptance conditions are met (for example a merged and verified change or a closed task); a check or review counts only when it is what completes an accepted task, 4 hours elapsed, 12 paid model calls (Codex, Claude or GLM review or implementation runs), 150 tool calls in total, or the same failure three times; (d) only genuinely protected human-only gates remain.

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 from typing import Dict, List, Literal, Optional, Union
 
@@ -17,6 +18,8 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from src.auth_helpers import require_user
+from core.middleware import require_admin
+from src.rate_limiter import RateLimiter
 from src.delegation_preflight import delegation_preflight
 from src.estate_router import (
     RoutingConfigError,
@@ -231,8 +234,82 @@ class ResolvePrepareBody(BaseModel):
     host_id: str
 
 
+class ProviderOverrideBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    reason: str = Field(min_length=1, max_length=2000)
+
+    @field_validator("reason")
+    @classmethod
+    def nonempty_reason(cls, value):
+        if not value.strip():
+            raise ValueError("reason is required")
+        return value.strip()
+
+
+class FinalizeBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    commit_message: str = Field(default="Finalize governed estate execution", min_length=1, max_length=65536)
+
+
+def _provider_admin_owner(request: Request) -> str:
+    if getattr(request.state, "api_token", False):
+        _scope_owner(request, {"estate:admin"})
+        owner = getattr(request.state, "api_token_owner", None)
+        manager = getattr(request.app.state, "auth_manager", None)
+        if not owner or not manager or not manager.is_configured or not manager.is_admin(owner):
+            raise HTTPException(403, "Admin only")
+        return owner
+    require_admin(request)
+    owner = require_user(request)
+    if not owner:
+        raise HTTPException(403, "An identified administrator is required for the audit record")
+    return owner
+
+
 def setup_estate_routing_routes() -> APIRouter:
     router = APIRouter(prefix="/api/estate", tags=["estate-routing"])
+    override_limiter = RateLimiter(max_requests=5, window_seconds=60)
+
+    def known_provider(provider):
+        from src.estate_router import _resolve_paid_provider
+        if not _route_call(_resolve_paid_provider, None, explicit_provider=provider).get("provider"):
+            raise HTTPException(404, "unknown provider")
+
+    @router.get("/provider-health/{provider}")
+    def provider_health(request: Request, provider: str):
+        _scope_owner(request, {"estate:read", "estate:execute", "estate:admin"})
+        known_provider(provider)
+        from src.estate_router import provider_allows_dispatch
+        return provider_allows_dispatch(provider)
+
+    @router.post("/provider-health/{provider}/override")
+    def provider_override(request: Request, provider: str, body: ProviderOverrideBody):
+        owner = _provider_admin_owner(request)
+        known_provider(provider)
+        if not override_limiter.check(owner):
+            raise HTTPException(429, "Too many provider overrides; retry in 60 seconds")
+        from src.estate_router import record_operator_provider_override
+        result = _route_call(record_operator_provider_override, provider, body.reason, requested_by=owner,
+                             token_id=getattr(request.state, "api_token_id", None))
+        logging.getLogger(__name__).info("provider override provider=%s requested_by=%s decision_id=%s",
+                                         provider, owner, result["decision_id"])
+        return result
+
+    @router.post("/run/{execution_id}/finalize")
+    async def finalize_run_execution(request: Request, execution_id: str, body: FinalizeBody):
+        _scope_owner(request, {"estate:execute"})
+        from core.database import EstateExecution, get_db_session
+        from src.estate_router import finalize_execution
+        with get_db_session() as db:
+            row = db.get(EstateExecution, execution_id)
+            if row is None:
+                raise HTTPException(404, "execution not found")
+            repo_id, host_id = row.repo_id, row.host_id
+        result = await asyncio.to_thread(finalize_execution, execution_id=execution_id,
+                                        repo_id=repo_id, host_id=host_id, commit_message=body.commit_message)
+        if not result.get("finalized"):
+            raise HTTPException(409, result)
+        return result
 
     @router.post("/route")
     async def route_task(request: Request, envelope: TaskEnvelope):

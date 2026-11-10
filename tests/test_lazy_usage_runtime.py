@@ -552,6 +552,10 @@ def test_api_start_conflict_status_history_and_controls(db):
     assert writer.post("/api/lazy-usage/start", json={}).status_code == 409
     reader = client(["estate:read"])
     assert reader.get("/api/lazy-usage/status").json()["id"] == run["id"]
+    assert reader.get("/api/lazy-usage/status", params={"run_id": run["id"]}).json()["id"] == run["id"]
+    assert reader.get("/api/lazy-usage/status", params={"run_id": "missing"}).status_code == 404
+    assert client(["estate:read"], "other").get(
+        "/api/lazy-usage/status", params={"run_id": run["id"]}).status_code == 403
     assert len(reader.get("/api/lazy-usage/history").json()["runs"]) == 1
     for action, state in (("pause", "paused"), ("resume", "running"), ("stop", "stopped")):
         response = writer.post("/api/lazy-usage/" + action, json={"run_id": run["id"]})

@@ -31,9 +31,14 @@ def setup_lazy_usage_routes():
             raise HTTPException(exc.status_code, exc.detail) from exc
 
     @router.get("/status")
-    def status(request: Request):
+    def status(request: Request, run_id: str | None = None):
         owner = _scope_owner(request, {"estate:read", "estate:execute"})
         with get_db_session() as db:
+            if run_id:
+                try:
+                    return runtime.run_dict(runtime._load(db, run_id, owner))
+                except runtime.RunError as exc:
+                    raise HTTPException(exc.status_code, exc.detail) from exc
             run = db.query(LazyUsageRun).filter_by(created_by=owner).order_by(LazyUsageRun.created_at.desc()).first()
             return runtime.run_dict(run) if run else {"state": None, "counters": {}, "budgets": {},
                                                      "checkpoint": {}, "owed_reviews": []}

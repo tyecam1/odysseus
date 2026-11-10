@@ -1,125 +1,226 @@
-# Persistent lazy usage: packet A implementation evidence
+---
+title: Durable lazy usage lab persistence acceptance
+status: draft
+owner: odysseus
+task: 2026-11-09-lazyusage-bounded-persistent-continuation
+updated_at: 2026-11-10
+---
 
-Status: core candidate; **not shipped or deployed**. The owning task remains
-ready pending independent verification and its required live acceptance.
+# Durable lazy usage lab persistence acceptance
 
-## Authority and implementation
+## Purpose and status
 
-Implementation used the existing admitted execution
-`9ae16cbf-c605-4771-b590-c375b120c573`, under active repo lease
-`f74969f3-4d05-4328-b56f-8cc84b23a74b`, bound to
-`task/lazyusage-backend-persistence`. No second implementation dispatch or
-lease was acquired. Start HEAD: `eeb8da2a298b9853b836e9e3fee276cab6c3091c`.
-Controller retention is limited to final acceptance
+Extend the existing Odysseus lab service with explicitly activated, bounded,
+client-independent work. **Draft until live acceptance completes.** Disposable
+fixtures establish local behavior only; they do not establish deployment or
+real queued-task delivery. The owning task remains ready. Do not merge this
+packet as part of this implementation session.
+
+## Packet B authority and routing
+
+Start HEAD: `308e655c`. Live source DB read confirmed the existing admitted
+execution `9714754e-d6d9-486d-9269-4c196d7f8fd8`, active lease
+`c951afdd-f371-4e9a-90ee-6372eb3f68f1`, and exact packet worktree/branch
+`task/lazyusage-backend-persistence`. Packet A's earlier lease was already
+released and was not reused. No lease was acquired and no second implementation
+was dispatched by this worker.
+
+The absent `aoteru` executable and unconfigured bundled client prevented HTTP
+preflight. The backend Python preflight ran against a fresh read-only-source DB
+snapshot copied to `/tmp` for the three bounded units (client, admin surface,
+acceptance/docs). It confirmed the current write lease and eligible lab worker.
+New Codex admission was unavailable because this admitted execution's launch
+marker had no final outcome; this was not treated as additional quota or new
+dispatch authority. Implementation continued inside that already-admitted
+worker. Controller retention is final acceptance only
 (`nondelegation_reason: final_acceptance`).
 
-The `aoteru` executable was absent, the bundled client had no configured
-backend, and this sandbox denied HTTP/socket access and systemd bus access.
-The existing Python preflight was exercised using a read-only source DB
-snapshot copied to `/tmp`, with the deployed Python environment. It confirmed
-the exact worktree's existing write authority, a healthy qualified lab worker,
-and the existing Codex launch marker (provider state unknown while this
-already-admitted execution was running). That snapshot is not a new dispatch
-authorization or a claim of spare quota. No credentials were read or changed.
+The initializer register was checked: active `estate-queue-priority-execution@v2`
+is preserved as the backend policy reference. This bounded worker packet did
+not invoke a new queue-selection initializer application. No application rating,
+evolution event or independent-review verdict is invented. The central paid
+provider registry lists Codex and GLM, with no qualified Haiku/Terra/GLM-Flash
+review route demonstrated by this session; independent review remains owed.
 
-The additive `LazyUsageRun` model is created by the same `init_db()` /
-`Base.metadata.create_all()` path as `EstateExecution`. Its partial unique
-index prevents simultaneous non-terminal activations, including paused runs.
-There is no destructive schema migration.
+## What was built
 
-The runtime calls the existing portfolio functions locally, central routing
-and preflight, ParkLease preparation/renewal/release, the write admission lane,
-execution polling/reconciliation, and the worker's status/fence/cancel verbs.
-The reserved execution ID is checkpointed before dispatch. Write admission
-rechecks the activation in the existing serialized admission transaction.
-Ambiguous dispatches are observed or quarantined, never replayed with a new ID.
-Stop fences an unstarted spool before cancellation and preserves unresolved
-worktree authority. Ordinary release is constrained to the exact owned lease.
+Packet A: `core/database.py` (`LazyUsageRun`), `src/lazy_usage_runtime.py`,
+`routes/lazy_usage_routes.py`, and the existing service lifespan loop.
+See [packet A evidence](2026-11-10-lazyusage-persistence-packet-a.md).
 
-Checkpoints contain task/criterion references, state, counters, review debt,
-frontier/contract digests and next actions. Task bodies and model output remain
-outside the run checkpoint. Provider quota diagnostics retain the original
-error and reset/cooldown provenance. A successful model response alone never
-moves an owning task to done.
+Packet B:
 
-## API and lifecycle
+- `companion/laptop_client/aoteru.py`: checkout-free `am lazy` controls,
+  S6 `am finalize`, and `am provider-health show/override`; JSON on stdout,
+  compact run state, budget counters and owed-review count on stderr.
+- `routes/lazy_usage_routes.py`: owned run lookup by optional `run_id`.
+- `routes/estate_routing_routes.py`: provider-health read/admin override and
+  S6 finalization HTTP adapters; finalization derives repo/host from the
+  execution row and uses the existing control-plane authority checks.
+- `src/estate_router.py`: serialized, append-only operator override evidence.
+- `routes/api_token_routes.py`: dedicated `estate:admin` token scope.
+- `.claude/skills/lazyUsage/SKILL.md`: backend entry-point wording only.
+- `tests/test_lazy_usage_acceptance.py`: disposable DB, fixture delivery,
+  disconnect, restart/single-dispatch and rollback assertions.
+- `tests/test_estate_provider_override.py` and laptop-client tests: scope,
+  identity, validation, audit, rate limit and request contracts.
 
-- `POST /api/lazy-usage/start`: `estate:execute`; accepts `repo_scope` and
-  `budget_overrides`. Only registered frontier repo IDs are accepted; budgets
-  are clamped to the specified ceilings. A concurrent activation returns 409.
-- `GET /api/lazy-usage/status` and `/history`: `estate:read` or
-  `estate:execute`, restricted to the caller's runs.
-- `POST /api/lazy-usage/stop`, `/pause`, `/resume`: `estate:execute`, body
-  `{"run_id": "..."}`; owner and legal-state checks apply. Terminal rows cannot
-  resume or renew their budgets.
+## Activate, inspect and stop
 
-The existing app startup starts a 25-second observer when
-`ODYSSEUS_LAZY_USAGE_OBSERVER` is unset/on. An empty run table performs no
-frontier scan, model call or task dispatch. Only a persisted explicit activation
-permits work. No new run is automatically created. No-progress runs park with
-a five-minute condition recheck, while operator pauses require explicit resume.
-Shutdown cancels the observer without erasing durable execution state.
+Use the existing configured Odysseus service URL and bearer token; no new
+configuration or secrets are stored. Mutating lazy verbs and finalization
+require `estate:execute`; status/history require `estate:read` or
+`estate:execute`. Runs are owner-scoped. Start without `--repo` selects the
+existing registered three-repository scope. Budgets can only lower ceilings.
 
-Wall time is measured from persisted activation time, including pauses and
-service restarts. Existing read-worker timeouts and durable write deadlines
-are clamped to that wall-clock budget; existing bounded cancellation/cleanup
-grace still applies. Paid/tool reservations are committed before admission;
-reported child/restart totals are charged once. Provider quota errors park
-dependent review debt while other eligible work can continue. Verified Codex
-quota failover uses only a GLM read route qualified by the central router.
+```sh
+am lazy start --repo odysseus --budget max_paid_calls=2 --budget max_seconds=600
+am lazy status
+am lazy status RUN_ID
+am lazy status --all
+am lazy pause RUN_ID
+am lazy resume RUN_ID
+am lazy stop RUN_ID
+am finalize EXECUTION_ID --message-file commit-message.txt
+```
 
-## Essential remaining dependency: child usage evidence
+Omitting RUN_ID for pause/resume/stop selects the latest owned run. History
+returns the backend's bounded default page (20 rows). Terminal budget exhaustion
+requires a fresh explicit activation. A second non-terminal activation is refused.
+Finalization is an explicit S6 commit/push operation on the recorded execution,
+not a merge or permission to finalize unrelated work. Without a message file it
+uses `Finalize governed estate execution`.
 
-The current paid worker result does **not** expose authoritative aggregate
-child paid/tool-call totals. The core records `usage_accounting_pending` and
-parks further dispatch when those totals are absent; it never treats unknown
-child usage as zero. Once the existing EstateExecution carries validated
-`usage.paid_calls` and `usage.tool_calls` totals, a due recheck or explicit
-resume accounts them before another attempt. This behavior has regression
-coverage, including restarts and exactly-once accounting.
+Provider state inspection and operator evidence:
 
-This does not certify a hard tool-call or nested-paid-call bound *inside* an
-unmetered worker invocation. Existing worker-boundary metering/enforcement is
-an essential delivery dependency under the task's no-new-harness constraint.
-Do not advertise unattended bounded multi-task paid continuation until that
-boundary is qualified. Review routes also require an actually qualified
-approved reviewer identity; provider credentials or aliases do not qualify one.
-Required independent review and owner acceptance remain visible as owed debt.
+```sh
+am provider-health show codex
+am provider-health override codex --reason 'Observed live lab Codex capacity; evidence reference ...'
+```
 
-## Verification and outstanding live gates
+Override requires an **`estate:admin` token owned by a current administrator**,
+or the existing authenticated admin-session path. `estate:execute` alone is
+insufficient, even for an admin owner. The row asserts operator-observed evidence;
+it does not measure or fabricate capacity, qualify a worker/model, acquire a
+lease, or bypass currency/permission checks. Only registered providers are
+accepted. The reason is mandatory, bounded and audited with requesting identity
+and token ID (never the bearer secret). Overrides append a `provider_outcome`
+RoutingDecision with `ok`, no assumed reset, and the prefix
+`operator-authorized override: `. A per-owner sliding window allows five
+accepted attempts per minute. The existing audit history is retained; later
+admitted launches and their outcomes govern subsequent gate decisions.
 
-Tests cover DB singleton activation and racing starts, ceiling clamps, all
-five exhaustion conditions, terminal immutability, owner/scope authorization,
-restart observation without redispatch, competing advances, stop before and
-after admission, spool fencing, exact lease release/protection, quota debt and
-qualified GLM read failover, missing child accounting, bounded frontier
-rechecks, stale approval assessment, worker deadlines and observer cancellation.
+## Budget ceilings
 
-The initial complete estate/portfolio/park/preflight selection returned
-844 passed, 21 skipped and one failure: the pre-existing
-`test_local_transport_subprocess_round_trip_against_fake_ollama` cannot create
-its `127.0.0.1` HTTPServer in this socket-denied sandbox. Tests were not changed
-to suppress that failure. A subsequent combined run with that single test
-explicitly deselected returned 878 passed, 21 skipped, one deselected; further
-runtime/router/control checks returned 195 passed. The final combined run on
-the finished Python changes returned **883 passed, 21 skipped, one deselected**
-in 175.82 seconds. `git diff --check` and syntax parsing of all changed Python
-files also passed.
+| Budget key | Ceiling per activation |
+| --- | --- |
+| `max_seconds` | 14,400 seconds (4 hours) |
+| `max_paid_calls` | 12 |
+| `max_tool_calls` | 150 |
+| `max_no_delivery_turns` | 8 consecutive turns |
+| `max_repeat_failures` | 3 repeats |
 
-The sandbox also denies socketpair writes used for cross-thread asyncio
-wakeup. API tests were run with a process-local selector timeout capped at
-50 ms in the test launcher, allowing already-queued callbacks to run without
-socket writes. Application code and repository test policy were unchanged.
-Test DB/data roots were explicitly isolated under `/tmp` or in memory.
+Counters and deadlines survive restarts. Child usage must be reported; unknown
+usage fences further dispatch rather than resetting spent-call accounting.
+The initializer remains `estate-queue-priority-execution@v2` unchanged.
 
-Not performed: qualified independent implementation review, live API start,
-real owner-task delivery/merge/deploy, client disconnect demonstration, service
-restart demonstration, or live cancellation/quota/lease-collision acceptance.
-No live run was activated and no service/deployment policy was changed.
+## Acceptance evidence
 
-Rollback: disable the observer with `ODYSSEUS_LAZY_USAGE_OBSERVER=0` through
-the existing release process, use stop to cancel an active activation through
-the existing worker lane, and revert this packet's code through that release
-process. Retain run/execution/lease records for audit; do not drop tables or
-force-release unresolved worktrees. Deployment and rollback have not been
-exercised by this packet.
+### Local scaffolding
+
+Verified locally:
+
+| Selection | Result |
+| --- | --- |
+| Separate `-m lazy_usage_acceptance tests/test_lazy_usage_acceptance.py` | 4 passed in 3.16s |
+| Estate/laptop regression selection below | 427 passed in 76.12s |
+| Final admin/auth selection after audit-identity hardening | 78 passed in 23.98s |
+| Python syntax parsing and `git diff --check` | passed |
+
+The regression command selected:
+
+```sh
+pytest -q tests/test_estate_provider_override.py tests/test_laptop_client.py \
+  tests/test_lazy_usage_runtime.py tests/test_estate_routing_routes.py \
+  tests/test_estate_router.py tests/test_estate_stage6_control.py \
+  tests/test_provider_quota_health.py tests/test_delegation_preflight.py \
+  tests/test_api_token_routes.py tests/test_api_token_user_route_gate.py
+```
+
+The final admin/auth rerun selected `test_estate_provider_override.py`,
+`test_estate_routing_routes.py`, `test_api_token_routes.py` and
+`test_api_token_user_route_gate.py`. Initial finalization-fixture failures
+(missing required executor/provider fields) were corrected and rerun; no
+test was skipped or deselected in these selections. Only existing SQLAlchemy
+and Starlette deprecation warnings remain.
+
+Execution used `/tmp/odysseus-glm-fallback-venv/bin/python`, explicit
+`DATABASE_URL=sqlite:///:memory:` and isolated `ODYSSEUS_DATA_DIR` roots under
+`/tmp`. As in packet A, sandbox socketpair writes prevent cross-thread asyncio
+wakeup. The process-local launcher `/tmp/lazyusage-packet-b-pytest.py` caps
+`selectors.EpollSelector.select` waits at 50ms before calling `pytest.main`;
+application code and repository test policy are unchanged. The exact launcher
+logic is:
+
+```python
+import selectors, sys, pytest
+original_select = selectors.EpollSelector.select
+def bounded_select(self, timeout=None):
+    return original_select(self, 0.05 if timeout is None else min(timeout, 0.05))
+selectors.EpollSelector.select = bounded_select
+raise SystemExit(pytest.main(sys.argv[1:]))
+```
+
+The acceptance marker is `lazy_usage_acceptance`, run separately; no slow
+designation is claimed without duration evidence. Fixture work really creates
+and checks a disposable artifact and transitions its owner card. Its mocked
+provider/host route is not production qualification. Restart coverage creates a
+new service-loop task over the same DB, retaining one execution and cumulative
+budgets. Live acceptance remains entirely outstanding below.
+
+### Live results — required before accepting deployment
+
+- TODO(live-delivery): real eligible low-risk owner task, preflight, lease,
+  exact dispatch/model route, deterministic/independent verification, owner
+  status transition and prompt-application trace.
+- TODO(live-disconnect): client disconnect timestamps, independent continuation
+  and actual delivered or advanced work/checkpoint.
+- TODO(live-restart): controlled service restart, recovered checkpoint, retained
+  budgets and proof of no duplicate mutation/tool/paid dispatch.
+- TODO(live-governance): protected gate, stale approval metadata, unavailable
+  reviewer while independent work proceeds, unqualified GLM write refusal,
+  stale HEAD/lease collision rejection and correct provider/host selection.
+- TODO(live-stop-cost): pause/resume, stop/cancel, all ceilings, empty frontier,
+  repeating failure, process/transport interruption and no orphan workers.
+- TODO(live-override): authenticated admin evidence, named-provider isolation,
+  durable audit and renewed gate state; do not infer capacity from this doc.
+- TODO(independent-review): qualified independent reviewer identity and verdict.
+- TODO(deployment): normal release evidence, deployed commit/service version,
+  health, activation state, actual worker route and task result.
+
+## Rollback
+
+Activation rollback: `POST /api/lazy-usage/stop` with `{"run_id":"RUN_ID"}`
+(or `am lazy stop RUN_ID`), then observe status until the run row is terminal.
+Keep the existing bounded cancellation, audit and unresolved-lease protections.
+
+Code rollback: through the normal release process, `git revert -m 1 <merge-commit>`
+for the merge commit, then `systemctl restart odysseus-aoteru-lab.service`.
+Stop the activation and confirm its terminal run row before reverting code.
+These are the activation and code rollback steps; no table deletion, record
+rewrites, credential changes, forced lease release or second daemon is needed.
+
+## Limitations and remaining debt
+
+This packet is local implementation and acceptance scaffolding, unmerged and
+undeployed. Mocked providers cannot prove real service restart safety, capacity,
+independent review or live delivery. Loop recreation over the same disposable
+DB simulates restart; it does not restart systemd. The existing service remains
+opt-in, with no new daemon. Existing protected gates, qualification, write leases,
+model currency, repository ownership and external publication gates still apply.
+
+Commit finalization is an execution-environment dependency: `git add` was
+refused with `Unable to create .../index.lock: Read-only file system` because
+the sandbox exposes shared Git metadata read-only. Source changes are retained
+in the packet worktree for the existing S6 controller finalization after this
+execution is terminal. No branch ref, merge or deployment was changed here.

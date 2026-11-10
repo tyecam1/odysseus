@@ -828,3 +828,74 @@ def test_dispatch_forwards_explicit_paid_provider_and_omits_it_otherwise(client,
     assert bodies[0]["paid_provider"] == "glm" and bodies[0]["allow_paid_escalation"] is True
     assert "paid_provider" not in bodies[1]
 
+
+
+@pytest.mark.parametrize("argv,method,path,body", [
+    (["lazy", "start", "--repo", "odysseus", "--repo", "misumi", "--budget", "max_paid_calls=2"],
+     "POST", "/api/lazy-usage/start", {"repo_scope": ["odysseus", "misumi"], "budget_overrides": {"max_paid_calls": 2}}),
+    (["lazy", "start"], "POST", "/api/lazy-usage/start", {}),
+    (["lazy", "status"], "GET", "/api/lazy-usage/status", None),
+    (["lazy", "status", "R1"], "GET", "/api/lazy-usage/status?run_id=R1", None),
+    (["lazy", "status", "--all"], "GET", "/api/lazy-usage/history", None),
+    *[(["lazy", action, "R1"], "POST", "/api/lazy-usage/" + action, {"run_id": "R1"})
+      for action in ("pause", "resume", "stop")],
+    (["provider-health", "show", "codex"], "GET", "/api/estate/provider-health/codex", None),
+    (["provider-health", "override", "codex", "--reason", "Observed capacity"], "POST",
+     "/api/estate/provider-health/codex/override", {"reason": "Observed capacity"}),
+])
+def test_lazy_and_provider_request_contracts(client, monkeypatch, capsys, argv, method, path, body):
+    calls = []
+    payload = {"id": "R1", "state": "running", "counters": {"paid_calls": 1},
+               "budgets": {"max_paid_calls": 2}, "owed_reviews": [{"task_id": "owed"}]}
+    def request(cfg, method, path, body=None, timeout=30):
+        calls.append((method, path, body))
+        return {"status": 200, "body": payload}
+    monkeypatch.setattr(client, "_request", request)
+    assert client.main(argv) == 0
+    assert calls == [(method, path, body)]
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == payload
+    if argv[0] == "lazy":
+        assert "state: running" in captured.err and "owed reviews: 1" in captured.err
+        assert "paid_calls" in captured.err
+
+
+@pytest.mark.parametrize("action", ["pause", "resume", "stop"])
+def test_lazy_controls_resolve_latest_without_storing_run(client, monkeypatch, action):
+    calls = []
+    def request(cfg, method, path, body=None, timeout=30):
+        calls.append((method, path, body))
+        return {"status": 200, "body": {"id": "latest", "state": "running"}}
+    monkeypatch.setattr(client, "_request", request)
+    assert client.main(["lazy", action]) == 0
+    assert calls == [("GET", "/api/lazy-usage/status", None),
+                     ("POST", "/api/lazy-usage/" + action, {"run_id": "latest"})]
+
+
+@pytest.mark.parametrize("budget", ["oops", "=4", "max_paid_calls=no", "max_paid_calls=-1"])
+def test_lazy_bad_budget_is_local_error(client, budget):
+    with pytest.raises(SystemExit):
+        client.main(["lazy", "start", "--budget", budget])
+
+
+def test_finalize_preserves_message_file_and_uses_control_plane(client, monkeypatch, tmp_path, capsys):
+    message = tmp_path / "message.txt"
+    message.write_text("Bounded change\n\nExact UTF-8: 日本語\n", encoding="utf-8")
+    calls = []
+    def request(cfg, method, path, body=None, timeout=30):
+        calls.append((method, path, body, timeout))
+        return {"status": 200, "body": {"finalized": True}}
+    monkeypatch.setattr(client, "_request", request)
+    assert client.main(["finalize", "E1", "--message-file", str(message)]) == 0
+    assert calls == [("POST", "/api/estate/run/E1/finalize", {"commit_message": message.read_text(encoding="utf-8")}, 240)]
+    assert json.loads(capsys.readouterr().out)["finalized"]
+    assert client.main(["finalize", "E1"]) == 0
+    assert calls[-1][2] == {}
+
+
+@pytest.mark.parametrize("argv", [["lazy", "start"], ["lazy", "status"],
+    ["lazy", "stop", "R1"], ["provider-health", "show", "codex"],
+    ["provider-health", "override", "codex", "--reason", "observed"], ["finalize", "E1"]])
+def test_new_commands_propagate_http_denials(client, monkeypatch, argv):
+    monkeypatch.setattr(client, "_request", lambda *a, **kw: {"status": 403, "body": {"detail": "denied"}})
+    assert client.main(argv) == 1

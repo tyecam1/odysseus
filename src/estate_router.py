@@ -191,6 +191,43 @@ def provider_allows_dispatch(provider: str, *, now: Optional[datetime] = None,
             "reason": f"provider {provider}: {health['state']}: {health['reason']}"}
 
 
+def record_operator_provider_override(provider: str, reason: str, *, requested_by: str,
+                                      token_id: Optional[str] = None) -> dict:
+    """Record operator-observed evidence, never a synthetic capacity probe.
+
+    Serialize with admission so this append has an unambiguous position in
+    provider history. Existing in-flight launch outcomes retain their rows.
+    """
+    from core.database import RoutingDecision, get_db_session
+    from sqlalchemy import text
+    if not _resolve_paid_provider(None, explicit_provider=provider).get("provider"):
+        raise ValueError("unknown provider")
+    if not reason.strip() or not requested_by.strip():
+        raise ValueError("reason and requesting identity are required")
+    health = {"state": "ok", "retry_after": None, "retry_after_assumed": False,
+              "reason": "operator-authorized override: " + reason.strip()}
+    decision_id = str(uuid.uuid4())
+    with get_db_session() as db:
+        dialect = db.get_bind().dialect.name
+        if dialect == "sqlite":
+            db.execute(text("BEGIN IMMEDIATE"))
+        elif dialect == "postgresql":
+            db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:scope))"),
+                       {"scope": "provider_outcome:" + provider})
+        else:
+            raise ValueError("unsupported admission database")
+        previous = db.query(RoutingDecision).filter_by(executor=provider, task_class="provider_outcome").order_by(
+            RoutingDecision.created_at.desc(), RoutingDecision.id.desc()).first()
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        stamp = max(now, previous.created_at + timedelta(microseconds=1)) if previous else now
+        db.add(RoutingDecision(id=decision_id, task_class="provider_outcome", executor=provider,
+            host_id=socket.gethostname(), status="complete", created_at=stamp,
+            escalation_reason=json.dumps({"provider_health": health, "requested_by": requested_by,
+                                          "api_token_id": token_id, "action": "operator_override"})))
+    return {**health, "provider": provider, "allowed": True, "decision_id": decision_id,
+            "requested_by": requested_by}
+
+
 def _record_provider_outcome(result: dict, outcome_id: str) -> Optional[str]:
     """Finalize the launch marker; GLM host-local failures remain attempt-only."""
     from core.database import RoutingDecision, get_db_session
