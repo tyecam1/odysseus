@@ -1,6 +1,6 @@
-# Lab GLM and GLM Flash execution: partial evidence (steps 1-2 only)
+# Lab GLM and GLM Flash execution: partial evidence (phase 1 implemented, not qualified)
 
-Task: `2026-11-09-qualify-glm-and-glm-flash-on-lab-odysseus`. Status of this document: **partial**. Only reconciliation and the host-local launcher smoke test were done. No backend integration, no `/api/estate/run` proof, no write-mode proof and no Flash qualification exist yet; the task stays unfinished.
+Task: `2026-11-09-qualify-glm-and-glm-flash-on-lab-odysseus`. Status of this document: **partial**. Reconciliation and the launcher smoke test came first. Since then phase 1 (explicit read-only GLM, #261) was merged and deployed, and this change adds effective-model attestation, failure classification from provider evidence and an in-process real-path proof (see below). **No host is qualified for GLM** (a policy blocker is recorded below), there is no HTTP-level `/api/estate/run` proof, no write-mode route and no Flash qualification; the task stays unfinished. The sections below this status line are written in the order they were produced; where they say that no code exists they describe the state at that time.
 
 ## Reconciliation (read-only, 2026-11-09, lab `hz2-workstation`, `dev` at `6a67f639`)
 
@@ -40,6 +40,31 @@ Typed errors: `launcher_missing`, `entitlement_missing`, `auth_failed`, `quota_e
 
 Main risks to live Codex: GLM readiness displacing Codex in `_select_host`, an explicit request overriding the `code-strong` default, shared health keys, and any edit to `_execute_codex_with_sandbox` in phase 1 (left unchanged).
 
+## Phase 1 live proof (read-only GLM, real router and worker path, in-process), 2026-11-10
+
+Run on the lab (`hz2-workstation`) from a worktree that temporarily carried a one-line `qualified_executors` entry for `glm` (**that entry is not part of this change and no host is qualified**), with `DATABASE_URL` pointing at a throwaway SQLite file created for the run (no production database touched, application server not started). The request went through `estate_router.run_task` with the capability `code-strong`, `allow_paid_escalation` true and `paid_provider: "glm"`; route resolution, host qualification, the `glm-readonly` worker verb over the local transport and the restricted launcher (`--tools Read,Grep,Glob`, write and agent tools disallowed, `--strict-mcp-config`, `--bare`, `--disable-slash-commands`, `--no-session-persistence`) all ran for real. This is **not** an HTTP-level `/api/estate/run` call; that is a separate follow-up after deploy.
+
+| Item | Observed |
+|---|---|
+| Prompt | one line asking for the exact string `GLM-PROOF-<epoch>` and nothing else (epoch 1794313697 in the final recorded run) |
+| Response | exactly the sentinel (`sentinel_match: True`) |
+| Route | `executor: glm`, `host: hz2-workstation`, alias `code-strong`; reason "local capability was insufficient; glm executed on hz2-workstation read-only" |
+| Execution record | `provider: glm`, `host_id: hz2-workstation`, `exit_code: 0`, `ok: true`, `latency_ms` about 5,300, **`concrete_model: "glm-5.3"`, `model_unverified: false`**. The model is attested from the provider's own usage response (`modelUsage` in the launcher's JSON output must hold exactly one key starting with `glm-`; otherwise the call fails closed with `model_mismatch`). An earlier run before this change recorded `concrete_model: null`, `model_unverified: true`. **Currency is not attested** (`model_currency_attested: false`): the route proves which model answered, not that it is the newest GLM offered; `glm-5.3` is the newest the estate knows of |
+| Backend trace | a decision row for the task (`executor: glm`, `escalation_reason: insufficient_capability`) and a `provider_outcome` row for `glm` with health `ok`, recorded separately from Codex |
+| Provider health before the run | `unknown`, "no recorded outcome; initial attempt permitted", allowed |
+
+Negative controls (same setup, nothing launched; no `claude-glm` process existed afterwards):
+- `paid_provider: "glm"` with `mode: implementation` and a repository: refused, `error_code: provider_unqualified`, "provider 'glm' has no qualified write route", `executed: false`.
+- `paid_provider: "nonesuch"`: refused, `error_code: unknown_provider`, `executed: false`.
+
+Not shown and still open: the HTTP `/api/estate/run` path after deploy, a Codex-quota-to-GLM failover (phase 4, not implemented), any write route (phase 3), GLM Flash (phase 2), a provider-side assertion that the answering model is the newest offered, and a run through the restarted production service. 
+
+## Qualification withheld: currency policy gate (precise blocker)
+
+`docs/subscription-model-currency-policy.md` ("Other subscription execution paths") says other subscription CLIs such as GLM "must NOT be claimed compliant or silently routed under this policy until a tested provider-specific latest resolver, effective-version record and fail-closed guard exist." This change supplies the **effective-version record** (the model is attested from the provider usage response and the call fails closed on a mismatch) but **not a latest-model resolver**: nothing here can tell whether `glm-5.3` is the newest model the plan offers, and reading the provider's model list would need the launcher-owned credential, which Odysseus must not duplicate. Therefore `glm` is deliberately **not** added to any host's `qualified_executors`; an explicit GLM request is refused with `provider_unqualified` on every host, and Codex routing is unchanged.
+
+To unblock: either (a) a tested provider-specific latest resolver (for example a launcher-owned `--list-models` or an approved read of the provider's model list under the launcher's credential) with a fail-closed guard, or (b) an owner decision, recorded in the currency policy, that an explicit, advisory-only, effective-model-attested GLM route may be qualified without a latest resolver, labelled as such. Once either exists, the one-line registry change, an HTTP-level `/api/estate/run` canary and a recorded rollback (revert the entry and restart `odysseus-aoteru-lab.service`) complete phase 1.
+
 ## Open, in order
 
 1. Flash: find a genuine entitlement and concrete model identity, or record the precise blocker. Any credential or account action belongs to the operator and is not attempted here.
@@ -48,4 +73,4 @@ Main risks to live Codex: GLM readiness displacing Codex in `_select_host`, an e
 
 ## Rollback
 
-None needed: no code, configuration or service was changed.
+For the reconciliation and smoke-test steps nothing was changed. For the code in #261 and this change: revert the merge and, if deployed, restart `odysseus-aoteru-lab.service`; since no host lists `glm` in `qualified_executors`, an explicit GLM request is refused with `provider_unqualified` and no GLM process can be launched through the backend.
