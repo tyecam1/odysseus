@@ -17,6 +17,26 @@ non-subscription APIs. Their qualification and benchmark controls remain intact.
 It does not enlarge write permissions, replace independent verification or
 relax PhD research authority.
 
+## Operator review-only economy exception (2026-11-10)
+
+The standing operator preference for **review tasks only** is Haiku 5.5,
+Terra 6.1 or GLM-Flash, with the cheapest qualified adequate route selected
+by Odysseus. This supersedes the *premium-only tier preference* above **for
+review dispatch only**. It does not permit stale model versions, unverified
+provider aliases, unqualified workers, unapproved write actions, or silent
+fallback. The named models are desired review identities, not evidence that
+the live subscription/API catalogues expose them. Resolve current available
+model IDs and eligibility at dispatch; fail closed rather than silently use
+Sol/Opus/Fable when unavailable. Other task classes retain the existing
+premium-subscription rule until separately changed by the operator.
+
+**Not yet enforced by the installed Codex resolver**:
+`src/subscription_model_policy.py` currently selects the newest premium Codex
+model without a review-role path. Provider adapters and review task-class
+routing must be changed and tested through the existing central router; do
+not claim this written preference already changes runtime calls. See the
+routing contract's standing review-model budget preference.
+
 ## Codex subscription, current implemented path
 
 - `src/subscription_model_policy.py` calls `codex debug models` on the chosen
