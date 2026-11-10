@@ -173,6 +173,7 @@ class RunTaskEnvelope(TaskEnvelope):
     prepared_items: Optional[List[Dict[str, object]]] = Field(default=None, min_length=1, max_length=32)
     verification: Dict[str, object] = Field(default_factory=dict)
     allow_paid_escalation: bool = False
+    paid_provider: Optional[str] = None
     mode: Optional[Literal["implementation"]] = None
 
     @field_validator("objective", "prepared_items")
@@ -189,8 +190,10 @@ class RunTaskEnvelope(TaskEnvelope):
         return value
 
     def to_task(self) -> dict:
-        task = self.model_dump(exclude={"allow_paid_escalation", "mode"})
+        task = self.model_dump(exclude={"allow_paid_escalation", "mode", "paid_provider"})
         task["routing"] = {"allow_paid_escalation": self.allow_paid_escalation}
+        if self.paid_provider is not None:
+            task["routing"]["paid_provider"] = self.paid_provider
         if self.mode is not None:
             task["routing"]["mode"] = self.mode
         return task
@@ -201,6 +204,11 @@ class DelegationPreflightUnit(BaseModel):
     repo: Optional[str] = None
     capabilities: List[str] = Field(default_factory=list)
     objective: Optional[str] = None
+    paid_provider: Optional[str] = None
+    allow_paid_escalation: bool = False
+    mode: Optional[Literal["implementation"]] = None
+    write: bool = False
+    requires_repo_write: bool = False
     requested_route: Optional[Literal["controller_retained"]] = None
     retain_by_controller: bool = False
     nondelegation_reason: Optional[str] = None
