@@ -1,0 +1,13 @@
+MarkItDown pilot: supplementary checks, console output recorded on the lab, 2026-11-10
+(venv: /tmp/mdpilot/venv, markitdown 0.1.9, Python 3.10.12; socket.connect replaced by a raising function during conversion)
+
+formula cell D1 (formulas mode): '=SUM(B2:B3)'
+D1 cached value (data_only): None
+markitdown xlsx full: '## Data\n| id | value |\n| --- | --- |\n| 1 | 10 |\n| 2 | 20 |'
+result attrs: ['markdown', 'text_content', 'title']
+misnamed result attrs title: None
+docx 3 fresh-instance runs ms: [151.5, 194.9, 248.8]
+docx 3 same-instance runs ms: [216.7, 228.2, 208.5]
+du -sk venv: 367680
+pip list --format=freeze | wc -l: 39
+zip_ratio.zip size in bytes: 4987
