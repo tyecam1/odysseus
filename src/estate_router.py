@@ -108,7 +108,8 @@ def _provider_outcome(result: dict, now=None, *, host_tz=None) -> dict:
         state = "quota_exhausted"
     elif re.search(r"unauthorized|authentication|invalid.api.key|not logged in|login required|\b401\b", text):
         state, reason = "auth_failed", "provider authentication failed"
-    elif result.get("provider") == "glm" and re.search(r"rate.limit|too many requests|\b429\b", text):
+    elif result.get("provider") == "glm" and (re.search(r"rate.limit|too many requests", text)
+            or _glm_contextual_429(str(result.get("stderr") or ""))):
         state, reason = "rate_limited", "provider rate limited"
     elif result.get("provider") == "glm" and result.get("error_code") in {"launcher_missing", "timeout"}:
         state, reason = "unreachable", "GLM launcher unavailable or timed out"
@@ -118,6 +119,12 @@ def _provider_outcome(result: dict, now=None, *, host_tz=None) -> dict:
         state, reason, retry = "unknown", "unclassified provider outcome", None
     return {"state": state, "retry_after": min(retry, now + timedelta(days=7)).astimezone(timezone.utc).isoformat() if retry else None,
             "reason": reason, "retry_after_assumed": "retry_after_assumed" in reason}
+
+
+def _glm_contextual_429(stderr: str) -> bool:
+    return any(re.search(r"\b429\b", line) and
+               re.search(r"rate.limit|too many requests|usage limit|quota", line, re.I)
+               for line in stderr.splitlines())
 
 
 def provider_allows_dispatch(provider: str, *, now: Optional[datetime] = None,
@@ -729,7 +736,7 @@ _UNVERIFIABLE_BUDGET_FIELDS = (
 )
 
 
-def _select_host(eligible: list[dict], capabilities: list[str], *, paid_provider: Optional[str] = None) -> tuple[dict, list[dict], str]:
+def _select_host(eligible: list[dict], capabilities: list[str], *, paid_provider: Optional[str] = None) -> tuple[Optional[dict], list[dict], str]:
     """Stage 5's host+model selection (plan §E, Stage 5, replacing the old
     `host = eligible[0]`). `eligible` is already in `config/estate.yaml`
     order (`eligible_hosts()` preserves file order), so "first host that
@@ -752,7 +759,8 @@ def _select_host(eligible: list[dict], capabilities: list[str], *, paid_provider
        this function inventing a placement.
 
     Returns `(host, capability_resolutions, executor)`. `executor` is one
-    of `deterministic` / `local` / `none` — `resolve_route` decides the
+    of `deterministic` / `local` / `none`; an explicit GLM request returns
+    no host when every qualified host reports GLM unavailable. `resolve_route` decides the
     final recorded status (a `local` candidate can still be downgraded to
     `needs_escalation` by a quality-floor/context failure `resolve_alias`
     itself can't see)."""
@@ -771,10 +779,12 @@ def _select_host(eligible: list[dict], capabilities: list[str], *, paid_provider
     # the single-host messaging this replaced (still real evidence, just
     # not necessarily every candidate's).
     from src.estate_worker_client import WorkerTransportError, worker_health
+    provider_qualified = False
     for host in eligible:
         provider = paid_provider or "codex"
         if provider not in (host.get("qualified_executors") or []):
             continue
+        provider_qualified = True
         try:
             health = worker_health(host["host_id"])
         except WorkerTransportError:
@@ -787,6 +797,9 @@ def _select_host(eligible: list[dict], capabilities: list[str], *, paid_provider
             # finding).
             resolutions = [resolve_alias(alias, host["host_id"]) for alias in capabilities]
             return host, resolutions, "none"
+
+    if paid_provider == "glm" and provider_qualified:
+        return None, [], "none"
 
     # No host resolved every alias locally and no codex-qualified host is
     # healthy either -- capability_resolutions for the response/telemetry
@@ -887,6 +900,15 @@ def resolve_route(task: dict, *, record_decision: bool = True) -> dict:
     host, capability_resolutions, candidate_executor = (
         _select_host(eligible, capabilities) if explicit_provider is None else
         _select_host(eligible, capabilities, paid_provider=explicit_provider))
+    if host is None:
+        reason = "GLM is unavailable on every qualified eligible host"
+        decision_id = _record_decision(
+            task, host_id=None, executor="none", model_alias=None,
+            concrete_model=None, status="blocked",
+        ) if record_decision else None
+        return {"ok": False, "executed": False, "error_code": "provider_unavailable",
+                "error": reason, "reason": reason, "hosts_checked": hosts,
+                "decision_id": decision_id}
     alias = capabilities[0] if capabilities else None
     alias_result = capability_resolutions[0] if capability_resolutions else {
         "resolved": False, "reason": "no capability requested",
@@ -1435,15 +1457,18 @@ def execute_glm(objective: str, *, timeout: float = 180.0, cwd: Optional[str] = 
                     "error": "GLM launcher is missing or not executable"}
         proc = subprocess.Popen(
             [str(launcher), "--print", "--tools", "Read,Grep,Glob",
-             "--disallowedTools", "Bash,Write,Edit,NotebookEdit,WebFetch,WebSearch,Task,Skill"],
+             "--disallowedTools", "Bash,Write,Edit,NotebookEdit,WebFetch,WebSearch,Task,Skill",
+             # Repository hooks, project settings and MCP are deliberately excluded.
+             "--strict-mcp-config", "--setting-sources", "user",
+             "--disable-slash-commands", "--no-session-persistence"],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, start_new_session=True, cwd=cwd,
         )
         stdout, stderr = proc.communicate(input=objective, timeout=timeout)
-        # Removing prompt tokens can also mask a real error that shares their words;
-        # in that case a nonzero exit stays unclassified, without a health cooldown.
+        # A non-word sentinel prevents removed tokens joining adjacent words
+        # into a false provider-limit marker.
         for token in objective.split():
-            stderr = re.sub(re.escape(token), "", stderr, flags=re.I)
+            stderr = re.sub(re.escape(token), "\ue000", stderr, flags=re.I)
         stderr = stderr[:2000]
         outcome = {"ok": proc.returncode == 0, "provider": "glm", "state": "completed" if proc.returncode == 0 else "failed",
                    "exit_code": proc.returncode, "stderr": stderr}
@@ -1455,7 +1480,7 @@ def execute_glm(objective: str, *, timeout: float = 180.0, cwd: Optional[str] = 
             code = "quota_exhausted"
         elif re.search(r"unauthorized|authentication|invalid.api.key|not logged in|login required|\b401\b", stderr, re.I):
             code = "auth_failed"
-        elif re.search(r"rate.limit|too many requests|\b429\b", stderr, re.I):
+        elif re.search(r"rate.limit|too many requests", stderr, re.I) or _glm_contextual_429(stderr):
             code = "rate_limited"
         else:
             code = "nonzero_exit"
@@ -1987,6 +2012,20 @@ def run_task(task: dict, *, packet_authority: Optional[dict] = None) -> dict:
                 return {**route, "ok": False, "executed": False,
                         "execution_error": f"executor {provider_name!r} not qualified on {paid_host!r}",
                         "error_code": "provider_unqualified", "escalation_reason": "worker_failed"}
+            if not implementation_mode and provider_name == "glm":
+                from src.estate_worker_client import WorkerTransportError, worker_health
+                try:
+                    glm_ready = bool((worker_health(paid_host).get("glm") or {}).get("available"))
+                except WorkerTransportError:
+                    glm_ready = False
+                if not glm_ready:
+                    _update_decision_outcome(
+                        route["decision_id"], status="blocked", deterministic_gate="fail",
+                        escalation_reason="worker_failed", verification_outcome="fail",
+                    )
+                    return {**route, "ok": False, "executed": False,
+                            "execution_error": f"GLM is unavailable on {paid_host!r}",
+                            "error_code": "provider_unavailable", "escalation_reason": "worker_failed"}
             if implementation_mode:
                 if task.get("prepared_items") is not None:
                     return {**route, "ok": False, "executed": False,

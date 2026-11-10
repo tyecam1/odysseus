@@ -112,7 +112,7 @@ def test_glm_preflight_uses_explicit_write_intent(monkeypatch, write_fields, exp
         "ok": False, "route": {"host": "lab", "executor": "none"},
         "hosts_checked": [{"host_id": "lab", "qualified_executors": ["glm"]}]})
     unit = DelegationPreflightUnit(task_class="code_review", repo="odysseus",
-                                   objective="Review the implementation", paid_provider="glm",
+                                   objective="Review the patch", paid_provider="glm",
                                    allow_paid_escalation=True, **write_fields)
     result = delegation_preflight.delegation_preflight([unit.model_dump()])["units"][0]
     assert result["recommended_route"] == expected
@@ -120,6 +120,27 @@ def test_glm_preflight_uses_explicit_write_intent(monkeypatch, write_fields, exp
     if expected is None:
         assert result["error_code"] == "provider_unqualified"
         assert "write route" in result["reason"]
+
+
+def test_glm_preflight_infers_repository_implementation_write(monkeypatch):
+    from src import estate_worker_client
+    monkeypatch.setattr(estate_router, "eligible_hosts", lambda repo_id=None: [
+        {"host_id": "lab", "eligible": True, "qualified_executors": ["glm"]}])
+    monkeypatch.setattr(estate_router, "provider_allows_dispatch", lambda provider, **kwargs: {
+        "allowed": True, "reason": "ready", "provider": provider})
+    monkeypatch.setattr(estate_worker_client, "worker_health", lambda host_id: {
+        "codex": {"available": False}, "glm": {"available": True}})
+    monkeypatch.setattr(estate_router, "resolve_route", lambda task, record_decision=False: {
+        "ok": False, "route": {"host": "lab", "executor": "none"},
+        "hosts_checked": [{"host_id": "lab", "qualified_executors": ["glm"]}]})
+    units = [DelegationPreflightUnit(task_class="code_review", repo="odysseus",
+                                    objective=objective, paid_provider="glm",
+                                    allow_paid_escalation=True).model_dump()
+             for objective in ("Implement the fix", "Review the patch")]
+    implementation, review = delegation_preflight.delegation_preflight(units)["units"]
+    assert implementation["recommended_route"] is None
+    assert implementation["ok"] is False and implementation["error_code"] == "provider_unqualified"
+    assert review["recommended_route"] == "glm" and review["ok"] is True
 
 
 def test_unqualified_host_rejected_before_dispatch(monkeypatch):
@@ -194,6 +215,33 @@ def test_explicit_glm_selects_qualified_host(monkeypatch):
     assert host["host_id"] == "glm-host" and executor == "none"
 
 
+def test_unready_glm_host_is_not_selected(monkeypatch):
+    from src import estate_worker_client
+    monkeypatch.setattr(estate_router, "eligible_hosts", lambda repo_id=None: [
+        {"host_id": "glm-host", "eligible": True, "qualified_executors": ["glm"]}])
+    monkeypatch.setattr(estate_router, "resolve_alias", lambda alias, host_id: {"resolved": False})
+    monkeypatch.setattr(estate_worker_client, "worker_health", lambda host_id: {
+        "glm": {"available": False}})
+    result = estate_router.resolve_route({"requirements": {"capabilities": ["code-strong"]},
+                                          "routing": {"paid_provider": "glm"}}, record_decision=False)
+    assert result["error_code"] == "provider_unavailable"
+    assert result.get("route") is None and result["executed"] is False
+
+
+def test_glm_dispatch_rechecks_worker_readiness(monkeypatch):
+    from src import estate_worker_client
+    route = {"route": {"host": "lab", "executor": "none", "model_alias": "code-strong"},
+             "decision_id": "decision", "hosts_checked": [{"host_id": "lab", "qualified_executors": ["glm"]}]}
+    monkeypatch.setattr(estate_router, "resolve_route", lambda task: route)
+    monkeypatch.setattr(estate_router, "_update_decision_outcome", lambda *args, **kwargs: True)
+    monkeypatch.setattr(estate_worker_client, "worker_health", lambda host_id: {
+        "glm": {"available": False}})
+    monkeypatch.setattr(estate_router, "_dispatch_advisory_call", lambda *args, **kwargs: pytest.fail("dispatched"))
+    result = estate_router.run_task({"objective": "Review the patch", "requirements": {"capabilities": ["code-strong"]},
+                                    "routing": {"allow_paid_escalation": True, "paid_provider": "glm"}})
+    assert result["error_code"] == "provider_unavailable" and result["executed"] is False
+
+
 def test_glm_exact_stdin_readonly_args_and_model_unverified(tmp_path, monkeypatch, glm_admission):
     capture = tmp_path / "stdin"
     args_capture = tmp_path / "args"
@@ -212,7 +260,9 @@ def test_glm_exact_stdin_readonly_args_and_model_unverified(tmp_path, monkeypatc
     assert args[3] == "--disallowedTools"
     assert set(args[4].split(",")) == {"Bash", "Write", "Edit", "NotebookEdit", "WebFetch", "WebSearch", "Task", "Skill"}
     assert not set(args[2].split(",")) & {"Bash", "Write", "Edit", "NotebookEdit"}
-    assert len(args) == 5
+    assert args[5:] == ["--strict-mcp-config", "--setting-sources", "user",
+                        "--disable-slash-commands", "--no-session-persistence"]
+    assert "--mcp-config" not in args
     assert result["provider"] == "glm" and result["host_id"] == "lab"
     assert result["exit_code"] == 0 and result["concrete_model"] is None
     assert result["model_unverified"] is True
@@ -255,16 +305,16 @@ def test_glm_echoed_prompt_cannot_exhaust_quota(tmp_path, monkeypatch, glm_admis
               "sys.exit(7)")
     result = estate_router.execute_glm(prompt, timeout=2)
     assert result["error_code"] == "nonzero_exit"
-    assert glm_admission[-1]["stderr"].strip() == ""
+    assert glm_admission[-1]["stderr"].strip() == " ".join(["\ue000"] * len(prompt.split()))
     assert estate_router._provider_outcome(glm_admission[-1])["state"] != "quota_exhausted"
 
 
 @pytest.mark.parametrize("prompt,stderr,expected,retained", [
-    ("usage limit", "usage limit", "nonzero_exit", " \n"),
-    ("Please investigate limit reached soon", "limit reached", "nonzero_exit", " \n"),
+    ("usage limit", "usage limit", "nonzero_exit", "\ue000 \ue000\n"),
+    ("Please investigate limit reached soon", "limit reached", "nonzero_exit", "\ue000 \ue000\n"),
     ("Review the request", "usage limit reached", "quota_exhausted", "usage limit reached\n"),
-    ("429", "Prompt: 429", "nonzero_exit", "Prompt: \n"),
-    ("usage limit", "error: usage limit", "nonzero_exit", "error:  \n"),
+    ("429", "Prompt: 429", "nonzero_exit", "Prompt: \ue000\n"),
+    ("usage limit", "error: usage limit", "nonzero_exit", "error: \ue000 \ue000\n"),
     ("inspect output", "HTTP 429 Too Many Requests: usage limit reached", "quota_exhausted",
      "HTTP 429 Too Many Requests: usage limit reached\n"),
 ])
@@ -281,6 +331,24 @@ def test_glm_stderr_removes_prompt_tokens_before_classification(
         assert health["state"] == "unknown" and health["retry_after"] is None
     else:
         assert health["state"] == expected
+
+
+def test_scrubbing_cannot_create_quota_marker_or_cooldown(tmp_path, monkeypatch, glm_health_db):
+    _launcher(tmp_path, monkeypatch,
+              "import sys\nprint('quota zexceeded', file=sys.stderr)\nsys.exit(7)")
+    result = estate_router.execute_glm("z", timeout=2)
+    assert result["error_code"] == "nonzero_exit" and result["exit_code"] == 7
+    health = estate_router.provider_allows_dispatch("glm")
+    assert health["allowed"] is True and health["state"] == "unknown"
+
+
+def test_generic_429_is_not_glm_provider_limit(tmp_path, monkeypatch, glm_health_db):
+    _launcher(tmp_path, monkeypatch,
+              "import sys\nprint('MCP tool failed: 429', file=sys.stderr)\nsys.exit(7)")
+    result = estate_router.execute_glm("Review the patch", timeout=2)
+    assert result["error_code"] == "nonzero_exit"
+    health = estate_router.provider_allows_dispatch("glm")
+    assert health["allowed"] is True and health["state"] == "unknown"
 
 
 def test_glm_timeout_kills_process(tmp_path, monkeypatch, glm_admission):

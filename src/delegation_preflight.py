@@ -186,7 +186,8 @@ def delegation_preflight(units: Iterable[dict]) -> dict:
             except WorkerTransportError:
                 live = False
             glm_health = estate_router.provider_allows_dispatch("glm")
-            glm_write_requested = (unit.get("mode") == "implementation"
+            glm_write_requested = (_requires_repo_write(unit)
+                                   or unit.get("mode") == "implementation"
                                    or unit.get("write") is True
                                    or unit.get("requires_repo_write") is True)
             ok = bool(unit_host and qualified and live and glm_health["allowed"]
