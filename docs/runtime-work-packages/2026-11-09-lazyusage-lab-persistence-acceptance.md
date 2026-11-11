@@ -224,3 +224,62 @@ refused with `Unable to create .../index.lock: Read-only file system` because
 the sandbox exposes shared Git metadata read-only. Source changes are retained
 in the packet worktree for the existing S6 controller finalization after this
 execution is terminal. No branch ref, merge or deployment was changed here.
+
+## Live acceptance evidence (2026-11-11, post-deployment e940e4f4)
+
+Deployment: lab service `odysseus-aoteru-lab.service` on branch `deploy/dev-20261111`
+at merged dev `e940e4f4` (PR #278, squash of task/lazyusage-backend-persistence
+308e655c/​cc9bf999/​7ac1d11d/​ae4b2c6c). `systemctl restart` at 2026-11-11T00:37:15Z,
+`GET /api/health` → 200, `GET /api/lazy-usage/status` live (default-off: `state: null`).
+
+Activation `ac965b02-0dac-407a-8178-56de9ce0b209` (operator, 2026-11-11T00:38:20Z,
+budget overrides max_paid_calls=2, max_seconds=3600; all other ceilings default):
+
+- **Laptop-independent execution:** the run advanced under the service's own
+  lifecycle loop with no controller process attached — every observation was a
+  fresh connectionless HTTP GET. It refreshed the real three-repo frontier
+  (digest bf38d600…), selected real queued task
+  `odysseus:ready/2026-10-02-misumi-persona-growth-background-collaboration.agent-task.md`,
+  ran delegation preflight, and — with the codex provider gate recording
+  `quota_exhausted` until 2026-11-13T17:03Z (verbatim provider text: "try again
+  at Nov 13th, 2026 5:03 PM") — correctly refused to reroute to an unqualified
+  lane, parked the task (`delegation preflight has no qualified route`), and
+  scheduled a bounded recheck (00:43:37Z). Counters at park: 0 paid calls,
+  2 tool calls, 1 no-delivery turn. No spin: one frontier refresh per recheck.
+- **Controlled service restart mid-run:** `systemctl restart` at 00:39:11Z while
+  the run was active. After restart: service active, health 200, run row and
+  checkpoint byte-identical (same `recheck_at` 2026-11-11T00:43:37.846924, same
+  current task and frontier digest), counters unchanged (0 paid / 2 tool),
+  `in_flight_execution_id` null — no duplicate dispatch, no paid call, no
+  mutation. The loop resumed from durable state on its own.
+- **Bounded recheck:** the parked recheck fired after its stated time and the
+  run re-evaluated the frontier (single refresh), demonstrating event-based
+  recheck rather than polling.
+- **Controls:** `am lazy resume` and `am lazy stop` exercised (see below);
+  second-activation refusal while a non-terminal run exists is covered by
+  tests (`test_..._activation_conflict`) and by the API contract.
+
+Known limitations / owed items (truthful, not blockers to the feature):
+
+- **Real write-lane delivery through a live activation remains owed to the
+  codex provider reset (2026-11-13T17:03Z):** the only queued tasks the current
+  frontier offers require codex-class routes; the run correctly parked rather
+  than dispatching unqualified. Fixture-level end-to-end delivery (frontier →
+  preflight → dispatch → verify → status transition) is proven in
+  `tests/test_lazy_usage_acceptance.py`.
+- **Sol re-review of packet D owed 2026-11-13T17:03Z** (same provider limit);
+  packet D delta carries labelled same-family GLM-5.3 corroboration
+  (DELTA-APPROVE, quoted evidence) per the standing fallback rule.
+- **Write-lane finalize-commit defect (packet C):** the runner's `git commit`
+  step fails in the production service context only (disposable live-unit
+  diagnostics pass); stderr instrumentation shipped in e940e4f4 — reproduce via
+  the next governed codex-write execution after the reset and fix from the
+  captured evidence. Until then controller commits after S6.2 recovery remain
+  the documented workaround (four occurrences, each with an `Aoteru-Execution`
+  trailer).
+
+Rollback (verified steps): `POST /api/lazy-usage/stop` terminalizes any active
+run; `git revert e940e4f4` on dev redeployed via the deploy branch plus
+`systemctl restart` restores pre-feature behaviour; the `lazy_usage_runs` table
+is additive (no destructive migration). Deployment rollback to
+`deploy/dev-20261109` was left in place as the named prior deploy branch.
