@@ -31,6 +31,7 @@ CEILINGS = {"max_seconds": 14400, "max_paid_calls": 12, "max_tool_calls": 150,
             "max_no_delivery_turns": 8, "max_repeat_failures": 3}
 TERMINAL = frozenset({"completed", "stopped", "failed", "budget_exhausted"})
 EXECUTION_TERMINAL = frozenset({"succeeded", "failed", "timed_out", "interrupted"})
+TASK_TERMINAL = frozenset({"done", "completed", "rejected", "superseded", "closed", "cancelled", "canceled"})
 RECHECK_SECONDS = 300
 LOOP_SECONDS = 25
 
@@ -119,7 +120,7 @@ def pause_run(db, run_id, owner):
         db.rollback()
         raise RunError(409, "run cannot be paused from this state")
     run.state = "paused"
-    return _save(db, run, pause_reason="operator", next_action="operator_resume")
+    return _save(db, run, pause_reason="operator", recheck_at=None, next_action="operator_resume")
 
 
 def resume_run(db, run_id, owner):
@@ -249,7 +250,42 @@ def _task(record, meta, body):
             "routing": {"allow_paid_escalation": True, **({"mode": "implementation"} if write else {})}}, write
 
 
+def _reviewer_allowed(record, meta, selected):
+    if record["bucket"] != "review" and meta.get("task_type") not in {"review", "independent-review"}:
+        return True
+    # Every concrete route, including failover, needs the same attestation.
+    model = str(selected.get("concrete_model") or "").lower()
+    return any(name in model for name in ("haiku", "terra", "glm-flash"))
+
+
+def _debt_gate(debt):
+    # Checkpoints predating explicit gates used an error to identify quota debt.
+    return debt.get("gate") or ("verification" if debt.get("error") else "owner_acceptance")
+
+
+def _set_review_debts(run, debts):
+    newest = {}
+    for debt in debts:
+        newest[(debt.get("task_ref") or debt.get("task_id"), _debt_gate(debt))] = debt
+    _checkpoint(run, owed_reviews=list(newest.values()))
+
+
+def _reconcile_review_debts(run, task_ref, *, verified=False, acceptance=None):
+    acceptance = acceptance or {}
+    settled = acceptance.get("delivered") or str(acceptance.get("status", "")).lower() in TASK_TERMINAL
+    _set_review_debts(run, [debt for debt in run.checkpoint.get("owed_reviews", [])
+                           if debt.get("task_ref") != task_ref or
+                           not (settled or verified and _debt_gate(debt) == "verification")])
+
+
 def _choose(frontier, run):
+    # Re-read owner outcomes even for tasks that no longer need dispatch.
+    # Absence alone never resolves debt; the done card must be read explicitly.
+    for task_ref in dict.fromkeys(d.get("task_ref") for d in run.checkpoint.get("owed_reviews", [])):
+        if task_ref:
+            rid, _, _ = portfolio.parse_ref(task_ref)
+            acceptance = _owner_task_status({"repo_id": rid, "task_ref": task_ref}, frontier)
+            _reconcile_review_debts(run, task_ref, acceptance=acceptance)
     attempted = run.checkpoint.get("attempted", {})
     rows = sorted(frontier["records"], key=lambda r: (
         portfolio.RANK[r["bucket"]], portfolio.PRIORITY.get(str(r.get("priority", "")).lower(), 9), r["ref"]))
@@ -257,7 +293,7 @@ def _choose(frontier, run):
         # Inbox and blocked metadata do not prove executable authority.
         if record["bucket"] in {"inbox", "blocked", "blocked-human"}:
             continue
-        if str(record.get("status", "")).lower() in {"done", "completed", "rejected", "superseded", "closed"}:
+        if str(record.get("status", "")).lower() in TASK_TERMINAL:
             continue
         meta, body = _contract(frontier, record)
         revision = hashlib.sha256(json.dumps(meta, sort_keys=True, default=str).encode() + body.encode()).hexdigest()
@@ -275,13 +311,8 @@ def _choose(frontier, run):
         task, write = _task(record, meta, body)
         route = estate_router.resolve_route(task, record_decision=False)
         selected = route.get("route") or {}
-        if record["bucket"] == "review" or meta.get("task_type") in {"review", "independent-review"}:
-            # The central router must attest the approved reviewer identity;
-            # aliases, provider credentials and an implementer's own result
-            # cannot qualify an independent review. Preserve debt otherwise.
-            model = str(selected.get("concrete_model") or "").lower()
-            if not any(name in model for name in ("haiku", "terra", "glm-flash")):
-                continue
+        if not _reviewer_allowed(record, meta, selected):
+            continue
         host = selected.get("host")
         checked = next((h for h in route.get("hosts_checked", []) if h.get("host_id") == host), {})
         executor = selected.get("executor")
@@ -305,7 +336,8 @@ def _choose(frontier, run):
                     alternate_entry = next((h for h in alternate.get("hosts_checked", [])
                                             if h.get("host_id") == alternate_host), {})
                     if (alternate_host and "glm" in alternate_entry.get("qualified_executors", [])
-                            and estate_router.provider_allows_dispatch("glm").get("allowed")):
+                            and estate_router.provider_allows_dispatch("glm").get("allowed")
+                            and _reviewer_allowed(record, meta, alternate_selected)):
                         task, host, provider = alternate_task, alternate_host, "glm"
                     else:
                         continue
@@ -348,14 +380,12 @@ def _quota_debt(run, result):
     # assumed router cooldown is explicitly distinguished from a reset.
     error = result.get("error") or result.get("execution_error") or result.get("stderr") or health.get("reason")
     debt = {"task_id": cp.get("current_task_id"), "task_ref": cp.get("task_ref"),
+            "gate": "verification",
             "execution_id": cp.get("in_flight_execution_id"), "provider": result.get("provider"),
             "error": error, "retry_after": health.get("retry_after"),
             "retry_after_assumed": health.get("retry_after_assumed", False),
             "next_action": "retry_dependent_verification_after_provider_recovery"}
-    owed = list(cp.get("owed_reviews", []))
-    if debt not in owed:
-        owed.append(debt)
-    _checkpoint(run, owed_reviews=owed)
+    _set_review_debts(run, [*cp.get("owed_reviews", []), debt])
     return True
 
 
@@ -378,6 +408,10 @@ def reconcile_task_status(checkpoint, view):
     acceptance is recorded as debt, so another eligible task may proceed.
     """
     frontier = refresh_frontier([checkpoint["repo_id"]])
+    return _owner_task_status(checkpoint, frontier)
+
+
+def _owner_task_status(checkpoint, frontier):
     record = next((r for r in frontier["records"] if r["ref"] == checkpoint["task_ref"]), None)
     if record:
         return {"delivered": False, "status": record.get("status", "unknown"),
@@ -390,8 +424,11 @@ def reconcile_task_status(checkpoint, view):
         try:
             queue = portfolio.queue_path(root, Path(portfolio.LAYOUT[checkpoint["repo_id"]][0]))
             meta, _ = portfolio.split_card(portfolio.read_card(queue, "done", name))
-            if meta.get("status") in {"done", "completed"} and meta.get("acceptance_evidence"):
-                return {"delivered": True, "status": meta["status"], "reason": "owner acceptance evidence recorded"}
+            status = str(meta.get("status", "")).lower()
+            if status in TASK_TERMINAL:
+                delivered = status in {"done", "completed"} and bool(meta.get("acceptance_evidence"))
+                return {"delivered": delivered, "status": status,
+                        "reason": "owner acceptance evidence recorded" if delivered else "owner task is terminal"}
         except (OSError, ValueError):
             pass
     return {"delivered": False, "status": "unknown", "reason": "owner acceptance evidence unavailable"}
@@ -465,15 +502,18 @@ def _observe(db, run):
     # paid outcomes require worker-reported totals; absence is not zero.
     unknown_usage = bool(run.checkpoint.get("dispatch_provider") and usage is None and not parked)
     passed = verify_attempt(view, run.checkpoint) and not parked
-    acceptance = reconcile_task_status(run.checkpoint, view) if passed else {
-        "delivered": False, "status": "verification_pending" if parked else "failed"}
-    if passed and not acceptance["delivered"]:
+    acceptance = reconcile_task_status(run.checkpoint, view)
+    _reconcile_review_debts(run, run.checkpoint["task_ref"], verified=passed, acceptance=acceptance)
+    task_terminal = str(acceptance.get("status", "")).lower() in TASK_TERMINAL
+    if not passed and not acceptance["delivered"] and not task_terminal:
+        acceptance = {"delivered": False, "status": "verification_pending" if parked else "failed"}
+    if passed and not acceptance["delivered"] and not task_terminal:
         owed = list(run.checkpoint.get("owed_reviews", []))
         debt = {"task_id": run.checkpoint["current_task_id"], "task_ref": run.checkpoint["task_ref"],
+                "gate": "owner_acceptance",
                 "execution_id": execution_id, "provider": None, "error": None, "retry_after": None,
                 "next_action": "owner_acceptance_and_required_independent_verification"}
-        if debt not in owed:
-            _checkpoint(run, owed_reviews=owed + [debt])
+        _set_review_debts(run, owed + [debt])
     if acceptance["delivered"]:
         run.counters = {**run.counters, "no_delivery_turns": 0, "repeated_failures": 0,
                         "last_failure_signature": None}

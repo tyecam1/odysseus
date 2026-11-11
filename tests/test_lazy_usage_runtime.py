@@ -37,8 +37,8 @@ def db(monkeypatch):
     os.unlink(tmpfile.name)
 
 
-def activate(db, **overrides):
-    return rt.activate_run(db, "operator", ["odysseus"], overrides)["id"]
+def activate(db, scope=("odysseus",), **overrides):
+    return rt.activate_run(db, "operator", list(scope), overrides)["id"]
 
 
 def fail_dispatch(*args, **kwargs):
@@ -72,6 +72,14 @@ def frontier(tmp_path, monkeypatch):
     monkeypatch.setattr(estate_router, "provider_allows_dispatch", lambda *a, **kw: {"allowed": True})
     monkeypatch.setattr(rt, "delegation_preflight", lambda units: {"ok": True})
     return add, records
+
+
+def frozen(view):
+    """run_dict equality without the live elapsed_seconds clock."""
+    view = dict(view)
+    view["counters"] = {k: v for k, v in view["counters"].items()
+                        if k != "elapsed_seconds"}
+    return view
 
 
 def read_result(**extra):
@@ -172,6 +180,35 @@ def test_no_eligible_frontier_backs_off_without_spin(db, frontier, monkeypatch):
     assert len(calls) == 2
 
 
+@pytest.mark.parametrize("due_seconds", [-1, 300])
+def test_operator_pause_clears_automatic_recheck_and_requires_resume(db, frontier, monkeypatch, due_seconds):
+    add, _ = frontier
+    add()
+    run_id = activate(db)
+    row = db.get(LazyUsageRun, run_id)
+    rt._park(db, row, "automatic backoff")
+    row.checkpoint = {**row.checkpoint, "recheck_at":
+                      (utcnow_naive() + timedelta(seconds=due_seconds)).isoformat()}
+    db.commit()
+    paused = rt.pause_run(db, run_id, "operator")
+    assert paused["checkpoint"]["recheck_at"] is None
+    assert paused["checkpoint"]["next_action"] == "operator_resume"
+    original_frontier = rt.refresh_frontier
+    monkeypatch.setattr(rt, "refresh_frontier", fail_dispatch)
+    monkeypatch.setattr(estate_router, "run_task", fail_dispatch)
+    db.close()
+    with cdb.SessionLocal() as restarted:
+        for _ in range(3):
+            assert frozen(rt.advance(restarted, run_id)) == frozen(paused)
+        rt.resume_run(restarted, run_id, "operator")
+        monkeypatch.setattr(rt, "refresh_frontier", original_frontier)
+        calls = []
+        monkeypatch.setattr(estate_router, "run_task", lambda task: (
+            calls.append(task), read_result(usage={"paid_calls": 1, "tool_calls": 1}))[1])
+        rt.advance(restarted, run_id)
+        assert len(calls) == 1
+
+
 def write_setup(db, monkeypatch):
     worker = FakeWorker(monkeypatch)
 
@@ -262,14 +299,17 @@ def test_quota_error_parks_verbatim_debt_and_other_task_continues(db, frontier, 
     add, _ = frontier
     add("a")
     add("b")
-    error = "You've hit your usage limit. Try again at 23:45 on 2026-11-10."
+    reset_at = (utcnow_naive().replace(microsecond=0) + timedelta(hours=2))
+    retry_after = reset_at.isoformat() + "+00:00"
+    error = ("You've hit your usage limit. Try again at "
+             + reset_at.strftime("%H:%M on %Y-%m-%d") + ".")
     calls = []
 
     def execute(task):
         calls.append(task["objective"])
         if len(calls) == 1:
             return {"ok": False, "executed": True, "provider": "codex", "error": error,
-                    "provider_health": {"state": "quota_exhausted", "retry_after": "2026-11-10T23:45:00+00:00",
+                    "provider_health": {"state": "quota_exhausted", "retry_after": retry_after,
                                         "retry_after_assumed": False}}
         return read_result()
 
@@ -279,11 +319,109 @@ def test_quota_error_parks_verbatim_debt_and_other_task_continues(db, frontier, 
     assert first["state"] == "running"
     debt = first["owed_reviews"][0]
     assert debt["error"] == error
-    assert debt["retry_after"] == "2026-11-10T23:45:00+00:00"
+    assert debt["retry_after"] == retry_after
     second = rt.advance(db, run_id)
     assert len(calls) == 2 and "ready/b.md" in calls[1]
     assert second["owed_reviews"][0] == debt
     assert "Run the bounded owning task" not in json.dumps(second["checkpoint"])
+
+
+def quota_result(error="usage limit", retry_after="2000-01-01T00:00:00+00:00"):
+    return {"ok": False, "executed": True, "provider": "codex", "error": error,
+            "provider_health": {"state": "quota_exhausted", "retry_after": retry_after,
+                                "retry_after_assumed": False}}
+
+
+@pytest.mark.parametrize("owner_outcome", ["pending", "accepted", "terminal"])
+def test_quota_debt_resolved_after_successful_retry(db, frontier, monkeypatch, owner_outcome):
+    add, _ = frontier
+    add()
+    calls = []
+
+    def execute(task):
+        calls.append(task)
+        return quota_result() if len(calls) == 1 else read_result(usage={"paid_calls": 1, "tool_calls": 1})
+
+    monkeypatch.setattr(estate_router, "run_task", execute)
+    run_id = activate(db)
+    first = rt.advance(db, run_id)
+    assert first["owed_reviews"][0]["error"] == "usage limit"
+    if owner_outcome != "pending":
+        monkeypatch.setattr(rt, "reconcile_task_status", lambda *a: {
+            "delivered": owner_outcome == "accepted", "status": "done" if owner_outcome == "accepted" else "rejected"})
+    result = rt.advance(db, run_id)
+    assert len(calls) == 2
+    assert not any(d.get("error") for d in result["owed_reviews"])
+    if owner_outcome == "pending":
+        assert len(result["owed_reviews"]) == 1
+        assert result["owed_reviews"][0]["gate"] == "owner_acceptance"
+    else:
+        assert result["owed_reviews"] == []
+    # An expired quota entry must not authorize another call at unchanged HEAD.
+    rt.advance(db, run_id)
+    assert len(calls) == 2
+
+
+def test_repeated_quota_debt_keeps_newest_per_task_gate(db, frontier, monkeypatch):
+    add, _ = frontier
+    add()
+    calls = []
+
+    def execute(task):
+        calls.append(task)
+        return quota_result("first" if len(calls) == 1 else "newest",
+                            "2000-01-01T00:00:00+00:00" if len(calls) == 1 else "2999-01-01T00:00:00+00:00")
+
+    monkeypatch.setattr(estate_router, "run_task", execute)
+    run_id = activate(db)
+    first = rt.advance(db, run_id)
+    # Preserve compatibility with legacy checkpoints lacking gate labels,
+    # including accumulated duplicates and an independent owner gate.
+    row = db.get(LazyUsageRun, run_id)
+    legacy = {k: v for k, v in first["owed_reviews"][0].items() if k != "gate"}
+    owner = {**legacy, "gate": "owner_acceptance", "error": None, "retry_after": None}
+    row.checkpoint = {**row.checkpoint, "owed_reviews": [legacy, {**legacy, "execution_id": "older"}, owner]}
+    db.commit()
+    result = rt.advance(db, run_id)
+    assert len(calls) == 2
+    assert len(result["owed_reviews"]) == 2
+    verification = next(d for d in result["owed_reviews"] if d.get("error"))
+    assert verification["error"] == "newest"
+    assert verification["execution_id"] == result["checkpoint"]["last_execution_id"]
+    assert verification["retry_after"] == "2999-01-01T00:00:00+00:00"
+    assert owner in result["owed_reviews"]
+    rt.advance(db, run_id)
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize("owner_status", ["accepted", "done", "completed", "rejected", "superseded", "closed", "cancelled", "missing"])
+def test_frontier_reconciles_debt_without_retry_or_inferred_delivery(db, frontier, monkeypatch, owner_status):
+    add, records = frontier
+    record = add()
+    monkeypatch.setattr(estate_router, "run_task", lambda task: quota_result())
+    run_id = activate(db)
+    first = rt.advance(db, run_id)
+    assert len(first["owed_reviews"]) == 1
+    if owner_status in {"accepted", "missing"}:
+        root = rt.refresh_frontier(["odysseus"])["roots"]["odysseus"]
+        queue = root / "automation/review/agent-tasks"
+        (queue / "ready/a.md").unlink()
+        records.clear()
+        if owner_status == "accepted":
+            (queue / "done").mkdir()
+            (queue / "done/a.md").write_text("---\nstatus: done\nacceptance_evidence: owner verified\n---\n")
+    else:
+        record["status"] = owner_status
+    monkeypatch.setattr(estate_router, "run_task", fail_dispatch)
+    # A future reset prevents a retry of an absent task regardless of the fix.
+    # Terminal owner evidence must resolve the debt without another execution.
+    result = rt.advance(db, run_id)
+    if owner_status == "missing":
+        assert result["owed_reviews"] == first["owed_reviews"]
+        assert result["state"] == "paused"
+    else:
+        assert result["owed_reviews"] == []
+    assert db.query(EstateExecution).count() == 1
 
 
 def test_uncertain_read_response_is_observed_never_replayed(db, frontier, monkeypatch):
@@ -490,6 +628,52 @@ def test_verified_quota_fails_over_only_to_qualified_glm_read(db, frontier, monk
     rt.advance(db, activate(db))
     assert len(calls) == 1
     assert calls[0]["routing"]["paid_provider"] == "glm"
+
+
+@pytest.mark.parametrize("review_kind", ["review", "independent-review", "bucket"])
+@pytest.mark.parametrize("alternate_model", [None, "glm-4", "sol", "glm-flash"])
+def test_quota_failover_revalidates_concrete_reviewer(db, frontier, monkeypatch, review_kind, alternate_model):
+    add, _ = frontier
+    record = add(**({"task_type": review_kind} if review_kind != "bucket" else {}))
+    scope = ["odysseus"]
+    if review_kind == "bucket":
+        # odysseus has no review bucket in portfolio LAYOUT; use a repo that does.
+        base = rt.refresh_frontier(["odysseus"])["roots"]["odysseus"].parent
+        phd = base / "obsidian-PhD"
+        queue = phd / "automation/review/agent-tasks"
+        (queue / "review").mkdir(parents=True)
+        (queue / "ready").mkdir(parents=True)
+        (base / "odysseus/automation/review/agent-tasks/ready/a.md").rename(
+            queue / "review/a.md")
+        record.update(bucket="review", ref="obsidian-phd:review/a.md",
+                       repo_id="obsidian-phd")
+        scope = ["obsidian-phd"]
+        monkeypatch.setattr(rt, "refresh_frontier", lambda s: {
+            "roots": {"obsidian-phd": phd}, "records": [record],
+            "unavailable": {}, "counts": {"obsidian-phd": {"review": 1}},
+            "warnings": []})
+
+    def route(task, **kwargs):
+        provider = task["routing"].get("paid_provider", "codex")
+        return {"route": {"executor": "none", "host": LAB, "model_alias": "code-strong",
+                          "concrete_model": alternate_model if provider == "glm" else "terra"},
+                "hosts_checked": [{"host_id": LAB, "qualified_executors": [provider]}]}
+
+    monkeypatch.setattr(estate_router, "resolve_route", route)
+    monkeypatch.setattr(estate_router, "provider_allows_dispatch", lambda provider, **kwargs: {
+        "allowed": provider == "glm", "state": "ok" if provider == "glm" else "quota_exhausted"})
+    calls = []
+    monkeypatch.setattr(estate_router, "run_task", lambda task: (
+        calls.append(task), read_result(usage={"paid_calls": 1, "tool_calls": 1}))[1])
+    result = rt.advance(db, activate(db, scope))
+    if alternate_model == "glm-flash":
+        assert len(calls) == 1
+        assert calls[0]["routing"]["paid_provider"] == "glm"
+    else:
+        assert calls == []
+        assert result["state"] == "paused"
+        assert result["counters"]["paid_calls"] == 0
+        assert db.query(EstateExecution).count() == 0
 
 
 def test_observer_without_activation_is_inert(db, monkeypatch):
