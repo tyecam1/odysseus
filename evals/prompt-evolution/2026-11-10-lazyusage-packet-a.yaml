@@ -1,0 +1,21 @@
+schema_version: 1
+event_id: 2026-11-10-lazyusage-packet-a
+prompt_id: estate-queue-priority-execution
+application_id: 2026-11-10-lazyusage-packet-a
+application_trace: evals/prompt-applications/estate-queue-priority-execution/2026-11-10-lazyusage-packet-a.yaml
+from: prompt:v2
+to: prompt:v2
+type: reinforcement
+reason: >-
+  Existing governance primitives supported the additive core and regression
+  checks. Missing child-usage evidence is explicitly fenced and recorded as
+  a delivery dependency; no prompt change or weaker acceptance is justified.
+active_head_changed: false
+guardrail_validation:
+  repository_scope_preserved: true
+  authority_scope_preserved: true
+  evidence_and_verification_preserved: true
+  model_identity_discipline_preserved: true
+  prompt_application_trace_recorded: true
+  operator_rating_invented: false
+  stop_and_safety_gates_preserved: true

@@ -18,7 +18,7 @@ import logging
 import threading
 import time
 import uuid
-from datetime import timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from src import park_lease_ops
@@ -222,7 +222,9 @@ def _admission_outcome(blocker) -> dict:
 def execute_write_via_worker(objective: str, *, repo_id: str, host_id: str,
                              decision_id: Optional[str] = None,
                              subject=None, head_sha=None, function=None,
-                             wait_timeout: float = 30.0, timeout: float = 1800.0) -> dict:
+                             wait_timeout: float = 30.0, timeout: float = 1800.0,
+                             execution_id: Optional[str] = None, admission_guard=None,
+                             deadline_at: Optional[datetime] = None) -> dict:
     from sqlalchemy.exc import IntegrityError
     from core.database import EstateExecution, ParkLease, lease_serialized_transaction
 
@@ -267,7 +269,9 @@ def execute_write_via_worker(objective: str, *, repo_id: str, host_id: str,
                 "error": f"leased worktree {worktree_path!r} on {host_id!r} is not clean"}
     admission_head = verify.get("head_sha")
 
-    execution_id = str(uuid.uuid4())
+    # Internal continuation callers may reserve the id in their checkpoint
+    # before admission. Not exposed by the HTTP task envelope.
+    execution_id = str(uuid.UUID(execution_id)) if execution_id else str(uuid.uuid4())
     try:
         with lease_serialized_transaction(lease_id=lease_id) as db:                     # step 3
             lease = db.query(ParkLease).filter(ParkLease.id == lease_id).one_or_none()
@@ -286,6 +290,8 @@ def execute_write_via_worker(objective: str, *, repo_id: str, host_id: str,
                 reuse = _admission_outcome(blocker)
                 return {"ok": True, "provider": "codex-write", **reuse,
                         "next_action": _next_action_observe(reuse["execution_id"])}
+            if admission_guard is not None and not admission_guard(db, execution_id):
+                raise _Refusal("activation_stopped", "bounded activation no longer permits dispatch")
             now = _now()
             db.add(EstateExecution(                                                        # step 5
                 id=execution_id, decision_id=decision_id, objective=objective,
@@ -293,7 +299,8 @@ def execute_write_via_worker(objective: str, *, repo_id: str, host_id: str,
                 lease_id=lease_id, worktree_path=worktree_path, branch=branch,
                 lifecycle_state="accepted", worktree_resolution="unresolved",
                 worker_handle_json=json.dumps(PLACEHOLDER),
-                execution_deadline_at=now + timedelta(seconds=timeout),
+                execution_deadline_at=min(now + timedelta(seconds=timeout), deadline_at)
+                if deadline_at is not None else now + timedelta(seconds=timeout),
                 admission_head_sha=admission_head, submitted_at=now,
             ))
             db.flush()

@@ -1,0 +1,58 @@
+schema_version: 1
+application_id: 2026-11-10-lazyusage-packet-a
+prompt_id: estate-queue-priority-execution
+prompt_version: 2
+application_scope: operator-scoped-packet-A-engineering-policy
+repository: tyecam1/odysseus
+branch: task/lazyusage-backend-persistence
+session_started_at: "2026-11-10T20:33:45Z"
+session_ended_at: "2026-11-10T21:01:54Z"
+start_commit: eeb8da2a298b9853b836e9e3fee276cab6c3091c
+end_commit: eeb8da2a298b9853b836e9e3fee276cab6c3091c
+working_tree_changes: true
+outcome_status: partial
+stop_reason: >-
+  Operator-scoped packet A candidate implemented and tested. This is an
+  engineering application of the registered policy, not a live portfolio
+  activation. Child-usage metering at the existing paid worker boundary,
+  independent review and the owning task's real delivery/disconnect/restart/
+  deployment acceptance remain outstanding. No task was labelled shipped.
+models_routes:
+  - provider: codex
+    executor: codex-write
+    host: hz2-workstation
+    execution_id: 9ae16cbf-c605-4771-b590-c375b120c573
+    lease_id: f74969f3-4d05-4328-b56f-8cc84b23a74b
+    concrete_model: not-independently-attested-within-packet
+    note: Existing admitted implementation worker; no nested paid dispatch.
+nondelegation_reason: final_acceptance
+authority_evidence:
+  - Exact active lease and running packet execution read from the deployed database in read-only mode.
+  - Existing Python preflight exercised on a temporary copy of that DB snapshot; no lease acquisition.
+  - HTTP and systemd transports unavailable within this restricted sandbox.
+verification:
+  - "Final estate/portfolio/lease/preflight/runtime selection: 883 passed, 21 skipped, 1 deselected in 175.82 seconds."
+  - "Runtime/router/control targeted selection: 195 passed."
+  - "Initial complete estate selection: 844 passed, 21 skipped, 1 failure caused by prohibited loopback socket creation."
+  - "The failing pre-existing fake-Ollama HTTPServer test was explicitly deselected in subsequent combined runs; it was not weakened."
+  - "Temporary test-launcher selector cap compensated for sandbox-denied cross-thread socketpair wakeup writes; application/test policy unchanged."
+  - "Changed Python files parsed; git diff --check passed."
+failure_tags:
+  - existing_worker_child_usage_metering_unavailable
+  - sandbox_socket_and_systemd_transport_unavailable
+  - independent_review_and_live_acceptance_owed
+rating:
+  scale: 1-5
+  goal_progress: 3
+  correctness_verification: 4
+  authority_scope_discipline: 5
+  routing_resource_efficiency: 4
+  continuity_handoff_quality: 4
+  agent_overall: 3
+  operator_overall: null
+  operator_note: null
+prompt_revision_recommended: false
+revision_reason: The remaining gap is worker-boundary engineering evidence, not initializer wording.
+evidence:
+  - docs/runtime-work-packages/2026-11-09-lazyusage-lab-persistence-acceptance.md
+  - tests/test_lazy_usage_runtime.py

@@ -1438,7 +1438,12 @@ def _verb_worktree_finalize(payload: dict) -> dict:
     if result is None:
         return {"outcome": "finalize_in_progress", "attempt": number}
     if result.get("outcome") == "authority_denied":
-        raise WorkerError("authority_denied", result.get("reason", "unattributable history"))
+        reason = result.get("reason", "unattributable history")
+        if result.get("git_error"):
+            # The worker error protocol carries only code/message. Keep the
+            # bounded evidence here as well as in the durable attempt result.
+            reason += " | git_error=" + json.dumps(result["git_error"], separators=(",", ":"))
+        raise WorkerError("authority_denied", reason)
     return {**result, "attempt": number}
 
 
@@ -1465,15 +1470,50 @@ def _finalize_logic(execution_id: str, spool: Path, request: dict) -> dict:
     path = str(Path(request["worktree_path"]).resolve())
     branch, expected = request["branch"], request["expected_head_sha"]
     commit_record = spool / "finalize" / "commit.json"
-    current = _git(path, ["branch", "--show-current"])
+    last_git_error = {}
+
+    def _trim(value) -> str:
+        if isinstance(value, bytes):
+            value = value.decode("utf-8", errors="replace")
+        return (value or "").strip()[-200:]
+
+    def _run(args: list[str]) -> subprocess.CompletedProcess:
+        nonlocal last_git_error
+        try:
+            completed = _git(path, args)
+        except WorkerError as exc:
+            cause = exc.__cause__ or exc
+            # A timeout/spawn failure has no observed exit code. Keep null
+            # rather than inventing one, including partial timeout output.
+            exc.git_error = {
+                "command": f"git {args[0]}", "returncode": None,
+                "stdout": _trim(getattr(cause, "stdout", None)),
+                "stderr": _trim(getattr(cause, "stderr", None) or
+                                ("git timed out" if isinstance(cause, subprocess.TimeoutExpired) else str(cause))),
+            }
+            raise
+        if completed.returncode != 0:
+            # Retain the failing command across retries and subsequent successful
+            # probes. Do not include argv: commit messages can be large/private.
+            last_git_error = {"git_error": {
+                "command": f"git {args[0]}", "returncode": completed.returncode,
+                "stderr": _trim(completed.stderr),
+                "stdout": _trim(completed.stdout),
+            }}
+        return completed
+
+    def _failure(result: dict) -> dict:
+        return {**result, **last_git_error}
+
+    current = _run(["branch", "--show-current"])
     if current.returncode != 0 or current.stdout.strip() != branch:
-        return {"outcome": "authority_denied", "reason": "worktree branch changed before finalization"}
+        return _failure({"outcome": "authority_denied", "reason": "worktree branch changed before finalization"})
 
     def _head() -> str:
-        return _git(path, ["rev-parse", "HEAD"]).stdout.strip()
+        return _run(["rev-parse", "HEAD"]).stdout.strip()
 
     def _clean() -> bool:
-        status = _git(path, ["status", "--porcelain"])
+        status = _run(["status", "--porcelain"])
         return status.returncode == 0 and not status.stdout.strip()
 
     for _round in range(4):
@@ -1485,15 +1525,15 @@ def _finalize_logic(execution_id: str, spool: Path, request: dict) -> dict:
                         "commit_sha": head, "parent_sha": proven.get("parent_sha"),
                         "dirty_paths": proven.get("dirty_paths", []),
                         "push": _exact_commit_push(path, head, branch)}
-            return {"outcome": "authority_denied", "reason": "history moved after the recorded finalize commit"}
+            return _failure({"outcome": "authority_denied", "reason": "history moved after the recorded finalize commit"})
         if head != expected:
-            parent = _git(path, ["rev-parse", "HEAD^"]).stdout.strip()
-            message = _git(path, ["log", "-1", "--format=%B"]).stdout
-            return {"outcome": "finalize_ambiguous", "head": head, "parent": parent,
-                    "trailer_matches": f"Aoteru-Execution: {execution_id}" in message}
-        status = _git(path, ["status", "--porcelain"])
+            parent = _run(["rev-parse", "HEAD^"]).stdout.strip()
+            message = _run(["log", "-1", "--format=%B"]).stdout
+            return _failure({"outcome": "finalize_ambiguous", "head": head, "parent": parent,
+                             "trailer_matches": f"Aoteru-Execution: {execution_id}" in message})
+        status = _run(["status", "--porcelain"])
         if status.returncode != 0:
-            return {"outcome": "authority_denied", "reason": status.stderr.strip() or "git status failed"}
+            return _failure({"outcome": "authority_denied", "reason": "git status failed"})
         dirty_paths = [line[3:] for line in status.stdout.splitlines() if line.strip()]
         if not dirty_paths:
             if _head() != expected or read_decision(commit_record) is not None:
@@ -1504,21 +1544,21 @@ def _finalize_logic(execution_id: str, spool: Path, request: dict) -> dict:
             return {"outcome": "finalized", "committed": False, "adopted": False, "commit_sha": head,
                     "parent_sha": None, "dirty_paths": [],
                     "push": {"state": "not_required", "commit_sha": head, "branch": branch}}
-        added = _git(path, ["add", "--", *dirty_paths])
-        committed = _git(path, ["commit", "-m", f"{request['commit_message']}\n\nAoteru-Execution: {execution_id}"]) \
+        added = _run(["add", "--", *dirty_paths])
+        committed = _run(["commit", "-m", f"{request['commit_message']}\n\nAoteru-Execution: {execution_id}"]) \
             if added.returncode == 0 else added
         if committed.returncode != 0:
             continue   # re-evaluate once: a concurrent same-execution attempt may have committed
         sha = _head()
-        parent = _git(path, ["rev-parse", "HEAD^"]).stdout.strip()
+        parent = _run(["rev-parse", "HEAD^"]).stdout.strip()
         if parent != expected:
-            return {"outcome": "finalize_ambiguous", "head": sha, "parent": parent, "trailer_matches": True}
+            return _failure({"outcome": "finalize_ambiguous", "head": sha, "parent": parent, "trailer_matches": True})
         decide_once(commit_record, {"commit_sha": sha, "parent_sha": parent,
                                     "dirty_paths": dirty_paths, "at": _utcnow()})
         return {"outcome": "finalized", "committed": True, "adopted": False, "commit_sha": sha,
                 "parent_sha": parent, "dirty_paths": dirty_paths,
                 "push": _exact_commit_push(path, sha, branch)}
-    return {"outcome": "finalize_ambiguous", "head": _head(), "parent": None, "trailer_matches": False}
+    return _failure({"outcome": "finalize_ambiguous", "head": _head(), "parent": None, "trailer_matches": False})
 
 
 def _run_attempt(kind: str, execution_id: str, number: str) -> int:
@@ -1557,6 +1597,8 @@ def _run_attempt_body(kind, execution_id, spool, directory, number, request) -> 
             result = _push_logic(request)
     except Exception as exc:
         result = {"outcome": "finalize_ambiguous" if kind == "finalize" else "push_failed", "reason": str(exc)}
+        if getattr(exc, "git_error", None):
+            result.update(git_error=exc.git_error, reason=f"{exc.git_error['command']} failed")
     _json_write(directory / f"attempt-{number}.result.json", result)
     return 0
 

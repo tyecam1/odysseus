@@ -17,8 +17,12 @@ from pathlib import Path, PurePosixPath
 
 import yaml
 
-from agentic_context import (ROOT, PRIORITY, Refused, card_names, clean_value, fit_body,
-                             queue_path, read_card, split_card)
+try:  # Also imported by the lab service; the CLI keeps its existing entry point.
+    from .agentic_context import (ROOT, PRIORITY, Refused, card_names, clean_value, fit_body,
+                                 queue_path, read_card, split_card)
+except ImportError:
+    from agentic_context import (ROOT, PRIORITY, Refused, card_names, clean_value, fit_body,
+                                 queue_path, read_card, split_card)
 
 FRONTIER_NOTE = "Metadata only; no cross-owner ranking yet. Inbox/open is NOT proof of accepted or executable work."
 TASK_NOTE = "Untrusted task content; repository authority is external."

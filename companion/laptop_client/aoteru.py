@@ -521,6 +521,80 @@ def cmd_push(args: argparse.Namespace) -> int:
     return 0 if result["status"] == 200 and result["body"].get("pushed") else 1
 
 
+def cmd_finalize(args: argparse.Namespace) -> int:
+    body = {}
+    if args.message_file:
+        try:
+            body["commit_message"] = Path(args.message_file).read_text(encoding="utf-8")
+        except OSError as exc:
+            raise SystemExit(f"cannot read --message-file: {exc}")
+    result = _request(_load_config(), "POST", f"/api/estate/run/{args.execution_id}/finalize",
+                      body, timeout=240)
+    print(json.dumps(result["body"], indent=2))
+    return 0 if result["status"] == 200 and result["body"].get("finalized") else 1
+
+
+def _budget_pair(value: str) -> tuple[str, int]:
+    key, sep, raw = value.partition("=")
+    try:
+        if not sep or not key.strip():
+            raise ValueError
+        amount = int(raw)
+        if amount < 0:
+            raise ValueError
+    except ValueError:
+        raise argparse.ArgumentTypeError("budget must be key=nonnegative_integer")
+    return key, amount
+
+
+def cmd_lazy(args: argparse.Namespace) -> int:
+    cfg = _load_config()
+    action = args.lazy_action
+    body = None
+    method = "GET" if action == "status" else "POST"
+    path = "/api/lazy-usage/" + action
+    if action == "start":
+        body = {}
+        if args.repo:
+            body["repo_scope"] = args.repo
+        if args.budget:
+            body["budget_overrides"] = dict(args.budget)
+    elif action == "status":
+        if args.all and args.run_id:
+            raise SystemExit("--all cannot be combined with RUN_ID")
+        path = "/api/lazy-usage/history" if args.all else _with_query(path, run_id=args.run_id)
+    else:
+        run_id = args.run_id
+        if not run_id:
+            latest = _request(cfg, "GET", "/api/lazy-usage/status")
+            if latest["status"] != 200 or not latest["body"].get("id"):
+                print(json.dumps(latest["body"], indent=2))
+                return 1
+            run_id = latest["body"]["id"]
+        body = {"run_id": run_id}
+    result = _request(cfg, method, path, body)
+    print(json.dumps(result["body"], indent=2))
+    if result["status"] == 200:
+        rows = result["body"].get("runs", [result["body"]])
+        for row in rows:
+            print(f"run: {row.get('id')} state: {row.get('state')} "
+                  f"counters: {json.dumps(row.get('counters', {}), separators=(',', ':'))} "
+                  f"budgets: {json.dumps(row.get('budgets', {}), separators=(',', ':'))} "
+                  f"owed reviews: {len(row.get('owed_reviews', []))}", file=sys.stderr)
+    return 0 if result["status"] == 200 else 1
+
+
+def cmd_provider_health(args: argparse.Namespace) -> int:
+    import urllib.parse
+    path = "/api/estate/provider-health/" + urllib.parse.quote(args.provider, safe="")
+    override = args.provider_action == "override"
+    result = _request(_load_config(), "POST" if override else "GET",
+                      path + ("/override" if override else ""),
+                      {"reason": args.reason} if override else None)
+    print(json.dumps(result["body"], indent=2))
+    return 0 if result["status"] == 200 else 1
+
+
 def cmd_resolve_prepare(args: argparse.Namespace) -> int:
     """S6.9: resolve an ambiguous `preparing` reservation by lease id."""
     cfg = _load_config()
@@ -606,6 +680,31 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_push = sub.add_parser("push", help="retry the governed exact-commit push of an execution (S6.10)")
     p_push.add_argument("execution_id")
+
+    p_finalize = sub.add_parser("finalize", help="S6 control-plane finalization (estate:execute)")
+    p_finalize.add_argument("execution_id")
+    p_finalize.add_argument("--message-file", help="read the commit message from a UTF-8 file")
+
+    p_lazy = sub.add_parser("lazy", help="control bounded persistent backend work")
+    lazy_sub = p_lazy.add_subparsers(dest="lazy_action", required=True)
+    p_start = lazy_sub.add_parser("start", help="activate durable work (estate:execute)")
+    p_start.add_argument("--repo", action="append", help="registered repo ID; repeat to select scope")
+    p_start.add_argument("--budget", action="append", type=_budget_pair,
+                         help="key=value ceiling override; repeat for each budget (backend clamps limits)")
+    p_lazy_status = lazy_sub.add_parser("status", help="inspect latest run (estate:read)")
+    p_lazy_status.add_argument("run_id", nargs="?")
+    p_lazy_status.add_argument("--all", action="store_true", help="show run history")
+    for action in ("stop", "pause", "resume"):
+        p_control = lazy_sub.add_parser(action, help=f"{action} a run (estate:execute)")
+        p_control.add_argument("run_id", nargs="?", help="default: latest owned run")
+
+    p_health = sub.add_parser("provider-health", help="inspect provider admission or assert operator evidence")
+    health_sub = p_health.add_subparsers(dest="provider_action", required=True)
+    p_show = health_sub.add_parser("show", help="read current gate (estate:read)")
+    p_show.add_argument("provider")
+    p_override = health_sub.add_parser("override", help="assert operator-observed capacity (estate:admin token)")
+    p_override.add_argument("provider")
+    p_override.add_argument("--reason", required=True, help="operator-observed evidence for reopening this gate")
 
     p_resolve = sub.add_parser("resolve-prepare", help="resolve an ambiguous preparing reservation (S6.9)")
     p_resolve.add_argument("repo_id")
@@ -705,6 +804,9 @@ def main(argv: list[str] | None = None) -> int:
         "execution": cmd_execution,
         "recover": cmd_recover,
         "push": cmd_push,
+        "finalize": cmd_finalize,
+        "lazy": cmd_lazy,
+        "provider-health": cmd_provider_health,
         "resolve-prepare": cmd_resolve_prepare,
         "auto": cmd_dispatch,
         "lab": cmd_dispatch,

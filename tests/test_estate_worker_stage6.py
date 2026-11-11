@@ -610,6 +610,89 @@ def test_u71_lost_response_retry_adopts_via_commit_record(cfg, repo):
     assert retry["commit_sha"] == first["commit_sha"]
 
 
+@pytest.mark.parametrize("command", ["add", "commit", "status"])
+def test_finalize_retains_bounded_failing_git_command(cfg, repo, monkeypatch, command):
+    (repo["wt"] / "new.txt").write_text("change")
+    real_git = estate_worker._git
+    calls = []
+
+    def fail(path, args, **kwargs):
+        calls.append(args[0])
+        if args[0] == command:
+            return subprocess.CompletedProcess(args, 73, stdout=" " + "o" * 500 + " ",
+                                               stderr=" " + "e" * 500 + " ")
+        return real_git(path, args, **kwargs)
+
+    monkeypatch.setattr(estate_worker, "_git", fail)
+    result = estate_worker._finalize_logic("E1", _spool("E1"), _finalize_request(repo))
+    assert result["outcome"] == ("authority_denied" if command == "status" else "finalize_ambiguous")
+    assert result["git_error"] == {"command": f"git {command}", "returncode": 73,
+                                   "stdout": "o" * 200, "stderr": "e" * 200}
+    assert calls.count(command) == (1 if command == "status" else 4)
+    if command == "add":
+        assert "commit" not in calls
+    assert _git(repo["wt"], "rev-parse", "HEAD") == repo["head"]
+
+
+def test_finalize_real_commit_error_survives_attempt_result(cfg, repo):
+    (repo["wt"] / "new.txt").write_text("change")
+    _git(repo["main"], "config", "user.name", "")
+    spool = _spool("E1")
+    assert estate_worker._run_attempt_body("finalize", "E1", spool, spool / "finalize", "1",
+                                          _finalize_request(repo)) == 0
+    result = estate_worker._json_read(spool / "finalize" / "attempt-1.result.json")
+    assert result["outcome"] == "finalize_ambiguous", result
+    assert result["git_error"]["command"] == "git commit"
+    assert result["git_error"]["returncode"] == 128
+    assert "empty ident" in result["git_error"]["stderr"]
+    assert _git(repo["wt"], "diff", "--cached", "--name-only") == "new.txt"
+    assert not (spool / "finalize" / "commit.json").exists()
+
+
+def test_finalize_retains_commit_error_when_history_moves(cfg, repo, monkeypatch):
+    (repo["wt"] / "new.txt").write_text("change")
+    real_git = estate_worker._git
+
+    def lost_commit_response(path, args, **kwargs):
+        completed = real_git(path, args, **kwargs)
+        if args[0] == "commit":
+            assert completed.returncode == 0
+            return subprocess.CompletedProcess(args, 1, stdout="", stderr="concurrent commit")
+        return completed
+
+    monkeypatch.setattr(estate_worker, "_git", lost_commit_response)
+    result = estate_worker._finalize_logic("E1", _spool("E1"), _finalize_request(repo))
+    assert result["outcome"] == "finalize_ambiguous" and result["trailer_matches"] is True
+    assert result["git_error"] == {"command": "git commit", "returncode": 1,
+                                   "stdout": "", "stderr": "concurrent commit"}
+
+
+@pytest.mark.parametrize("timed_out", [False, True], ids=["spawn-failure", "timeout"])
+def test_finalize_exception_keeps_partial_git_output(cfg, repo, monkeypatch, timed_out):
+    (repo["wt"] / "new.txt").write_text("change")
+    real_git = estate_worker._git
+
+    def fail_commit(path, args, **kwargs):
+        if args[0] == "commit":
+            try:
+                if timed_out:
+                    raise subprocess.TimeoutExpired("git commit", 120, output=b"partial stdout",
+                                                     stderr=b"partial stderr")
+                raise FileNotFoundError("git executable missing")
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                raise estate_worker.WorkerError("repo_unavailable", "git commit failed") from exc
+        return real_git(path, args, **kwargs)
+
+    monkeypatch.setattr(estate_worker, "_git", fail_commit)
+    spool = _spool("E1")
+    estate_worker._run_attempt_body("finalize", "E1", spool, spool / "finalize", "1", _finalize_request(repo))
+    result = estate_worker._json_read(spool / "finalize" / "attempt-1.result.json")
+    assert result["outcome"] == "finalize_ambiguous"
+    assert result["git_error"] == {"command": "git commit", "returncode": None,
+        "stdout": "partial stdout" if timed_out else "",
+        "stderr": "partial stderr" if timed_out else "git executable missing"}
+
+
 def test_u71_forged_trailer_without_commit_record_is_ambiguous(cfg, repo):
     (repo["wt"] / "foreign.txt").write_text("f")
     _git(repo["wt"], "add", "foreign.txt")
@@ -698,6 +781,18 @@ def test_u74_finalize_reports_only_when_every_attempt_is_quiescent(cfg, repo, in
     inline_attempts.set_populated("aoteru-finalize-E1-1.service", None)
     third = _result("worktree.finalize", _finalize_request(repo))
     assert third["outcome"] == "finalized" and third["adopted"] is True
+
+
+def test_finalize_authority_error_keeps_git_evidence_in_protocol_message(cfg, repo, inline_attempts, monkeypatch):
+    inline_attempts.write_spool("E1")
+    error = {"command": "git status", "returncode": 128, "stderr": "permission denied", "stdout": ""}
+    monkeypatch.setattr(estate_worker, "_wait_attempts", lambda *a: {
+        "outcome": "authority_denied", "reason": "git status failed", "git_error": error,
+    })
+    response = _call("worktree.finalize", _finalize_request(repo))
+    assert response["ok"] is False and response["error"]["code"] == "authority_denied"
+    reason, evidence = response["error"]["message"].split(" | git_error=", 1)
+    assert reason == "git status failed" and json.loads(evidence) == error
 
 
 def test_u74_attempt_without_run_decision_is_fenced_by_a_later_attempt(cfg, repo, inline_attempts, monkeypatch):

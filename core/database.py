@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 from urllib.parse import unquote, urlparse
-from sqlalchemy import event, create_engine, Column, String, Text, Boolean, DateTime, Integer, ForeignKey, JSON, Index, UniqueConstraint, func, text
+from sqlalchemy import event, create_engine, Column, String, Text, Boolean, DateTime, Integer, ForeignKey, JSON, Index, UniqueConstraint, CheckConstraint, func, text
 from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.types import TypeDecorator
 from sqlalchemy.ext.declarative import declarative_base, declared_attr
@@ -1060,6 +1060,42 @@ class EstateExecution(TimestampMixin, Base):
             sqlite_where=text(ESTATE_EXECUTION_UNRESOLVED_PREDICATE),
             postgresql_where=text(ESTATE_EXECUTION_UNRESOLVED_PREDICATE),
         ),
+    )
+
+
+class LazyUsageRun(TimestampMixin, Base):
+    """Explicit bounded activation. EstateExecution and ParkLease retain task authority.
+
+    Created by init_db/create_all alongside EstateExecution; existing tables
+    need no migration. JSON checkpoints contain references and accounting only.
+    The partial index serializes even simultaneous first activations.
+    """
+    __tablename__ = "lazy_usage_runs"
+
+    id = Column(String, primary_key=True)
+    state = Column(String, nullable=False, default="requested", index=True)
+    created_by = Column(String, nullable=False)
+    initializer = Column(String, nullable=False, default="estate-queue-priority-execution@v2")
+    repo_scope = Column(JSON, nullable=False, default=lambda: ["odysseus", "misumi", "obsidian-phd"])
+    budgets = Column(JSON, nullable=False, default=lambda: {
+        "max_seconds": 14400, "max_paid_calls": 12, "max_tool_calls": 150,
+        "max_no_delivery_turns": 8, "max_repeat_failures": 3,
+    })
+    counters = Column(JSON, nullable=False, default=lambda: {
+        "paid_calls": 0, "tool_calls": 0, "no_delivery_turns": 0,
+        "repeated_failures": 0, "last_failure_signature": None,
+    })
+    checkpoint = Column(JSON, nullable=False, default=dict)
+    terminal_reason = Column(String, nullable=True)
+    started_at = Column(DateTime, nullable=True)
+    finished_at = Column(DateTime, nullable=True)
+
+    __table_args__ = (
+        CheckConstraint("state IN ('requested', 'running', 'paused', 'stop_requested', 'stopping', "
+                        "'completed', 'stopped', 'failed', 'budget_exhausted')", name="ck_lazy_usage_state"),
+        Index("ix_lazy_usage_one_active", text("(1)"), unique=True,
+              sqlite_where=text("state NOT IN ('completed', 'stopped', 'failed', 'budget_exhausted')"),
+              postgresql_where=text("state NOT IN ('completed', 'stopped', 'failed', 'budget_exhausted')")),
     )
 
 
