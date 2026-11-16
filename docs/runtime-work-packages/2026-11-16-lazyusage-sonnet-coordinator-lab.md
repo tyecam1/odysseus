@@ -91,3 +91,24 @@ acceptance record are appended below as they complete.)
   env; model `glm-5.3-flash`).
 - Claude subscription probe: OAuth session expired (see above); sonnet lane
   correctly fail-closed pending operator re-login.
+
+## Live qualification (2026-11-16, branch feat/lazyusage-cognitive-coordinator 3c787d9b)
+
+Full suite: **9583 passed, 47 skipped, 5 deselected (live units), 5 xfailed**
+(plus 41 coordinator tests inside that count).
+
+- **GLM-Flash lane live-attested:** `execute_glm(variant="flash")` against
+  the live Z.AI endpoint through `claude-glm-flash`: `ok: true`,
+  `concrete_model: glm-5.3-flash` (provider-usage-response attestation),
+  strict-JSON plan output, 5.6 s latency. Provider health for `glm`
+  recorded `state: ok, allowed: true` in the authoritative controller DB.
+  This run is the `glm` executor qualification evidence for
+  `hz2-workstation` (read-only advisory, standard + flash launchers).
+- **Claude subscription lane fail-closed live:** `execute_claude` typed
+  `auth_failed` (OAuth session expired), provider health `claude`
+  `auth_failed, allowed: false` with 15-minute backoff. The lane correctly
+  refuses rather than bypassing; owed operator action: one interactive
+  `claude login` on the lab, then a live attested Sonnet call plus a
+  one-line governed `config/estate.yaml` qualification commit.
+- **Codex:** quota window expired 2026-11-13T17:03Z; `allowed: true`
+  (retry permitted on next dispatch).
