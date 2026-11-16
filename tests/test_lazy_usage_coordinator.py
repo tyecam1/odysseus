@@ -256,12 +256,15 @@ def test_step_digest_fence_prevents_repeat_paid_call_after_failure(db, frontier,
             glm_plan_result(["odysseus:ready/a.md"])
 
     monkeypatch.setattr(estate_router, "execute_glm", flaky)
-    run = _run(db)
+    run_id = _run(db).id
     snapshot = rt.refresh_frontier(["odysseus"])
     digest = rt._digest(snapshot)
-    assert coord.coordinator_step(db, run, snapshot, digest) is None
-    # same digest: the attempt fence blocks a second paid call even though
-    # the provider has now recovered
+    assert coord.coordinator_step(db, db.get(cdb.LazyUsageRun, run_id), snapshot, digest) is None
+    # crash simulation: reload the run purely from durable committed state;
+    # the fence committed before the call must still hold
+    db.expire_all()
+    run = db.get(cdb.LazyUsageRun, run_id)
+    assert run.checkpoint["coordinator_attempted_key"] == coord.plan_key(digest)
     assert coord.coordinator_step(db, run, snapshot, digest) is None
     assert run.checkpoint["coordinator_skip"] == "digest_already_attempted"
     assert len(calls) == 1 and run.counters["paid_calls"] == 1
@@ -269,6 +272,45 @@ def test_step_digest_fence_prevents_repeat_paid_call_after_failure(db, frontier,
     snapshot2 = dict(snapshot, warnings=["changed"])
     plan = coord.coordinator_step(db, run, snapshot2, rt._digest(snapshot2))
     assert plan is not None and len(calls) == 2
+
+
+@pytest.mark.parametrize("first_result", [
+    {"ok": True, "output": "garbage not json", "concrete_model": "glm-5.3-flash"},
+    {"ok": True, "output": json.dumps({"selected": ["odysseus:ready/ghost.md"],
+                                       "decomposition": [], "next_action": "x"}),
+     "concrete_model": "glm-5.3-flash"},
+])
+def test_step_digest_fence_also_covers_invalid_output(db, frontier, monkeypatch, first_result):
+    qualify(monkeypatch)
+    calls = []
+    add, _ = frontier
+    add("a")
+    monkeypatch.setattr(estate_router, "execute_glm",
+                        lambda prompt, **kw: calls.append(prompt) or first_result)
+    run = _run(db)
+    snapshot = rt.refresh_frontier(["odysseus"])
+    digest = rt._digest(snapshot)
+    assert coord.coordinator_step(db, run, snapshot, digest) is None
+    assert run.checkpoint["coordinator_skip"] == "plan_validation_failed"
+    assert coord.coordinator_step(db, run, snapshot, digest) is None
+    assert run.checkpoint["coordinator_skip"] == "digest_already_attempted"
+    assert len(calls) == 1
+
+
+def test_step_rejects_ref_beyond_bounded_candidate_window(db, frontier, monkeypatch):
+    qualify(monkeypatch)
+    add, _ = frontier
+    for i in range(coord.MAX_CANDIDATES + 1):
+        add("task-%02d" % i)
+    # the 16th record exists in the frontier but was never shown to the
+    # model; a plan promoting it must be rejected
+    unshown = "odysseus:ready/task-15.md"
+    assert unshown not in {r["ref"] for r in coord._candidates(rt.refresh_frontier(["odysseus"]))}
+    monkeypatch.setattr(estate_router, "execute_glm", lambda prompt, **kw: glm_plan_result([unshown]))
+    run = _run(db)
+    snapshot = rt.refresh_frontier(["odysseus"])
+    assert coord.coordinator_step(db, run, snapshot, rt._digest(snapshot)) is None
+    assert run.checkpoint["coordinator_skip"] == "plan_validation_failed"
 
 
 def test_step_invalid_output_fails_closed(db, frontier, monkeypatch):
@@ -329,8 +371,10 @@ def test_advance_uses_plan_order_and_checkpoints_decomposition(db, frontier, mon
     assert run.checkpoint["task_ref"] == "odysseus:ready/b.md"
     assert run.counters["paid_calls"] >= 2  # coordinator + task advisory
     # decomposition stays advisory evidence in the checkpoint and never
-    # enters the worker objective (Sol review P1)
-    assert "decomposition" not in dispatched[0]["objective"]
+    # enters the worker objective (Sol review P1): assert the actual step
+    # text is absent from what the worker receives
+    assert "run deterministic checks" not in dispatched[0]["objective"]
+    assert "Coordinator advisory decomposition" not in dispatched[0]["objective"]
     assert "run deterministic checks" in run.checkpoint["coordinator_decomposition"]
     assert run.checkpoint["coordinator_order"][0] == "odysseus:ready/b.md"
 
