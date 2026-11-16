@@ -91,10 +91,11 @@ hosts:
     worker:
       enabled: true
       transport: local
-      qualified_executors: [deterministic, local, codex, codex-write]
+      qualified_executors: [deterministic, local, codex, codex-write, glm]
       qualification_evidence:
         - docs/aoteru-lm4-production-canary-evidence.md
         - docs/aoteru-p12-active-estate-convergence-evidence.md
+        - docs/runtime-work-packages/2026-11-16-lazyusage-sonnet-coordinator-lab.md  # glm read-only advisory (incl. flash launcher), live-attested 2026-11-16
     tailscale: true  # cap/is-admin, cap/is-owner, cap/ssh on this node's identity
     inventoried_at: "2026-08-19"
     notes: >-

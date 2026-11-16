@@ -22,6 +22,7 @@ from core.database import EstateExecution, LazyUsageRun, ParkLease, utcnow_naive
 from scripts import agentic_portfolio as portfolio
 from src import estate_router, estate_write_lane, park_lease_ops
 from src.delegation_preflight import delegation_preflight
+from src import lazy_usage_coordinator as coordinator
 from src.estate_worker_client import WorkerTransportError, call_worker
 from src.runtime_paths import get_app_root
 
@@ -80,7 +81,7 @@ def run_dict(run):
             "finished_at": run.finished_at.isoformat() if run.finished_at else None}
 
 
-def activate_run(db, owner, repo_scope=None, budget_overrides=None):
+def activate_run(db, owner, repo_scope=None, budget_overrides=None, coordinator=None):
     if not isinstance(owner, str) or not owner.strip():
         raise RunError(422, "owner is required")
     scope = list(portfolio.LAYOUT) if repo_scope is None else repo_scope
@@ -95,6 +96,10 @@ def activate_run(db, owner, repo_scope=None, budget_overrides=None):
         if type(value) is not int or value < 0:
             raise RunError(422, "budgets must be nonnegative integers")
         budgets[key] = min(value, CEILINGS[key])
+    if coordinator is not None and (
+            not isinstance(coordinator, dict) or set(coordinator) - {"enabled"}
+            or type(coordinator.get("enabled")) is not bool):
+        raise RunError(422, "coordinator must be {'enabled': bool}")
     if db.query(LazyUsageRun).filter(LazyUsageRun.state.notin_(TERMINAL)).first():
         db.rollback()
         raise RunError(409, "a non-terminal activation already exists")
@@ -104,7 +109,8 @@ def activate_run(db, owner, repo_scope=None, budget_overrides=None):
                        counters={"paid_calls": 0, "tool_calls": 0, "no_delivery_turns": 0,
                                  "repeated_failures": 0, "last_failure_signature": None},
                        checkpoint={"phase": "idle", "in_flight_execution_id": None,
-                                   "owed_reviews": [], "next_action": "refresh_frontier"})
+                                   "owed_reviews": [], "next_action": "refresh_frontier",
+                                   **({"coordinator": coordinator} if coordinator and coordinator.get("enabled") else {})})
     db.add(run)
     try:
         db.commit()
@@ -278,7 +284,7 @@ def _reconcile_review_debts(run, task_ref, *, verified=False, acceptance=None):
                            not (settled or verified and _debt_gate(debt) == "verification")])
 
 
-def _choose(frontier, run):
+def _choose(frontier, run, plan=None):
     # Re-read owner outcomes even for tasks that no longer need dispatch.
     # Absence alone never resolves debt; the done card must be read explicitly.
     for task_ref in dict.fromkeys(d.get("task_ref") for d in run.checkpoint.get("owed_reviews", [])):
@@ -289,6 +295,10 @@ def _choose(frontier, run):
     attempted = run.checkpoint.get("attempted", {})
     rows = sorted(frontier["records"], key=lambda r: (
         portfolio.RANK[r["bucket"]], portfolio.PRIORITY.get(str(r.get("priority", "")).lower(), 9), r["ref"]))
+    if plan and isinstance(plan.get("order"), list):
+        # Coordinator advice reorders candidates; every gate below is unchanged.
+        rank = {ref: i for i, ref in enumerate(plan["order"])}
+        rows.sort(key=lambda r: rank.get(r["ref"], len(rank)))
     for record in rows:
         # Inbox and blocked metadata do not prove executable authority.
         if record["bucket"] in {"inbox", "blocked", "blocked-human"}:
@@ -672,7 +682,10 @@ def advance(db, run_id):
         frontier = refresh_frontier(run.repo_scope)
         digest = _digest(frontier)
         _save(db, run, last_frontier_digest=digest)
-        chosen = _choose(frontier, run)
+        # Opt-in bounded cognitive step: one advisory plan per unchanged
+        # frontier state, charged to this run's budgets, fail-closed.
+        plan = coordinator.coordinator_step(db, run, frontier, digest)
+        chosen = _choose(frontier, run, plan)
         if chosen is None:
             if not frontier["records"] and not frontier["unavailable"] and not frontier["warnings"] and not run.checkpoint.get("owed_reviews"):
                 return _finish(db, run, "completed", "authorised_work_exhausted")
@@ -682,6 +695,9 @@ def advance(db, run_id):
             return _finish(db, run, "budget_exhausted", reason) if reason else _park(
                 db, run, "no eligible frontier; recheck on frontier, authority or provider change")
         record, meta, task, write, host, provider, revision = chosen
+        # The coordinator's decomposition/next_action stay checkpointed as
+        # untrusted advisory evidence only (Sol review P1: never inject
+        # model-generated instruction text into a worker objective).
         run = _load(db, run.id)
         if run.state != "running":
             return _save(db, run, phase="idle")
