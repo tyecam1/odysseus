@@ -167,8 +167,9 @@ def build_prompt(frontier, run):
                          counters=json.dumps(run.counters or {}, sort_keys=True))
 
 
-def parse_plan(text, frontier):
-    """Strict validation: exact schema, bounded sizes, refs must exist."""
+def parse_plan(text, valid_refs):
+    """Strict validation: exact schema, bounded sizes, and refs restricted
+    to the bounded candidate set the model was actually shown."""
     if not isinstance(text, str):
         return None
     try:
@@ -177,10 +178,9 @@ def parse_plan(text, frontier):
         return None
     if not isinstance(plan, dict) or set(plan) != {"selected", "decomposition", "next_action"}:
         return None
-    valid = {r["ref"] for r in frontier["records"]}
     selected = plan["selected"]
     if (not isinstance(selected, list) or not 1 <= len(selected) <= MAX_SELECTED
-            or any(not isinstance(ref, str) or ref not in valid for ref in selected)):
+            or any(not isinstance(ref, str) or ref not in valid_refs for ref in selected)):
         return None
     order, seen = [], set()
     for ref in selected:
@@ -234,6 +234,13 @@ def coordinator_step(db, run, frontier, digest):
         return {"order": cp["coordinator_order"], "primary": cp.get("coordinator_primary"),
                 "decomposition": cp.get("coordinator_decomposition") or [],
                 "next_action": cp.get("coordinator_next_action")}
+    if cp.get("coordinator_attempted_key") == key:
+        # This frontier state was already attempted (failure, invalid output
+        # or crash): never re-bill the same digest. A new frontier digest
+        # is the only re-plan trigger.
+        _checkpoint(run, coordinator_skip="digest_already_attempted")
+        db.commit()
+        return None
     choice = select_lane(run, high_consequence=high_consequence(cp, run.counters))
     lane = choice["lane"]
     if lane is None:
@@ -243,8 +250,11 @@ def coordinator_step(db, run, frontier, digest):
     provider, variant = LANE_ROUTES[lane]
     prompt = build_prompt(frontier, run)
     # Charge BEFORE the call so spent accounting survives a crash mid-call.
+    # The attempted-digest fence in the same commit guarantees exactly one
+    # coordinator call per frontier digest even across crashes.
     _charge(run, paid_calls=1, tool_calls=1)
-    _checkpoint(run, coordinator_skip=None, coordinator_lane=lane, coordinator_key=None)
+    _checkpoint(run, coordinator_skip=None, coordinator_lane=lane, coordinator_key=None,
+                coordinator_attempted_key=key)
     db.commit()
     try:
         if provider == "glm":
@@ -261,7 +271,7 @@ def coordinator_step(db, run, frontier, digest):
         _checkpoint(run, coordinator_skip="provider_failed_" + str(result.get("error_code") or "unknown")[:60])
         db.commit()
         return None
-    plan = parse_plan(result.get("output"), frontier)
+    plan = parse_plan(result.get("output"), {r["ref"] for r in _candidates(frontier)})
     if plan is None:
         _checkpoint(run, coordinator_skip="plan_validation_failed",
                     coordinator_model=result.get("concrete_model"))

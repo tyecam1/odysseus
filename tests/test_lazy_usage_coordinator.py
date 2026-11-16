@@ -150,7 +150,7 @@ def test_select_lane_ignores_unknown_configured_lanes(db, monkeypatch):
 # ---------------------------------------------------------------- plan validation
 
 def _frontier_with(*refs):
-    return {"records": [{"ref": ref} for ref in refs]}
+    return {ref for ref in refs}
 
 
 def test_parse_plan_accepts_bounded_valid_plan():
@@ -244,6 +244,33 @@ def test_step_provider_failure_fails_closed_and_records_skip(db, frontier, monke
     assert run.counters["paid_calls"] == 1  # the failed call was really spent
 
 
+def test_step_digest_fence_prevents_repeat_paid_call_after_failure(db, frontier, monkeypatch):
+    qualify(monkeypatch)
+    calls = []
+    add, _ = frontier
+    add("a")
+
+    def flaky(prompt, **kw):
+        calls.append(prompt)
+        return {"ok": False, "error_code": "quota_exhausted"} if len(calls) == 1 else \
+            glm_plan_result(["odysseus:ready/a.md"])
+
+    monkeypatch.setattr(estate_router, "execute_glm", flaky)
+    run = _run(db)
+    snapshot = rt.refresh_frontier(["odysseus"])
+    digest = rt._digest(snapshot)
+    assert coord.coordinator_step(db, run, snapshot, digest) is None
+    # same digest: the attempt fence blocks a second paid call even though
+    # the provider has now recovered
+    assert coord.coordinator_step(db, run, snapshot, digest) is None
+    assert run.checkpoint["coordinator_skip"] == "digest_already_attempted"
+    assert len(calls) == 1 and run.counters["paid_calls"] == 1
+    # a changed frontier (new digest) permits exactly one new attempt
+    snapshot2 = dict(snapshot, warnings=["changed"])
+    plan = coord.coordinator_step(db, run, snapshot2, rt._digest(snapshot2))
+    assert plan is not None and len(calls) == 2
+
+
 def test_step_invalid_output_fails_closed(db, frontier, monkeypatch):
     qualify(monkeypatch)
     add, _ = frontier
@@ -290,7 +317,7 @@ def _integration(monkeypatch, db, frontier, plan_output):
     return dispatched
 
 
-def test_advance_uses_plan_order_and_attaches_decomposition(db, frontier, monkeypatch):
+def test_advance_uses_plan_order_and_checkpoints_decomposition(db, frontier, monkeypatch):
     dispatched = _integration(monkeypatch, db, frontier, None)
     add, _ = frontier
     monkeypatch.setattr(estate_router, "execute_glm", lambda prompt, **kw: glm_plan_result(
@@ -301,8 +328,10 @@ def test_advance_uses_plan_order_and_attaches_decomposition(db, frontier, monkey
     run = db.get(cdb.LazyUsageRun, run_id)
     assert run.checkpoint["task_ref"] == "odysseus:ready/b.md"
     assert run.counters["paid_calls"] >= 2  # coordinator + task advisory
-    assert "Coordinator advisory decomposition" in dispatched[0]["objective"]
-    assert "run deterministic checks" in dispatched[0]["objective"]
+    # decomposition stays advisory evidence in the checkpoint and never
+    # enters the worker objective (Sol review P1)
+    assert "decomposition" not in dispatched[0]["objective"]
+    assert "run deterministic checks" in run.checkpoint["coordinator_decomposition"]
     assert run.checkpoint["coordinator_order"][0] == "odysseus:ready/b.md"
 
 
@@ -316,7 +345,7 @@ def test_advance_survives_garbage_plan_deterministically(db, frontier, monkeypat
     assert run.checkpoint["coordinator_skip"] == "plan_validation_failed"
     # deterministic priority still picked the high-priority task
     assert run.checkpoint["task_ref"] == "odysseus:ready/a.md"
-    assert "Coordinator advisory decomposition" not in dispatched[0]["objective"]
+    assert "decomposition" not in dispatched[0]["objective"]
 
 
 def test_advance_restart_reuses_plan_without_second_call(db, frontier, monkeypatch):
@@ -397,6 +426,21 @@ def test_execute_claude_typed_failures(tmp_path, monkeypatch, claude_admission, 
         _claude_cli(tmp_path, monkeypatch, response)
     result = estate_router.execute_claude("plan", timeout=5)
     assert result["ok"] is False and result["error_code"] == code
+
+
+def test_execute_glm_unconfigured_variant_fails_typed_and_finalizes(monkeypatch):
+    outcomes = []
+    monkeypatch.setenv("DATABASE_URL", "test-only")
+    monkeypatch.setattr(estate_router, "provider_allows_dispatch", lambda provider, **kw: {
+        "allowed": True, "outcome_id": "out-1", "provider": provider})
+    monkeypatch.setattr(estate_router, "_record_provider_outcome",
+                        lambda result, outcome_id: outcomes.append(result))
+    monkeypatch.setattr(estate_router, "_glm_variant_launcher_path", lambda variant: None)
+    result = estate_router.execute_glm("plan", variant="flash")
+    assert result["ok"] is False and result["error_code"] == "launcher_missing"
+    assert "not configured" in result["error"]
+    # the reserved provider outcome is finalized, never left "launching"
+    assert outcomes and outcomes[0]["error_code"] == "launcher_missing"
 
 
 def test_execute_claude_requires_authoritative_database(monkeypatch, tmp_path):

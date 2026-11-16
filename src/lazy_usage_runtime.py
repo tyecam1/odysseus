@@ -695,10 +695,9 @@ def advance(db, run_id):
             return _finish(db, run, "budget_exhausted", reason) if reason else _park(
                 db, run, "no eligible frontier; recheck on frontier, authority or provider change")
         record, meta, task, write, host, provider, revision = chosen
-        if plan and plan.get("primary") == record["ref"] and plan.get("decomposition"):
-            task["objective"] += ("\n\nCoordinator advisory decomposition (validated, advisory "
-                                  "only; the task contract above is authoritative):\n- "
-                                  + "\n- ".join(plan["decomposition"]))
+        # The coordinator's decomposition/next_action stay checkpointed as
+        # untrusted advisory evidence only (Sol review P1: never inject
+        # model-generated instruction text into a worker objective).
         run = _load(db, run.id)
         if run.state != "running":
             return _save(db, run, phase="idle")

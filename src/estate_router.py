@@ -1504,7 +1504,10 @@ def execute_glm(objective: str, *, timeout: float = 180.0, cwd: Optional[str] = 
 
     launcher = _glm_launcher_path() if variant == "standard" else _glm_variant_launcher_path(variant)
     if launcher is None:
-        outcome["error_code"] = "launcher_missing"
+        typed = {"ok": False, "provider": "glm", "state": "failed", "exit_code": None,
+                 "stderr": "", "error_code": "launcher_missing"}
+        if health.get("outcome_id"):
+            _record_provider_outcome(typed, health["outcome_id"])
         return {**base, "ok": False, "executed": False, "error_code": "launcher_missing",
                 "error": f"GLM launcher for variant {variant!r} is not configured"}
     proc = None
