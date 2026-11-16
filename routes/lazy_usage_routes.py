@@ -11,6 +11,7 @@ class Activation(BaseModel):
     model_config = ConfigDict(extra="forbid")
     repo_scope: list[str] | None = None
     budget_overrides: dict[str, StrictInt] | None = None
+    coordinator: dict | None = None
 
 
 class RunControl(BaseModel):
@@ -26,7 +27,8 @@ def setup_lazy_usage_routes():
         owner = _scope_owner(request, {"estate:execute"})
         try:
             with get_db_session() as db:
-                return runtime.activate_run(db, owner, activation.repo_scope, activation.budget_overrides)
+                return runtime.activate_run(db, owner, activation.repo_scope,
+                                            activation.budget_overrides, activation.coordinator)
         except runtime.RunError as exc:
             raise HTTPException(exc.status_code, exc.detail) from exc
 

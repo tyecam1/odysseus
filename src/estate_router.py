@@ -59,7 +59,7 @@ _CONFIG_DIR = Path(get_app_root()) / "config"
 
 def _provider_outcome(result: dict, now=None, *, host_tz=None) -> dict:
     """Failure evidence always wins; reset clocks are relative to the outcome."""
-    if result.get("provider") == "glm" and result.get("error_code") in {"bad_output", "model_mismatch", "nonzero_exit"}:
+    if result.get("provider") in {"glm", "claude"} and result.get("error_code") in {"bad_output", "model_mismatch", "nonzero_exit"}:
         return {"state": "unknown", "retry_after": None, "reason": "GLM output could not be verified",
                 "retry_after_assumed": False}
     now = now or datetime.now().astimezone()
@@ -72,7 +72,7 @@ def _provider_outcome(result: dict, now=None, *, host_tz=None) -> dict:
         # Structural success is decided before any text is read: a long transcript that quotes "# noqa: F401", "timeout"
         # or an old error line must never turn a clean run into a failure. Text only explains runs that did not succeed.
         return {"state": "ok", "retry_after": None, "reason": "no provider error", "retry_after_assumed": False}
-    glm_code = result.get("error_code") if result.get("provider") == "glm" else None
+    glm_code = result.get("error_code") if result.get("provider") in {"glm", "claude"} else None
     text = "\n".join(str(result.get(k) or "") for k in ("error", "output", "stdout", "stderr"))
     text = (text + "\n" + "\n".join(map(str, states))).lower().replace("’", "'")
     now = now.replace(tzinfo=host_tz) if now.tzinfo is None else now.astimezone(host_tz)
@@ -114,11 +114,11 @@ def _provider_outcome(result: dict, now=None, *, host_tz=None) -> dict:
     elif (glm_code == "auth_failed" or glm_code is None and
             re.search(r"unauthorized|authentication|invalid.api.key|not logged in|login required|\b401\b", text)):
         state, reason = "auth_failed", "provider authentication failed"
-    elif result.get("provider") == "glm" and (glm_code == "rate_limited" or glm_code is None and
+    elif result.get("provider") in {"glm", "claude"} and (glm_code == "rate_limited" or glm_code is None and
             (re.search(r"rate.limit|too many requests", text)
              or _glm_contextual_429(str(result.get("stderr") or "")))):
         state, reason = "rate_limited", "provider rate limited"
-    elif result.get("provider") == "glm" and result.get("error_code") in {"launcher_missing", "timeout"}:
+    elif result.get("provider") in {"glm", "claude"} and result.get("error_code") in {"launcher_missing", "timeout"}:
         state, reason = "unreachable", "GLM launcher unavailable or timed out"
     elif re.search(r"unreachable|connection|timed out|timeout|dns|network", text):
         state, reason = "unreachable", "provider transport unavailable"
@@ -237,7 +237,7 @@ def _record_provider_outcome(result: dict, outcome_id: str) -> Optional[str]:
             row = db.query(RoutingDecision).filter_by(id=outcome_id, task_class="provider_outcome").one()
             health["launched_at"] = json.loads(row.escalation_reason)["provider_health"]["launched_at"]
             row.status = "complete" if health["state"] == "ok" else "failed"
-            if result.get("provider") == "glm" and health["state"] not in {
+            if result.get("provider") in {"glm", "claude"} and health["state"] not in {
                     "ok", "quota_exhausted", "rate_limited", "auth_failed"}:
                 health["retry_after"] = None
                 row.task_class = "provider_attempt"
@@ -1471,13 +1471,25 @@ def _glm_launcher_path() -> Path:
     return Path.home() / ".local" / "bin" / "claude-glm"
 
 
-def execute_glm(objective: str, *, timeout: float = 180.0, cwd: Optional[str] = None) -> dict:
+def _glm_variant_launcher_path(variant: str) -> Optional[Path]:
+    """Configured launcher for a non-standard GLM variant (e.g. the
+    economical flash coordinator lane). The operator-owned launcher,
+    not this module, selects the concrete model; an unconfigured
+    variant fails closed as launcher_missing."""
+    entry = next((p for p in _load_yaml("models").get("paid_providers", [])
+                  if p.get("name") == "glm"), {})
+    name = (entry.get("launchers") or {}).get(variant)
+    return Path.home() / ".local" / "bin" / name if isinstance(name, str) and name else None
+
+
+def execute_glm(objective: str, *, timeout: float = 180.0, cwd: Optional[str] = None,
+                variant: str = "standard") -> dict:
     """Run the host-local GLM launcher as bounded read-only advice."""
     import os
     import subprocess
     import time
 
-    base = {"provider": "glm", "host_id": current_host_id(),
+    base = {"provider": "glm", "host_id": current_host_id(), "variant": variant,
             "concrete_model": None, "model_unverified": True,
             "model_currency_attested": False, "exit_code": None}
     if not isinstance(objective, str) or not objective.strip():
@@ -1490,7 +1502,11 @@ def execute_glm(objective: str, *, timeout: float = 180.0, cwd: Optional[str] = 
         code = state if state in {"auth_failed", "quota_exhausted"} else "rate_limited" if state == "rate_limited" else "nonzero_exit"
         return {**base, "ok": False, "executed": False, "error_code": code, "error": health["reason"]}
 
-    launcher = _glm_launcher_path()
+    launcher = _glm_launcher_path() if variant == "standard" else _glm_variant_launcher_path(variant)
+    if launcher is None:
+        outcome["error_code"] = "launcher_missing"
+        return {**base, "ok": False, "executed": False, "error_code": "launcher_missing",
+                "error": f"GLM launcher for variant {variant!r} is not configured"}
     proc = None
     stderr = ""
     outcome = {"ok": False, "provider": "glm", "state": "failed", "exit_code": None, "stderr": ""}
@@ -1583,6 +1599,152 @@ def execute_glm(objective: str, *, timeout: float = 180.0, cwd: Optional[str] = 
         outcome["error_code"] = "launcher_missing"
         return {**base, "ok": False, "executed": False, "error_code": "launcher_missing",
                 "error": "GLM launcher could not be started"}
+    finally:
+        if health.get("outcome_id"):
+            _record_provider_outcome(outcome, health["outcome_id"])
+
+
+def _claude_launcher_path() -> Path:
+    return Path.home() / ".local" / "bin" / "claude"
+
+
+def _claude_model_alias() -> str:
+    """Rolling subscription alias from config; never a pinned concrete
+    version (docs/subscription-model-currency-policy.md). The unmodified
+    official CLI resolves the newest eligible Sonnet at dispatch; the
+    concrete model is attested from the provider usage response below."""
+    entry = next((p for p in _load_yaml("models").get("paid_providers", [])
+                  if p.get("name") == "claude"), {})
+    alias = entry.get("model_alias")
+    return alias if isinstance(alias, str) and alias.strip() else "sonnet"
+
+
+def execute_claude(objective: str, *, timeout: float = 120.0) -> dict:
+    """One bounded planning/advisory call through the unmodified official
+    Claude Code CLI under the host's existing subscription login. No tools,
+    no repository access: text-in/text-out for the cognitive-coordinator
+    role. Credential handling stays entirely inside the CLI; this function
+    never reads tokens or profile files. Fail-closed typed outcomes mirror
+    execute_glm, including provider-health recording."""
+    import os
+    import subprocess
+    import time
+
+    base = {"provider": "claude", "host_id": current_host_id(),
+            "concrete_model": None, "model_unverified": True,
+            "model_currency_attested": False, "exit_code": None}
+    if not isinstance(objective, str) or not objective.strip():
+        return {**base, "ok": False, "executed": False, "error_code": "nonzero_exit",
+                "error": "claude objective must be a non-empty string"}
+    health = provider_allows_dispatch("claude", launch_timeout=timeout) if os.getenv("DATABASE_URL") else {
+        "allowed": False, "reason": "provider claude: authoritative DATABASE_URL required", "state": "unknown"}
+    if not health["allowed"]:
+        state = health.get("state")
+        code = state if state in {"auth_failed", "quota_exhausted"} else "rate_limited" if state == "rate_limited" else "nonzero_exit"
+        return {**base, "ok": False, "executed": False, "error_code": code, "error": health["reason"]}
+
+    launcher = _claude_launcher_path()
+    proc = None
+    stderr = ""
+    outcome = {"ok": False, "provider": "claude", "state": "failed", "exit_code": None, "stderr": ""}
+    started = time.monotonic()
+    try:
+        if not launcher.is_file() or not os.access(launcher, os.X_OK):
+            outcome["error_code"] = "launcher_missing"
+            return {**base, "ok": False, "executed": False, "error_code": "launcher_missing",
+                    "error": "claude CLI is missing or not executable"}
+        proc = subprocess.Popen(
+            [str(launcher), "--print", "--output-format", "json", "--model", _claude_model_alias(),
+             "--max-turns", "1",
+             "--disallowedTools", "Bash,Write,Edit,NotebookEdit,WebFetch,WebSearch,Task,Skill,Agent,TodoWrite,Read,Grep,Glob",
+             "--strict-mcp-config", "--bare", "--disable-slash-commands", "--no-session-persistence"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, start_new_session=True, cwd=None,
+        )
+        stdout, stderr = proc.communicate(input=objective, timeout=timeout)
+        for token in objective.split():
+            stderr = re.sub(re.escape(token), "\ue000", stderr, flags=re.I)
+        stderr = stderr[:2000]
+        outcome = {"ok": proc.returncode == 0, "provider": "claude",
+                   "state": "completed" if proc.returncode == 0 else "failed",
+                   "exit_code": proc.returncode, "stderr": stderr}
+        common = {**base, "executed": True, "exit_code": proc.returncode,
+                  "latency_ms": int((time.monotonic() - started) * 1000)}
+        if proc.returncode != 0:
+            if re.search(r"usage limit|quota (?:exhausted|exceeded)|insufficient_quota", stderr, re.I):
+                code = "quota_exhausted"
+            elif re.search(r"oauth|authenticate|unauthorized|not logged in|login required|\b40[13]\b", stderr, re.I):
+                code = "auth_failed"
+            elif re.search(r"rate.limit|too many requests", stderr, re.I):
+                code = "rate_limited"
+            else:
+                code = None
+            if code:
+                outcome.update(ok=False, state="failed", error_code=code)
+                return {**common, "ok": False, "error_code": code,
+                        "error": f"claude CLI exited {proc.returncode}"}
+        try:
+            response = json.loads(stdout)
+        except (TypeError, ValueError):
+            response = None
+        if (not isinstance(response, dict) or response.get("type") != "result"
+                or type(response.get("is_error")) is not bool):
+            outcome.update(ok=False, state="failed", error_code="bad_output")
+            return {**common, "ok": False, "error_code": "bad_output",
+                    "error": "claude CLI returned an invalid result object"}
+        result_text = str(response.get("result") or "")
+        if response["is_error"]:
+            status = response.get("api_error_status")
+            text = result_text + "\n" + stderr
+            if re.search(r"oauth|failed to authenticate|not logged in|login required|unauthorized", text, re.I):
+                code = "auth_failed"
+            elif re.search(r"usage limit|quota (?:exhausted|exceeded)", text, re.I):
+                code = "quota_exhausted"
+            elif (type(status) is int and status == 429) or "rate limit" in text.lower():
+                code = "rate_limited"
+            elif type(status) is int and status in {401, 403}:
+                code = "auth_failed"
+            else:
+                code = "nonzero_exit"
+            outcome.update(ok=False, state="failed", error_code=code)
+            error = "claude CLI returned an error result" if proc.returncode == 0 else f"claude CLI exited {proc.returncode}"
+            return {**common, "ok": False, "error_code": code, "error": error}
+        if not isinstance(response.get("result"), str) or not result_text.strip():
+            outcome.update(ok=False, state="failed", error_code="bad_output")
+            return {**common, "ok": False, "error_code": "bad_output",
+                    "error": "claude CLI returned an invalid result object"}
+        if proc.returncode == 0:
+            usage = response.get("modelUsage")
+            models = list(usage) if isinstance(usage, dict) else []
+            if (len(models) != 1 or not isinstance(models[0], str)
+                    or "sonnet" not in models[0].lower()):
+                outcome.update(ok=False, state="failed", error_code="model_mismatch")
+                return {**common, "ok": False, "error_code": "model_mismatch",
+                        "error": "claude result has no single Sonnet-class model attestation",
+                        "observed_models": [str(model)[:80] for model in models[:5]]}
+            return {**base, "executed": True, "ok": True, "output": result_text,
+                    "exit_code": proc.returncode, "concrete_model": models[0],
+                    "model_unverified": False, "model_attestation": "provider-usage-response",
+                    "latency_ms": int((time.monotonic() - started) * 1000)}
+        outcome.update(ok=False, state="failed", error_code="nonzero_exit")
+        return {**common, "ok": False, "error_code": "nonzero_exit",
+                "error": f"claude CLI exited {proc.returncode}"}
+    except subprocess.TimeoutExpired:
+        cleanup = _kill_process_tree(proc.pid, proc.pid)
+        try:
+            proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+        outcome = {"ok": False, "provider": "claude", "state": "failed", "exit_code": proc.returncode,
+                   "stderr": "", "error_code": "timeout"}
+        return {**base, "ok": False, "executed": True, "exit_code": proc.returncode,
+                "error_code": "timeout", "error": f"claude CLI timed out after {timeout}s",
+                "cleanup_incomplete": not cleanup["ok"],
+                "latency_ms": int((time.monotonic() - started) * 1000)}
+    except OSError:
+        outcome["error_code"] = "launcher_missing"
+        return {**base, "ok": False, "executed": False, "error_code": "launcher_missing",
+                "error": "claude CLI could not be started"}
     finally:
         if health.get("outcome_id"):
             _record_provider_outcome(outcome, health["outcome_id"])
@@ -1794,7 +1956,8 @@ def execute_codex_write_durable(objective: str, *, repo_id: str, host_id: str,
 # (and any future caller) monkeypatch `estate_router.execute_codex` the
 # same way they already monkeypatch `execute_local`; binding the object
 # here at import time would silently stop honouring that patch.
-_PAID_PROVIDER_FUNCTION_NAMES = {"codex": "execute_codex", "glm": "execute_glm"}
+_PAID_PROVIDER_FUNCTION_NAMES = {"codex": "execute_codex", "glm": "execute_glm",
+                                 "claude": "execute_claude"}
 # Stage 6: the write lane dispatches through the worker on route.host.
 _PAID_PROVIDER_WRITE_FUNCTION_NAMES = {"codex": "execute_write_via_worker"}
 
@@ -1877,7 +2040,7 @@ def _dispatch_read_only(host_id: str, executor: str, task: dict, *, concrete_mod
             "objective": objective,
             "timeout_s": float(timeout or 60.0),
         }
-    elif executor in {"codex", "glm"}:
+    elif executor in {"codex", "glm", "claude"}:
         payload = {
             "kind": f"{executor}-readonly",
             "objective": objective if isinstance(objective, str) else str(objective),

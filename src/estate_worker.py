@@ -493,6 +493,16 @@ def _verb_execute(payload: dict) -> dict:
             if cwd is None:
                 raise WorkerError("repo_unavailable", f"repo {repo_id!r} does not resolve on this worker")
         return estate_router.execute_glm(objective, timeout=timeout_s, cwd=cwd)
+    if kind == "claude-readonly":
+        if not isinstance(objective, str):
+            raise WorkerError("bad_request", "claude-readonly objective must be a string")
+        host_id = estate_router.current_host_id()
+        host = next((entry for entry in estate_router._load_yaml("estate").get("hosts", [])
+                     if entry.get("id") == host_id), None)
+        if "claude" not in (estate_router.host_static_state(host)["qualified_executors"] if host else []):
+            raise WorkerError("executor_unqualified", f"executor 'claude' not qualified on {host_id!r}")
+        # No repo cwd: the claude advisory lane runs tool-less by design.
+        return estate_router.execute_claude(objective, timeout=timeout_s)
     raise WorkerError("bad_request", f"unsupported execute kind {kind!r}")
 
 

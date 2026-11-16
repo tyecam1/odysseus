@@ -559,6 +559,8 @@ def cmd_lazy(args: argparse.Namespace) -> int:
             body["repo_scope"] = args.repo
         if args.budget:
             body["budget_overrides"] = dict(args.budget)
+        if getattr(args, "coordinator", False):
+            body["coordinator"] = {"enabled": True}
     elif action == "status":
         if args.all and args.run_id:
             raise SystemExit("--all cannot be combined with RUN_ID")
@@ -691,6 +693,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_start.add_argument("--repo", action="append", help="registered repo ID; repeat to select scope")
     p_start.add_argument("--budget", action="append", type=_budget_pair,
                          help="key=value ceiling override; repeat for each budget (backend clamps limits)")
+    p_start.add_argument("--coordinator", action="store_true",
+                         help="opt this run in to the bounded cognitive coordinator (qualified advisory lane)")
     p_lazy_status = lazy_sub.add_parser("status", help="inspect latest run (estate:read)")
     p_lazy_status.add_argument("run_id", nargs="?")
     p_lazy_status.add_argument("--all", action="store_true", help="show run history")
