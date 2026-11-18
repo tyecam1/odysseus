@@ -112,3 +112,82 @@ Full suite: **9583 passed, 47 skipped, 5 deselected (live units), 5 xfailed**
   one-line governed `config/estate.yaml` qualification commit.
 - **Codex:** quota window expired 2026-11-13T17:03Z; `allowed: true`
   (retry permitted on next dispatch).
+
+## Live acceptance (2026-11-18, deployed 606fb81f, service odysseus-aoteru-lab @127.0.0.1:7001)
+
+Deploy chain: PR #283 (coordinator slice, merged 72c79b41) → deploy/dev-20261116;
+PR #285 (preflight write-intent fix, merged 606fb81f) → deploy/dev-20261118.
+`systemctl restart` + `/api/health` 200 on each. Laptop client updated
+(`am lazy start --coordinator`).
+
+Run `fd499041-79d6-41a0-b819-1d2937e22c74` (operator, scope `odysseus`,
+budgets max_paid_calls=6 / max_seconds=7200, coordinator opted in):
+
+- **Coordinator live:** lane `glm-flash`, attested `glm-5.3-flash`
+  (provider-usage-response), strict-JSON plan persisted
+  (`coordinator_order` across the real frontier, bounded decomposition,
+  next_action), exactly ONE paid call charged; the frontier-digest fence
+  prevented any repeat planning across restarts and later ticks.
+- **Real queued write delivery (PR #279 debt):** the loop dispatched
+  write execution `80a28363` through preflight (fixed by PR #285: the
+  runtime's authoritative write classification now overrides the
+  objective-text heuristic) → ParkLease `c5c32a1d` (session = the run) →
+  codex-write worker on `gpt-6.1-sol`, exit 0, 796 s, 179,977 tokens,
+  targeted suites 316/91/26 green. The worker independently confirmed the
+  Claude OAuth blocker and left its correction **unmerged** on leased
+  branch `task/lazyusage-fd499041-…-e1fa573782` (pushed, commit
+  `3f3fae1d` after governed finalize) — owner acceptance and independent
+  review of that branch remain owed (`owner_acceptance` debt recorded by
+  the run itself).
+- **Mid-flight service restart:** `systemctl restart` at ~2 min into the
+  13-minute write execution. After restart: same `in_flight_execution_id`,
+  counters byte-stable (paid=2), no duplicate dispatch, no repeat
+  coordinator call; the durable worker spool carried the execution to
+  `succeeded` laptop-independently.
+- **Exactly-once accounting fence:** the worker result carried no
+  authoritative child usage totals, so the run fenced further dispatch
+  (`usage_accounting_pending`) rather than treating unknown usage as
+  zero — the documented packet-A metering dependency, now demonstrated
+  live.
+- **Restart-observer gap + S6.2 recovery (packet-C diagnosis):** the
+  restart killed the write lane's in-backend observer thread, leaving the
+  succeeded execution unfinalized and the lease pinned. The documented
+  recovery path worked end-to-end: `am finalize 80a28363` committed and
+  pushed the worktree (`3f3fae1d`), `worktree_resolution: finalized`, and
+  the lease released cleanly. Finalize's git commit itself did NOT
+  reproduce the Nov-11 production commit failure — today's evidence
+  attributes that symptom class to the lost-observer condition, not the
+  commit step.
+- **Laptop controls:** `am lazy start --coordinator / status / pause /
+  resume / stop` all exercised from the laptop; stop terminalized the run
+  (`operator_stop`, owed reviews preserved).
+- **Bounded failure mode (2026-11-16 run `cefb1120`, pre-fix):** every
+  activation parked at the preflight write-heuristic defect, terminalized
+  `budget_exhausted` at exactly 1 paid call — no spin, no unbounded paid
+  calls.
+
+Counts: run fd499041 final — paid 2/6, tool 70/150, no_delivery 1,
+repeated_failures 1, elapsed 905 s, terminal `operator_stop` with 1 owed
+review (owner acceptance of the delivered branch).
+
+### Owed
+
+1. **Claude Sonnet subscription lane:** one interactive `claude login` on
+   the lab (OAuth session expired 2026-11-16, typed `auth_failed`
+   fail-closed live), then one live attested Sonnet call + a one-line
+   governed `config/estate.yaml` qualification commit. Until then the
+   coordinator runs the GLM lanes and `claude-sonnet` fails closed.
+2. **Review/merge of the delivered branch**
+   `task/lazyusage-fd499041-…-e1fa573782` (`3f3fae1d`, Sol 6.1 worker
+   correction of this slice) — the run's `owner_acceptance` debt.
+3. **Worker-boundary usage metering** (packet-A dependency): child
+   paid/tool totals so the accounting fence can reconcile automatically.
+4. **Opus consultation lane:** unqualified in the paid router
+   (contract-documented dependency, unchanged by this slice).
+
+Rollback (verified live): `POST /api/lazy-usage/stop` terminalizes;
+`ODYSSEUS_LAZY_USAGE_COORDINATOR=0` or
+`lazy_usage_coordinator.enabled: false` disables the coordinator without
+redeploy; `git revert` of 72c79b41/606fb81f on dev + deploy-branch
+redeploy restores pre-feature behaviour; prior deploy branch
+`deploy/dev-20261111` retained.
