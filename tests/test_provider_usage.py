@@ -18,8 +18,8 @@ from routes.estate_routing_routes import setup_estate_routing_routes
 def _rollout(path, events):
     path.parent.mkdir(parents=True, exist_ok=True)
     lines = []
-    for payload in events:
-        lines.append(json.dumps({"type": "event", "payload": payload}))
+    for stamp, payload in events:
+        lines.append(json.dumps({"timestamp": stamp, "type": "event", "payload": payload}))
     path.write_text("\n".join(lines) + "\n")
 
 
@@ -29,30 +29,29 @@ def _token_count(primary=None, secondary=None, plan="plus"):
             "plan_type": plan}
 
 
-def test_codex_windows_reads_latest_provider_stated_event(tmp_path):
-    newer = tmp_path / "2026" / "11" / "18" / "rollout-b.jsonl"
-    older = tmp_path / "2026" / "11" / "16" / "rollout-a.jsonl"
-    _rollout(older, [_token_count(primary={"used_percent": 50.0, "window_minutes": 300,
-                                           "resets_at": 1794900000})])
-    _rollout(newer, [
-        _token_count(primary={"used_percent": 90.0, "window_minutes": 300, "resets_at": 1795000000}),
-        {"type": "other"},
-        _token_count(primary={"used_percent": 5.0, "window_minutes": 300, "resets_at": 1795016288},
-                     secondary={"used_percent": 69.0, "window_minutes": 10080,
-                                "resets_at": 1795208916}),
-    ])
-    os.utime(older, (1794800000, 1794800000))
-    os.utime(newer, (1795016300, 1795016300))
+P5 = {"used_percent": 5.0, "window_minutes": 300, "resets_at": 1795016288}
+W69 = {"used_percent": 69.0, "window_minutes": 10080, "resets_at": 1795208916}
+P90 = {"used_percent": 90.0, "window_minutes": 300, "resets_at": 1795000000}
+
+
+def test_codex_windows_newest_valid_event_by_event_time_wins(tmp_path):
+    newer_file = tmp_path / "a" / "rollout-new.jsonl"
+    older_file = tmp_path / "b" / "rollout-old.jsonl"
+    # OLDER mtime file carries the NEWEST event: event time must win
+    _rollout(older_file, [("2026-11-18T13:40:00Z", _token_count(primary=P5, secondary=W69))])
+    _rollout(newer_file, [("2026-11-18T10:00:00Z", _token_count(primary=P90))])
+    os.utime(older_file, (1795014000, 1795014000))
+    os.utime(newer_file, (1795016300, 1795016300))
     result = provider_usage.codex_windows(tmp_path)
     assert result["confidence"] == "provider-stated"
     assert result["plan_type"] == "plus"
+    assert result["observed_at"].startswith("2026-11-18T13:40:00")
     pools = {w["pool"]: w for w in result["windows"]}
     assert pools["primary"]["used_percent"] == 5.0
     assert pools["primary"]["remaining_percent"] == 95.0
     assert pools["secondary"]["used_percent"] == 69.0
     assert pools["primary"]["resets_at"].startswith("2026-")
-    # conservative summary: the most-constrained window wins
-    assert result["remaining"] == 31.0
+    assert result["remaining"] == 31.0  # most-constrained window
 
 
 def test_codex_windows_unknown_when_no_recent_rollouts(tmp_path):
@@ -61,11 +60,41 @@ def test_codex_windows_unknown_when_no_recent_rollouts(tmp_path):
     assert result["confidence"] == "none"
 
 
-def test_codex_windows_skips_events_without_primary(tmp_path):
+def test_codex_windows_rejects_invalid_numbers(tmp_path):
     rollout = tmp_path / "r.jsonl"
-    _rollout(rollout, [_token_count(primary=None), _token_count()])
+    _rollout(rollout, [
+        ("2026-11-18T12:00:00Z", _token_count(
+            primary={"used_percent": -25.0, "window_minutes": 300, "resets_at": 1795016288})),
+        ("2026-11-18T12:01:00Z", _token_count(
+            primary={"used_percent": True, "window_minutes": 300, "resets_at": 1795016288})),
+        ("2026-11-18T12:02:00Z", _token_count(
+            primary={"used_percent": 10.0, "window_minutes": 300,
+                     "resets_at": 999999999999999999999})),
+        ("2026-11-18T12:03:00Z", _token_count(
+            primary={"used_percent": 10.0, "window_minutes": 300, "resets_at": 1795016288},
+            plan="x" * 60)),
+    ])
     result = provider_usage.codex_windows(tmp_path)
-    assert result["remaining"] == "unknown"
+    # the newest event with a valid primary percentage wins; malformed
+    # plan_type is dropped. (The invalid-percentage events were never
+    # candidates; the huge-reset event is simply older than the winner.)
+    assert result["confidence"] == "provider-stated"
+    assert result["windows"][0]["used_percent"] == 10.0
+    assert result["windows"][0]["resets_at"].startswith("2026-")
+    assert result["plan_type"] is None
+
+
+def test_codex_windows_never_decodes_message_records(tmp_path):
+    rollout = tmp_path / "r.jsonl"
+    rollout.parent.mkdir(exist_ok=True)
+    big_message = json.dumps({"timestamp": "2026-11-18T12:00:00Z", "type": "message",
+                              "payload": {"secret": "x" * 20000}})
+    rollout.write_text(big_message + "\n" + json.dumps({
+        "timestamp": "2026-11-18T12:01:00Z", "type": "event",
+        "payload": _token_count(primary=P5)}) + "\n")
+    result = provider_usage.codex_windows(tmp_path)
+    assert result["confidence"] == "provider-stated"
+    assert result["windows"][0]["used_percent"] == 5.0
 
 
 @pytest.fixture
@@ -103,7 +132,7 @@ def test_usage_route_returns_provider_snapshot(api, monkeypatch):
     assert "unknown means no authorised machine-readable source" in body["note"]
 
 
-def test_execute_claude_omits_bare_and_uses_neutral_cwd(tmp_path, monkeypatch):
+def test_execute_claude_isolated_config_dir_and_neutral_cwd(tmp_path, monkeypatch):
     import subprocess
     from pathlib import Path as P
     captured = {}
@@ -118,11 +147,14 @@ def test_execute_claude_omits_bare_and_uses_neutral_cwd(tmp_path, monkeypatch):
 
     def fake_popen(args, **kwargs):
         captured["args"] = args
-        captured["cwd"] = kwargs.get("cwd")
+        captured.update(kwargs)
         return FakeProc()
 
     monkeypatch.setattr(subprocess, "Popen", fake_popen)
     monkeypatch.setattr(P, "home", classmethod(lambda cls: tmp_path))
+    real_creds = tmp_path / ".claude" / ".credentials.json"
+    real_creds.parent.mkdir(parents=True, exist_ok=True)
+    real_creds.write_text("{}")
     launcher = tmp_path / "bin" / "claude"
     launcher.parent.mkdir(parents=True, exist_ok=True)
     launcher.write_text("#!/bin/sh\n")
@@ -135,6 +167,12 @@ def test_execute_claude_omits_bare_and_uses_neutral_cwd(tmp_path, monkeypatch):
     monkeypatch.setattr(estate_router, "current_host_id", lambda: "lab")
     result = estate_router.execute_claude("plan", timeout=10)
     assert result["ok"] is True and result["concrete_model"] == "claude-sonnet-5"
-    assert "--bare" not in captured["args"]
-    assert str(captured["cwd"]).endswith(".cache/aoteru/claude-lane")
+    args = captured["args"]
+    assert "--bare" not in args
+    env = captured["env"]
+    config_dir = P(env["CLAUDE_CONFIG_DIR"])
+    assert config_dir.is_dir()
+    assert json.loads((config_dir / "settings.json").read_text()) == {"disableAllHooks": True}
+    assert (config_dir / ".credentials.json").is_symlink()
+    assert str(captured["cwd"]).endswith("claude-lane/cwd")
     assert P(captured["cwd"]).is_dir()

@@ -68,3 +68,21 @@ Claude Sonnet subscription advisory lane after the operator's lab re-login.
   with `model_not_found` on this ChatGPT-authenticated account; the write
   worker lane's launcher does run gpt-6.1-sol. Direct review gates must
   resolve from `codex debug models` (currently `gpt-6-sol`).
+
+## Sol review fixes (gpt-6.1-sol, this branch)
+
+P1 (claude isolation without --bare): isolation now by construction — an
+Odysseus-owned `CLAUDE_CONFIG_DIR` stub (settings `{"disableAllHooks":
+true}`, no plugins/skills/user CLAUDE.md, credentials reached only by a
+symlink the CLI itself resolves) plus an owned empty cwd. Live re-qualified:
+`execute_claude` ok, attested `claude-sonnet-5`, and a SessionStart-hook
+canary planted in the lane cwd did NOT fire.
+P2 (usage collector): raw lines are substring-prefiltered (no message
+records decoded), strict numeric/shape validation (bool/non-finite/
+out-of-range/huge-epoch rejected; malformed plan_type dropped), latest
+selected by EVENT timestamp with the source event time exposed as
+observed_at, and discovery (500 paths) / per-file (2 MB tail) / total
+(8 MB) reads bounded.
+Direct-Sol note: `codex exec --model gpt-6.1-sol` works on the lab's
+newest CLI binary (0.163.0, node_modules path); the older ~/.local/bin
+wrapper (0.155.1) rejects it — reviews must use the newest binary.
