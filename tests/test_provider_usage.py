@@ -117,6 +117,33 @@ def api(monkeypatch):
     os.unlink(tmpfile.name)
 
 
+def test_codex_windows_huge_json_integers_and_filter_collisions(tmp_path):
+    rollout = tmp_path / "r.jsonl"
+    colliding_message = json.dumps({"timestamp": "2026-11-18T12:00:00Z", "type": "message",
+                                    "payload": {"text": 'mentioned "token_count" and '
+                                                        '"rate_limits" and "timestamp" inline'}})
+    huge_int_event = json.dumps({"timestamp": "2026-11-18T12:01:00Z", "type": "event",
+                                 "payload": _token_count(
+                                     primary={"used_percent": 10 ** 401,
+                                              "window_minutes": 300, "resets_at": 1795016288})})
+    valid_event = json.dumps({"timestamp": "2026-11-18T12:02:00Z", "type": "event",
+                              "payload": _token_count(primary=P5)})
+    rollout.parent.mkdir(exist_ok=True)
+    rollout.write_text("\n".join([colliding_message, huge_int_event, valid_event]) + "\n")
+    result = provider_usage.codex_windows(tmp_path)
+    assert result["confidence"] == "provider-stated"
+    assert result["windows"][0]["used_percent"] == 5.0  # colliding message and huge int rejected
+
+
+def test_codex_windows_discovery_visit_cap_is_bounded(tmp_path):
+    deep = tmp_path / "d"
+    deep.mkdir()
+    for i in range(600):
+        (deep / ("f%03d.jsonl" % i)).write_text("")
+    result = provider_usage.codex_windows(tmp_path)  # must terminate, bounded
+    assert result["remaining"] == "unknown"
+
+
 def test_usage_route_returns_provider_snapshot(api, monkeypatch):
     monkeypatch.setattr(provider_usage, "codex_windows",
                         lambda: {"remaining": 31.0, "reset": "unknown", "windows": [],

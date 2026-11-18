@@ -23,8 +23,8 @@ from __future__ import annotations
 
 import json
 import math
+import os
 from datetime import datetime, timedelta, timezone
-from itertools import islice
 from pathlib import Path
 
 from src import estate_router
@@ -40,7 +40,10 @@ RESET_HORIZON_DAYS = 400
 def _valid_percent(value) -> float | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    value = float(value)
+    try:
+        value = float(value)
+    except (OverflowError, ValueError, TypeError):  # JSON ints can exceed float range
+        return None
     if not math.isfinite(value) or not 0.0 <= value <= 100.0:
         return None
     return value
@@ -49,7 +52,10 @@ def _valid_percent(value) -> float | None:
 def _valid_epoch(value) -> float | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    value = float(value)
+    try:
+        value = float(value)
+    except (OverflowError, ValueError, TypeError):
+        return None
     if not math.isfinite(value) or value <= 0:
         return None
     if value > (datetime.now(timezone.utc) + timedelta(days=RESET_HORIZON_DAYS)).timestamp():
@@ -94,14 +100,41 @@ def _iter_usage_lines(path: Path, budget: list[int]):
         for raw in handle:
             if len(raw) > MAX_EVENT_LINE:
                 continue
-            if b'"token_count"' not in raw or b'"rate_limits"' not in raw:
+            # token_count rollout events always carry these three fields; a
+            # message record quoting the strings still decodes (bounded by
+            # the 8 KB cap) but is discarded by the payload checks below.
+            if (b'"token_count"' not in raw or b'"rate_limits"' not in raw
+                    or b'"timestamp"' not in raw):
                 continue
             try:
                 record = json.loads(raw)
             except ValueError:
                 continue
-            if isinstance(record, dict):
-                yield record
+            if isinstance(record, dict) and record.get("type") == "event":
+                payload = record.get("payload")
+                if isinstance(payload, dict) and payload.get("type") == "token_count":
+                    yield record
+
+
+def _candidate_files(root: Path, cutoff: float) -> list[Path]:
+    """Bounded traversal: the visit cap bounds enumeration work itself,
+    not just the filtered result."""
+    visited = 0
+    found = []
+    for dirpath, _dirnames, filenames in os.walk(root):
+        for name in filenames:
+            visited += 1
+            if visited > MAX_VISIT_PATHS:
+                return found
+            if not name.endswith(".jsonl"):
+                continue
+            candidate = Path(dirpath) / name
+            try:
+                if candidate.stat().st_mtime >= cutoff:
+                    found.append(candidate)
+            except OSError:
+                continue
+    return found
 
 
 def codex_windows(sessions_root: Path | None = None) -> dict:
@@ -116,8 +149,7 @@ def codex_windows(sessions_root: Path | None = None) -> dict:
         return unknown("no session rollouts found")
     cutoff = datetime.now(timezone.utc).timestamp() - 48 * 3600
     try:
-        paths = list(islice((p for p in root.rglob("*.jsonl")
-                             if p.stat().st_mtime >= cutoff), MAX_VISIT_PATHS))
+        paths = _candidate_files(root, cutoff)
     except OSError:
         return unknown("session rollout enumeration failed")
     if not paths:
