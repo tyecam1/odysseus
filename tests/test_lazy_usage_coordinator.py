@@ -39,12 +39,12 @@ def frontier(tmp_path, monkeypatch):
     queue.mkdir(parents=True)
     records = []
 
-    def add(name="a", priority="high", **meta):
+    def add(name="a", priority="high", body="Run the bounded owning task.\n", **meta):
         import yaml
         metadata = {"task_id": name, "title": name, "status": "ready", "priority": priority,
                     "execution_mode": "read-only", **meta}
         (queue / (name + ".md")).write_text("---\n" + yaml.safe_dump(metadata) +
-                                            "---\nRun the bounded owning task.\n")
+                                            "---\n" + body)
         record = {"ref": "odysseus:ready/" + name + ".md", "repo_id": "odysseus", "bucket": "ready",
                   "task_id": name, "status": "ready", "priority": priority, "eligible": "unverified"}
         records.append(record)
@@ -487,6 +487,66 @@ def test_execute_glm_unconfigured_variant_fails_typed_and_finalizes(monkeypatch)
     assert outcomes and outcomes[0]["error_code"] == "launcher_missing"
 
 
+def test_preflight_explicit_write_false_overrides_text_heuristic():
+    from src.delegation_preflight import _requires_repo_write
+    body = "Implement the bounded change in src/ and merge it."
+    assert _requires_repo_write({"repo": "odysseus", "objective": body}) is True
+    # trusted in-process classification wins in both directions
+    assert _requires_repo_write({"repo": "odysseus", "objective": body,
+                                 "write_classified": True, "requires_repo_write": False}) is False
+    assert _requires_repo_write({"repo": "odysseus", "objective": body,
+                                 "write_classified": True, "requires_repo_write": True}) is True
+    # envelope units carry write=False by default; that must NOT disable
+    # the heuristic inference the HTTP contract relies on
+    assert _requires_repo_write({"repo": "odysseus", "objective": body, "write": False}) is True
+
+
+def test_advance_dispatches_read_only_reconnaissance_with_write_pattern_body(db, frontier, monkeypatch):
+    """Live 2026-11-16 finding: an approval_required card's embedded body can
+    match the write text-heuristic while the runtime's classification is a
+    read-only reconnaissance. The runtime's explicit write: False must keep
+    the preflight on the advisory lane instead of demanding a write lease."""
+    _integration(monkeypatch, db, frontier, None)
+    add, _ = frontier
+    add("a", approval_required=True, body="Implement the bounded owning task in src/.\n")
+    # exercise the REAL preflight (the _integration helper bypasses it)
+    from src import estate_worker_client
+    from src.delegation_preflight import delegation_preflight as real_preflight
+    monkeypatch.setattr(rt, "delegation_preflight", real_preflight)
+    monkeypatch.setattr(estate_worker_client, "worker_health",
+                        lambda host_id: {"codex": {"available": True}})
+    monkeypatch.setattr(estate_router, "execute_glm", lambda prompt, **kw: glm_plan_result(
+        ["odysseus:ready/a.md"]))
+    run_id = rt.activate_run(db, "operator", ["odysseus"], None, {"enabled": True})["id"]
+    rt.advance(db, run_id)
+    run = db.get(cdb.LazyUsageRun, run_id)
+    # before the fix this parked at "delegation preflight has no qualified route"
+    assert run.checkpoint.get("pause_reason") != "delegation preflight has no qualified route"
+    assert run.checkpoint["current_task_id"] == "a"
+
+
+def test_preflight_explicit_write_intent_counts_without_heuristic_match():
+    from src.delegation_preflight import _requires_repo_write
+    assert _requires_repo_write({"repo": "odysseus", "objective": "Review the patch",
+                                 "write": True}) is True
+    assert _requires_repo_write({"repo": "odysseus", "objective": "Review the patch",
+                                 "mode": "implementation"}) is True
+
+
+def test_preflight_fallthrough_refuses_write_intent_local_route(monkeypatch):
+    from src.delegation_preflight import delegation_preflight as real_pf
+    monkeypatch.setattr(estate_router, "resolve_route", lambda task, record_decision=False: {
+        "ok": True, "route": {"host": "lab", "executor": "local", "model_alias": "local-fast"},
+        "hosts_checked": [{"host_id": "lab", "qualified_executors": ["local"]}]})
+    monkeypatch.setattr(estate_router, "eligible_hosts", lambda repo_id=None: [])
+    result = real_pf([{"task_class": "batch", "repo": "odysseus",
+                       "objective": "Run the batch scan", "write": True,
+                       "capabilities": ["local-fast"], "allow_paid_escalation": False}])
+    unit = result["units"][0]
+    assert unit["ok"] is False and unit["recommended_route"] is None
+    assert unit["error_code"] == "write_intent_requires_codex_write_lane"
+
+
 def test_execute_claude_requires_authoritative_database(monkeypatch, tmp_path):
     monkeypatch.delenv("DATABASE_URL", raising=False)
     result = estate_router.execute_claude("plan")
@@ -509,3 +569,18 @@ def test_step_uses_claude_lane_when_high_consequence_and_qualified(db, frontier,
     assert plan is not None and len(calls) == 1
     assert run.checkpoint["coordinator_lane"] == "claude-sonnet"
     assert run.checkpoint["coordinator_high_consequence"] is True
+
+
+def test_preflight_explicit_glm_passthrough_refuses_write_intent(monkeypatch):
+    from src.delegation_preflight import delegation_preflight as real_pf
+    monkeypatch.setattr(estate_router, "resolve_route", lambda task, record_decision=False: {
+        "ok": True, "route": {"host": "lab", "executor": "local", "model_alias": "local-fast"},
+        "hosts_checked": [{"host_id": "lab", "qualified_executors": ["local"]}]})
+    monkeypatch.setattr(estate_router, "eligible_hosts", lambda repo_id=None: [])
+    result = real_pf([{"task_class": "batch", "repo": "odysseus",
+                       "objective": "Run the batch scan", "write": True,
+                       "paid_provider": "glm", "allow_paid_escalation": True,
+                       "capabilities": ["local-fast"]}])
+    unit = result["units"][0]
+    assert unit["ok"] is False and unit["recommended_route"] is None
+    assert unit["error_code"] == "write_intent_requires_codex_write_lane"

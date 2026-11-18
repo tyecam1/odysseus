@@ -726,6 +726,14 @@ def advance(db, run_id):
         preflight = delegation_preflight([{
             "task_class": task["task_class"], "repo": task["repo"], "objective": task["objective"],
             "capabilities": task["requirements"]["capabilities"], "allow_paid_escalation": True,
+            # This loop already owns the authoritative write classification
+            # (contract execution_mode/approval metadata, lease acquired above
+            # for write tasks); state it so the preflight text heuristic on
+            # the embedded card body cannot demand a write lane for a
+            # read-only reconnaissance unit (2026-11-16 live finding).
+            # write_classified is a trusted in-process key the HTTP envelope
+            # never sets (envelope write defaults False).
+            "write_classified": True, "requires_repo_write": write,
             **({"paid_provider": provider} if provider is not None else {})}])
         if not preflight.get("ok"):
             _failure(run, "preflight_unavailable")
