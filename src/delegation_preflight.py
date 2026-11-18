@@ -59,6 +59,15 @@ def recommended_lane_for_task(task: dict) -> str:
 
 
 def _requires_repo_write(task: dict) -> bool:
+    # A trusted in-process caller (lazy_usage_runtime) states the authoritative
+    # write classification it already derived from the task contract's
+    # execution_mode/approval metadata via write_classified=True plus
+    # requires_repo_write; the objective-text heuristic (which sees the
+    # embedded card body) then never overrides it. HTTP envelope units never
+    # carry write_classified, so envelope defaults cannot disable inference.
+    if task.get("write_classified") is True:
+        return (bool(task.get("requires_repo_write")) or task.get("write") is True
+                or task.get("mode") == "implementation")
     return bool(task.get("repo") and _WRITE_CODE_PATTERN.search(_task_text(task)))
 
 
