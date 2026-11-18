@@ -8,7 +8,7 @@ priority: high
 task_type: implementation
 created_by: operator-directed-chatgpt
 created_at: 2026-11-16
-updated_at: 2026-11-16
+updated_at: 2026-11-18
 executor: claude_subscription
 execution_mode: backend-integration-and-live-qualification
 execution_host: lab
@@ -105,3 +105,27 @@ Deploy **Claude Sonnet 5.5 as the bounded planning, decomposition, progress-reco
 - Live queued work delivers with authentic verification, trace, status reconciliation and rollback. Final report distinguishes implemented, deployed, proven and owed.
 
 Do not broaden the deployment into a comparative harness exercise. Ship the smallest valid vertical slice first, with later provider enablement strictly dependent on existing qualifications.
+
+
+## Execution checkpoint — 2026-11-18
+
+Status remains **ready / unfinished**. Existing admitted Codex write packet
+`80a28363-e8cc-4198-b6b2-e3cda2e07cfb` under lease
+`c5c32a1d-66a9-4a4d-845c-c18e9f95bde3` produced a bounded correction in its
+worktree: Sonnet-only coordination, exact effective 5.5/usage checks, explicit
+no-tools execution, live eligibility and budget/replay protections. This is
+unmerged candidate evidence, not delivery.
+
+Current CLI auth status is logged out; official bare mode excludes subscription
+OAuth, so the earlier login-only remedy does not qualify the existing adapter.
+No auth, billing, qualification or protected authority was changed. Real Sonnet
+qualification, permitted independent review, finalization/merge/deploy, and one
+verified owner-queued Sonnet delivery remain owed. The current live run used
+GLM-Flash for its plan, which does not settle this acceptance gate.
+
+Full verification, current-state evidence, prior debts, route-specific blockers,
+owner/recheck events and rollback are in
+`docs/runtime-work-packages/2026-11-16-lazyusage-sonnet-coordinator-lab.md`.
+Next: the existing controller observes this packet's terminal outcome, finalizes
+its candidate and arranges qualified review; do not duplicate its dispatch or
+mark this task done from a plan, worker exit, passing fixtures or an unmerged PR.

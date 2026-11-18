@@ -1,0 +1,116 @@
+schema_version: 1
+application_id: 2026-11-18-lazyusage-sonnet-coordinator
+prompt_id: estate-queue-priority-execution
+prompt_version: 2
+application_scope: operator-selected-owning-task-only
+repository: tyecam1/odysseus
+branch: task/lazyusage-fd499041-79d6-41a0-b819-1d2937e22c74-e1fa573782
+session_started_at: '2026-11-18T11:08:03.867077Z'
+session_ended_at: '2026-11-18T11:20:53.683149+00:00'
+start_commit: 606fb81f62021ac62251438cfaede62130ad26bd
+end_commit: 606fb81f62021ac62251438cfaede62130ad26bd
+working_tree_changes: true
+commits: []
+outcome_status: partial
+stop_reason: Bounded fail-closed correction implemented and deterministically checked.
+  Claude is logged out and current bare CLI mode excludes subscription OAuth; account-specific
+  permission/lab-policy and compatible auth/isolation qualification remain unverified.
+  This worker cannot perform HTTP/systemd operations or shared-Git finalization. No
+  qualified independent final-delta review, merge/deployment or accepted Sonnet queued
+  delivery is claimed. Existing controller retains finalization and next qualification
+  actions.
+models_routes:
+- provider: codex
+  executor: codex-write
+  host: hz2-workstation
+  execution_id: 80a28363-e8cc-4198-b6b2-e3cda2e07cfb
+  lease_id: c5c32a1d-66a9-4a4d-845c-c18e9f95bde3
+  concrete_model: not-independently-attested-within-worker
+  note: Already-admitted implementation worker; no nested paid dispatch. Final model/usage
+    identity must come from the controller terminal envelope.
+- provider: glm
+  executor: live-run-coordinator-before-this-worker
+  concrete_model: glm-5.3-flash
+  note: Observed existing live-run checkpoint only; not dispatched here and not Sonnet
+    acceptance.
+- provider: claude
+  executor: read-only-native-auth-status
+  concrete_model: null
+  note: CLI 2.1.281, exit 1, loggedIn false, authMethod none, apiProvider firstParty;
+    no inference or credentials inspected.
+nondelegation_reason: final_acceptance
+authority_evidence:
+- Exact active lease, worktree, admission SHA and running execution read from production
+  SQLite in read-only mode.
+- Canonical CLI preflight attempted; client unconfigured. Real Python preflight on
+  a temporary DB backup attested lab/write lease and refused new Codex dispatch while
+  this worker holds its launch reservation.
+- No new lease, provider qualification, credentials, API billing, task closure or
+  sibling work was authorised by model prose.
+usage_status:
+  claude: unknown; unauthenticated
+  codex: current admitted worker active; remaining quota unknown
+  glm: recent successful coordinator outcome; remaining quota unknown
+verification:
+- 'Initial updated coordinator tests: 51 passed.'
+- 'Coordinator/runtime/router/worker/GLM/model-policy selection: 316 passed.'
+- 'Final coordinator/disposable acceptance/delegation-preflight selection: 91 passed.'
+- 'Durable execution/finalization and lease selection: 26 passed.'
+- Broad first attempt interrupted after sandbox socket-wakeup stall; not counted as
+  a pass. Subsequent broad/API selections used a temporary 50ms selector-wait cap,
+  without weakening repository assertions.
+- Changed Python parsed; configuration YAML valid; git diff --check passed; owning
+  task still ready.
+- Official provider headless/auth guidance checked online; account-specific and university/lab
+  approval not inferred.
+acceptance:
+  implemented: Unmerged Sonnet-only coordinator and fail-closed attestation/usage/tool/budget/replay
+    corrections.
+  deployed: No worktree changes deployed. Registered deploy checkout observed at admission
+    SHA; running loaded SHA/health not independently verified here.
+  proven: Deterministic fixture regressions; existing real GLM planning and Codex
+    dispatch only.
+  owed:
+  - Compatible permitted Claude auth/isolation route and policy qualification.
+  - Independent attested effective Sonnet 5.5 live call.
+  - Qualified final-delta V3 review; prior packet-D and finalize-commit debts.
+  - Existing controller finalization, governed merge/deployment, rollback and real
+    verified owner-queued Sonnet delivery.
+  - HEAD/revision-bound coordinator planning and separately qualified consultation
+    integration.
+frontier:
+  scope_complete: true
+  odysseus_metadata_counts:
+    ready: 16
+    inbox: 33
+    blocked: 6
+  shipped_in_this_application: 0
+  selected_accepted_task_remaining: 1
+  note: Metadata discovery only; no other owner task opened or closed; baseline accepted
+    remaining not fully adjudicated.
+failure_tags:
+- claude_auth_and_bare_mode_incompatibility
+- independent_review_and_live_acceptance_owed
+- sandbox_http_systemd_and_git_finalization_unavailable
+- overbroad_temporary_path_discovery
+rating:
+  scale: 5
+  goal_progress: 3
+  correctness_verification: 4
+  authority_scope_discipline: 5
+  routing_resource_efficiency: 3
+  continuity_handoff_quality: 4
+  agent_overall: 3.8
+  operator_overall: null
+  operator_note: null
+prompt_revision_recommended: false
+revision_reason: The initializer already requires bounded context and qualified routes.
+  One noisy temporary-path lookup was an adherence defect; auth/isolation and acceptance
+  gaps require engineering/account evidence, not weakened instructions or cosmetic
+  prompt changes.
+evidence:
+- docs/runtime-work-packages/2026-11-16-lazyusage-sonnet-coordinator-lab.md
+- automation/review/agent-tasks/ready/2026-11-16-lazyusage-sonnet-coordinator-lab.agent-task.md
+- tests/test_lazy_usage_coordinator.py
+- https://code.claude.com/docs/en/headless
+- https://code.claude.com/docs/en/legal-and-compliance

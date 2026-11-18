@@ -63,10 +63,10 @@ def qualify(monkeypatch, executors=("glm", "claude"), allowed=True):
     monkeypatch.setattr(coord, "master_enabled", lambda: True)
 
 
-def glm_plan_result(order, steps=("step one", "step two"), next_action="dispatch first"):
-    return {"ok": True, "executed": True, "provider": "glm", "output": json.dumps(
+def sonnet_plan_result(order, steps=("step one", "step two"), next_action="dispatch first"):
+    return {"ok": True, "executed": True, "provider": "claude", "provider_usage": {"inputTokens": 30, "outputTokens": 20}, "output": json.dumps(
         {"selected": order, "decomposition": list(steps), "next_action": next_action}),
-        "concrete_model": "glm-5.3-flash"}
+        "concrete_model": "claude-sonnet-5-5"}
 
 
 # --------------------------------------------------------------- activation gate
@@ -93,22 +93,23 @@ def _run(db, paid_calls=0, **coordinator):
     run_id = rt.activate_run(db, "operator", ["odysseus"], None,
                              {"enabled": True} if coordinator.pop("on", True) else None)["id"]
     run = db.get(cdb.LazyUsageRun, run_id)
+    run.state = "running"
     if paid_calls:
         run.counters = {**run.counters, "paid_calls": paid_calls}
-        db.commit()
+    db.commit()
     return run
 
 
-def test_select_lane_cheapest_qualified_first(db, monkeypatch):
+def test_select_lane_requires_sonnet_for_all_consequences(db, monkeypatch):
     qualify(monkeypatch)
     run = _run(db)
-    assert coord.select_lane(run, high_consequence=False)["lane"] == "glm-flash"
+    assert coord.select_lane(run, high_consequence=False)["lane"] == "claude-sonnet"
     assert coord.select_lane(run, high_consequence=True)["lane"] == "claude-sonnet"
 
 
 def test_select_lane_skips_unqualified_executor(db, monkeypatch):
     qualify(monkeypatch, executors=("glm",))
-    assert coord.select_lane(_run(db), high_consequence=True)["lane"] == "glm-standard"
+    assert coord.select_lane(_run(db), high_consequence=True)["lane"] is None
 
 
 def test_select_lane_skips_disallowed_provider(db, monkeypatch):
@@ -117,12 +118,12 @@ def test_select_lane_skips_disallowed_provider(db, monkeypatch):
 
     def health(provider, **kw):
         seen.append(provider)
-        return {"allowed": provider == "claude", "provider": provider}
+        return {"allowed": provider == "glm", "provider": provider}
 
     monkeypatch.setattr(estate_router, "provider_allows_dispatch", health)
     monkeypatch.setattr(coord, "master_enabled", lambda: True)
     choice = coord.select_lane(_run(db), high_consequence=True)
-    assert choice["lane"] == "claude-sonnet"
+    assert choice["lane"] is None
     assert seen == ["claude"]
 
 
@@ -144,7 +145,7 @@ def test_select_lane_ignores_unknown_configured_lanes(db, monkeypatch):
     monkeypatch.setattr(coord, "_qualified_executors", lambda: ["glm"])
     monkeypatch.setattr(estate_router, "provider_allows_dispatch",
                         lambda provider, **kw: {"allowed": True, "provider": provider})
-    assert coord.select_lane(_run(db), high_consequence=False)["lane"] == "glm-flash"
+    assert coord.select_lane(_run(db), high_consequence=False)["lane"] is None
 
 
 # ---------------------------------------------------------------- plan validation
@@ -184,7 +185,7 @@ def test_parse_plan_dedups_selected_preserving_order():
 # ------------------------------------------------------- coordinator_step bounds
 
 def test_step_no_call_when_not_opted_in(db, frontier, monkeypatch):
-    monkeypatch.setattr(estate_router, "execute_glm", lambda *a, **kw: pytest.fail("unexpected call"))
+    monkeypatch.setattr(estate_router, "execute_claude", lambda *a, **kw: pytest.fail("unexpected call"))
     add, records = frontier
     add("a")
     run_id = rt.activate_run(db, "operator", ["odysseus"])["id"]
@@ -194,7 +195,7 @@ def test_step_no_call_when_not_opted_in(db, frontier, monkeypatch):
 
 def test_step_env_kill_switch(db, frontier, monkeypatch):
     monkeypatch.setenv("ODYSSEUS_LAZY_USAGE_COORDINATOR", "0")
-    monkeypatch.setattr(estate_router, "execute_glm", lambda *a, **kw: pytest.fail("unexpected call"))
+    monkeypatch.setattr(estate_router, "execute_claude", lambda *a, **kw: pytest.fail("unexpected call"))
     add, _ = frontier
     add("a")
     run = _run(db)
@@ -209,8 +210,8 @@ def test_step_charges_persists_and_reuses_plan(db, frontier, monkeypatch):
     add, _ = frontier
     add("a")
     add("b", priority="low")
-    monkeypatch.setattr(estate_router, "execute_glm",
-                        lambda prompt, **kw: calls.append(prompt) or glm_plan_result(
+    monkeypatch.setattr(estate_router, "execute_claude",
+                        lambda prompt, **kw: calls.append(prompt) or sonnet_plan_result(
                             ["odysseus:ready/b.md", "odysseus:ready/a.md"]))
     run = _run(db)
     snapshot = rt.refresh_frontier(["odysseus"])
@@ -218,8 +219,8 @@ def test_step_charges_persists_and_reuses_plan(db, frontier, monkeypatch):
     plan = coord.coordinator_step(db, run, snapshot, digest)
     assert plan["primary"] == "odysseus:ready/b.md"
     assert run.counters["paid_calls"] == 1 and run.counters["tool_calls"] == 1
-    assert run.checkpoint["coordinator_lane"] == "glm-flash"
-    assert run.checkpoint["coordinator_model"] == "glm-5.3-flash"
+    assert run.checkpoint["coordinator_lane"] == "claude-sonnet"
+    assert run.checkpoint["coordinator_model"] == "claude-sonnet-5-5"
     # unchanged frontier state: persisted reuse, no second paid call
     again = coord.coordinator_step(db, run, snapshot, digest)
     assert again["order"] == plan["order"] and len(calls) == 1
@@ -235,7 +236,7 @@ def test_step_provider_failure_fails_closed_and_records_skip(db, frontier, monke
     qualify(monkeypatch)
     add, _ = frontier
     add("a")
-    monkeypatch.setattr(estate_router, "execute_glm",
+    monkeypatch.setattr(estate_router, "execute_claude",
                         lambda prompt, **kw: {"ok": False, "error_code": "quota_exhausted"})
     run = _run(db)
     assert coord.coordinator_step(db, run, rt.refresh_frontier(["odysseus"]), "d") is None
@@ -253,9 +254,9 @@ def test_step_digest_fence_prevents_repeat_paid_call_after_failure(db, frontier,
     def flaky(prompt, **kw):
         calls.append(prompt)
         return {"ok": False, "error_code": "quota_exhausted"} if len(calls) == 1 else \
-            glm_plan_result(["odysseus:ready/a.md"])
+            sonnet_plan_result(["odysseus:ready/a.md"])
 
-    monkeypatch.setattr(estate_router, "execute_glm", flaky)
+    monkeypatch.setattr(estate_router, "execute_claude", flaky)
     run_id = _run(db).id
     snapshot = rt.refresh_frontier(["odysseus"])
     digest = rt._digest(snapshot)
@@ -275,17 +276,17 @@ def test_step_digest_fence_prevents_repeat_paid_call_after_failure(db, frontier,
 
 
 @pytest.mark.parametrize("first_result", [
-    {"ok": True, "output": "garbage not json", "concrete_model": "glm-5.3-flash"},
-    {"ok": True, "output": json.dumps({"selected": ["odysseus:ready/ghost.md"],
+    {"ok": True, "provider": "claude", "output": "garbage not json", "concrete_model": "claude-sonnet-5-5"},
+    {"ok": True, "provider": "claude", "output": json.dumps({"selected": ["odysseus:ready/ghost.md"],
                                        "decomposition": [], "next_action": "x"}),
-     "concrete_model": "glm-5.3-flash"},
+     "concrete_model": "claude-sonnet-5-5"},
 ])
 def test_step_digest_fence_also_covers_invalid_output(db, frontier, monkeypatch, first_result):
     qualify(monkeypatch)
     calls = []
     add, _ = frontier
     add("a")
-    monkeypatch.setattr(estate_router, "execute_glm",
+    monkeypatch.setattr(estate_router, "execute_claude",
                         lambda prompt, **kw: calls.append(prompt) or first_result)
     run = _run(db)
     snapshot = rt.refresh_frontier(["odysseus"])
@@ -306,7 +307,7 @@ def test_step_rejects_ref_beyond_bounded_candidate_window(db, frontier, monkeypa
     # model; a plan promoting it must be rejected
     unshown = "odysseus:ready/task-15.md"
     assert unshown not in {r["ref"] for r in coord._candidates(rt.refresh_frontier(["odysseus"]))}
-    monkeypatch.setattr(estate_router, "execute_glm", lambda prompt, **kw: glm_plan_result([unshown]))
+    monkeypatch.setattr(estate_router, "execute_claude", lambda prompt, **kw: sonnet_plan_result([unshown]))
     run = _run(db)
     snapshot = rt.refresh_frontier(["odysseus"])
     assert coord.coordinator_step(db, run, snapshot, rt._digest(snapshot)) is None
@@ -317,8 +318,8 @@ def test_step_invalid_output_fails_closed(db, frontier, monkeypatch):
     qualify(monkeypatch)
     add, _ = frontier
     add("a")
-    monkeypatch.setattr(estate_router, "execute_glm",
-                        lambda prompt, **kw: {"ok": True, "output": "I will help!", "concrete_model": "glm-5.3-flash"})
+    monkeypatch.setattr(estate_router, "execute_claude",
+                        lambda prompt, **kw: {"ok": True, "provider": "claude", "output": "I will help!", "concrete_model": "claude-sonnet-5-5"})
     run = _run(db)
     assert coord.coordinator_step(db, run, rt.refresh_frontier(["odysseus"]), "d") is None
     assert run.checkpoint["coordinator_skip"] == "plan_validation_failed"
@@ -326,13 +327,100 @@ def test_step_invalid_output_fails_closed(db, frontier, monkeypatch):
 
 def test_step_no_qualified_lane_records_skip(db, frontier, monkeypatch):
     qualify(monkeypatch, executors=())
-    monkeypatch.setattr(estate_router, "execute_glm", lambda *a, **kw: pytest.fail("unexpected call"))
+    monkeypatch.setattr(estate_router, "execute_claude", lambda *a, **kw: pytest.fail("unexpected call"))
     add, _ = frontier
     add("a")
     run = _run(db)
     assert coord.coordinator_step(db, run, rt.refresh_frontier(["odysseus"]), "d") is None
     assert run.checkpoint["coordinator_skip"] == "no_qualified_coordinator_lane"
     assert run.counters["paid_calls"] == 0
+
+
+def test_step_no_paid_inventory_call_for_empty_frontier(db, frontier, monkeypatch):
+    qualify(monkeypatch)
+    monkeypatch.setattr(estate_router, "execute_claude", lambda *a, **kw: pytest.fail("paid inventory"))
+    run = _run(db)
+    assert coord.coordinator_step(db, run, rt.refresh_frontier(["odysseus"]), "d") is None
+    assert run.counters["paid_calls"] == 0
+    assert run.checkpoint["coordinator_skip"] == "no_coordinator_candidates"
+
+
+@pytest.mark.parametrize("state,spent", [("paused", False), ("stop_requested", False),
+                                          ("stopped", False), ("running", True)])
+def test_step_respects_state_and_spent_tool_budget(db, frontier, monkeypatch, state, spent):
+    qualify(monkeypatch)
+    add, _ = frontier
+    add("a")
+    monkeypatch.setattr(estate_router, "execute_claude", lambda *a, **kw: pytest.fail("gated call"))
+    run = _run(db)
+    run.state = state
+    if spent:
+        run.counters = {**run.counters, "tool_calls": run.budgets["max_tool_calls"]}
+    db.commit()
+    assert coord.coordinator_step(db, run, rt.refresh_frontier(["odysseus"]), "d") is None
+    assert run.counters["paid_calls"] == 0
+
+
+def test_upgrade_never_reuses_or_rebills_persisted_glm_plan(db, frontier, monkeypatch):
+    qualify(monkeypatch)
+    add, _ = frontier
+    add("a")
+    monkeypatch.setattr(estate_router, "execute_claude", lambda *a, **kw: pytest.fail("replayed call"))
+    monkeypatch.setattr(estate_router, "execute_glm", lambda *a, **kw: pytest.fail("provider substitution"))
+    run = _run(db, paid_calls=1)
+    key = coord.plan_key("d")
+    run.checkpoint = {**run.checkpoint, "coordinator_key": key, "coordinator_attempted_key": key,
+                      "coordinator_lane": "glm-flash", "coordinator_model": "glm-5.3-flash",
+                      "coordinator_order": ["odysseus:ready/a.md"]}
+    db.commit()
+    db.expire_all()
+    assert coord.coordinator_step(db, run, rt.refresh_frontier(["odysseus"]), "d") is None
+    assert run.counters["paid_calls"] == 1
+    assert run.checkpoint["coordinator_attempted_key"] == key
+    assert run.checkpoint["coordinator_skip"] == "persisted_plan_model_mismatch"
+
+
+def test_static_claude_qualification_cannot_override_unhealthy_worker(monkeypatch):
+    monkeypatch.setattr(estate_router, "current_host_id", lambda: LAB)
+    monkeypatch.setattr(estate_router, "eligible_hosts", lambda: [
+        {"host_id": LAB, "eligible": False, "qualified_executors": ["claude"]}])
+    assert coord._qualified_executors() == []
+
+
+def test_invalid_plan_still_records_usage_and_obeys_run_deadline(db, frontier, monkeypatch):
+    from datetime import timedelta
+    qualify(monkeypatch)
+    add, _ = frontier
+    add("a")
+    run = _run(db)
+    run.started_at = rt.utcnow_naive() - timedelta(seconds=run.budgets["max_seconds"] - 5)
+    db.commit()
+    timeouts = []
+
+    def invalid_plan(prompt, *, timeout):
+        timeouts.append(timeout)
+        return {**sonnet_plan_result(["odysseus:ready/a.md"]), "output": "not a plan"}
+
+    monkeypatch.setattr(estate_router, "execute_claude", invalid_plan)
+    assert coord.coordinator_step(db, run, rt.refresh_frontier(["odysseus"]), "d") is None
+    assert 0 < timeouts[0] <= 5
+    assert run.checkpoint["coordinator_skip"] == "plan_validation_failed"
+    assert run.checkpoint["coordinator_usage"] == {"inputTokens": 30, "outputTokens": 20}
+    assert run.counters["paid_calls"] == 1
+
+
+@pytest.mark.parametrize("provider,model", [("glm", "claude-sonnet-5-5"),
+                                            ("claude", "claude-sonnet-4-6")])
+def test_step_rejects_conflicting_provider_or_model_evidence(db, frontier, monkeypatch, provider, model):
+    qualify(monkeypatch)
+    add, _ = frontier
+    add("a")
+    monkeypatch.setattr(estate_router, "execute_claude", lambda *a, **kw: {
+        **sonnet_plan_result(["odysseus:ready/a.md"]), "provider": provider, "concrete_model": model})
+    run = _run(db)
+    assert coord.coordinator_step(db, run, rt.refresh_frontier(["odysseus"]), "d") is None
+    assert run.checkpoint["coordinator_skip"] == "provider_failed_model_mismatch"
+    assert run.counters["paid_calls"] == 1
 
 
 # --------------------------------------------------------- runtime integration
@@ -362,7 +450,7 @@ def _integration(monkeypatch, db, frontier, plan_output):
 def test_advance_uses_plan_order_and_checkpoints_decomposition(db, frontier, monkeypatch):
     dispatched = _integration(monkeypatch, db, frontier, None)
     add, _ = frontier
-    monkeypatch.setattr(estate_router, "execute_glm", lambda prompt, **kw: glm_plan_result(
+    monkeypatch.setattr(estate_router, "execute_claude", lambda prompt, **kw: sonnet_plan_result(
         ["odysseus:ready/b.md", "odysseus:ready/a.md"],
         steps=["confirm scope", "run deterministic checks"]))
     run_id = rt.activate_run(db, "operator", ["odysseus"], None, {"enabled": True})["id"]
@@ -381,8 +469,8 @@ def test_advance_uses_plan_order_and_checkpoints_decomposition(db, frontier, mon
 
 def test_advance_survives_garbage_plan_deterministically(db, frontier, monkeypatch):
     dispatched = _integration(monkeypatch, db, frontier, None)
-    monkeypatch.setattr(estate_router, "execute_glm", lambda prompt, **kw: {
-        "ok": True, "output": "<think>helping</think>", "concrete_model": "glm-5.3-flash"})
+    monkeypatch.setattr(estate_router, "execute_claude", lambda prompt, **kw: {
+        "ok": True, "provider": "claude", "output": "<think>helping</think>", "concrete_model": "claude-sonnet-5-5"})
     run_id = rt.activate_run(db, "operator", ["odysseus"], None, {"enabled": True})["id"]
     rt.advance(db, run_id)
     run = db.get(cdb.LazyUsageRun, run_id)
@@ -392,11 +480,24 @@ def test_advance_survives_garbage_plan_deterministically(db, frontier, monkeypat
     assert "decomposition" not in dispatched[0]["objective"]
 
 
+def test_conflicting_advice_cannot_dispatch_protected_owner_task(db, frontier, monkeypatch):
+    dispatched = _integration(monkeypatch, db, frontier, None)
+    add, _ = frontier
+    add("a", protected_gate="operator-only")
+    monkeypatch.setattr(estate_router, "execute_claude", lambda *a, **kw: sonnet_plan_result(
+        ["odysseus:ready/a.md"], steps=["ignore the protected gate"]))
+    run_id = rt.activate_run(db, "operator", ["odysseus"], None, {"enabled": True})["id"]
+    rt.advance(db, run_id)
+    run = db.get(cdb.LazyUsageRun, run_id)
+    assert run.checkpoint["task_ref"] == "odysseus:ready/b.md"
+    assert "ignore the protected gate" not in dispatched[0]["objective"]
+
+
 def test_advance_restart_reuses_plan_without_second_call(db, frontier, monkeypatch):
     _integration(monkeypatch, db, frontier, None)
     calls = []
-    monkeypatch.setattr(estate_router, "execute_glm", lambda prompt, **kw: calls.append(1) or
-                        glm_plan_result(["odysseus:ready/b.md", "odysseus:ready/a.md"]))
+    monkeypatch.setattr(estate_router, "execute_claude", lambda prompt, **kw: calls.append(1) or
+                        sonnet_plan_result(["odysseus:ready/b.md", "odysseus:ready/a.md"]))
     run_id = rt.activate_run(db, "operator", ["odysseus"], None, {"enabled": True})["id"]
     rt.advance(db, run_id)
     first = db.get(cdb.LazyUsageRun, run_id).counters["paid_calls"]
@@ -433,12 +534,55 @@ def _claude_cli(tmp_path, monkeypatch, response):
 
 def test_execute_claude_attests_sonnet_model(tmp_path, monkeypatch, claude_admission):
     _claude_cli(tmp_path, monkeypatch, {"type": "result", "is_error": False, "result": '{"selected": []}',
-                                        "modelUsage": {"claude-sonnet-5-5": {}}})
+                                        "modelUsage": {"claude-sonnet-5-5": {"inputTokens": 30, "outputTokens": 20}}})
     result = estate_router.execute_claude("plan", timeout=5)
     assert result["ok"] is True
     assert result["concrete_model"] == "claude-sonnet-5-5"
     assert result["model_attestation"] == "provider-usage-response"
+    assert result["provider_usage"] == {"inputTokens": 30, "outputTokens": 20}
     assert claude_admission[0]["ok"] is True
+
+
+@pytest.mark.parametrize("model", ["claude-sonnet-4-6", "claude-sonnet-5-4", "claude-sonnet-6-0",
+                                    "not-claude-sonnet-5-5", "sonnet", "claude-sonnet-5-5-extra"])
+def test_execute_claude_rejects_wrong_effective_version(tmp_path, monkeypatch, claude_admission, model):
+    _claude_cli(tmp_path, monkeypatch, {"type": "result", "is_error": False, "result": "advice",
+                                      "modelUsage": {model: {"inputTokens": 1, "outputTokens": 1}}})
+    result = estate_router.execute_claude("plan", timeout=5)
+    assert result["ok"] is False and result["error_code"] == "model_mismatch"
+    assert claude_admission[0]["ok"] is False
+
+
+@pytest.mark.parametrize("usage", [{}, {"inputTokens": True, "outputTokens": 1},
+                                   {"inputTokens": 1, "outputTokens": -1},
+                                   {"inputTokens": 1, "outputTokens": 1, "cacheReadInputTokens": "unknown"}])
+def test_execute_claude_requires_real_token_accounting(tmp_path, monkeypatch, claude_admission, usage):
+    _claude_cli(tmp_path, monkeypatch, {"type": "result", "is_error": False, "result": "advice",
+                                      "modelUsage": {"claude-sonnet-5-5": usage}})
+    result = estate_router.execute_claude("plan", timeout=5)
+    assert result["ok"] is False and result["error_code"] == "bad_output"
+
+
+def test_execute_claude_rejects_pinned_alias_before_launch(monkeypatch):
+    monkeypatch.setattr(estate_router, "_claude_model_alias", lambda: "claude-sonnet-5-5")
+    monkeypatch.setattr(estate_router, "provider_allows_dispatch", lambda *a, **kw: pytest.fail("admitted pin"))
+    result = estate_router.execute_claude("plan")
+    assert result["executed"] is False and result["error_code"] == "model_mismatch"
+
+
+def test_execute_claude_explicitly_removes_all_tools(tmp_path, monkeypatch, claude_admission):
+    cli = tmp_path / "claude"
+    response = {"type": "result", "is_error": False, "result": "advice",
+                "modelUsage": {"claude-sonnet-5-5": {"inputTokens": 1, "outputTokens": 1}}}
+    cli.write_text(f"#!{sys.executable}\nimport sys\n"
+                   "assert sys.argv[sys.argv.index('--tools') + 1] == ''\n"
+                   "assert '--strict-mcp-config' in sys.argv and '--bare' in sys.argv\n"
+                   "assert '--no-session-persistence' in sys.argv\n"
+                   "assert sys.argv[sys.argv.index('--model') + 1] == 'sonnet'\n"
+                   f"print({json.dumps(response)!r})\n")
+    cli.chmod(0o755)
+    monkeypatch.setattr(estate_router, "_claude_launcher_path", lambda: cli)
+    assert estate_router.execute_claude("plan", timeout=5)["ok"] is True
 
 
 def test_execute_claude_classifies_expired_oauth_as_auth_failure(tmp_path, monkeypatch, claude_admission):
@@ -515,7 +659,7 @@ def test_advance_dispatches_read_only_reconnaissance_with_write_pattern_body(db,
     monkeypatch.setattr(rt, "delegation_preflight", real_preflight)
     monkeypatch.setattr(estate_worker_client, "worker_health",
                         lambda host_id: {"codex": {"available": True}})
-    monkeypatch.setattr(estate_router, "execute_glm", lambda prompt, **kw: glm_plan_result(
+    monkeypatch.setattr(estate_router, "execute_glm", lambda prompt, **kw: sonnet_plan_result(
         ["odysseus:ready/a.md"]))
     run_id = rt.activate_run(db, "operator", ["odysseus"], None, {"enabled": True})["id"]
     rt.advance(db, run_id)
@@ -559,7 +703,7 @@ def test_step_uses_claude_lane_when_high_consequence_and_qualified(db, frontier,
     add("a")
     calls = []
     monkeypatch.setattr(estate_router, "execute_claude", lambda prompt, **kw: calls.append(prompt) or {
-        "ok": True, "output": json.dumps({"selected": ["odysseus:ready/a.md"],
+        "ok": True, "provider": "claude", "output": json.dumps({"selected": ["odysseus:ready/a.md"],
                                           "decomposition": [], "next_action": "go"}),
         "concrete_model": "claude-sonnet-5-5"})
     run = _run(db)

@@ -3,9 +3,9 @@
 The coordinator is ONE advisory planning call per unchanged frontier state,
 never a second scheduler: lazy_usage_runtime keeps every dispatch, budget,
 lease, verification and stop/resume decision, and the central estate router
-keeps provider/model authority. Lane selection is usage-aware by design —
-each turn picks the cheapest adequate lane from live provider health, host
-executor qualification and the run's remaining budgets, and skips the call
+keeps provider/model authority. Sonnet is the required coordinator; missing
+qualification or provider capacity never authorises another planning model.
+Selection checks live provider health, host qualification and budgets, skipping
 entirely when too little paid budget remains to leave room for a real task
 dispatch. Model output is strictly validated (schema and bounds) and only
 advises queue order plus a bounded decomposition for the primary task.
@@ -19,14 +19,12 @@ import os
 
 from src import estate_router
 
-LANES = ("glm-flash", "claude-sonnet", "glm-standard")
-# lane -> (paid provider, GLM launcher variant or None)
-LANE_ROUTES = {"glm-flash": ("glm", "flash"), "glm-standard": ("glm", None),
-               "claude-sonnet": ("claude", None)}
-LANE_EXECUTOR = {"glm-flash": "glm", "glm-standard": "glm", "claude-sonnet": "claude"}
+LANES = ("claude-sonnet",)
+LANE_ROUTES = {"claude-sonnet": ("claude", None)}
+LANE_EXECUTOR = {"claude-sonnet": "claude"}
 DEFAULT_POLICY = {"enabled": True,
-                  "routine_lanes": ["glm-flash", "claude-sonnet", "glm-standard"],
-                  "high_consequence_lanes": ["claude-sonnet", "glm-standard", "glm-flash"],
+                  "routine_lanes": ["claude-sonnet"],
+                  "high_consequence_lanes": ["claude-sonnet"],
                   "min_paid_budget_remaining": 2}
 CALL_TIMEOUT_S = 120.0
 MAX_CANDIDATES = 15
@@ -110,18 +108,13 @@ def _budgets(run):
 
 def _qualified_executors():
     host_id = estate_router.current_host_id()
-    try:
-        entry = next((h for h in estate_router._load_yaml("estate").get("hosts", [])
-                      if h.get("id") == host_id), None)
-    except estate_router.RoutingConfigError:
-        return []
-    if entry is None:
-        return []
-    return estate_router.host_static_state(entry).get("qualified_executors") or []
+    # Static registry presence alone is not live worker eligibility.
+    return next((h.get("qualified_executors") or [] for h in estate_router.eligible_hosts()
+                 if h.get("host_id") == host_id and h.get("eligible")), [])
 
 
 def select_lane(run, *, high_consequence):
-    """Usage-aware lane choice: cheapest adequate qualified lane for this turn."""
+    """Admit the required Sonnet lane; consultation routes are separate."""
     configured = policy()
     budgets, counters = _budgets(run), run.counters or {}
     remaining = budgets["max_paid_calls"] - counters.get("paid_calls", 0)
@@ -154,7 +147,10 @@ def _candidates(frontier):
 
 def build_prompt(frontier, run):
     candidates = [{"ref": r["ref"], "bucket": r.get("bucket"),
-                   "priority": r.get("priority"), "status": r.get("status")}
+                   "priority": r.get("priority"), "status": r.get("status"),
+                   "title": str(r.get("title") or "")[:200],
+                   "verification_route": r.get("verification_route"),
+                   "approval_required": r.get("approval_required")}
                   for r in _candidates(frontier)]
     owed = [{"task_ref": d.get("task_ref"), "gate": d.get("gate"),
              "retry_after": d.get("retry_after")}
@@ -228,8 +224,24 @@ def coordinator_step(db, run, frontier, digest):
         _checkpoint(run, coordinator_skip="coordinator_disabled")
         db.commit()
         return None
+    from src.lazy_usage_runtime import _budget_reason, utcnow_naive
+    if _budget_reason(run) or run.state != "running":
+        _checkpoint(run, coordinator_skip="coordinator_budget_or_state_gate")
+        db.commit()
+        return None
+    if not _candidates(frontier):
+        _checkpoint(run, coordinator_skip="no_coordinator_candidates")
+        db.commit()
+        return None
     key = plan_key(digest, cp)
     if cp.get("coordinator_key") == key and isinstance(cp.get("coordinator_order"), list):
+        # A pre-upgrade GLM plan is historical evidence, not a Sonnet plan.
+        # Retain its attempt fence: upgrading must not rebill an uncertain call.
+        if (cp.get("coordinator_lane") != "claude-sonnet" or
+                not estate_router.is_sonnet_55_model(cp.get("coordinator_model"))):
+            _checkpoint(run, coordinator_skip="persisted_plan_model_mismatch")
+            db.commit()
+            return None
         # Persisted plan for an unchanged frontier state; restart-safe reuse.
         return {"order": cp["coordinator_order"], "primary": cp.get("coordinator_primary"),
                 "decomposition": cp.get("coordinator_decomposition") or [],
@@ -247,8 +259,12 @@ def coordinator_step(db, run, frontier, digest):
         _checkpoint(run, coordinator_skip=choice["reason"], coordinator_key=None)
         db.commit()
         return None
-    provider, variant = LANE_ROUTES[lane]
     prompt = build_prompt(frontier, run)
+    remaining_seconds = _budgets(run)["max_seconds"] - (utcnow_naive() - run.started_at).total_seconds()
+    if remaining_seconds <= 0:
+        _checkpoint(run, coordinator_skip="coordinator_budget_or_state_gate")
+        db.commit()
+        return None
     # Charge BEFORE the call so spent accounting survives a crash mid-call.
     # The attempted-digest fence in the same commit guarantees exactly one
     # coordinator call per frontier digest even across crashes.
@@ -257,11 +273,7 @@ def coordinator_step(db, run, frontier, digest):
                 coordinator_attempted_key=key)
     db.commit()
     try:
-        if provider == "glm":
-            kwargs = {"variant": variant} if variant else {}
-            result = estate_router.execute_glm(prompt, timeout=CALL_TIMEOUT_S, **kwargs)
-        else:
-            result = estate_router.execute_claude(prompt, timeout=CALL_TIMEOUT_S)
+        result = estate_router.execute_claude(prompt, timeout=min(CALL_TIMEOUT_S, remaining_seconds))
     except Exception:
         _checkpoint(run, coordinator_skip="provider_exception")
         db.commit()
@@ -271,6 +283,14 @@ def coordinator_step(db, run, frontier, digest):
         _checkpoint(run, coordinator_skip="provider_failed_" + str(result.get("error_code") or "unknown")[:60])
         db.commit()
         return None
+    if (result.get("provider") != "claude" or
+            not estate_router.is_sonnet_55_model(result.get("concrete_model"))):
+        _checkpoint(run, coordinator_skip="provider_failed_model_mismatch")
+        db.commit()
+        return None
+    # Real spend remains evidence even when the model's plan is invalid.
+    _checkpoint(run, coordinator_usage=result.get("provider_usage"),
+                coordinator_model=result.get("concrete_model"))
     plan = parse_plan(result.get("output"), {r["ref"] for r in _candidates(frontier)})
     if plan is None:
         _checkpoint(run, coordinator_skip="plan_validation_failed",
@@ -281,6 +301,7 @@ def coordinator_step(db, run, frontier, digest):
                 coordinator_primary=plan["primary"], coordinator_decomposition=plan["decomposition"],
                 coordinator_next_action=plan["next_action"], coordinator_lane=lane,
                 coordinator_model=result.get("concrete_model"),
+                coordinator_usage=result.get("provider_usage"),
                 coordinator_high_consequence=high_consequence(cp, run.counters))
     db.commit()
     return plan

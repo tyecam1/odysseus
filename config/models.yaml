@@ -58,8 +58,9 @@ paid_providers:
     concrete_model_label: claude-subscription
     # Rolling subscription alias resolved by the unmodified official CLI at
     # dispatch (docs/subscription-model-currency-policy.md); never a pinned
-    # concrete version. Not a qualified executor anywhere yet: qualification
-    # requires the operator's subscription re-login plus live evidence.
+    # concrete version. Not a qualified executor anywhere yet. Current --bare
+    # skips subscription OAuth; re-login alone does not qualify this adapter.
+    # A permitted auth/isolation route and live effective-model evidence are owed.
     model_alias: sonnet
 default_paid_provider: codex
 

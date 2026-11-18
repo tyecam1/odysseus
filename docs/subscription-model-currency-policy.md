@@ -72,6 +72,17 @@ routing contract's standing review-model budget preference.
 
 ## Other subscription execution paths
 
+- **Bounded /lazyUsage coordinator exception (operator task, 2026-11-16):**
+  `2026-11-16-lazyusage-sonnet-coordinator-lab` explicitly authorises the
+  rolling `sonnet` alias for its advisory coordinator role, with independently
+  validated effective Sonnet 5.5 identity. This does not authorise other
+  providers as substitute coordinators, premium reviews, API charges or
+  credential changes. The lab's Claude executor remains unqualified until
+  account permission, provider terms, university/lab policy, tool isolation
+  and real model/usage evidence are verified. Current official CLI `--bare`
+  mode does not read subscription OAuth; a subscription re-login alone does
+  not qualify the existing adapter. See the owning acceptance report and
+  [official programmatic-use documentation](https://code.claude.com/docs/en/headless).
 - Claude Code: use the CLI's **`opus` rolling family alias**, not a
   versioned model ID, and keep its CLI updated. Any configured aliases or
   environment substitutions that pin an older snapshot are non-compliant.

@@ -1611,6 +1611,15 @@ def _claude_launcher_path() -> Path:
     return Path.home() / ".local" / "bin" / "claude"
 
 
+def is_sonnet_55_model(model: object) -> bool:
+    """The owning coordinator contract requires attested Sonnet 5.5.
+
+    This is an acceptance guard, not a dispatch pin: the CLI still receives
+    the rolling sonnet alias. Unverified aliases and other releases fail closed.
+    """
+    return isinstance(model, str) and re.fullmatch(r"claude-sonnet-5-5(?:-\d{8})?", model) is not None
+
+
 def _claude_model_alias() -> str:
     """Rolling subscription alias from config; never a pinned concrete
     version (docs/subscription-model-currency-policy.md). The unmodified
@@ -1624,7 +1633,8 @@ def _claude_model_alias() -> str:
 
 def execute_claude(objective: str, *, timeout: float = 120.0) -> dict:
     """One bounded planning/advisory call through the unmodified official
-    Claude Code CLI under the host's existing subscription login. No tools,
+    Claude Code CLI. Auth and terms qualification belong to the host gate;
+    --bare does not use subscription OAuth on current CLI releases. No tools,
     no repository access: text-in/text-out for the cognitive-coordinator
     role. Credential handling stays entirely inside the CLI; this function
     never reads tokens or profile files. Fail-closed typed outcomes mirror
@@ -1639,6 +1649,9 @@ def execute_claude(objective: str, *, timeout: float = 120.0) -> dict:
     if not isinstance(objective, str) or not objective.strip():
         return {**base, "ok": False, "executed": False, "error_code": "nonzero_exit",
                 "error": "claude objective must be a non-empty string"}
+    if _claude_model_alias() != "sonnet":
+        return {**base, "ok": False, "executed": False, "error_code": "model_mismatch",
+                "error": "claude coordinator requires the rolling sonnet alias"}
     health = provider_allows_dispatch("claude", launch_timeout=timeout) if os.getenv("DATABASE_URL") else {
         "allowed": False, "reason": "provider claude: authoritative DATABASE_URL required", "state": "unknown"}
     if not health["allowed"]:
@@ -1657,8 +1670,9 @@ def execute_claude(objective: str, *, timeout: float = 120.0) -> dict:
             return {**base, "ok": False, "executed": False, "error_code": "launcher_missing",
                     "error": "claude CLI is missing or not executable"}
         proc = subprocess.Popen(
-            [str(launcher), "--print", "--output-format", "json", "--model", _claude_model_alias(),
+            [str(launcher), "--print", "--output-format", "json", "--model", "sonnet",
              "--max-turns", "1",
+             "--tools", "",
              "--disallowedTools", "Bash,Write,Edit,NotebookEdit,WebFetch,WebSearch,Task,Skill,Agent,TodoWrite,Read,Grep,Glob",
              "--strict-mcp-config", "--bare", "--disable-slash-commands", "--no-session-persistence"],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -1720,14 +1734,24 @@ def execute_claude(objective: str, *, timeout: float = 120.0) -> dict:
             usage = response.get("modelUsage")
             models = list(usage) if isinstance(usage, dict) else []
             if (len(models) != 1 or not isinstance(models[0], str)
-                    or "sonnet" not in models[0].lower()):
+                    or not is_sonnet_55_model(models[0])):
                 outcome.update(ok=False, state="failed", error_code="model_mismatch")
                 return {**common, "ok": False, "error_code": "model_mismatch",
-                        "error": "claude result has no single Sonnet-class model attestation",
+                        "error": "claude result has no single Sonnet 5.5 model attestation",
                         "observed_models": [str(model)[:80] for model in models[:5]]}
+            tokens = usage[models[0]]
+            token_fields = ("inputTokens", "outputTokens", "cacheReadInputTokens", "cacheCreationInputTokens")
+            if (not isinstance(tokens, dict) or
+                    any(type(tokens.get(k)) is not int or tokens[k] < 0
+                        for k in ("inputTokens", "outputTokens")) or
+                    any(k in tokens and (type(tokens[k]) is not int or tokens[k] < 0) for k in token_fields)):
+                outcome.update(ok=False, state="failed", error_code="bad_output")
+                return {**common, "ok": False, "error_code": "bad_output",
+                        "error": "claude result has no valid token usage accounting"}
             return {**base, "executed": True, "ok": True, "output": result_text,
                     "exit_code": proc.returncode, "concrete_model": models[0],
                     "model_unverified": False, "model_attestation": "provider-usage-response",
+                    "provider_usage": {k: tokens[k] for k in token_fields if k in tokens},
                     "latency_ms": int((time.monotonic() - started) * 1000)}
         outcome.update(ok=False, state="failed", error_code="nonzero_exit")
         return {**common, "ok": False, "error_code": "nonzero_exit",

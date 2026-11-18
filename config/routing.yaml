@@ -74,15 +74,14 @@ exploration:
   high_consequence_exploration: false
 # Opt-in /lazyUsage cognitive coordinator
 # (docs/runtime-work-packages/2026-11-16-lazyusage-sonnet-coordinator-lab.md).
-# Central lane policy for the bounded advisory planning step: cheapest
-# adequate qualified lane first; high-consequence turns (owed verification
-# debt or repeated failures) prefer the strongest qualified lane. The
+# Sonnet is required for the bounded advisory planning step. An unavailable
+# Sonnet route leaves explicit debt; GLM/Opus are separate consultations. The
 # coordinator never dispatches work — every gate stays in
 # src/lazy_usage_runtime.py and the estate router. `enabled: false`, or
 # ODYSSEUS_LAZY_USAGE_COORDINATOR=0 in the service environment, is the
 # documented rollback; activations additionally opt in per run.
 lazy_usage_coordinator:
   enabled: true
-  routine_lanes: [glm-flash, claude-sonnet, glm-standard]
-  high_consequence_lanes: [claude-sonnet, glm-standard, glm-flash]
+  routine_lanes: [claude-sonnet]
+  high_consequence_lanes: [claude-sonnet]
   min_paid_budget_remaining: 2  # leave room for one real task dispatch
