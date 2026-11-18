@@ -12,7 +12,7 @@ Resolve the live canonical Odysseus `START-AGENTIC.md`, `AGENTS.md`, `config/ini
 
 ## 1. Inspect before spending
 
-Run the configured read-only client operations:
+Run the configured read-only client operations, then the allowance snapshot:
 
 ```sh
 am config show
@@ -23,7 +23,10 @@ am park-status
 am provider-health show claude
 am provider-health show codex
 am provider-health show glm
+am usage
 ```
+
+`am usage` is the trusted read-only monitor: provider-stated windows only (currently Codex session-rollout rate limits); providers without an authorised machine-readable source report unknown.
 
 Use only the supported commands and installed client version. An active or paused run is resumed/inspected **in place**, not duplicated. Inspect unresolved previous write leases, owed reviews, near-complete work and provider resets before opening a new activation.
 
