@@ -217,12 +217,14 @@ def delegation_preflight(units: Iterable[dict]) -> dict:
                                               "GLM read-only advisory is not qualified for this unit on the routed host"})
             continue
         if explicit_provider == "glm":
+            glm_pass_write = _requires_repo_write(unit)
             recommendations.append({
                 "index": index,
                 "task_class": task["task_class"],
                 "classification": structural_lane,
-                "recommended_route": route.get("route"),
-                "ok": bool(route.get("ok")),
+                "recommended_route": None if glm_pass_write else route.get("route"),
+                "ok": False if glm_pass_write else bool(route.get("ok")),
+                "error_code": "write_intent_requires_codex_write_lane" if glm_pass_write else None,
                 "requires_justification": False,
                 "nondelegation_reason": None,
                 "route": route.get("route"),

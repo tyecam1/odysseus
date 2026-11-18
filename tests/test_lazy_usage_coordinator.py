@@ -569,3 +569,18 @@ def test_step_uses_claude_lane_when_high_consequence_and_qualified(db, frontier,
     assert plan is not None and len(calls) == 1
     assert run.checkpoint["coordinator_lane"] == "claude-sonnet"
     assert run.checkpoint["coordinator_high_consequence"] is True
+
+
+def test_preflight_explicit_glm_passthrough_refuses_write_intent(monkeypatch):
+    from src.delegation_preflight import delegation_preflight as real_pf
+    monkeypatch.setattr(estate_router, "resolve_route", lambda task, record_decision=False: {
+        "ok": True, "route": {"host": "lab", "executor": "local", "model_alias": "local-fast"},
+        "hosts_checked": [{"host_id": "lab", "qualified_executors": ["local"]}]})
+    monkeypatch.setattr(estate_router, "eligible_hosts", lambda repo_id=None: [])
+    result = real_pf([{"task_class": "batch", "repo": "odysseus",
+                       "objective": "Run the batch scan", "write": True,
+                       "paid_provider": "glm", "allow_paid_escalation": True,
+                       "capabilities": ["local-fast"]}])
+    unit = result["units"][0]
+    assert unit["ok"] is False and unit["recommended_route"] is None
+    assert unit["error_code"] == "write_intent_requires_codex_write_lane"
