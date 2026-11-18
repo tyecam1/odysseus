@@ -525,6 +525,28 @@ def test_advance_dispatches_read_only_reconnaissance_with_write_pattern_body(db,
     assert run.checkpoint["current_task_id"] == "a"
 
 
+def test_preflight_explicit_write_intent_counts_without_heuristic_match():
+    from src.delegation_preflight import _requires_repo_write
+    assert _requires_repo_write({"repo": "odysseus", "objective": "Review the patch",
+                                 "write": True}) is True
+    assert _requires_repo_write({"repo": "odysseus", "objective": "Review the patch",
+                                 "mode": "implementation"}) is True
+
+
+def test_preflight_fallthrough_refuses_write_intent_local_route(monkeypatch):
+    from src.delegation_preflight import delegation_preflight as real_pf
+    monkeypatch.setattr(estate_router, "resolve_route", lambda task, record_decision=False: {
+        "ok": True, "route": {"host": "lab", "executor": "local", "model_alias": "local-fast"},
+        "hosts_checked": [{"host_id": "lab", "qualified_executors": ["local"]}]})
+    monkeypatch.setattr(estate_router, "eligible_hosts", lambda repo_id=None: [])
+    result = real_pf([{"task_class": "batch", "repo": "odysseus",
+                       "objective": "Run the batch scan", "write": True,
+                       "capabilities": ["local-fast"], "allow_paid_escalation": False}])
+    unit = result["units"][0]
+    assert unit["ok"] is False and unit["recommended_route"] is None
+    assert unit["error_code"] == "write_intent_requires_codex_write_lane"
+
+
 def test_execute_claude_requires_authoritative_database(monkeypatch, tmp_path):
     monkeypatch.delenv("DATABASE_URL", raising=False)
     result = estate_router.execute_claude("plan")

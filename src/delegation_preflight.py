@@ -68,6 +68,11 @@ def _requires_repo_write(task: dict) -> bool:
     if task.get("write_classified") is True:
         return (bool(task.get("requires_repo_write")) or task.get("write") is True
                 or task.get("mode") == "implementation")
+    if (task.get("requires_repo_write") is True or task.get("write") is True
+            or task.get("mode") == "implementation"):
+        # Explicit write intent from any caller counts even when the
+        # objective text does not match the heuristic (Sol review finding 1).
+        return True
     return bool(task.get("repo") and _WRITE_CODE_PATTERN.search(_task_text(task)))
 
 
@@ -317,12 +322,21 @@ def delegation_preflight(units: Iterable[dict]) -> dict:
             continue
 
         ok = bool(route.get("ok"))
+        write_intent = _requires_repo_write(unit)
+        if ok and write_intent:
+            # A declared/heuristic write unit never gets an unguarded
+            # local/fall-through recommendation: repository writes belong to
+            # the lease-gated codex-write lane (Sol review finding 2). This
+            # is advisory only; actual write dispatch checks lease authority
+            # again in estate_router/estate_write_lane.
+            ok = False
         recommendations.append({
             "index": index,
             "task_class": task["task_class"],
             "classification": structural_lane,
-            "recommended_route": route.get("route"),
+            "recommended_route": None if write_intent else route.get("route"),
             "ok": ok,
+            "error_code": "write_intent_requires_codex_write_lane" if write_intent else None,
             "requires_justification": False,
             "nondelegation_reason": None,
             "route": route.get("route"),
