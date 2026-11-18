@@ -547,6 +547,14 @@ def _budget_pair(value: str) -> tuple[str, int]:
     return key, amount
 
 
+def cmd_usage(args: argparse.Namespace) -> int:
+    cfg = _load_config()
+    result = _request(cfg, "GET", "/api/estate/usage")
+    print(json.dumps(result["body"], indent=2, sort_keys=True) if result["status"] == 200
+          else f"error {result['status']}: {json.dumps(result['body'])[:300]}")
+    return 0 if result["status"] == 200 else 1
+
+
 def cmd_lazy(args: argparse.Namespace) -> int:
     cfg = _load_config()
     action = args.lazy_action
@@ -702,6 +710,7 @@ def build_parser() -> argparse.ArgumentParser:
         p_control = lazy_sub.add_parser(action, help=f"{action} a run (estate:execute)")
         p_control.add_argument("run_id", nargs="?", help="default: latest owned run")
 
+    p_usage = sub.add_parser("usage", help="read provider allowance windows (estate:read)")
     p_health = sub.add_parser("provider-health", help="inspect provider admission or assert operator evidence")
     health_sub = p_health.add_subparsers(dest="provider_action", required=True)
     p_show = health_sub.add_parser("show", help="read current gate (estate:read)")
@@ -810,6 +819,7 @@ def main(argv: list[str] | None = None) -> int:
         "push": cmd_push,
         "finalize": cmd_finalize,
         "lazy": cmd_lazy,
+        "usage": cmd_usage,
         "provider-health": cmd_provider_health,
         "resolve-prepare": cmd_resolve_prepare,
         "auto": cmd_dispatch,

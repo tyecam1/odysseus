@@ -1628,7 +1628,12 @@ def execute_claude(objective: str, *, timeout: float = 120.0) -> dict:
     no repository access: text-in/text-out for the cognitive-coordinator
     role. Credential handling stays entirely inside the CLI; this function
     never reads tokens or profile files. Fail-closed typed outcomes mirror
-    execute_glm, including provider-health recording."""
+    execute_glm, including provider-health recording.
+
+    Unlike the GLM lane (env-var auth), subscription OAuth needs the CLI's
+    normal config context: --bare skips it and reliably fails "Not logged
+    in" (verified live 2026-11-18). A neutral empty working directory keeps
+    project CLAUDE.md/context out of the call instead."""
     import os
     import subprocess
     import time
@@ -1656,13 +1661,15 @@ def execute_claude(objective: str, *, timeout: float = 120.0) -> dict:
             outcome["error_code"] = "launcher_missing"
             return {**base, "ok": False, "executed": False, "error_code": "launcher_missing",
                     "error": "claude CLI is missing or not executable"}
+        lane_cwd = Path.home() / ".cache" / "aoteru" / "claude-lane"
+        lane_cwd.mkdir(parents=True, exist_ok=True)
         proc = subprocess.Popen(
             [str(launcher), "--print", "--output-format", "json", "--model", _claude_model_alias(),
              "--max-turns", "1",
              "--disallowedTools", "Bash,Write,Edit,NotebookEdit,WebFetch,WebSearch,Task,Skill,Agent,TodoWrite,Read,Grep,Glob",
-             "--strict-mcp-config", "--bare", "--disable-slash-commands", "--no-session-persistence"],
+             "--strict-mcp-config", "--disable-slash-commands", "--no-session-persistence"],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, start_new_session=True, cwd=None,
+            text=True, start_new_session=True, cwd=lane_cwd,
         )
         stdout, stderr = proc.communicate(input=objective, timeout=timeout)
         for token in objective.split():

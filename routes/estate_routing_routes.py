@@ -295,6 +295,12 @@ def setup_estate_routing_routes() -> APIRouter:
                                          provider, owner, result["decision_id"])
         return result
 
+    @router.get("/usage")
+    def usage_windows(request: Request):
+        _scope_owner(request, {"estate:read", "estate:execute", "estate:admin"})
+        from src.provider_usage import usage_snapshot
+        return usage_snapshot()
+
     @router.post("/run/{execution_id}/finalize")
     async def finalize_run_execution(request: Request, execution_id: str, body: FinalizeBody):
         _scope_owner(request, {"estate:execute"})
