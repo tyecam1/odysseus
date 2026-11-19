@@ -3,7 +3,7 @@ artifact_type: agent-task
 task_schema: agent-task/v2
 task_id: 2026-11-19-lazyusage-skill-delivery-status-reading
 title: "Teach the /lazyUsage skill to read delivery status: kinds, skipped reasons, ledger and handoffs"
-status: ready
+status: done
 priority: critical
 task_type: implementation
 created_by: claude-controller
@@ -43,6 +43,13 @@ denied_paths:
 outputs:
   - an updated section 4 of the lazyUsage skill that explains how the controller reads delivery status
 result_path: .claude/skills/lazyUsage/SKILL.md
+acceptance_evidence:
+  - "Live delivery: /lazyUsage run b5db0e86 on lab service ba4aa58b; Sonnet coordinator (claude-sonnet-5) ranked this card first of six dispatchable candidates; codex-write execution fda7135f (gpt-6.1-sol) produced the edit in a ParkLease worktree."
+  - "Deterministic checks: one file changed, 15 lines added by the worker (16 after controller edits, limit 20), section 4 only, every backticked identifier grepped in src/lazy_usage_runtime.py, grep -c protected_handoff >= 1."
+  - "Independent review: claude-haiku-5-5 read-only against the runtime source, APPROVE WITH FIXES, all six findings applied. Same-family reviewer, not a Sol verdict."
+  - "Merged: tyecam1/odysseus PR 291, squash commit 37715711ae2cee576ca0c710d0854fb1ceb2ba9f."
+  - "Worker finalize defect found and fixed in PR 290 (ba4aa58b); recovery via am recover with exact identifiers; the lab has no GitHub credentials so the push failed and the change was published from the controller."
+closed_at: 2026-11-19
 ---
 
 # Teach the /lazyUsage skill to read delivery status
@@ -80,3 +87,9 @@ Do not change any other section, any code or any configuration. Keep the existin
 - Every identifier named above is spelled exactly as in `src/lazy_usage_runtime.py`.
 - Deterministic check: `git diff --stat` shows one file; `grep -c "protected_handoff" .claude/skills/lazyUsage/SKILL.md` is at least 1.
 - Independent economical review (Haiku/Terra/GLM-Flash) of the diff; owner acceptance by the controller after merge.
+
+## Closure (2026-11-19)
+
+Delivered by `/lazyUsage` run `b5db0e86`, execution `fda7135f`, merged as PR 291 (`37715711`). See `acceptance_evidence` above.
+
+Not claimed: the installed laptop copy at `~/.claude/skills/lazyUsage/SKILL.md` is a separate file and is updated only when the operator syncs it from `dev`.
