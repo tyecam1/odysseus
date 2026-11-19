@@ -1448,3 +1448,37 @@ def test_gate12_timed_out_verify_unit_is_retryable_not_an_authority_verdict(cfg,
                                                   {"repo_id": "test-repo", "worktree_path": "/p", "branch": "b"},
                                                   estate_worker.VERIFY_CALL_DEADLINE_S))
     assert response["ok"] is False and response["error"]["code"] == "executor_unavailable"
+
+
+def test_finalize_stages_a_tracked_file_under_a_gitignored_directory(cfg, repo):
+    """/lazyUsage run b5db0e86: `git add -- .claude/skills/x` on a tracked file in an ignored
+    directory stages it but exits 1, which finalize reported as finalize_ambiguous after 4 rounds."""
+    wt = repo["wt"]
+    (wt / ".gitignore").write_text(".claude/\n")
+    (wt / ".claude" / "skills").mkdir(parents=True)
+    (wt / ".claude" / "skills" / "SKILL.md").write_text("v1\n")
+    _git(wt, "add", ".gitignore")
+    _git(wt, "add", "-f", ".claude/skills/SKILL.md")
+    _git(wt, "commit", "-q", "-m", "track ignored file")
+    head = _git(wt, "rev-parse", "HEAD")
+    (wt / ".claude" / "skills" / "SKILL.md").write_text("v2\n")
+    (wt / "new.txt").write_text("fresh\n")                       # an untracked path alongside it
+    request = {**_finalize_request(repo), "expected_head_sha": head}
+    done = estate_worker._finalize_logic("E1", _spool("E1"), request)
+    assert done["outcome"] == "finalized" and done["committed"] is True, done
+    assert sorted(done["dirty_paths"]) == [".claude/skills/SKILL.md", "new.txt"]
+    assert _git(wt, "show", "HEAD:.claude/skills/SKILL.md") == "v2"
+    assert _git(wt, "show", "HEAD:new.txt") == "fresh"
+    assert _git(wt, "status", "--porcelain") == ""
+
+
+def test_finalize_stages_a_deleted_tracked_file(cfg, repo):
+    wt = repo["wt"]
+    (wt / "gone.txt").write_text("x\n")
+    _git(wt, "add", "gone.txt")
+    _git(wt, "commit", "-q", "-m", "add gone")
+    head = _git(wt, "rev-parse", "HEAD")
+    (wt / "gone.txt").unlink()
+    done = estate_worker._finalize_logic("E1", _spool("E1"), {**_finalize_request(repo), "expected_head_sha": head})
+    assert done["outcome"] == "finalized" and done["committed"] is True, done
+    assert "gone.txt" not in _git(wt, "ls-tree", "-r", "--name-only", "HEAD").split()

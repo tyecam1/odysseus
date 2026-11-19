@@ -683,3 +683,54 @@ def test_debt_reconciled_during_selection_is_persisted_on_a_dispatching_tick(db,
     view = rt.advance(db, run_id)
     assert all(d["task_ref"] != gone for d in view["checkpoint"]["owed_reviews"])
     assert db.get(LazyUsageRun, run_id).checkpoint["owed_reviews"] == view["checkpoint"]["owed_reviews"]
+
+
+def test_unfinalized_write_lease_makes_the_next_write_a_skip_not_a_failure(db, queue, monkeypatch):
+    """/lazyUsage run b5db0e86: after one write delivered, the second write hit ParkConflict
+    on the still-held lease and was charged as a failure that parked the activation."""
+    first = queue.add("odysseus", "a-first", execution_mode="implementation", allowed_paths=["src/**"])
+    second = queue.add("odysseus", "b-second", execution_mode="implementation", allowed_paths=["src/**"])
+    run_id = activate(db)
+    park_lease_ops.park_repo("odysseus", LAB, "/w/held", branch="task/held", session_id=run_id)   # unfinalized earlier write
+    monkeypatch.setattr(estate_router, "execute_write_via_worker", no_dispatch)
+    monkeypatch.setattr(park_lease_ops, "park_with_worktree", lambda *a, **kw: pytest.fail("must not try to park"))
+    view = rt.advance(db, run_id)
+    assert view["checkpoint"]["skipped"] == {first: "repo_lease_held", second: "repo_lease_held"}
+    assert view["counters"]["repeated_failures"] == 0 and view["counters"]["paid_calls"] == 0
+
+
+def test_a_held_lease_does_not_block_advisory_work(db, queue, monkeypatch):
+    queue.add("odysseus", "a-write", execution_mode="implementation", allowed_paths=["src/**"])
+    advisory = queue.add("odysseus", "b-advice", execution_mode="read-only")
+    run_id = activate(db)
+    park_lease_ops.park_repo("odysseus", LAB, "/w/held", branch="task/held", session_id=run_id)
+    seen = []
+    monkeypatch.setattr(estate_router, "run_task", lambda task: (seen.append(task["objective"]), advisory_pass())[1])
+    view = rt.advance(db, run_id)
+    assert len(seen) == 1 and "b-advice" in seen[0]
+    assert view["checkpoint"]["ledger"][advisory]["outcome"] == "advisory_complete"
+
+
+def test_a_stale_unprotected_lease_is_reclaimable_and_does_not_block_a_write(db, queue, monkeypatch):
+    """Review: park_repo reclaims a stale lease with no unresolved execution, so it is not 'held'."""
+    ref = queue.add("odysseus", "a", execution_mode="implementation", allowed_paths=["src/**"])
+    run_id = activate(db)
+    lease = park_lease_ops.park_repo("odysseus", LAB, "/w/dead", branch="task/dead", session_id="dead-run")
+    row = db.get(cdb.ParkLease, lease["lease_id"])
+    row.heartbeat_at = utcnow_naive() - timedelta(days=2)
+    db.commit()
+    verdict = rt._assess(rt.refresh_frontier(["odysseus"]), db.get(LazyUsageRun, run_id),
+                         {"ref": ref, "repo_id": "odysseus", "bucket": "ready"})
+    assert verdict["blocker"] != "repo_lease_held" and verdict["ok"] is True
+
+
+def test_a_fresh_lease_still_blocks_and_an_old_preparing_reservation_does_not(db, queue):
+    ref = queue.add("odysseus", "a", execution_mode="implementation", allowed_paths=["src/**"])
+    run_id = activate(db)
+    frontier, record = rt.refresh_frontier(["odysseus"]), {"ref": ref, "repo_id": "odysseus", "bucket": "ready"}
+    lease = park_lease_ops.park_repo("odysseus", LAB, "/w/x", branch="task/x", session_id="s", status="preparing")
+    assert rt._assess(frontier, db.get(LazyUsageRun, run_id), record)["blocker"] == "repo_lease_held"
+    row = db.get(cdb.ParkLease, lease["lease_id"])
+    row.heartbeat_at = utcnow_naive() - timedelta(seconds=park_lease_ops.PARK_PREPARE_STALE_SECONDS + 60)
+    db.commit()
+    assert rt._assess(frontier, db.get(LazyUsageRun, run_id), record)["blocker"] != "repo_lease_held"
