@@ -35,6 +35,21 @@ EXECUTION_TERMINAL = frozenset({"succeeded", "failed", "timed_out", "interrupted
 TASK_TERMINAL = frozenset({"done", "completed", "rejected", "superseded", "closed", "cancelled", "canceled"})
 RECHECK_SECONDS = 300
 LOOP_SECONDS = 25
+# Execution classes. Only an implementation can deliver; every other class
+# produces advisory evidence or a human handoff that never counts as delivery.
+KINDS = ("implementation", "reconnaissance", "evidence", "review", "protected_handoff")
+DELIVERING_KINDS = frozenset({"implementation"})
+HANDOFF_TASK_TYPES = frozenset({"human-approval", "human-handoff", "handoff"})
+EVIDENCE_TASK_TYPES = frozenset({"evidence-synthesis", "evidence-gathering", "evidence"})
+READ_ONLY_MODES = frozenset({"read-only", "read_only", "advisory"})
+# Cross-activation memory. An unchanged revision is not re-dispatched while a
+# prior result is fresh; both windows expire, so a retry is never blocked forever.
+ADVISORY_REUSE_SECONDS = 86400
+FAILURE_RETRY_SECONDS = 3600
+LEDGER_MAX = 200
+HISTORY_RUNS = 10
+HISTORY_SCAN_ROWS = 500
+MAX_ASSESSED = 24
 
 
 def _checkpoint(run, **fields):
@@ -103,13 +118,16 @@ def activate_run(db, owner, repo_scope=None, budget_overrides=None, coordinator=
     if db.query(LazyUsageRun).filter(LazyUsageRun.state.notin_(TERMINAL)).first():
         db.rollback()
         raise RunError(409, "a non-terminal activation already exists")
+    scope = list(dict.fromkeys(scope))
+    ledger, owed = _inherited_history(db, scope)
     run = LazyUsageRun(id=str(uuid.uuid4()), state="requested", created_by=owner,
-                       initializer=INITIALIZER, repo_scope=list(dict.fromkeys(scope)),
+                       initializer=INITIALIZER, repo_scope=scope,
                        budgets=budgets, started_at=utcnow_naive(),
                        counters={"paid_calls": 0, "tool_calls": 0, "no_delivery_turns": 0,
                                  "repeated_failures": 0, "last_failure_signature": None},
                        checkpoint={"phase": "idle", "in_flight_execution_id": None,
-                                   "owed_reviews": [], "next_action": "refresh_frontier",
+                                   "owed_reviews": owed, "ledger": ledger,
+                                   "next_action": "refresh_frontier",
                                    **({"coordinator": coordinator} if coordinator and coordinator.get("enabled") else {})})
     db.add(run)
     try:
@@ -230,11 +248,29 @@ def _contract(frontier, record):
     return metadata, body
 
 
-def _task(record, meta, body):
-    assessment = meta.get("approval_required") is True
-    review = record["bucket"] == "review" or meta.get("task_type") in {"review", "independent-review"}
-    write = not (assessment or review) and meta.get("execution_mode") not in {"read-only", "read_only", "advisory"}
-    capabilities = meta.get("capabilities") or ["code-strong" if write else "local-fast"]
+def _classify(record, meta):
+    """Deterministic execution class from the owner card; never from model output."""
+    task_type = str(meta.get("task_type") or "").lower()
+    mode = str(meta.get("execution_mode") or "").lower()
+    if (str(meta.get("executor") or "").lower() == "human" or mode == "handoff"
+            or task_type in HANDOFF_TASK_TYPES):
+        return "protected_handoff"
+    if record["bucket"] == "review" or task_type in {"review", "independent-review"}:
+        return "review"
+    if meta.get("approval_required") is True:
+        return "reconnaissance"
+    if mode in READ_ONLY_MODES or task_type in EVIDENCE_TASK_TYPES:
+        return "evidence"
+    return "implementation"
+
+
+def _task(record, meta, body, kind=None):
+    kind = kind or _classify(record, meta)
+    assessment = kind == "reconnaissance"
+    write = kind == "implementation"
+    # Advisory classes read the repository, which the plain local model cannot
+    # do (it fabricates plausible output), so they default to a paid lane.
+    capabilities = meta.get("capabilities") or ["code-strong"]
     if not isinstance(capabilities, list) or not all(isinstance(v, str) for v in capabilities):
         raise ValueError("invalid task capabilities")
     # The contract is loaded only for a selected task and stays in memory.
@@ -284,6 +320,156 @@ def _reconcile_review_debts(run, task_ref, *, verified=False, acceptance=None):
                            not (settled or verified and _debt_gate(debt) == "verification")])
 
 
+def _deliverable_surface(meta):
+    """A write task must name where its output lands (paths, outputs or a result file)."""
+    return any(meta.get(key) for key in ("allowed_paths", "outputs", "result_path"))
+
+
+def _static_blocker(kind, meta, write):
+    """Feasibility facts that need no routing: authority, tools and deliverables."""
+    if kind == "protected_handoff":
+        return "protected_handoff"
+    if meta.get("blocked_by") or meta.get("protected_gate"):
+        return "protected_gate"
+    if meta.get("requires_zotero") is True:
+        # No estate host declares a Zotero capability, so no lane can honour it.
+        return "requires_zotero_unavailable"
+    if write and not _deliverable_surface(meta):
+        return "no_deliverable_surface"
+    return None
+
+
+def _age_seconds(stamp):
+    try:
+        return (utcnow_naive() - datetime.fromisoformat(stamp)).total_seconds()
+    except (TypeError, ValueError):
+        return float("inf")
+
+
+def _recent_blocker(run, ref, revision):
+    """Why an unchanged revision should not be dispatched again right now."""
+    cp = run.checkpoint
+    debts = [d for d in cp.get("owed_reviews", []) if d.get("task_ref") == ref]
+    retry_due = False
+    for debt in debts:
+        if not debt.get("error") or not debt.get("retry_after"):
+            continue
+        reset = datetime.fromisoformat(debt["retry_after"].replace("Z", "+00:00"))
+        retry_due |= reset.tzinfo is not None and datetime.now(timezone.utc) >= reset
+    if cp.get("attempted", {}).get(ref) == revision and not retry_due:
+        return "attempted_this_activation"
+    entry = (cp.get("ledger") or {}).get(ref)
+    if not entry or entry.get("revision") != revision:
+        return None
+    outcome, age = entry.get("outcome"), _age_seconds(entry.get("at"))
+    if outcome in {"advisory_complete", "protected_handoff", "attempted_legacy",
+                   "delivered"} and age < ADVISORY_REUSE_SECONDS:
+        return "result_reusable"
+    if outcome == "failed" and age < FAILURE_RETRY_SECONDS:
+        return "failure_backoff"
+    if outcome == "quota_parked" and not retry_due and (
+            any(d.get("error") and d.get("retry_after") for d in debts) or age < FAILURE_RETRY_SECONDS):
+        # Blocked until the provider's *stated* reset; with no stated reset (the
+        # debt was reconciled away) it is only a bounded backoff, never permanent.
+        return "quota_retry_pending"
+    if outcome == "delivered_pending_acceptance" and any(_debt_gate(d) == "owner_acceptance" for d in debts):
+        return "awaiting_owner_acceptance"
+    return None
+
+
+def _assess(frontier, run, record):
+    """Side-effect-free feasibility verdict for one candidate.
+
+    Validates, before any dispatch, that the card's class, authority, required
+    tools, deliverable, model lane and provider can actually deliver. `ok` is
+    the single dispatch gate; `blocker` is a stable reason code. Selection and
+    the coordinator's evidence both come from here, so they cannot disagree.
+    """
+    meta, body = _contract(frontier, record)
+    revision = hashlib.sha256(json.dumps(meta, sort_keys=True, default=str).encode() + body.encode()).hexdigest()
+    kind = _classify(record, meta)
+    verdict = {"ref": record["ref"], "kind": kind, "delivers": kind in DELIVERING_KINDS, "ok": False,
+               "blocker": None, "revision": revision, "meta": meta, "body": body, "title": meta.get("title")}
+    write = kind == "implementation"
+    verdict["blocker"] = _static_blocker(kind, meta, write) or _recent_blocker(run, record["ref"], revision)
+    if verdict["blocker"]:
+        return verdict
+    task, write = _task(record, meta, body, kind)
+    route = estate_router.resolve_route(task, record_decision=False)
+    selected = route.get("route") or {}
+    if not _reviewer_allowed(record, meta, selected):
+        return {**verdict, "blocker": "reviewer_model_not_attested"}
+    host = selected.get("host")
+    checked = next((h for h in route.get("hosts_checked", []) if h.get("host_id") == host), {})
+    executor = selected.get("executor")
+    paid = executor == "none"
+    provider = estate_router._resolve_paid_provider(selected.get("model_alias")).get("provider") if paid else None
+    needed = "codex-write" if write else provider if paid else executor
+    if not host or needed not in checked.get("qualified_executors", []):
+        return {**verdict, "blocker": "no_qualified_lane"}
+    if write and (provider != "codex" or not paid):
+        return {**verdict, "blocker": "no_qualified_write_lane"}
+    if not write and executor == "local":
+        # A plain local model has no repository access; its "reconnaissance"
+        # is fabricated text, so it can never evidence or deliver anything.
+        return {**verdict, "blocker": "ungrounded_local_executor"}
+    if executor == "deterministic":
+        # The router's deterministic route answers placement, not execution.
+        return {**verdict, "blocker": "deterministic_route_is_not_execution"}
+    if paid:
+        health = estate_router.provider_allows_dispatch(provider)
+        if not health.get("allowed"):
+            # Verified Codex usage-limit failover goes through the existing
+            # explicit-provider router, retaining scope. No launcher or
+            # credential observation qualifies a GLM route.
+            if not write and provider == "codex" and health.get("state") == "quota_exhausted":
+                alternate_task = {**task, "routing": {**task["routing"], "paid_provider": "glm"}}
+                alternate = estate_router.resolve_route(alternate_task, record_decision=False)
+                alternate_selected = alternate.get("route") or {}
+                alternate_host = alternate_selected.get("host")
+                alternate_entry = next((h for h in alternate.get("hosts_checked", [])
+                                        if h.get("host_id") == alternate_host), {})
+                if (alternate_host and "glm" in alternate_entry.get("qualified_executors", [])
+                        and estate_router.provider_allows_dispatch("glm").get("allowed")
+                        and _reviewer_allowed(record, meta, alternate_selected)):
+                    task, host, provider = alternate_task, alternate_host, "glm"
+                else:
+                    return {**verdict, "blocker": "provider_unavailable"}
+            else:
+                return {**verdict, "blocker": "provider_unavailable"}
+    return {**verdict, "ok": True, "task": task, "write": write, "host": host, "provider": provider}
+
+
+def _ordered(frontier, plan=None):
+    rows = sorted(frontier["records"], key=lambda r: (
+        portfolio.RANK[r["bucket"]], portfolio.PRIORITY.get(str(r.get("priority", "")).lower(), 9), r["ref"]))
+    if plan and isinstance(plan.get("order"), list):
+        # Coordinator advice reorders candidates; every gate is unchanged.
+        rank = {ref: i for i, ref in enumerate(plan["order"])}
+        rows.sort(key=lambda r: rank.get(r["ref"], len(rank)))
+    return [r for r in rows if r["bucket"] not in {"inbox", "blocked", "blocked-human"}
+            and str(r.get("status", "")).lower() not in TASK_TERMINAL]
+
+
+def candidate_evidence(frontier, run):
+    """Compact per-candidate feasibility for the coordinator (bounded, no prose)."""
+    out = []
+    for record in _ordered(frontier)[:MAX_ASSESSED]:
+        try:
+            verdict = _assess(frontier, run, record)
+        except Exception as exc:
+            verdict = {"ref": record["ref"], "kind": None, "delivers": False, "ok": False,
+                       "blocker": "assessment_" + type(exc).__name__, "meta": {}}
+        entry = (run.checkpoint.get("ledger") or {}).get(record["ref"]) or {}
+        out.append({"ref": record["ref"], "kind": verdict["kind"], "feasible": verdict["ok"],
+                    "delivers": verdict["delivers"], "blocker": verdict["blocker"],
+                    "title": str(verdict.get("title") or "")[:80],
+                    "verification_route": verdict["meta"].get("verification_route"),
+                    "approval_required": verdict["meta"].get("approval_required"),
+                    "last_outcome": entry.get("outcome")})
+    return out
+
+
 def _choose(frontier, run, plan=None):
     # Re-read owner outcomes even for tasks that no longer need dispatch.
     # Absence alone never resolves debt; the done card must be read explicitly.
@@ -292,82 +478,97 @@ def _choose(frontier, run, plan=None):
             rid, _, _ = portfolio.parse_ref(task_ref)
             acceptance = _owner_task_status({"repo_id": rid, "task_ref": task_ref}, frontier)
             _reconcile_review_debts(run, task_ref, acceptance=acceptance)
-    attempted = run.checkpoint.get("attempted", {})
-    rows = sorted(frontier["records"], key=lambda r: (
-        portfolio.RANK[r["bucket"]], portfolio.PRIORITY.get(str(r.get("priority", "")).lower(), 9), r["ref"]))
-    if plan and isinstance(plan.get("order"), list):
-        # Coordinator advice reorders candidates; every gate below is unchanged.
-        rank = {ref: i for i, ref in enumerate(plan["order"])}
-        rows.sort(key=lambda r: rank.get(r["ref"], len(rank)))
-    for record in rows:
-        # Inbox and blocked metadata do not prove executable authority.
-        if record["bucket"] in {"inbox", "blocked", "blocked-human"}:
+    skipped = {}
+    for record in _ordered(frontier, plan):
+        try:
+            verdict = _assess(frontier, run, record)
+        except Exception as exc:
+            skipped[record["ref"]] = "assessment_" + type(exc).__name__
             continue
-        if str(record.get("status", "")).lower() in TASK_TERMINAL:
-            continue
-        meta, body = _contract(frontier, record)
-        revision = hashlib.sha256(json.dumps(meta, sort_keys=True, default=str).encode() + body.encode()).hexdigest()
-        if attempted.get(record["ref"]) == revision:
-            retry_due = False
-            for debt in run.checkpoint.get("owed_reviews", []):
-                if debt.get("task_ref") != record["ref"] or not debt.get("error") or not debt.get("retry_after"):
-                    continue
-                reset = datetime.fromisoformat(debt["retry_after"].replace("Z", "+00:00"))
-                retry_due |= reset.tzinfo is not None and datetime.now(timezone.utc) >= reset
-            if not retry_due:
-                continue
-        if meta.get("blocked_by") or meta.get("protected_gate"):
-            continue
-        task, write = _task(record, meta, body)
-        route = estate_router.resolve_route(task, record_decision=False)
-        selected = route.get("route") or {}
-        if not _reviewer_allowed(record, meta, selected):
-            continue
-        host = selected.get("host")
-        checked = next((h for h in route.get("hosts_checked", []) if h.get("host_id") == host), {})
-        executor = selected.get("executor")
-        paid = executor == "none"
-        provider = estate_router._resolve_paid_provider(selected.get("model_alias")).get("provider") if paid else None
-        needed = "codex-write" if write else provider if paid else executor
-        if (not host or needed not in checked.get("qualified_executors", []) or
-                (write and (provider != "codex" or not paid))):
-            continue
-        if paid:
-            health = estate_router.provider_allows_dispatch(provider)
-            if not health.get("allowed"):
-                # Verified Codex usage-limit failover goes through the
-                # existing explicit-provider router, retaining scope. No
-                # launcher/credential observation qualifies a GLM route.
-                if not write and provider == "codex" and health.get("state") == "quota_exhausted":
-                    alternate_task = {**task, "routing": {**task["routing"], "paid_provider": "glm"}}
-                    alternate = estate_router.resolve_route(alternate_task, record_decision=False)
-                    alternate_selected = alternate.get("route") or {}
-                    alternate_host = alternate_selected.get("host")
-                    alternate_entry = next((h for h in alternate.get("hosts_checked", [])
-                                            if h.get("host_id") == alternate_host), {})
-                    if (alternate_host and "glm" in alternate_entry.get("qualified_executors", [])
-                            and estate_router.provider_allows_dispatch("glm").get("allowed")
-                            and _reviewer_allowed(record, meta, alternate_selected)):
-                        task, host, provider = alternate_task, alternate_host, "glm"
-                    else:
-                        continue
-                else:
-                    continue
-        if executor == "deterministic":
-            # The router's deterministic route is an answer about placement,
-            # not a task executor. Never fabricate delivery from that answer.
-            continue
-        return record, meta, task, write, host, provider, revision
+        if verdict["ok"]:
+            _checkpoint(run, skipped=dict(list(skipped.items())[:40]))
+            return (record, verdict["meta"], verdict["task"], verdict["write"], verdict["host"],
+                    verdict["provider"], verdict["revision"], verdict["kind"])
+        skipped[record["ref"]] = verdict["blocker"]
+        if verdict["blocker"] == "protected_handoff":
+            entry = (run.checkpoint.get("ledger") or {}).get(record["ref"]) or {}
+            if entry.get("revision") != verdict["revision"] or entry.get("outcome") != "protected_handoff":
+                # Recorded once as a human action; never dispatched to a model.
+                _ledger_put(run, record["ref"], verdict["revision"], "protected_handoff", "protected_handoff")
+    _checkpoint(run, skipped=dict(list(skipped.items())[:40]))
     return None
 
 
-def _failure(run, signature):
-    digest = hashlib.sha256(signature.encode()).hexdigest()
+def _failure(run, cause, scope=None):
+    """Record one failed attempt.
+
+    The repeat signature is task + revision + cause. Different tasks (or one
+    task whose card changed) sharing a status or an error class are separate
+    failures; only the same task, revision and cause in a row is a repeat.
+    """
+    parts = [str(scope[0]), str(scope[1])] if scope else []
+    digest = hashlib.sha256("|".join([*parts, cause]).encode()).hexdigest()
     counters = dict(run.counters)
     counters["no_delivery_turns"] += 1
     counters["repeated_failures"] = counters["repeated_failures"] + 1 if counters.get("last_failure_signature") == digest else 1
     counters["last_failure_signature"] = digest
     run.counters = counters
+
+
+def _no_delivery(run):
+    """A successful execution that did not deliver: a no-delivery turn, never a
+    failure. It also ends any repeated-failure streak."""
+    counters = dict(run.counters)
+    counters["no_delivery_turns"] += 1
+    counters["repeated_failures"] = 0
+    counters["last_failure_signature"] = None
+    run.counters = counters
+
+
+def _task_scope(run):
+    """The task an in-flight attempt belongs to, or None while still selecting."""
+    cp = run.checkpoint or {}
+    if cp.get("phase") in {"preparing", "dispatching", "observing"} and cp.get("task_ref"):
+        return cp["task_ref"], cp.get("task_revision")
+    return None
+
+
+def _ledger_put(run, task_ref, revision, kind, outcome, execution_id=None):
+    ledger = dict(run.checkpoint.get("ledger") or {})
+    ledger[task_ref] = {"revision": revision, "kind": kind, "outcome": outcome,
+                        "execution_id": execution_id, "at": utcnow_naive().isoformat()}
+    if len(ledger) > LEDGER_MAX:
+        for ref in sorted(ledger, key=lambda r: ledger[r].get("at") or "")[:len(ledger) - LEDGER_MAX]:
+            del ledger[ref]
+    _checkpoint(run, ledger=ledger)
+
+
+def _inherited_history(db, scope):
+    """Carry results and acceptance debt across activations (newest wins).
+
+    Entries only suppress re-dispatch of an unchanged revision inside the
+    reuse windows above; they never block a changed card or a due retry.
+    """
+    candidates = db.query(LazyUsageRun).filter(LazyUsageRun.state.in_(TERMINAL)).order_by(
+        LazyUsageRun.started_at.desc()).limit(HISTORY_SCAN_ROWS).all()
+    prior = [old for old in candidates if set(old.repo_scope or []) & set(scope)][:HISTORY_RUNS]
+    ledger, owed = {}, {}
+    in_scope = lambda ref: isinstance(ref, str) and ref.split(":", 1)[0] in scope
+    for old in reversed(prior):
+        cp = old.checkpoint or {}
+        at = (old.finished_at or old.started_at or utcnow_naive()).isoformat()
+        for ref, revision in (cp.get("attempted") or {}).items():
+            if in_scope(ref):
+                ledger[ref] = {"revision": revision, "kind": None, "outcome": "attempted_legacy",
+                               "execution_id": None, "at": at}
+        for ref, entry in (cp.get("ledger") or {}).items():
+            if in_scope(ref) and isinstance(entry, dict):
+                ledger[ref] = dict(entry)
+        for debt in cp.get("owed_reviews") or []:
+            if in_scope(debt.get("task_ref")):
+                owed[(debt.get("task_ref"), _debt_gate(debt))] = dict(debt)
+    newest = sorted(ledger, key=lambda r: ledger[r].get("at") or "")[-LEDGER_MAX:]
+    return {ref: ledger[ref] for ref in newest}, list(owed.values())
 
 
 def _reported_usage(result):
@@ -502,6 +703,12 @@ def _observe(db, run):
     # Boundary totals include child attempts/restarts when reported. The
     # original dispatch was charged before admission, even if it crashed.
     usage = _reported_usage(result)
+    if usage is None:
+        started = db.query(EstateExecution.worktree_resolution).filter_by(id=execution_id).populate_existing().scalar()
+        if started == "not_started":
+            # The worker proved the writer never ran: nothing beyond the dispatch
+            # charge can be owed, so there is no child usage to wait for.
+            usage = {"paid_calls": 1, "tool_calls": 1}
     accounted = run.checkpoint.get("accounted_execution_id") == execution_id
     if not accounted and usage is not None:
         _charge(run, paid_calls=max(0, usage["paid_calls"] - 1),
@@ -517,9 +724,12 @@ def _observe(db, run):
     task_terminal = str(acceptance.get("status", "")).lower() in TASK_TERMINAL
     if not passed and not acceptance["delivered"] and not task_terminal:
         acceptance = {"delivered": False, "status": "verification_pending" if parked else "failed"}
-    if passed and not acceptance["delivered"] and not task_terminal:
+    kind = run.checkpoint.get("task_kind") or "implementation"
+    task_ref, revision = run.checkpoint["task_ref"], run.checkpoint.get("task_revision")
+    # A re-adjudication report is not the task's output: nothing is owed on it.
+    if passed and kind != "reconnaissance" and not acceptance["delivered"] and not task_terminal:
         owed = list(run.checkpoint.get("owed_reviews", []))
-        debt = {"task_id": run.checkpoint["current_task_id"], "task_ref": run.checkpoint["task_ref"],
+        debt = {"task_id": run.checkpoint["current_task_id"], "task_ref": task_ref,
                 "gate": "owner_acceptance",
                 "execution_id": execution_id, "provider": None, "error": None, "retry_after": None,
                 "next_action": "owner_acceptance_and_required_independent_verification"}
@@ -527,10 +737,24 @@ def _observe(db, run):
     if acceptance["delivered"]:
         run.counters = {**run.counters, "no_delivery_turns": 0, "repeated_failures": 0,
                         "last_failure_signature": None}
-    elif not accounted:
-        _failure(run, str(result.get("error") or acceptance["status"]))
+        outcome = "delivered"
+    elif parked:
+        outcome = "quota_parked"
+    elif passed:
+        outcome = "delivered_pending_acceptance" if kind in DELIVERING_KINDS else "advisory_complete"
+    else:
+        outcome = "failed"
+    if not accounted and not acceptance["delivered"]:
+        if passed:
+            # Executed and verified but not accepted: not a failure. Advisory
+            # classes can never deliver, so this only spends a no-delivery turn.
+            _no_delivery(run)
+        else:
+            cause = str(result.get("error") or provider_result.get("error_code") or "verification_failed")
+            _failure(run, cause, scope=(task_ref, revision))
+    _ledger_put(run, task_ref, revision, kind, outcome, execution_id)
     attempted = dict(run.checkpoint.get("attempted", {}))
-    attempted[run.checkpoint["task_ref"]] = run.checkpoint.get("task_revision")
+    attempted[task_ref] = revision
     _checkpoint(run, attempted=attempted, last_execution_id=execution_id,
                 in_flight_execution_id=None, phase="idle", acceptance=acceptance,
                 accounted_execution_id=execution_id, next_action="refresh_frontier")
@@ -684,8 +908,23 @@ def advance(db, run_id):
         _save(db, run, last_frontier_digest=digest)
         # Opt-in bounded cognitive step: one advisory plan per unchanged
         # frontier state, charged to this run's budgets, fail-closed.
-        plan = coordinator.coordinator_step(db, run, frontier, digest)
+        # Feasibility evidence is only computed when a coordinator call may
+        # happen, so a plain activation pays nothing extra for it.
+        evidence = (candidate_evidence(frontier, run)
+                    if (run.checkpoint.get("coordinator") or {}).get("enabled") else None)
+        plan = coordinator.coordinator_step(db, run, frontier, digest, evidence)
         chosen = _choose(frontier, run, plan)
+        # Selection records skipped reasons, one-off handoff entries and reconciled
+        # owed reviews on the checkpoint. Only that evidence is carried across a reload:
+        # writing the whole pre-reload snapshot back would overwrite a concurrent
+        # operator pause/stop that committed while selection ran (both the dispatch and
+        # the nothing-eligible paths below start from the freshly locked row).
+        evidence_cp = {key: run.checkpoint[key] for key in ("skipped", "ledger", "owed_reviews")
+                       if key in run.checkpoint}
+        run = _load(db, run.id)
+        if run.state != "running":
+            return _save(db, run, phase="idle", **evidence_cp)
+        _checkpoint(run, **evidence_cp)
         if chosen is None:
             if not frontier["records"] and not frontier["unavailable"] and not frontier["warnings"] and not run.checkpoint.get("owed_reviews"):
                 return _finish(db, run, "completed", "authorised_work_exhausted")
@@ -694,18 +933,15 @@ def advance(db, run_id):
             reason = _budget_reason(run)
             return _finish(db, run, "budget_exhausted", reason) if reason else _park(
                 db, run, "no eligible frontier; recheck on frontier, authority or provider change")
-        record, meta, task, write, host, provider, revision = chosen
+        record, meta, task, write, host, provider, revision, kind = chosen
         # The coordinator's decomposition/next_action stay checkpointed as
         # untrusted advisory evidence only (Sol review P1: never inject
         # model-generated instruction text into a worker objective).
-        run = _load(db, run.id)
-        if run.state != "running":
-            return _save(db, run, phase="idle")
         # Only criterion headings/identifiers belong in checkpoints, never
         # arbitrary body text. The full contract remains in its owner file.
         _save(db, run, current_task_id=str(meta.get("task_id") or record["ref"]),
               task_ref=record["ref"], repo_id=record["repo_id"],
-              task_revision=revision,
+              task_revision=revision, task_kind=kind,
               dispatch_provider=provider,
               acceptance_criteria={"contract_ref": record["ref"], "verification_route": meta.get("verification_route")},
               phase="preparing", next_action="preflight")
@@ -736,7 +972,7 @@ def advance(db, run_id):
             "write_classified": True, "requires_repo_write": write,
             **({"paid_provider": provider} if provider is not None else {})}])
         if not preflight.get("ok"):
-            _failure(run, "preflight_unavailable")
+            _failure(run, "preflight_unavailable", scope=(record["ref"], revision))
             _checkpoint(run, phase="idle")
             _release_owned_lease(db, run)
             return _park(db, run, "delegation preflight has no qualified route")
@@ -773,7 +1009,8 @@ def advance(db, run_id):
                 return _save(db, run, phase="observing", in_flight_execution_id=actual_id)
             # Positive admission refusal: the reserved id was never launched.
             _quota_debt(run, result)
-            _failure(run, str(result.get("error_code") or "admission_refused"))
+            _failure(run, str(result.get("error_code") or "admission_refused"),
+                     scope=(record["ref"], revision))
             _checkpoint(run, in_flight_execution_id=None, phase="idle")
             _release_owned_lease(db, run)
             return _save(db, run)
@@ -790,6 +1027,13 @@ def advance(db, run_id):
         task["_activation_deadline"] = (run.started_at.replace(tzinfo=timezone.utc) +
                                         timedelta(seconds=run.budgets["max_seconds"])).isoformat()
         result = estate_router.run_task(task)
+        if _reported_usage(result) is None:
+            # run_task is ONE synchronous advisory dispatch: it cannot restart or spawn a
+            # second dispatch, so the dispatch total is what this loop charged before
+            # launch. paid_calls counts DISPATCHES (as for a write), not the model turns
+            # inside one CLI invocation. A durable worker boundary, which can restart or
+            # spawn children, keeps the stricter rule: absence there is unknown, not zero.
+            result = {**result, "usage": {"paid_calls": int(provider is not None), "tool_calls": 1}}
         row = db.get(EstateExecution, execution_id)
         row.lifecycle_state = "succeeded" if result.get("ok") and result.get("executed") else "failed"
         row.result_json = json.dumps(result)
@@ -801,7 +1045,7 @@ def advance(db, run_id):
         run = _load(db, run_id)
         # Never store exception text: it can contain a task prompt or secrets.
         # Provider diagnostics are recorded only by the explicit quota path.
-        _failure(run, type(exc).__name__)
+        _failure(run, type(exc).__name__, scope=_task_scope(run))
         if run.checkpoint.get("in_flight_execution_id"):
             return _park(db, run, "dispatch observation required after " + type(exc).__name__, automatic=False)
         if run.checkpoint.get("phase") == "preparing":

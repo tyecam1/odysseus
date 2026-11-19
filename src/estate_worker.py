@@ -957,6 +957,19 @@ def _execution_aggregate(spool: Path, *, fence_unstarted: bool) -> tuple[bool | 
     return aggregate, units
 
 
+def _execution_usage(spool: Path) -> dict:
+    """Worker-boundary totals for one execution, from decision files only.
+
+    The writer is exactly one paid model call (once its runner won `execute`);
+    each finalize or push attempt is a further worker tool call. Never parsed
+    from model prose, and an execution that never ran reports zero.
+    """
+    run = read_decision(_spool_files(spool)["run"])
+    wrote = int(bool(run) and run.get("decision") == "execute")
+    attempts = len(_attempts(spool, "finalize")) + len(_attempts(spool, "push"))
+    return {"paid_calls": wrote, "tool_calls": wrote + attempts}
+
+
 def _execution_view(spool: Path) -> dict:
     """Derived state (S6.6): computed only from decision files plus
     quiescence, never from an overwritable field."""
@@ -988,6 +1001,7 @@ def _execution_view(spool: Path) -> dict:
         view["error"] = run.get("reason")
         return view
     view["handle"] = {key: run.get(key) for key in ("pid", "create_time", "cgroup", "unit")}
+    view["usage"] = _execution_usage(spool)
     view["finalize_commit"] = read_decision(spool / "finalize" / "commit.json")
     writer_quiescent = _unit_quiescent(run)
     recorded = telemetry.get("state")

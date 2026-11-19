@@ -513,7 +513,10 @@ def _apply_view(execution_id: str, view: dict, *, start_answer: bool = False, fe
             _record_outcome(row, "interrupted", row.host_id)
         return
     if state in _TERMINAL:
-        result = view.get("result") or {}
+        result = dict(view.get("result") or {})
+        if isinstance(view.get("usage"), dict):
+            # Child usage as reported at the worker boundary (never model prose).
+            result.setdefault("usage", view["usage"])
         if _transition(execution_id, ("running",), lifecycle_state=state, finished_at=now,
                        result_json=json.dumps(result), exit_status="0" if state == "succeeded" else "1",
                        error=None if state == "succeeded" else result.get("error")):

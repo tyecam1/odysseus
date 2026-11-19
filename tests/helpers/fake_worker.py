@@ -75,6 +75,8 @@ class FakeWorker:
                "handle": self.handle(execution_id) if view["state"] not in ("starting", "start_failed") else None}
         if "result" in view:
             out["result"] = view["result"]
+        if "usage" in view:     # worker-boundary child usage, when the worker reports it
+            out["usage"] = view["usage"]
         return out
 
     def _start(self, payload):
