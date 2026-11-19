@@ -200,8 +200,10 @@ def test_cards_are_classified_from_metadata(meta, bucket, kind):
 
 
 def test_only_implementation_delivers():
-    assert rt.DELIVERING_KINDS == {"implementation"}
-    assert set(rt.KINDS) - rt.DELIVERING_KINDS == {"reconnaissance", "evidence", "review", "protected_handoff"}
+    # Evidence delivers only with a review-side deliverable (see test_lazy_usage_reliability);
+    # reconnaissance, review (no attested reviewer write lane yet) and handoffs never do.
+    assert rt.DELIVERING_KINDS == {"implementation", "evidence"}
+    assert set(rt.KINDS) - rt.DELIVERING_KINDS == {"reconnaissance", "review", "protected_handoff"}
 
 
 def test_successful_reconnaissance_is_never_delivery_or_debt(db, queue, monkeypatch):
@@ -211,8 +213,9 @@ def test_successful_reconnaissance_is_never_delivery_or_debt(db, queue, monkeypa
     view = rt.advance(db, run_id)
     assert view["checkpoint"]["acceptance"]["delivered"] is False
     assert view["checkpoint"]["ledger"][ref]["kind"] == "reconnaissance"
-    assert view["checkpoint"]["ledger"][ref]["outcome"] == "advisory_complete"
-    assert view["owed_reviews"] == []          # a re-adjudication report is not task output
+    # A re-adjudication report is not task output: the only thing owed is ONE owner approval.
+    assert [d["gate"] for d in view["owed_reviews"]] == ["owner_approval"]
+    assert view["checkpoint"]["ledger"][ref]["outcome"] == "awaiting_approval"
     assert view["counters"]["repeated_failures"] == 0
     assert view["counters"]["no_delivery_turns"] == 1
 
@@ -619,7 +622,7 @@ def test_selection_evidence_survives_when_another_task_is_dispatched(db, queue, 
     view = rt.advance(db, activate(db, ("obsidian-phd",)))
     assert view["checkpoint"]["ledger"][handoff]["outcome"] == "protected_handoff"
     assert view["checkpoint"]["skipped"][handoff] == "protected_handoff"
-    assert any(e["outcome"] == "advisory_complete" for e in view["checkpoint"]["ledger"].values())
+    assert any(e["outcome"] == "awaiting_approval" for e in view["checkpoint"]["ledger"].values())
 
 
 def test_operator_pause_during_selection_is_not_undone(db, queue, monkeypatch):

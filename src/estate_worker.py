@@ -1490,11 +1490,74 @@ def _exact_commit_push(path: str, commit_sha: str, branch: str) -> dict:
             "error": (pushed.stderr or "").strip()[-500:] or "git push failed", "at": _utcnow()}
 
 
+_RENAME_OR_COPY = ("R", "C")
+
+
+def _parse_status_z(text: str) -> list[dict]:
+    """Parse `git status --porcelain=v1 -z` (never the text mode).
+
+    Text mode quotes names containing spaces, quotes, tabs or non-ASCII bytes and
+    prints a rename as one `old -> new` token, so both were passed to `git add` as a
+    single bogus pathspec. In -z mode names are verbatim and a rename/copy record is
+    two NUL-terminated fields (`XY new`, then `old`)."""
+    tokens = text.split(chr(0))
+    entries, i = [], 0
+    while i < len(tokens):
+        token = tokens[i]
+        i += 1
+        if len(token) < 4:
+            continue
+        code, path_, orig = token[:2], token[3:], None
+        if code[0] in _RENAME_OR_COPY or code[1] in _RENAME_OR_COPY:
+            if i < len(tokens) and tokens[i]:
+                orig = tokens[i]
+            i += 1
+        entries.append({"code": code, "path": path_, "orig": orig})
+    return entries
+
+
+def _glob_regex(pattern: str):
+    out, i = [], 0
+    while i < len(pattern):
+        if pattern.startswith("**/", i):
+            out.append("(?:.*/)?")
+            i += 3
+        elif pattern.startswith("**", i):
+            out.append(".*")
+            i += 2
+        elif pattern[i] == "*":
+            out.append("[^/]*")
+            i += 1
+        elif pattern[i] == "?":
+            out.append("[^/]")
+            i += 1
+        else:
+            out.append(re.escape(pattern[i]))
+            i += 1
+    return re.compile("".join(out) + r"\Z")
+
+
+def _scope_violation(path_: str, allowed: list[str], denied: list[str]) -> bool:
+    """True when `path_` is denied, or an allow-list exists and does not cover it."""
+    norm = path_.replace("\\", "/")
+    if any(_glob_regex(p).match(norm) for p in denied):
+        return True
+    return bool(allowed) and not any(_glob_regex(p).match(norm) for p in allowed)
+
+
+def _literal(path_: str) -> str:
+    return ":(literal)" + path_
+
+
 def _finalize_logic(execution_id: str, spool: Path, request: dict) -> dict:
     path = str(Path(request["worktree_path"]).resolve())
     branch, expected = request["branch"], request["expected_head_sha"]
     commit_record = spool / "finalize" / "commit.json"
     last_git_error = {}
+    allowed = [p_ for p_ in request.get("allowed_paths") or [] if isinstance(p_, str)]
+    denied = [p_ for p_ in request.get("denied_paths") or [] if isinstance(p_, str)]
+    scoped = bool(allowed or denied)
+    violations: set[str] = set()
 
     def _trim(value) -> str:
         if isinstance(value, bytes):
@@ -1555,11 +1618,29 @@ def _finalize_logic(execution_id: str, spool: Path, request: dict) -> dict:
             message = _run(["log", "-1", "--format=%B"]).stdout
             return _failure({"outcome": "finalize_ambiguous", "head": head, "parent": parent,
                              "trailer_matches": f"Aoteru-Execution: {execution_id}" in message})
-        status = _run(["status", "--porcelain"])
+        status = _run(["status", "--porcelain=v1", "-z", "--untracked-files=all"])
         if status.returncode != 0:
             return _failure({"outcome": "authority_denied", "reason": "git status failed"})
-        dirty = [(line[:2], line[3:]) for line in status.stdout.splitlines() if line.strip()]
-        dirty_paths = [path_ for _code, path_ in dirty]
+        entries = _parse_status_z(status.stdout)
+        if scoped:
+            bad = [e for e in entries if any(_scope_violation(p_, allowed, denied)
+                                              for p_ in (e["path"], e["orig"]) if p_)]
+            for entry in bad:
+                for p_ in (entry["path"], entry["orig"]):
+                    if not p_:
+                        continue
+                    violations.add(p_)
+                    if _run(["cat-file", "-e", f"HEAD:{p_}"]).returncode == 0:
+                        _run(["restore", "--source=HEAD", "--staged", "--worktree", "--", _literal(p_)])
+                    else:
+                        _run(["rm", "-f", "--cached", "--ignore-unmatch", "--", _literal(p_)])
+                        target = Path(path, p_)
+                        if target.is_file() or target.is_symlink():
+                            target.unlink()
+            if bad:
+                continue          # re-read the tree: only in-scope changes may remain
+        dirty_paths = sorted({p_ for e in entries for p_ in (e["path"], e["orig"]) if p_})
+        extra = {"scope_violations": sorted(violations)} if scoped else {}
         if not dirty_paths:
             if _head() != expected or read_decision(commit_record) is not None:
                 # A concurrent same-execution attempt committed between our
@@ -1567,19 +1648,21 @@ def _finalize_logic(execution_id: str, spool: Path, request: dict) -> dict:
                 # commit.json), never report a stale no-change result.
                 continue
             return {"outcome": "finalized", "committed": False, "adopted": False, "commit_sha": head,
-                    "parent_sha": None, "dirty_paths": [],
+                    "parent_sha": None, "dirty_paths": [], **extra,
                     "push": {"state": "not_required", "commit_sha": head, "branch": branch}}
         # Tracked paths (modified/deleted) are staged with `add -u`: plain `add --` on a
         # tracked file under a gitignored directory (e.g. .claude/) stages it but exits 1
         # with the ignore warning, which looked like a failed finalize. Only untracked
-        # paths need the plain form, and those honour .gitignore as before.
-        tracked = [path_ for code, path_ in dirty if code != "??"]
-        untracked = [path_ for code, path_ in dirty if code == "??"]
+        # paths need the plain form, and those honour .gitignore as before. A rename is
+        # already staged on both sides in the index, so only its new name is named here,
+        # and a fully staged entry (nothing unstaged) needs no add at all.
+        tracked = [_literal(e["path"]) for e in entries if e["code"] != "??" and e["code"][1] != " "]
+        untracked = [_literal(e["path"]) for e in entries if e["code"] == "??"]
         added = _run(["add", "-u", "--", *tracked]) if tracked else None
         if untracked and (added is None or added.returncode == 0):
             added = _run(["add", "--", *untracked])
         committed = _run(["commit", "-m", f"{request['commit_message']}\n\nAoteru-Execution: {execution_id}"]) \
-            if added.returncode == 0 else added
+            if added is None or added.returncode == 0 else added
         if committed.returncode != 0:
             continue   # re-evaluate once: a concurrent same-execution attempt may have committed
         sha = _head()
@@ -1589,7 +1672,7 @@ def _finalize_logic(execution_id: str, spool: Path, request: dict) -> dict:
         decide_once(commit_record, {"commit_sha": sha, "parent_sha": parent,
                                     "dirty_paths": dirty_paths, "at": _utcnow()})
         return {"outcome": "finalized", "committed": True, "adopted": False, "commit_sha": sha,
-                "parent_sha": parent, "dirty_paths": dirty_paths,
+                "parent_sha": parent, "dirty_paths": dirty_paths, **extra,
                 "push": _exact_commit_push(path, sha, branch)}
     return _failure({"outcome": "finalize_ambiguous", "head": _head(), "parent": None, "trailer_matches": False})
 

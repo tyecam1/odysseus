@@ -110,6 +110,8 @@ class FakeWorker:
         if view.get("closed"):
             return {"outcome": "execution_closed"}
         view["finalize_result"] = dict(self.finalize_outcome)
+        if self.finalize_outcome.get("outcome") == "finalized" and self.finalize_outcome.get("commit_sha"):
+            self.head = self.finalize_outcome["commit_sha"]       # the worktree now sits on the new commit
         return dict(self.finalize_outcome)
 
     def _spool_release(self, payload):
