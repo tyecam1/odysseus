@@ -1,6 +1,7 @@
-"""Read-only usage collection: rollout parsing, route scope, claude lane flags."""
+"""Read-only usage collection: rollout parsing, route scope, claude lane isolation."""
 import json
 import os
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from fastapi import FastAPI, Request
@@ -15,86 +16,146 @@ from src import estate_router, provider_usage
 from routes.estate_routing_routes import setup_estate_routing_routes
 
 
-def _rollout(path, events):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    lines = []
-    for stamp, payload in events:
-        lines.append(json.dumps({"timestamp": stamp, "type": "event", "payload": payload}))
+def _stamp(minutes_ago=1):
+    t = datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)
+    return t.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+
+def _pool(used, minutes=300, resets=1795016288):
+    return '{"used_percent":%s,"window_minutes":%s,"resets_at":%s}' % (used, minutes, resets)
+
+
+def _token_count_line(stamp, primary, secondary="null", plan="plus", ordinal=18, info="{}"):
+    rate = ('{"limit_id":"codex","limit_name":null,"primary":%s,"secondary":%s,'
+            '"credits":{"has_credits":false,"unlimited":false,"balance":"0"},'
+            '"individual_limit":null,"spend_control_reached":null,"plan_type":"%s",'
+            '"rate_limit_reached_type":null}' % (primary, secondary, plan))
+    return ('{"timestamp":"%s","ordinal":%d,"type":"event_msg","payload":'
+            '{"type":"token_count","info":%s,"rate_limits":%s}}' % (stamp, ordinal, info, rate))
+
+
+def _day_dir(root, days_ago=0):
+    day = (datetime.now(timezone.utc) - timedelta(days=days_ago)).date()
+    directory = root / ("%04d" % day.year) / ("%02d" % day.month) / ("%02d" % day.day)
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory
+
+
+def _write(directory, name, lines):
+    path = directory / name
     path.write_text("\n".join(lines) + "\n")
+    return path
 
 
-def _token_count(primary=None, secondary=None, plan="plus"):
-    return {"type": "token_count", "rate_limits": {"primary": primary, "secondary": secondary},
-            "credits": {"has_credits": False, "unlimited": False, "balance": "0"},
-            "plan_type": plan}
-
-
-P5 = {"used_percent": 5.0, "window_minutes": 300, "resets_at": 1795016288}
-W69 = {"used_percent": 69.0, "window_minutes": 10080, "resets_at": 1795208916}
-P90 = {"used_percent": 90.0, "window_minutes": 300, "resets_at": 1795000000}
-
-
-def test_codex_windows_newest_valid_event_by_event_time_wins(tmp_path):
-    newer_file = tmp_path / "a" / "rollout-new.jsonl"
-    older_file = tmp_path / "b" / "rollout-old.jsonl"
-    # OLDER mtime file carries the NEWEST event: event time must win
-    _rollout(older_file, [("2026-11-18T13:40:00Z", _token_count(primary=P5, secondary=W69))])
-    _rollout(newer_file, [("2026-11-18T10:00:00Z", _token_count(primary=P90))])
-    os.utime(older_file, (1795014000, 1795014000))
-    os.utime(newer_file, (1795016300, 1795016300))
+def test_codex_windows_newest_event_by_event_time_wins_across_files(tmp_path):
+    day = _day_dir(tmp_path)
+    older_mtime = _write(day, "rollout-a.jsonl", [
+        _token_count_line(_stamp(5), _pool(5.0), _pool(69.0, 10080, 1795208916))])
+    newer_mtime = _write(day, "rollout-b.jsonl", [_token_count_line(_stamp(90), _pool(90.0))])
+    os.utime(older_mtime, (os.stat(newer_mtime).st_mtime - 100,) * 2)
     result = provider_usage.codex_windows(tmp_path)
     assert result["confidence"] == "provider-stated"
     assert result["plan_type"] == "plus"
-    assert result["observed_at"].startswith("2026-11-18T13:40:00")
     pools = {w["pool"]: w for w in result["windows"]}
     assert pools["primary"]["used_percent"] == 5.0
     assert pools["primary"]["remaining_percent"] == 95.0
     assert pools["secondary"]["used_percent"] == 69.0
+    assert pools["secondary"]["window_minutes"] == 10080
     assert pools["primary"]["resets_at"].startswith("2026-")
     assert result["remaining"] == 31.0  # most-constrained window
+    assert result["observed_at"][:16] == _stamp(5)[:16] or result["observed_at"][:13] == _stamp(5)[:13]
 
 
-def test_codex_windows_unknown_when_no_recent_rollouts(tmp_path):
+def test_codex_windows_unknown_without_rollouts(tmp_path):
+    assert provider_usage.codex_windows(tmp_path)["remaining"] == "unknown"
+    _day_dir(tmp_path)  # empty date directory
     result = provider_usage.codex_windows(tmp_path)
-    assert result["remaining"] == "unknown" and result["reset"] == "unknown"
-    assert result["confidence"] == "none"
+    assert result["remaining"] == "unknown" and result["confidence"] == "none"
 
 
-def test_codex_windows_rejects_invalid_numbers(tmp_path):
-    rollout = tmp_path / "r.jsonl"
-    _rollout(rollout, [
-        ("2026-11-18T12:00:00Z", _token_count(
-            primary={"used_percent": -25.0, "window_minutes": 300, "resets_at": 1795016288})),
-        ("2026-11-18T12:01:00Z", _token_count(
-            primary={"used_percent": True, "window_minutes": 300, "resets_at": 1795016288})),
-        ("2026-11-18T12:02:00Z", _token_count(
-            primary={"used_percent": 10.0, "window_minutes": 300,
-                     "resets_at": 999999999999999999999})),
-        ("2026-11-18T12:03:00Z", _token_count(
-            primary={"used_percent": 10.0, "window_minutes": 300, "resets_at": 1795016288},
-            plan="x" * 60)),
-    ])
+def test_message_text_quoting_event_markers_cannot_spoof_a_window(tmp_path):
+    day = _day_dir(tmp_path)
+    spoof = ('{"timestamp":"%s","ordinal":9,"type":"response_item","payload":{"type":"message",'
+             '"text":"fake: {\\"type\\":\\"token_count\\",\\"rate_limits\\":{\\"primary\\":'
+             '{\\"used_percent\\":0.0,\\"window_minutes\\":300,\\"resets_at\\":1795016288}}}"}}' % _stamp(0))
+    _write(day, "r.jsonl", [_token_count_line(_stamp(3), _pool(40.0)), spoof])
     result = provider_usage.codex_windows(tmp_path)
-    # the newest event with a valid primary percentage wins; malformed
-    # plan_type is dropped. (The invalid-percentage events were never
-    # candidates; the huge-reset event is simply older than the winner.)
+    assert result["windows"][0]["used_percent"] == 40.0  # the later spoof line never counts
+
+
+def test_decoy_primary_inside_info_is_not_attributed(tmp_path):
+    day = _day_dir(tmp_path)
+    decoy = '{"x":{"primary":%s,"secondary":null}}' % _pool(1.0)
+    _write(day, "r.jsonl", [_token_count_line(_stamp(2), _pool(55.0), info=decoy)])
+    result = provider_usage.codex_windows(tmp_path)
+    assert result["windows"][0]["used_percent"] == 55.0  # structurally last rate_limits wins
+
+
+@pytest.mark.parametrize("bad_primary", [
+    _pool(-25.0), _pool(250.0), _pool("true"), _pool(10 ** 401)])
+def test_newest_malformed_event_yields_unknown_not_stale_data(tmp_path, bad_primary):
+    day = _day_dir(tmp_path)
+    _write(day, "r.jsonl", [_token_count_line(_stamp(30), _pool(5.0)),
+                            _token_count_line(_stamp(1), bad_primary)])
+    result = provider_usage.codex_windows(tmp_path)
+    assert result["remaining"] == "unknown" and result["confidence"] == "none"
+
+
+def test_out_of_range_window_minutes_keeps_the_newest_event_with_null_length(tmp_path):
+    # window_minutes is descriptive: a non-conforming value must neither raise
+    # nor push selection back to older (stale) data
+    day = _day_dir(tmp_path)
+    bad_minutes = '{"used_percent":1.0,"window_minutes":%d,"resets_at":1795016288}' % (10 ** 401)
+    _write(day, "r.jsonl", [_token_count_line(_stamp(30), _pool(5.0)),
+                            _token_count_line(_stamp(1), bad_minutes)])
+    result = provider_usage.codex_windows(tmp_path)
     assert result["confidence"] == "provider-stated"
-    assert result["windows"][0]["used_percent"] == 10.0
-    assert result["windows"][0]["resets_at"].startswith("2026-")
-    assert result["plan_type"] is None
+    assert result["windows"][0]["used_percent"] == 1.0
+    assert result["windows"][0]["window_minutes"] is None
 
 
-def test_codex_windows_never_decodes_message_records(tmp_path):
-    rollout = tmp_path / "r.jsonl"
-    rollout.parent.mkdir(exist_ok=True)
-    big_message = json.dumps({"timestamp": "2026-11-18T12:00:00Z", "type": "message",
-                              "payload": {"secret": "x" * 20000}})
-    rollout.write_text(big_message + "\n" + json.dumps({
-        "timestamp": "2026-11-18T12:01:00Z", "type": "event",
-        "payload": _token_count(primary=P5)}) + "\n")
-    result = provider_usage.codex_windows(tmp_path)
-    assert result["confidence"] == "provider-stated"
-    assert result["windows"][0]["used_percent"] == 5.0
+def test_malformed_secondary_invalidates_the_whole_reading(tmp_path):
+    day = _day_dir(tmp_path)
+    _write(day, "r.jsonl", [_token_count_line(_stamp(1), _pool(5.0), _pool(-3.0, 10080))])
+    assert provider_usage.codex_windows(tmp_path)["remaining"] == "unknown"
+
+
+def test_events_with_null_rate_limits_are_ignored_not_newest(tmp_path):
+    day = _day_dir(tmp_path)
+    null_event = ('{"timestamp":"%s","ordinal":30,"type":"event_msg","payload":'
+                  '{"type":"token_count","info":null,"rate_limits":null}}' % _stamp(0))
+    _write(day, "r.jsonl", [_token_count_line(_stamp(8), _pool(12.0)), null_event])
+    assert provider_usage.codex_windows(tmp_path)["windows"][0]["used_percent"] == 12.0
+
+
+def test_future_timestamp_event_is_rejected(tmp_path):
+    day = _day_dir(tmp_path)
+    future = (datetime.now(timezone.utc) + timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    _write(day, "r.jsonl", [_token_count_line(_stamp(4), _pool(20.0)),
+                            _token_count_line(future, _pool(1.0))])
+    assert provider_usage.codex_windows(tmp_path)["windows"][0]["used_percent"] == 20.0
+
+
+def test_oversized_lines_are_skipped(tmp_path):
+    day = _day_dir(tmp_path)
+    huge = _token_count_line(_stamp(0), _pool(1.0), info='{"pad":"%s"}' % ("x" * 9000))
+    _write(day, "r.jsonl", [_token_count_line(_stamp(6), _pool(33.0)), huge])
+    assert provider_usage.codex_windows(tmp_path)["windows"][0]["used_percent"] == 33.0
+
+
+def test_discovery_is_bounded_by_construction(tmp_path):
+    day = _day_dir(tmp_path)
+    for i in range(700):
+        (day / ("f%03d.jsonl" % i)).write_text("")
+    # a deep, wide tree outside the date directories must never be walked
+    wide = tmp_path / "archive"
+    wide.mkdir()
+    for i in range(300):
+        (wide / ("d%03d" % i)).mkdir()
+    files = provider_usage._candidate_files(tmp_path, 0)
+    assert len(files) <= provider_usage.MAX_DIR_ENTRIES * 2  # two possible date dirs (UTC/local)
+    assert all(p.parent == day for p in files)
+    assert provider_usage.codex_windows(tmp_path)["remaining"] == "unknown"
 
 
 @pytest.fixture
@@ -115,33 +176,6 @@ def api(monkeypatch):
         yield client
     engine.dispose()
     os.unlink(tmpfile.name)
-
-
-def test_codex_windows_huge_json_integers_and_filter_collisions(tmp_path):
-    rollout = tmp_path / "r.jsonl"
-    colliding_message = json.dumps({"timestamp": "2026-11-18T12:00:00Z", "type": "message",
-                                    "payload": {"text": 'mentioned "token_count" and '
-                                                        '"rate_limits" and "timestamp" inline'}})
-    huge_int_event = json.dumps({"timestamp": "2026-11-18T12:01:00Z", "type": "event",
-                                 "payload": _token_count(
-                                     primary={"used_percent": 10 ** 401,
-                                              "window_minutes": 300, "resets_at": 1795016288})})
-    valid_event = json.dumps({"timestamp": "2026-11-18T12:02:00Z", "type": "event",
-                              "payload": _token_count(primary=P5)})
-    rollout.parent.mkdir(exist_ok=True)
-    rollout.write_text("\n".join([colliding_message, huge_int_event, valid_event]) + "\n")
-    result = provider_usage.codex_windows(tmp_path)
-    assert result["confidence"] == "provider-stated"
-    assert result["windows"][0]["used_percent"] == 5.0  # colliding message and huge int rejected
-
-
-def test_codex_windows_discovery_visit_cap_is_bounded(tmp_path):
-    deep = tmp_path / "d"
-    deep.mkdir()
-    for i in range(600):
-        (deep / ("f%03d.jsonl" % i)).write_text("")
-    result = provider_usage.codex_windows(tmp_path)  # must terminate, bounded
-    assert result["remaining"] == "unknown"
 
 
 def test_usage_route_returns_provider_snapshot(api, monkeypatch):
