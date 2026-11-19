@@ -154,8 +154,58 @@ def test_discovery_is_bounded_by_construction(tmp_path):
         (wide / ("d%03d" % i)).mkdir()
     files = provider_usage._candidate_files(tmp_path, 0)
     assert len(files) <= provider_usage.MAX_DIR_ENTRIES * 2  # two possible date dirs (UTC/local)
-    assert all(p.parent == day for p in files)
+    assert all(path.parent == day for _mtime, path in files)
     assert provider_usage.codex_windows(tmp_path)["remaining"] == "unknown"
+
+
+def test_duplicated_rate_limits_key_cannot_mis_attribute_a_decoy(tmp_path):
+    day = _day_dir(tmp_path)
+    decoy = ('"rate_limit_reached_type":{"rate_limits":{"limit_id":"x","primary":%s,'
+             '"secondary":null}}' % _pool(1.0))
+    line = _token_count_line(_stamp(1), _pool(75.0)).replace(
+        '"rate_limit_reached_type":null', decoy)
+    assert line.count('"rate_limits":') == 2
+    _write(day, "r.jsonl", [_token_count_line(_stamp(30), _pool(5.0)), line])
+    result = provider_usage.codex_windows(tmp_path)
+    # the ambiguous newest event is neither read as 1% nor replaced by stale 5%
+    assert result["remaining"] == "unknown" and result["confidence"] == "none"
+
+
+def test_read_is_one_bounded_tail_and_partial_trailing_line_is_ignored(tmp_path, monkeypatch):
+    day = _day_dir(tmp_path)
+    complete = _token_count_line(_stamp(5), _pool(12.0))
+    partial = _token_count_line(_stamp(1), _pool(99.0))[:-20]  # cut mid-write, no newline
+    path = day / "r.jsonl"
+    path.write_text(complete + "\n" + partial)
+    result = provider_usage.codex_windows(tmp_path)
+    assert result["windows"][0]["used_percent"] == 12.0  # the half-written newest line is not read
+    # a file larger than the per-file bound is read once, from its tail only
+    monkeypatch.setattr(provider_usage, "TAIL_BYTES_PER_FILE", len(complete) + 10)
+    older = _token_count_line(_stamp(40), _pool(88.0))
+    path.write_text(older + "\n" + complete + "\n")
+    assert provider_usage.codex_windows(tmp_path)["windows"][0]["used_percent"] == 12.0
+    budget = [10 ** 9]
+    seen = list(provider_usage._iter_events(path, budget))
+    assert len(seen) == 1 and budget[0] == 10 ** 9 - (len(complete) + 10)
+
+
+def test_file_deleted_between_discovery_and_read_is_tolerated(tmp_path, monkeypatch):
+    day = _day_dir(tmp_path)
+    real = _write(day, "real.jsonl", [_token_count_line(_stamp(2), _pool(21.0))])
+    gone = day / "gone.jsonl"
+    now = datetime.now(timezone.utc).timestamp()
+    monkeypatch.setattr(provider_usage, "_candidate_files",
+                        lambda root, cutoff: [(now, gone), (now - 5, real)])
+    assert provider_usage.codex_windows(tmp_path)["windows"][0]["used_percent"] == 21.0
+
+
+def test_null_primary_event_is_skipped_so_the_newest_real_window_is_used(tmp_path):
+    day = _day_dir(tmp_path)
+    null_primary = _token_count_line(_stamp(0), "null", "null")
+    _write(day, "r.jsonl", [_token_count_line(_stamp(9), _pool(5.0)), null_primary])
+    result = provider_usage.codex_windows(tmp_path)
+    assert result["confidence"] == "provider-stated"
+    assert result["windows"][0]["used_percent"] == 5.0
 
 
 @pytest.fixture

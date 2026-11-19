@@ -89,9 +89,10 @@ def _parse_stamp(text: bytes) -> datetime | None:
     return parsed
 
 
-def _candidate_files(root: Path, cutoff: float) -> list[Path]:
+def _candidate_files(root: Path, cutoff: float) -> list[tuple[float, Path]]:
     """Last few date directories only, lazily scanned and capped, so the work
-    is bounded regardless of how large the sessions tree is."""
+    is bounded regardless of how large the sessions tree is. The mtime is
+    captured once here so later sorting never touches a vanished file."""
     today = datetime.now(timezone.utc)
     days = {(today - timedelta(days=n)).date() for n in range(DATE_DIR_DAYS)}
     days |= {(datetime.now() - timedelta(days=n)).date() for n in range(DATE_DIR_DAYS)}
@@ -104,8 +105,9 @@ def _candidate_files(root: Path, cutoff: float) -> list[Path]:
                     if not entry.name.endswith(".jsonl"):
                         continue
                     try:
-                        if entry.is_file() and entry.stat().st_mtime >= cutoff:
-                            found.append(Path(entry.path))
+                        mtime = entry.stat().st_mtime
+                        if entry.is_file() and mtime >= cutoff:
+                            found.append((mtime, Path(entry.path)))
                     except OSError:
                         continue
         except OSError:
@@ -114,32 +116,58 @@ def _candidate_files(root: Path, cutoff: float) -> list[Path]:
 
 
 def _iter_events(path: Path, budget: list[int]):
-    """Bounded tail scan yielding (timestamp, raw_line) for lines matching the
-    fixed token_count prefix. No JSON decoding."""
+    """Bounded tail scan yielding (timestamp, raw_line) for COMPLETE lines
+    matching the fixed token_count prefix. Exactly one bounded read per file,
+    so a concurrently appended file can never exceed the byte budgets. No JSON
+    decoding."""
     size = path.stat().st_size
     take = min(size, TAIL_BYTES_PER_FILE, budget[0])
     if take <= 0:
         return
     budget[0] -= take
     with path.open("rb") as handle:
-        if size > take:
-            handle.seek(size - take)
-            handle.readline()  # drop the partial first line
-        for raw in handle:
-            if len(raw) > MAX_EVENT_LINE:
-                continue
-            head = _EVENT_PREFIX.match(raw)
-            if head is None:
-                continue
-            stamp = _parse_stamp(head.group(1))
-            if stamp is not None:
-                yield stamp, raw
+        handle.seek(size - take)
+        data = handle.read(take)
+    lines = data.split(b"\n")
+    if size > take:
+        lines = lines[1:]   # the first line is a partial tail cut
+    lines = lines[:-1]      # the last element is a partial or empty trailing line
+    for raw in lines:
+        if len(raw) > MAX_EVENT_LINE:
+            continue
+        head = _EVENT_PREFIX.match(raw)
+        if head is None:
+            continue
+        stamp = _parse_stamp(head.group(1))
+        if stamp is not None:
+            yield stamp, raw
+
+
+def _is_candidate(raw: bytes) -> bool:
+    """Does this event claim a rate-limit window? Events with no rate_limits,
+    null rate_limits, or a null primary window carry no reading and are
+    skipped; anything else that mentions rate_limits (including a malformed or
+    duplicated key) is a candidate and, if it is the newest, makes the answer
+    unknown rather than falling back to older data."""
+    count = raw.count(b'"rate_limits":')
+    if count == 0 or b'"rate_limits":null' in raw:
+        return False
+    if count > 1:
+        return True
+    index = raw.find(b'"rate_limits":{')
+    if index < 0:
+        return True
+    limits = _RATE_LIMITS.match(raw, index)
+    return limits is None or limits.group(1) != b"null"
 
 
 def _read_windows(raw: bytes) -> tuple[list[dict], str | None] | None:
-    """Windows from the structurally last rate_limits object on the line;
-    None when the event carries no (or malformed) primary window."""
-    index = raw.rfind(b'"rate_limits":{')
+    """Windows from the line's single rate_limits object; None when the event
+    has a duplicated key (a decoy could be mis-attributed) or no, or a
+    malformed, primary window."""
+    if raw.count(b'"rate_limits":') != 1:
+        return None
+    index = raw.find(b'"rate_limits":{')
     if index < 0:
         return None
     limits = _RATE_LIMITS.match(raw, index)
@@ -180,18 +208,18 @@ def codex_windows(sessions_root: Path | None = None) -> dict:
     paths = _candidate_files(root, cutoff)
     if not paths:
         return unknown("no recent session rollouts found")
-    paths.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    newest = None  # (timestamp, raw) of the newest event that carries a primary window
+    paths.sort(key=lambda item: item[0], reverse=True)
+    newest = None  # (timestamp, raw) of the newest event that claims a primary window
     budget = [TOTAL_BYTES_BUDGET]
-    for path in paths[:MAX_CANDIDATE_FILES]:
+    for _mtime, path in paths[:MAX_CANDIDATE_FILES]:
         try:
             for stamp, raw in _iter_events(path, budget):
-                if b'"rate_limits":null' in raw or b'"rate_limits":{' not in raw:
+                if not _is_candidate(raw):
                     continue
                 if newest is None or stamp > newest[0]:
                     newest = (stamp, raw)
         except OSError:
-            continue
+            continue  # vanished or unreadable between discovery and read
         if budget[0] <= 0:
             break
     if newest is None:
