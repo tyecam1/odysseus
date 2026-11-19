@@ -171,6 +171,16 @@ def test_duplicated_rate_limits_key_cannot_mis_attribute_a_decoy(tmp_path):
     assert result["remaining"] == "unknown" and result["confidence"] == "none"
 
 
+def test_duplicated_key_with_nested_null_is_ambiguous_not_skipped(tmp_path):
+    day = _day_dir(tmp_path)
+    line = _token_count_line(_stamp(1), _pool(75.0)).replace(
+        '"rate_limit_reached_type":null', '"rate_limit_reached_type":{"rate_limits":null}')
+    assert line.count('"rate_limits":') == 2
+    _write(day, "r.jsonl", [_token_count_line(_stamp(30), _pool(5.0)), line])
+    result = provider_usage.codex_windows(tmp_path)
+    assert result["remaining"] == "unknown" and result["confidence"] == "none"
+
+
 def test_read_is_one_bounded_tail_and_partial_trailing_line_is_ignored(tmp_path, monkeypatch):
     day = _day_dir(tmp_path)
     complete = _token_count_line(_stamp(5), _pool(12.0))

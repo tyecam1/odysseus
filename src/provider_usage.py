@@ -150,10 +150,12 @@ def _is_candidate(raw: bytes) -> bool:
     duplicated key) is a candidate and, if it is the newest, makes the answer
     unknown rather than falling back to older data."""
     count = raw.count(b'"rate_limits":')
-    if count == 0 or b'"rate_limits":null' in raw:
+    if count == 0:
         return False
     if count > 1:
-        return True
+        return True  # ambiguous (duplicated key, even a nested null): never skipped
+    if b'"rate_limits":null' in raw:
+        return False
     index = raw.find(b'"rate_limits":{')
     if index < 0:
         return True
