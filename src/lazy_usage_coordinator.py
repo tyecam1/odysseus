@@ -74,6 +74,22 @@ def _checkpoint(run, **fields):
     run.checkpoint = {**(run.checkpoint or {}), **fields}
 
 
+COORDINATOR_TOKEN_ESTIMATE = 60_000
+_TOKEN_KEYS = ("inputTokens", "outputTokens", "cacheReadInputTokens", "cacheCreationInputTokens",
+               "input_tokens", "output_tokens")
+
+
+def _meter_tokens(run, result):
+    """Measured provider tokens when reported, else a conservative estimate for a completed call."""
+    usage = result.get("provider_usage")
+    measured = (sum(usage[k] for k in _TOKEN_KEYS if type(usage.get(k)) is int and usage[k] > 0)
+                if isinstance(usage, dict) else 0)
+    if measured:
+        _charge(run, tokens_measured=measured)
+    else:
+        _charge(run, tokens_assumed=COORDINATOR_TOKEN_ESTIMATE)
+
+
 def _charge(run, **counts):
     counters = dict(run.counters or {})
     for key, count in counts.items():
@@ -298,11 +314,16 @@ def coordinator_step(db, run, frontier, digest, evidence=None):
         db.commit()
         return None
     if not result.get("ok"):
+        # A dispatched call that failed after the model may have run still consumed tokens; only an
+        # explicit provider refusal (nothing ran) is free. The dispatch itself was charged above.
+        if estate_router._provider_outcome(result).get("state") not in {"quota_exhausted", "rate_limited"}:
+            _meter_tokens(run, result)
         # The executor recorded provider health itself; keep the reason bounded.
         _checkpoint(run, coordinator_skip="provider_failed_" + str(result.get("error_code") or "unknown")[:60])
         db.commit()
         return None
     # Real spend remains evidence even when the model's plan is invalid.
+    _meter_tokens(run, result)
     _checkpoint(run, coordinator_usage=result.get("provider_usage"),
                 coordinator_model=result.get("concrete_model"))
     plan = parse_plan(result.get("output"), {r["ref"] for r in _candidates(frontier, evidence)})

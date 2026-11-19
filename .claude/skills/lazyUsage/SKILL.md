@@ -102,6 +102,9 @@ Within the existing runtime ceilings, a recoverable provider block parks only de
 - The backend finalises its own successful write (commit on the leased branch, scope enforced, lease released). A
   `finalization` debt or `finalize_failed` outcome means that did not hold; report it and the recover path, do not
   hide it. Push and merge are separate governed steps.
+- A write that fails at the provider (for example a usage limit) is recovered by the backend itself when its
+  worktree is clean, releasing the lease; a dirty tree leaves a `recovery` debt. `checkpoint.recovered_leases` lists
+  leases a later activation cleared. An operator stop keeps the lease for the controller.
 - `usage` separates `dispatches` (worker/provider calls) from tokens: `tokens_measured` where the provider reports
   them, and a conservative `tokens_assumed` estimate where it cannot. `max_tokens` ends the run on either. Never
   present dispatch counts as consumption.

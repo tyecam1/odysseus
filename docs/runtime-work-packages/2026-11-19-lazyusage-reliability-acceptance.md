@@ -15,6 +15,24 @@ reproduced by a failing regression test before it was fixed
 | 7 | Three fabricated review debts of `b102b3ce` had no retirement path. | `supersede_review_debts` / `POST /api/lazy-usage/supersede` (execute scope; reason and evidence required): moves the debt to `review_supersessions` with principal, reason, evidence and the original debt, and tombstones it for later activations. It never marks a task delivered. |
 | 8 | Laptop skill copy lagged `dev`. | Skill text updated here; the installed copy is backed up and synchronised after merge. |
 
+## Live findings after deploy of #293 (activation `ae1b1f20`, 2026-11-19 20:16Z, unattended)
+
+The first activation on the deployed code exercised the real estate and exposed three further defects
+that unit tests had missed (each now has a failing-first regression test):
+
+* **A write that failed at the provider left its lease active.** Codex was at its weekly usage limit;
+  the dispatched write failed, its execution stayed `unresolved`, `release_repo` refused ("has unresolved
+  execution ... next action: recover") and every later write on the repo was skipped `repo_lease_held`.
+  The backend now recovers it itself through `estate_write_lane.recover_execution_lease` (proves writer
+  quiescence and a CLEAN worktree); a dirty tree is refused and recorded as a `recovery` debt. An operator
+  stop still preserves the lease for the controller. At the start of the next activation
+  `_recover_orphan_leases` clears leases left by a *terminal* lazyusage run the same way
+  (`checkpoint.recovered_leases`); a live activation's lease is never touched.
+* **A provider-refused dispatch was charged 400k assumed tokens** although nothing ran. The dispatch is
+  still counted; tokens are only assumed when the provider did not refuse.
+* **Coordinator tokens were never metered** (`coordinator_usage` was recorded but not charged). They are
+  now charged as measured tokens, or a 60k estimate when unmeasured.
+
 ## Known limits
 
 * Verification for a write is worker-attested finalisation, not a repository test run; CI on

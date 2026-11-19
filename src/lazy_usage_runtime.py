@@ -436,7 +436,7 @@ def _reconcile_review_debts(run, task_ref, *, verified=False, acceptance=None):
 
 
 def _evidence_gap(debt):
-    return bool(debt.get("evidence_gap")) or _debt_gate(debt) in {"independent_review", "finalization"}
+    return bool(debt.get("evidence_gap")) or _debt_gate(debt) in {"independent_review", "finalization", "recovery"}
 
 
 def _resolve_met_debts(run, task_ref, frontier):
@@ -980,6 +980,75 @@ def _finalize_owned(db, run, execution_id):
     return outcome
 
 
+def _recover_failed_write(db, run, execution_id):
+    """A write whose execution ended without a finalised result (provider refusal, timeout, crash)
+    leaves its execution `unresolved`, which makes the lease unreleasable. The backend clears that
+    itself through the governed recovery path, which proves writer quiescence and a CLEAN worktree
+    first; anything dirty (possible partial work) is refused and stays visible as a debt."""
+    row = db.get(EstateExecution, execution_id)
+    if row is None:
+        return {"recovered": False, "code": "no_execution_row"}
+    db.refresh(row)
+    if row.worktree_resolution != "unresolved":
+        return {"recovered": True, "already": True, "resolution": row.worktree_resolution}
+    _charge(run, tool_calls=1)
+    db.commit()
+    try:
+        outcome = estate_write_lane.recover_execution_lease(
+            execution_id, lease_id=row.lease_id, host_id=row.host_id, repo_id=row.repo_id,
+            branch=row.branch, worktree_path=row.worktree_path)
+    except Exception as exc:
+        outcome = {"recovered": False, "code": "recover_raised_" + type(exc).__name__}
+    db.expire_all()
+    return outcome
+
+
+def _recover_orphan_leases(db, run):
+    """Restart recovery: leases a finished activation left behind (an unresolved failed execution, or
+    a plain unreleased lease) are cleared before this activation selects work. Only leases created by
+    a lazyusage activation that is now terminal are considered; a live activation's lease is never touched."""
+    scope = list(run.repo_scope or [])
+    candidates = db.query(ParkLease).filter(ParkLease.status == "active", ParkLease.repo_id.in_(scope),
+                                            ParkLease.session_id.isnot(None)).all()
+    sessions = {lease.session_id for lease in candidates}
+    terminal = ({rid for (rid,) in db.query(LazyUsageRun.id).filter(LazyUsageRun.id.in_(sessions),
+                                                                    LazyUsageRun.state.in_(TERMINAL))}
+                if sessions else set())
+    recovered = list(run.checkpoint.get("recovered_leases") or [])
+    tried = {entry.get("lease_id") for entry in recovered}
+    # Only leases of finished lazyusage activations (never an operator's or a live run's), and each
+    # lease at most once per activation: a lease that cannot be recovered (dirty worktree) must not
+    # drain this run's budget by being retried on every selection pass.
+    leases = [lease for lease in candidates if lease.session_id in terminal and lease.id not in tried]
+    for lease in leases[:3]:
+        rows = db.query(EstateExecution).filter(EstateExecution.lease_id == lease.id).all()
+        if any(r.lifecycle_state in ("accepted", "running", "lost") for r in rows):
+            continue
+        lease_id, repo_id, host_id = lease.id, lease.repo_id, lease.host_id
+        entry = {"lease_id": lease_id, "execution_id": None, "at": utcnow_naive().isoformat()}
+        pending = [r for r in rows if r.worktree_resolution == "unresolved"]
+        try:
+            _charge(run, tool_calls=1)
+            db.commit()
+            if pending:
+                entry["execution_id"] = pending[0].id
+                outcome = estate_write_lane.recover_execution_lease(
+                    pending[0].id, lease_id=lease_id, host_id=host_id, repo_id=repo_id,
+                    branch=pending[0].branch, worktree_path=pending[0].worktree_path)
+                entry["recovered"] = bool(outcome.get("recovered"))
+                entry["code"] = outcome.get("code")
+            else:
+                park_lease_ops.release_repo(repo_id, host_id, expected_lease_id=lease_id)
+                entry["recovered"] = True
+        except Exception as exc:
+            entry["recovered"] = False
+            entry["code"] = type(exc).__name__
+        db.expire_all()
+        recovered.append(entry)
+    if recovered != list(run.checkpoint.get("recovered_leases") or []):
+        _checkpoint(run, recovered_leases=recovered[-20:])
+
+
 def _quota_debt(run, result):
     if result.get("ok") is True and not result.get("error"):
         return False
@@ -1131,12 +1200,13 @@ def _observe(db, run):
     if not accounted and usage is not None:
         _charge(run, paid_calls=max(0, usage["paid_calls"] - 1),
                 tool_calls=max(0, usage["tool_calls"] - 1))
+    parked = _quota_debt(run, provider_result)
     if not accounted:
-        _charge_tokens(run, result, provider_result)
+        if not parked:      # a provider refusal ran nothing: the dispatch is counted, tokens are not assumed
+            _charge_tokens(run, result, provider_result)
         # Persist "accounted" together with the charges: a crash during the long finalize below
         # must not charge this execution a second time on re-entry.
         _checkpoint(run, accounted_execution_id=execution_id)
-    parked = _quota_debt(run, provider_result)
     # A provider refusal before any model/tool execution needs no child
     # accounting. Quota failures park only dependent verification. Other
     # paid outcomes require worker-reported totals; absence is not zero.
@@ -1146,6 +1216,10 @@ def _observe(db, run):
     wrote = bool(cp.get("dispatch_write", kind == "implementation"))
     ran_ok = view.get("lifecycle_state") == "succeeded" and result.get("ok") is True
     finalization = _finalize_owned(db, run, execution_id) if (wrote and ran_ok and not parked) else None
+    # An operator stop deliberately preserves an unresolved lease for the controller; only the
+    # next activation's orphan sweep (same clean-worktree proof) clears it.
+    stopping = run.state in {"stop_requested", "stopping"}
+    recovery = _recover_failed_write(db, run, execution_id) if (wrote and not ran_ok and not stopping) else None
     task_ref, revision = run.checkpoint["task_ref"], run.checkpoint.get("task_revision")
     acceptance = reconcile_task_status(run.checkpoint, view)
     card = acceptance.pop("_card", {})
@@ -1189,6 +1263,12 @@ def _observe(db, run):
         if review_open:
             new_debts.append({**base, "gate": "independent_review", "evidence_gap": True,
                               "next_action": "independent review by another model family"})
+    rec_failed = recovery is not None and not recovery.get("recovered")
+    if rec_failed:
+        new_debts.append({**base, "gate": "recovery", "evidence_gap": True,
+                          "error": str(recovery.get("code") or recovery.get("reason") or "recovery refused")[:300],
+                          "next_action": "inspect the leased worktree, then recover or finalize this execution "
+                                         "through the governed controller path"})
     if fin_failed:
         new_debts.append({**base, "gate": "finalization", "evidence_gap": True,
                           "error": str(finalization.get("reason") or "finalization failed")[:300],
@@ -1246,9 +1326,9 @@ def _observe(db, run):
     reason = _budget_reason(run)
     if reason:
         return _finish(db, run, "budget_exhausted", reason)
-    if fin_failed:
-        return _park(db, run, "finalization failed for execution " + execution_id +
-                     "; recover it through the governed finalize/recover path", automatic=False)
+    if fin_failed or rec_failed:
+        return _park(db, run, ("finalization" if fin_failed else "recovery") + " failed for execution " + execution_id +
+                     "; resolve it through the governed finalize/recover path", automatic=False)
     if unknown_usage:
         return _park(db, run, "no qualified metered continuation until existing execution usage is available")
     return _save(db, run)
@@ -1384,6 +1464,7 @@ def advance(db, run_id):
     _save(db, run, phase="selecting", next_action="refresh_frontier",
           claim_until=(utcnow_naive() + timedelta(seconds=RECHECK_SECONDS)).isoformat())
     try:
+        _recover_orphan_leases(db, run)
         frontier = refresh_frontier(run.repo_scope)
         digest = _digest(frontier)
         _save(db, run, last_frontier_digest=digest)
