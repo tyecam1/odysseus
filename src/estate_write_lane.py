@@ -762,7 +762,8 @@ def execution_provenance(row) -> dict:
 # Finalize (S6.1 / S6.10)
 # ---------------------------------------------------------------------
 
-def finalize_execution(*, execution_id: str, repo_id: str, host_id: str, commit_message: str) -> dict:
+def finalize_execution(*, execution_id: str, repo_id: str, host_id: str, commit_message: str,
+                       allowed_paths: Optional[list] = None, denied_paths: Optional[list] = None) -> dict:
     from core.database import EstateExecution, ParkLease, lease_serialized_transaction
     row = _load_row(execution_id)
     if row is None:
@@ -787,10 +788,15 @@ def finalize_execution(*, execution_id: str, repo_id: str, host_id: str, commit_
         return {"finalized": False, "reason": f"worker_unreachable: {exc}"}
     if status.get("quiescent") is not True:
         return {"finalized": False, "reason": "writer_quiescence_unproven"}
-    result, exc = _worker(host_id, "worktree.finalize", {
+    request = {
         "execution_id": execution_id, "repo_id": repo_id, "worktree_path": row.worktree_path,
         "branch": row.branch, "commit_message": commit_message, "expected_head_sha": row.admission_head_sha,
-    }, deadline_s=180)
+    }
+    if allowed_paths:
+        request["allowed_paths"] = list(allowed_paths)
+    if denied_paths:
+        request["denied_paths"] = list(denied_paths)
+    result, exc = _worker(host_id, "worktree.finalize", request, deadline_s=180)
     if exc is not None and not _is_ambiguous(exc):
         # A definite worker refusal (unattributable history, missing claim,
         # prerequisites): nothing was finalized; do not close.
@@ -817,6 +823,8 @@ def finalize_execution(*, execution_id: str, repo_id: str, host_id: str, commit_
                                               "finalize commit", "evidence": result, "next_action": "recover"}
     record = {key: result.get(key) for key in ("committed", "adopted", "commit_sha", "parent_sha",
                                                "dirty_paths", "push")}
+    if "scope_violations" in result:
+        record["scope_violations"] = result["scope_violations"]
     record["push"] = {**(record.get("push") or {}), "attempts": 1}
     with lease_serialized_transaction(lease_id=row.lease_id) as db:
         current = db.query(EstateExecution).filter(EstateExecution.id == execution_id).one_or_none()

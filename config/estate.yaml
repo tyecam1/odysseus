@@ -92,6 +92,11 @@ hosts:
       enabled: true
       transport: local
       qualified_executors: [deterministic, local, codex, codex-write, glm, claude]
+      # Tools a card may require (`requires_web`, `requires_mcp`, `requires_zotero`); /lazyUsage
+      # refuses a card whose requirement the selected host does not declare. Only what is
+      # evidenced is listed: outbound HTTPS was probed from this host on 2026-11-19 (GitHub 200,
+      # api.openai.com reachable). No MCP server or Zotero library is available to the lab worker.
+      capabilities: [web]
       qualification_evidence:
         - docs/aoteru-lm4-production-canary-evidence.md
         - docs/aoteru-p12-active-estate-convergence-evidence.md

@@ -14,6 +14,14 @@ class Activation(BaseModel):
     coordinator: dict | None = None
 
 
+class Supersession(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    run_id: str
+    task_refs: list[str]
+    reason: str
+    evidence: list[str]
+
+
 class RunControl(BaseModel):
     model_config = ConfigDict(extra="forbid")
     run_id: str
@@ -58,6 +66,17 @@ def setup_lazy_usage_routes():
         try:
             with get_db_session() as db:
                 return function(db, payload.run_id, owner)
+        except runtime.RunError as exc:
+            raise HTTPException(exc.status_code, exc.detail) from exc
+
+    @router.post("/supersede")
+    def supersede(request: Request, payload: Supersession):
+        # The owner's evidenced decision to retire review debts that rest on unusable output.
+        owner = _scope_owner(request, {"estate:execute"})
+        try:
+            with get_db_session() as db:
+                return runtime.supersede_review_debts(db, owner, payload.run_id, payload.task_refs,
+                                                      reason=payload.reason, evidence=payload.evidence)
         except runtime.RunError as exc:
             raise HTTPException(exc.status_code, exc.detail) from exc
 

@@ -29,7 +29,14 @@ from src.runtime_paths import get_app_root
 log = logging.getLogger(__name__)
 INITIALIZER = "estate-queue-priority-execution@v2"
 CEILINGS = {"max_seconds": 14400, "max_paid_calls": 12, "max_tool_calls": 150,
-            "max_no_delivery_turns": 8, "max_repeat_failures": 3}
+            "max_no_delivery_turns": 8, "max_repeat_failures": 3, "max_tokens": 2_000_000}
+# `paid_calls` counts worker/provider DISPATCHES, not model or token consumption. Where a
+# provider reports no usage (codex-write, plain advisory CLI output) the run is charged a
+# deliberately conservative estimate instead of zero, so the token ceiling still binds.
+UNMEASURED_TOKEN_ESTIMATE = 150_000
+UNMEASURED_WRITE_TOKEN_ESTIMATE = 400_000
+TOKEN_KEYS = ("inputTokens", "outputTokens", "cacheReadInputTokens", "cacheCreationInputTokens",
+              "input_tokens", "output_tokens")
 TERMINAL = frozenset({"completed", "stopped", "failed", "budget_exhausted"})
 EXECUTION_TERMINAL = frozenset({"succeeded", "failed", "timed_out", "interrupted"})
 TASK_TERMINAL = frozenset({"done", "completed", "rejected", "superseded", "closed", "cancelled", "canceled"})
@@ -38,7 +45,15 @@ LOOP_SECONDS = 25
 # Execution classes. Only an implementation can deliver; every other class
 # produces advisory evidence or a human handoff that never counts as delivery.
 KINDS = ("implementation", "reconnaissance", "evidence", "review", "protected_handoff")
-DELIVERING_KINDS = frozenset({"implementation"})
+# Implementation always delivers. An evidence card delivers when it names a deliverable surface
+# inside the review-side staging area (`_within_review_area`). A `review` card has no delivering
+# lane yet: its writer would have to be an attested economical reviewer (`_reviewer_allowed`), and
+# the only qualified write lane is codex. Reconnaissance and protected handoffs never deliver.
+DELIVERING_KINDS = frozenset({"implementation", "evidence"})
+REVIEW_SIDE_KINDS = frozenset({"evidence"})
+REVIEW_SIDE_PREFIX = "automation/review/"
+CONTROLLER_ROLES = frozenset({"laptop", "interface", "experiment-edge"})
+VERIFICATION_PASS_BASES = ("deterministic_gate", "worker_finalize_attested")
 HANDOFF_TASK_TYPES = frozenset({"human-approval", "human-handoff", "handoff"})
 EVIDENCE_TASK_TYPES = frozenset({"evidence-synthesis", "evidence-gathering", "evidence"})
 READ_ONLY_MODES = frozenset({"read-only", "read_only", "advisory"})
@@ -47,6 +62,8 @@ READ_ONLY_MODES = frozenset({"read-only", "read_only", "advisory"})
 ADVISORY_REUSE_SECONDS = 86400
 FAILURE_RETRY_SECONDS = 3600
 LEDGER_MAX = 200
+SETTLED_MAX = 400
+STAGES_MAX = 100
 HISTORY_RUNS = 10
 HISTORY_SCAN_ROWS = 500
 MAX_ASSESSED = 24
@@ -84,12 +101,30 @@ class RunError(ValueError):
         self.status_code, self.detail = status_code, detail
 
 
+def _usage_view(counters):
+    """Dispatch counts and token consumption are different quantities: keep them apart."""
+    measured, assumed = counters.get("tokens_measured", 0), counters.get("tokens_assumed", 0)
+    dispatches = counters.get("paid_calls", 0)
+    if measured and assumed:
+        basis = "measured plus assumed (conservative estimate for unmeasured dispatches)"
+    elif measured:
+        basis = "measured"
+    elif assumed:
+        basis = "assumed (conservative estimate: provider usage not measurable)"
+    else:
+        basis = "no usage yet" if not dispatches else "unmeasured"
+    return {"dispatches": dispatches, "tool_calls": counters.get("tool_calls", 0),
+            "tokens_measured": measured, "tokens_assumed": assumed,
+            "tokens_total": measured + assumed, "basis": basis}
+
+
 def run_dict(run):
     cp = dict(run.checkpoint or {})
     elapsed = max(0, ((run.finished_at or utcnow_naive()) - run.started_at).total_seconds()) if run.started_at else 0
     return {"id": run.id, "state": run.state, "created_by": run.created_by,
             "initializer": run.initializer, "repo_scope": run.repo_scope,
             "budgets": run.budgets, "counters": {**run.counters, "elapsed_seconds": elapsed},
+            "usage": _usage_view(run.counters or {}),
             "checkpoint": cp, "owed_reviews": cp.get("owed_reviews", []),
             "terminal_reason": run.terminal_reason,
             "started_at": run.started_at.isoformat() if run.started_at else None,
@@ -120,13 +155,14 @@ def activate_run(db, owner, repo_scope=None, budget_overrides=None, coordinator=
         raise RunError(409, "a non-terminal activation already exists")
     scope = list(dict.fromkeys(scope))
     ledger, owed = _inherited_history(db, scope)
+    settled = _inherited_settlements(db, scope)
     run = LazyUsageRun(id=str(uuid.uuid4()), state="requested", created_by=owner,
                        initializer=INITIALIZER, repo_scope=scope,
                        budgets=budgets, started_at=utcnow_naive(),
                        counters={"paid_calls": 0, "tool_calls": 0, "no_delivery_turns": 0,
                                  "repeated_failures": 0, "last_failure_signature": None},
                        checkpoint={"phase": "idle", "in_flight_execution_id": None,
-                                   "owed_reviews": owed, "ledger": ledger,
+                                   "owed_reviews": owed, "ledger": ledger, "settled_reviews": settled,
                                    "next_action": "refresh_frontier",
                                    **({"coordinator": coordinator} if coordinator and coordinator.get("enabled") else {})})
     db.add(run)
@@ -189,7 +225,20 @@ def _budget_reason(run, *, reserved=False):
         limit = budgets[ceiling]
         if (value > limit if reserved and counter in {"paid_calls", "tool_calls"} else value >= limit):
             return ceiling
+    counters = run.counters or {}
+    if counters.get("tokens_measured", 0) + counters.get("tokens_assumed", 0) >= budgets["max_tokens"]:
+        return "max_tokens"
     return None
+
+
+def _token_headroom_exhausted(run, provider, write):
+    """Refuse a paid dispatch whose conservative token estimate would cross the ceiling."""
+    if provider is None:
+        return False
+    counters = run.counters or {}
+    limit = min((run.budgets or {}).get("max_tokens", CEILINGS["max_tokens"]), CEILINGS["max_tokens"])
+    estimate = UNMEASURED_WRITE_TOKEN_ESTIMATE if write else UNMEASURED_TOKEN_ESTIMATE
+    return counters.get("tokens_measured", 0) + counters.get("tokens_assumed", 0) + estimate > limit
 
 
 def _charge(run, **counts):
@@ -257,17 +306,53 @@ def _classify(record, meta):
         return "protected_handoff"
     if record["bucket"] == "review" or task_type in {"review", "independent-review"}:
         return "review"
-    if meta.get("approval_required") is True:
+    if meta.get("approval_required") is True and not _approval_valid(meta):
+        # Without an owner approval bound to this exact scope the gate is only
+        # re-adjudicated; see `approval_scope` for the governed way past it.
         return "reconnaissance"
     if mode in READ_ONLY_MODES or task_type in EVIDENCE_TASK_TYPES:
         return "evidence"
     return "implementation"
 
 
+def approval_scope(meta):
+    """Digest of exactly what an owner approval covers (never prose, never the title)."""
+    scope = {key: meta.get(key) for key in ("task_id", "task_type", "execution_mode", "allowed_paths",
+                                            "denied_paths", "outputs", "result_path")}
+    return hashlib.sha256(json.dumps(scope, sort_keys=True, default=str).encode()).hexdigest()
+
+
+def _approval_valid(meta):
+    """An `approval` block written by the owner in the card, bound to the current scope.
+
+    Only the owner edits the card (its directory is denied to every writer), so a model
+    cannot approve itself; any change to the covered scope invalidates the approval."""
+    approval = meta.get("approval")
+    return (isinstance(approval, dict) and str(approval.get("status", "")).lower() == "approved"
+            and isinstance(approval.get("approved_by"), str) and bool(approval["approved_by"].strip())
+            and isinstance(approval.get("approved_at"), str) and bool(approval["approved_at"].strip())
+            and approval.get("scope_sha256") == approval_scope(meta))
+
+
+def _writes(kind, meta):
+    """Only these classes get a repository write lease and a worker-owned finalisation."""
+    return kind == "implementation" or (kind in REVIEW_SIDE_KINDS and _deliverable_surface(meta))
+
+
+def _write_scope(repo_id, meta):
+    """Paths a writer may commit, and paths it may never touch (always incl. the owner cards)."""
+    allowed = [p for p in (meta.get("allowed_paths") or []) if isinstance(p, str)]
+    if not allowed and isinstance(meta.get("result_path"), str):
+        allowed = [meta["result_path"]]
+    denied = [p for p in (meta.get("denied_paths") or []) if isinstance(p, str)]
+    card_dir = str(Path(portfolio.LAYOUT[repo_id][0])).replace("\\", "/") + "/**"
+    return {"allowed": allowed, "denied": list(dict.fromkeys([*denied, card_dir]))}
+
+
 def _task(record, meta, body, kind=None):
     kind = kind or _classify(record, meta)
     assessment = kind == "reconnaissance"
-    write = kind == "implementation"
+    write = _writes(kind, meta)
     # Advisory classes read the repository, which the plain local model cannot
     # do (it fabricates plausible output), so they default to a paid lane.
     capabilities = meta.get("capabilities") or ["code-strong"]
@@ -286,6 +371,11 @@ def _task(record, meta, body, kind=None):
                      "claim against current HEAD, repository authority and acceptance evidence. Identify stale, "
                      "agent-resolvable or genuinely protected gates and report evidence. Do not execute the "
                      "underlying task, change permissions, or publish anything.\n" + body)
+    if write and kind in REVIEW_SIDE_KINDS:
+        scope = _write_scope(record["repo_id"], meta)
+        objective += ("\nDeliver a review-side artifact only. Write only under: " + ", ".join(scope["allowed"]) +
+                      ". Never edit the owner task cards, canonical files or anything outside those paths, and "
+                      "never mark the task done or record an approval: owner acceptance is a separate step.")
     return {"task_class": "implementation" if write else "repository-reconnaissance",
             "repo": record["repo_id"], "objective": objective,
             "requirements": {"capabilities": capabilities},
@@ -300,6 +390,12 @@ def _reviewer_allowed(record, meta, selected):
     return any(name in model for name in ("haiku", "terra", "glm-flash"))
 
 
+def _task_key(ref):
+    """Task identity independent of the bucket a card currently sits in (ready -> done)."""
+    repo, _, rest = str(ref).partition(":")
+    return f"{repo}:{rest.rsplit('/', 1)[-1]}"
+
+
 def _debt_gate(debt):
     # Checkpoints predating explicit gates used an error to identify quota debt.
     return debt.get("gate") or ("verification" if debt.get("error") else "owner_acceptance")
@@ -308,16 +404,57 @@ def _debt_gate(debt):
 def _set_review_debts(run, debts):
     newest = {}
     for debt in debts:
-        newest[(debt.get("task_ref") or debt.get("task_id"), _debt_gate(debt))] = debt
+        ref = debt.get("task_ref") or debt.get("task_id")
+        newest[(_task_key(ref) if debt.get("task_ref") else ref, _debt_gate(debt))] = debt
     _checkpoint(run, owed_reviews=list(newest.values()))
+
+
+def _settle(run, task_ref, status):
+    """Tombstone: a settled card's debt must not be resurrected by an older run's copy."""
+    settled = dict(run.checkpoint.get("settled_reviews") or {})
+    settled[_task_key(task_ref)] = {"at": utcnow_naive().isoformat(), "status": status, "basis": "owner_card"}
+    if len(settled) > SETTLED_MAX:
+        for key in sorted(settled, key=lambda k: settled[k].get("at") or "")[:len(settled) - SETTLED_MAX]:
+            del settled[key]
+    _checkpoint(run, settled_reviews=settled)
 
 
 def _reconcile_review_debts(run, task_ref, *, verified=False, acceptance=None):
     acceptance = acceptance or {}
-    settled = acceptance.get("delivered") or str(acceptance.get("status", "")).lower() in TASK_TERMINAL
+    status = str(acceptance.get("status", "")).lower()
+    settled = acceptance.get("delivered") or status in TASK_TERMINAL
+    key = _task_key(task_ref)
+    if settled:
+        _settle(run, task_ref, status or "done")
+    # Settling a card clears what the OWNER was asked for. A gap in the other evidence
+    # (an unverified or unreviewed acceptance, a failed finalisation) stays visible until
+    # that evidence exists or the debt is superseded with owner-authorised evidence.
     _set_review_debts(run, [debt for debt in run.checkpoint.get("owed_reviews", [])
-                           if debt.get("task_ref") != task_ref or
-                           not (settled or verified and _debt_gate(debt) == "verification")])
+                           if _task_key(debt.get("task_ref") or "?:?") != key or
+                           not ((settled and not _evidence_gap(debt)) or
+                                verified and _debt_gate(debt) == "verification" and not _evidence_gap(debt))])
+
+
+def _evidence_gap(debt):
+    return bool(debt.get("evidence_gap")) or _debt_gate(debt) in {"independent_review", "finalization"}
+
+
+def _resolve_met_debts(run, task_ref, frontier):
+    """Drop debts whose own condition is now met by the owner card (approval, review evidence)."""
+    key = _task_key(task_ref)
+    meta = _card_meta({"task_ref": task_ref, "repo_id": task_ref.split(":", 1)[0]}, frontier)
+    kept = []
+    for debt in run.checkpoint.get("owed_reviews", []):
+        if _task_key(debt.get("task_ref") or "?:?") == key:
+            gate = _debt_gate(debt)
+            if gate == "owner_approval" and _approval_valid(meta):
+                continue
+            if gate == "independent_review" and evidence_stages(
+                    {"lifecycle_state": "succeeded"}, {"ok": True}, {"delivered": False}, meta,
+                    author_provider=debt.get("author_provider"))["review"]["status"] == "recorded":
+                continue
+        kept.append(debt)
+    _set_review_debts(run, kept)
 
 
 def _deliverable_surface(meta):
@@ -336,6 +473,55 @@ def _static_blocker(kind, meta, write):
         return "requires_zotero_unavailable"
     if write and not _deliverable_surface(meta):
         return "no_deliverable_surface"
+    if kind in REVIEW_SIDE_KINDS and write and not _within_review_area(meta):
+        return "deliverable_outside_review_area"
+    return None
+
+
+def _within_review_area(meta):
+    """An evidence/review artifact lands in the non-canonical review area, never canon."""
+    paths = [p for p in (meta.get("allowed_paths") or []) if isinstance(p, str)]
+    if not paths and isinstance(meta.get("result_path"), str):
+        paths = [meta["result_path"]]
+    return bool(paths) and all(p.replace("\\", "/").startswith(REVIEW_SIDE_PREFIX) and ".." not in p.split("/")
+                              for p in paths)
+
+
+def _resolve_host(label):
+    """Map a card's `execution_host` label to a registered host by id, role or hostname."""
+    wanted = str(label).strip().lower()
+    for host in estate_router._load_yaml("estate").get("hosts") or []:
+        names = {str(host.get(k, "")).lower() for k in ("id", "role", "hostname")}
+        if wanted in names:
+            return host
+    return None
+
+
+def _host_capabilities(host_id):
+    """Tools a worker host declares (estate.yaml `worker.capabilities`); nothing is assumed."""
+    for host in estate_router._load_yaml("estate").get("hosts") or []:
+        if host.get("id") == host_id:
+            return {str(c).lower() for c in (host.get("worker") or {}).get("capabilities") or []}
+    return set()
+
+
+def _capability_blocker(meta, host_id, qualified):
+    """Validate what the card requires against the host actually selected, before dispatch."""
+    label = meta.get("execution_host")
+    if label:
+        target = _resolve_host(label)
+        if target is None:
+            return "execution_host_unresolved"
+        if target.get("role") in CONTROLLER_ROLES or not (target.get("worker") or {}).get("enabled"):
+            return "execution_host_not_a_worker"
+        if target.get("id") != host_id:
+            return "execution_host_not_selected"
+    declared = _host_capabilities(host_id)
+    for need, capability in (("requires_web", "web"), ("requires_mcp", "mcp"), ("requires_zotero", "zotero")):
+        if meta.get(need) is True and capability not in declared:
+            return f"{need}_unavailable"
+    if meta.get("requires_local_model") is True and "local" not in qualified:
+        return "requires_local_model_unavailable"
     return None
 
 
@@ -375,7 +561,7 @@ def _age_seconds(stamp):
 def _recent_blocker(run, ref, revision):
     """Why an unchanged revision should not be dispatched again right now."""
     cp = run.checkpoint
-    debts = [d for d in cp.get("owed_reviews", []) if d.get("task_ref") == ref]
+    debts = [d for d in cp.get("owed_reviews", []) if _task_key(d.get("task_ref") or "?:?") == _task_key(ref)]
     retry_due = False
     for debt in debts:
         if not debt.get("error") or not debt.get("retry_after"):
@@ -400,6 +586,8 @@ def _recent_blocker(run, ref, revision):
         return "quota_retry_pending"
     if outcome == "delivered_pending_acceptance" and any(_debt_gate(d) == "owner_acceptance" for d in debts):
         return "awaiting_owner_acceptance"
+    if outcome == "awaiting_approval" and any(_debt_gate(d) == "owner_approval" for d in debts):
+        return "awaiting_owner_approval"
     return None
 
 
@@ -414,9 +602,10 @@ def _assess(frontier, run, record):
     meta, body = _contract(frontier, record)
     revision = hashlib.sha256(json.dumps(meta, sort_keys=True, default=str).encode() + body.encode()).hexdigest()
     kind = _classify(record, meta)
-    verdict = {"ref": record["ref"], "kind": kind, "delivers": kind in DELIVERING_KINDS, "ok": False,
-               "blocker": None, "revision": revision, "meta": meta, "body": body, "title": meta.get("title")}
-    write = kind == "implementation"
+    write = _writes(kind, meta)
+    verdict = {"ref": record["ref"], "kind": kind, "delivers": write, "ok": False,
+               "blocker": None, "revision": revision, "meta": meta, "body": body, "title": meta.get("title"),
+               "scope": _write_scope(record["repo_id"], meta) if write else None}
     verdict["blocker"] = _static_blocker(kind, meta, write) or _recent_blocker(run, record["ref"], revision)
     if not verdict["blocker"] and write and _repo_lease_held(run, record["repo_id"]):
         verdict["blocker"] = "repo_lease_held"
@@ -435,6 +624,12 @@ def _assess(frontier, run, record):
     needed = "codex-write" if write else provider if paid else executor
     if not host or needed not in checked.get("qualified_executors", []):
         return {**verdict, "blocker": "no_qualified_lane"}
+    # Reconnaissance only re-reads the repository; the card's execution host/tools govern the
+    # task's own execution, which a reconnaissance never performs.
+    capability = (None if kind == "reconnaissance"
+                  else _capability_blocker(meta, host, checked.get("qualified_executors", [])))
+    if capability:
+        return {**verdict, "blocker": capability}
     if write and (provider != "codex" or not paid):
         return {**verdict, "blocker": "no_qualified_write_lane"}
     if not write and executor == "local":
@@ -506,6 +701,7 @@ def _choose(frontier, run, plan=None):
             rid, _, _ = portfolio.parse_ref(task_ref)
             acceptance = _owner_task_status({"repo_id": rid, "task_ref": task_ref}, frontier)
             _reconcile_review_debts(run, task_ref, acceptance=acceptance)
+            _resolve_met_debts(run, task_ref, frontier)
     skipped = {}
     for record in _ordered(frontier, plan):
         try:
@@ -516,7 +712,7 @@ def _choose(frontier, run, plan=None):
         if verdict["ok"]:
             _checkpoint(run, skipped=dict(list(skipped.items())[:40]))
             return (record, verdict["meta"], verdict["task"], verdict["write"], verdict["host"],
-                    verdict["provider"], verdict["revision"], verdict["kind"])
+                    verdict["provider"], verdict["revision"], verdict["kind"], verdict["scope"])
         skipped[record["ref"]] = verdict["blocker"]
         if verdict["blocker"] == "protected_handoff":
             entry = (run.checkpoint.get("ledger") or {}).get(record["ref"]) or {}
@@ -571,16 +767,49 @@ def _ledger_put(run, task_ref, revision, kind, outcome, execution_id=None):
     _checkpoint(run, ledger=ledger)
 
 
+def _prior_runs(db, scope):
+    candidates = db.query(LazyUsageRun).filter(LazyUsageRun.state.in_(TERMINAL)).order_by(
+        LazyUsageRun.started_at.desc()).limit(HISTORY_SCAN_ROWS).all()
+    return [old for old in candidates if set(old.repo_scope or []) & set(scope)][:HISTORY_RUNS]   # newest first
+
+
+def _stamp(value):
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).replace(tzinfo=None)
+    except (TypeError, ValueError):
+        return None
+
+
+def _inherited_settlements(db, scope):
+    """Tombstones (settled or superseded cards) from the recent runs, newest decision wins."""
+    settled = {}
+    for old in reversed(_prior_runs(db, scope)):
+        cp = old.checkpoint or {}
+        for key, entry in (cp.get("settled_reviews") or {}).items():
+            if isinstance(entry, dict):
+                settled[key] = dict(entry)
+        for record in cp.get("review_supersessions") or []:
+            if isinstance(record, dict) and record.get("task_ref"):
+                settled[_task_key(record["task_ref"])] = {"at": record.get("at"), "status": "superseded",
+                                                          "basis": "owner_supersession"}
+    newest = sorted(settled, key=lambda k: settled[k].get("at") or "")[-SETTLED_MAX:]
+    return {key: settled[key] for key in newest}
+
+
 def _inherited_history(db, scope):
     """Carry results and acceptance debt across activations (newest wins).
 
-    Entries only suppress re-dispatch of an unchanged revision inside the
-    reuse windows above; they never block a changed card or a due retry.
+    Ledger entries only suppress re-dispatch of an unchanged revision inside the reuse
+    windows above; they never block a changed card or a due retry.
+
+    Debt is different: each run's final `owed_reviews` is the authoritative state of the
+    repositories it covered, so a repository's debt is taken from the NEWEST run that
+    covered it, never merged with older runs (merging resurrected debt a newer run had
+    already reconciled). A tombstone newer than a debt's `opened_at` also removes it, so
+    a card moved ready -> done cannot reappear from any copy.
     """
-    candidates = db.query(LazyUsageRun).filter(LazyUsageRun.state.in_(TERMINAL)).order_by(
-        LazyUsageRun.started_at.desc()).limit(HISTORY_SCAN_ROWS).all()
-    prior = [old for old in candidates if set(old.repo_scope or []) & set(scope)][:HISTORY_RUNS]
-    ledger, owed = {}, {}
+    prior = _prior_runs(db, scope)
+    ledger = {}
     in_scope = lambda ref: isinstance(ref, str) and ref.split(":", 1)[0] in scope
     for old in reversed(prior):
         cp = old.checkpoint or {}
@@ -592,11 +821,109 @@ def _inherited_history(db, scope):
         for ref, entry in (cp.get("ledger") or {}).items():
             if in_scope(ref) and isinstance(entry, dict):
                 ledger[ref] = dict(entry)
-        for debt in cp.get("owed_reviews") or []:
-            if in_scope(debt.get("task_ref")):
-                owed[(debt.get("task_ref"), _debt_gate(debt))] = dict(debt)
+    authority = {}
+    for old in prior:                                   # newest first
+        for repo in old.repo_scope or []:
+            if repo in scope:
+                authority.setdefault(repo, old)
+    settled = _inherited_settlements(db, scope)
+    owed = {}
+    for repo, old in authority.items():
+        for debt in (old.checkpoint or {}).get("owed_reviews") or []:
+            ref = debt.get("task_ref")
+            if not (isinstance(ref, str) and ref.split(":", 1)[0] == repo):
+                continue
+            tomb = settled.get(_task_key(ref))
+            opened, closed = _stamp(debt.get("opened_at")), _stamp((tomb or {}).get("at"))
+            # A tombstone clears what the owner was asked for; evidence gaps (verification,
+            # independent review, finalisation) outlive acceptance until met or superseded.
+            if (tomb is not None and not _evidence_gap(debt)
+                    and (opened is None or closed is None or closed >= opened)):
+                continue
+            owed[(_task_key(ref), _debt_gate(debt))] = dict(debt)
+        for debt in (old.checkpoint or {}).get("owed_reviews") or []:
+            if not debt.get("task_ref") and debt.get("task_id"):
+                # Pre-upgrade debts carry only a task_id: keep them rather than lose them silently.
+                owed.setdefault((debt["task_id"], _debt_gate(debt)), dict(debt))
     newest = sorted(ledger, key=lambda r: ledger[r].get("at") or "")[-LEDGER_MAX:]
     return {ref: ledger[ref] for ref in newest}, list(owed.values())
+
+
+# Independent reviewers must come from another model family than the author.
+FAMILIES = (("codex", "openai"), ("openai", "openai"), ("gpt", "openai"), ("sol", "openai"), ("terra", "openai"),
+            ("luna", "openai"), ("astra", "openai"), ("claude", "anthropic"), ("anthropic", "anthropic"),
+            ("opus", "anthropic"), ("sonnet", "anthropic"), ("haiku", "anthropic"), ("fable", "anthropic"),
+            ("glm", "zhipu"), ("zai", "zhipu"), ("local", "local"), ("qwen", "local"))
+APPROVING = frozenset({"approve", "approved", "pass", "accepted"})
+
+
+def _family(name):
+    """Model family of an alias, or None when it is not recognised (which can never count as
+    independent: an unknown reviewer fails closed rather than passing as another family)."""
+    text = str(name or "").strip().lower()
+    return next((family for key, family in FAMILIES if key in text), None)
+
+
+def _review_required(meta):
+    return "INDEPENDENT" in str(meta.get("verification_route") or "").upper()
+
+
+def evidence_stages(view, result, acceptance, meta, *, author_provider=None, finalization=None):
+    """Four separate pieces of evidence; none stands in for another.
+
+    1. execution:     the worker/provider run finished successfully (it says nothing about quality);
+    2. verification:  a deterministic check passed (the router gate, or worker-attested finalisation
+                      of an in-scope, non-empty commit). Exit code and non-empty prose are NOT checks;
+    3. review:        where the card's route demands it, an approving review by ANOTHER model family;
+    4. acceptance:    the owner card is done with acceptance evidence.
+    `complete` needs every required stage."""
+    result = result or {}
+    ok = (view or {}).get("lifecycle_state") == "succeeded" and result.get("ok") is True
+    execution = {"status": "succeeded" if ok else "failed", "state": (view or {}).get("lifecycle_state")}
+    gate = result.get("deterministic_gate") or result.get("verification_outcome")
+    if not ok:
+        verification = {"status": "fail", "basis": "execution_failed"}
+    elif finalization is not None:
+        violations = list(finalization.get("scope_violations") or [])
+        if violations:
+            verification = {"status": "fail", "basis": "scope_violation", "scope_violations": violations}
+        elif not finalization.get("finalized"):
+            verification = {"status": "fail", "basis": "finalization_failed"}
+        elif finalization.get("committed"):
+            verification = {"status": "pass", "basis": "worker_finalize_attested",
+                            "commit_sha": finalization.get("commit_sha")}
+        else:
+            verification = {"status": "unverified", "basis": "nothing_committed"}
+    elif gate == "pass":
+        verification = {"status": "pass", "basis": "deterministic_gate"}
+    elif gate:
+        verification = {"status": "fail", "basis": "deterministic_gate"}
+    else:
+        verification = {"status": "unverified", "basis": "no_deterministic_check"}
+    if not _review_required(meta or {}):
+        review = {"status": "not_required"}
+    else:
+        author = _family(author_provider) if author_provider else None
+        review = {"status": "required"}
+        for entry in (meta or {}).get("review_evidence") or []:
+            if (not isinstance(entry, dict) or str(entry.get("verdict", "")).lower() not in APPROVING
+                    or not entry.get("reviewer_provider")):
+                continue
+            reviewer = _family(entry["reviewer_provider"])
+            if author is None or reviewer is None:
+                continue
+            if reviewer == author:
+                review = {"status": "not_independent", "reviewer": entry["reviewer_provider"]}
+                continue
+            review = {"status": "recorded", "reviewer": entry["reviewer_provider"], "ref": entry.get("ref")}
+            break
+    accepted = bool(acceptance.get("delivered"))
+    stages = {"execution": execution, "verification": verification, "review": review,
+              "acceptance": {"status": "accepted" if accepted else "pending",
+                             "owner_status": acceptance.get("status")}}
+    stages["complete"] = (ok and verification["status"] == "pass" and
+                          review["status"] in {"not_required", "recorded"} and accepted)
+    return stages
 
 
 def _reported_usage(result):
@@ -606,6 +933,51 @@ def _reported_usage(result):
             any(type(usage.get(k)) is not int or usage[k] < 0 for k in ("paid_calls", "tool_calls"))):
         return None
     return usage
+
+
+def _measured_tokens(*results):
+    """Provider-reported token usage (Claude `modelUsage`-style keys); 0 when none was reported."""
+    for result in results:
+        usage = (result or {}).get("provider_usage")
+        if isinstance(usage, dict):
+            total = sum(usage[k] for k in TOKEN_KEYS if type(usage.get(k)) is int and usage[k] > 0)
+            if total:
+                return total
+    return 0
+
+
+def _charge_tokens(run, result, provider_result):
+    """Meter tokens once per execution: measured where reported, else a conservative estimate.
+
+    A dispatch that used a paid provider but reported nothing is never charged zero."""
+    measured = _measured_tokens(provider_result, result)
+    if measured:
+        _charge(run, tokens_measured=measured)
+    elif run.checkpoint.get("dispatch_provider"):
+        _charge(run, tokens_assumed=UNMEASURED_WRITE_TOKEN_ESTIMATE if run.checkpoint.get("dispatch_write")
+                else UNMEASURED_TOKEN_ESTIMATE)
+
+
+def _finalize_owned(db, run, execution_id):
+    """The backend finalises its own successful write: commit the in-scope worktree changes on
+    the leased task branch, with the card's scope and an execution trailer. No controller step.
+    Idempotent: a finalised execution answers `already_finalized`."""
+    cp = run.checkpoint
+    lease = cp.get("lease")
+    if not lease:
+        return {"finalized": False, "reason": "no lease recorded for this write"}
+    scope = cp.get("write_scope") or {}
+    _charge(run, tool_calls=1)
+    db.commit()
+    try:
+        outcome = estate_write_lane.finalize_execution(
+            execution_id=execution_id, repo_id=lease["repo_id"], host_id=lease["host_id"],
+            commit_message=f"task({cp.get('current_task_id')}): {cp.get('task_title') or 'lazyusage delivery'}",
+            allowed_paths=scope.get("allowed"), denied_paths=scope.get("denied"))
+    except Exception as exc:       # never store exception text: it can carry a task prompt
+        outcome = {"finalized": False, "reason": "finalize_raised_" + type(exc).__name__}
+    db.expire_all()
+    return outcome
 
 
 def _quota_debt(run, result):
@@ -619,7 +991,7 @@ def _quota_debt(run, result):
     # assumed router cooldown is explicitly distinguished from a reset.
     error = result.get("error") or result.get("execution_error") or result.get("stderr") or health.get("reason")
     debt = {"task_id": cp.get("current_task_id"), "task_ref": cp.get("task_ref"),
-            "gate": "verification",
+            "gate": "verification", "opened_at": utcnow_naive().isoformat(),
             "execution_id": cp.get("in_flight_execution_id"), "provider": result.get("provider"),
             "error": error, "retry_after": health.get("retry_after"),
             "retry_after_assumed": health.get("retry_after_assumed", False),
@@ -645,9 +1017,27 @@ def reconcile_task_status(checkpoint, view):
 
     Writes/finalization/merge stay in the existing owner/lease path. Pending
     acceptance is recorded as debt, so another eligible task may proceed.
+    The card's own metadata (verification route, recorded reviews) rides along as `_card`.
     """
     frontier = refresh_frontier([checkpoint["repo_id"]])
-    return _owner_task_status(checkpoint, frontier)
+    status = _owner_task_status(checkpoint, frontier)
+    return {**status, "_card": _card_meta(checkpoint, frontier)}
+
+
+def _card_meta(checkpoint, frontier):
+    """The task card's metadata wherever it now lives (its bucket changes when accepted)."""
+    record = next((r for r in frontier["records"] if r["ref"] == checkpoint["task_ref"]), None)
+    try:
+        if record:
+            return _contract(frontier, record)[0]
+        root = frontier["roots"].get(checkpoint["repo_id"])
+        if root:
+            _, _, name = portfolio.parse_ref(checkpoint["task_ref"])
+            queue = portfolio.queue_path(root, Path(portfolio.LAYOUT[checkpoint["repo_id"]][0]))
+            return portfolio.split_card(portfolio.read_card(queue, "done", name))[0]
+    except (OSError, ValueError, KeyError):
+        pass
+    return {}
 
 
 def _owner_task_status(checkpoint, frontier):
@@ -741,50 +1131,110 @@ def _observe(db, run):
     if not accounted and usage is not None:
         _charge(run, paid_calls=max(0, usage["paid_calls"] - 1),
                 tool_calls=max(0, usage["tool_calls"] - 1))
+    if not accounted:
+        _charge_tokens(run, result, provider_result)
+        # Persist "accounted" together with the charges: a crash during the long finalize below
+        # must not charge this execution a second time on re-entry.
+        _checkpoint(run, accounted_execution_id=execution_id)
     parked = _quota_debt(run, provider_result)
     # A provider refusal before any model/tool execution needs no child
     # accounting. Quota failures park only dependent verification. Other
     # paid outcomes require worker-reported totals; absence is not zero.
     unknown_usage = bool(run.checkpoint.get("dispatch_provider") and usage is None and not parked)
-    passed = verify_attempt(view, run.checkpoint) and not parked
+    cp = run.checkpoint
+    kind = cp.get("task_kind") or "implementation"
+    wrote = bool(cp.get("dispatch_write", kind == "implementation"))
+    ran_ok = view.get("lifecycle_state") == "succeeded" and result.get("ok") is True
+    finalization = _finalize_owned(db, run, execution_id) if (wrote and ran_ok and not parked) else None
+    task_ref, revision = run.checkpoint["task_ref"], run.checkpoint.get("task_revision")
     acceptance = reconcile_task_status(run.checkpoint, view)
-    _reconcile_review_debts(run, run.checkpoint["task_ref"], verified=passed, acceptance=acceptance)
+    card = acceptance.pop("_card", {})
+    stg = evidence_stages(view, result, acceptance, card,
+                          author_provider=run.checkpoint.get("dispatch_provider") or "local",
+                          finalization=finalization)
+    passed = stg["verification"]["status"] == "pass" and stg["execution"]["status"] == "succeeded" and not parked
+    fin_failed = finalization is not None and not finalization.get("finalized")
+    scope_failed = stg["verification"].get("basis") == "scope_violation"
+    _reconcile_review_debts(run, task_ref, verified=passed, acceptance=acceptance)
     task_terminal = str(acceptance.get("status", "")).lower() in TASK_TERMINAL
     if not passed and not acceptance["delivered"] and not task_terminal:
         acceptance = {"delivered": False, "status": "verification_pending" if parked else "failed"}
-    kind = run.checkpoint.get("task_kind") or "implementation"
-    task_ref, revision = run.checkpoint["task_ref"], run.checkpoint.get("task_revision")
-    # A re-adjudication report is not the task's output: nothing is owed on it.
-    if passed and kind != "reconnaissance" and not acceptance["delivered"] and not task_terminal:
-        owed = list(run.checkpoint.get("owed_reviews", []))
-        debt = {"task_id": run.checkpoint["current_task_id"], "task_ref": task_ref,
-                "gate": "owner_acceptance",
-                "execution_id": execution_id, "provider": None, "error": None, "retry_after": None,
-                "next_action": "owner_acceptance_and_required_independent_verification"}
-        _set_review_debts(run, owed + [debt])
-    if acceptance["delivered"]:
-        run.counters = {**run.counters, "no_delivery_turns": 0, "repeated_failures": 0,
-                        "last_failure_signature": None}
+    now = utcnow_naive().isoformat()
+    base = {"task_id": run.checkpoint["current_task_id"], "task_ref": task_ref, "execution_id": execution_id,
+            "provider": None, "error": None, "retry_after": None, "opened_at": now,
+            "author_provider": run.checkpoint.get("dispatch_provider") or "local"}
+    new_debts = []
+    review_open = stg["review"]["status"] in {"required", "not_independent"}
+    if passed and not acceptance["delivered"] and not task_terminal:
+        if kind == "reconnaissance":
+            # A re-adjudication report is not the task's output; it asks for ONE concrete owner step.
+            if run.checkpoint.get("dispatch_approval_required"):
+                new_debts.append({**base, "gate": "owner_approval",
+                                  "scope_sha256": run.checkpoint.get("dispatch_approval_scope"),
+                                  "next_action": "owner records an `approval` block in the task card (status: approved, "
+                                                 "approved_by, approved_at, scope_sha256 as listed) once the "
+                                                 "reconnaissance evidence justifies lifting the approval gate"})
+        else:
+            new_debts.append({**base, "gate": "owner_acceptance",
+                              "next_action": "owner_acceptance_and_required_independent_verification"})
+            if review_open:
+                new_debts.append({**base, "gate": "independent_review", "evidence_gap": True,
+                                  "next_action": "independent review by another model family, recorded as "
+                                                 "`review_evidence` on the card"})
+    elif acceptance["delivered"] and not stg["complete"]:
+        # Accepted, but a required piece of evidence is missing: acceptance cannot stand in for it.
+        if stg["verification"]["status"] != "pass":
+            new_debts.append({**base, "gate": "verification", "evidence_gap": True,
+                              "next_action": "deterministic verification evidence for the accepted work"})
+        if review_open:
+            new_debts.append({**base, "gate": "independent_review", "evidence_gap": True,
+                              "next_action": "independent review by another model family"})
+    if fin_failed:
+        new_debts.append({**base, "gate": "finalization", "evidence_gap": True,
+                          "error": str(finalization.get("reason") or "finalization failed")[:300],
+                          "next_action": "recover or finalize this execution through the governed controller path"})
+    if new_debts:
+        _set_review_debts(run, [*run.checkpoint.get("owed_reviews", []), *new_debts])
+    delivered_clean = acceptance["delivered"] and stg["complete"]
+    if delivered_clean:
         outcome = "delivered"
+    elif acceptance["delivered"]:
+        outcome = "accepted_unproven"
     elif parked:
         outcome = "quota_parked"
+    elif fin_failed:
+        outcome = "finalize_failed"
+    elif scope_failed:
+        outcome = "scope_violation"
     elif passed:
-        outcome = "delivered_pending_acceptance" if kind in DELIVERING_KINDS else "advisory_complete"
+        outcome = ("awaiting_approval" if kind == "reconnaissance" and run.checkpoint.get("dispatch_approval_required")
+                   else "delivered_pending_acceptance" if wrote else "advisory_complete")
+    elif stg["execution"]["status"] == "succeeded":
+        outcome = "unverified"
     else:
         outcome = "failed"
-    if not accounted and not acceptance["delivered"]:
-        if passed:
-            # Executed and verified but not accepted: not a failure. Advisory
-            # classes can never deliver, so this only spends a no-delivery turn.
+    if delivered_clean:
+        run.counters = {**run.counters, "no_delivery_turns": 0, "repeated_failures": 0,
+                        "last_failure_signature": None}
+    elif not accounted:
+        if outcome in {"advisory_complete", "delivered_pending_acceptance", "awaiting_approval", "unverified",
+                       "accepted_unproven"}:
+            # Executed but not accepted: not a failure. It only spends a no-delivery turn.
             _no_delivery(run)
         else:
-            cause = str(result.get("error") or provider_result.get("error_code") or "verification_failed")
+            cause = ("finalize_failed" if fin_failed else "scope_violation" if scope_failed else
+                     str(result.get("error") or provider_result.get("error_code") or "verification_failed"))
             _failure(run, cause, scope=(task_ref, revision))
     _ledger_put(run, task_ref, revision, kind, outcome, execution_id)
+    stages_map = dict(run.checkpoint.get("stages") or {})
+    stages_map[task_ref] = stg
+    if len(stages_map) > STAGES_MAX:
+        for ref in list(stages_map)[:len(stages_map) - STAGES_MAX]:
+            del stages_map[ref]
     attempted = dict(run.checkpoint.get("attempted", {}))
     attempted[task_ref] = revision
     _checkpoint(run, attempted=attempted, last_execution_id=execution_id,
-                in_flight_execution_id=None, phase="idle", acceptance=acceptance,
+                in_flight_execution_id=None, phase="idle", acceptance=acceptance, stages=stages_map,
                 accounted_execution_id=execution_id, next_action="refresh_frontier")
     if unknown_usage:
         _checkpoint(run, usage_accounting_pending=execution_id,
@@ -796,6 +1246,9 @@ def _observe(db, run):
     reason = _budget_reason(run)
     if reason:
         return _finish(db, run, "budget_exhausted", reason)
+    if fin_failed:
+        return _park(db, run, "finalization failed for execution " + execution_id +
+                     "; recover it through the governed finalize/recover path", automatic=False)
     if unknown_usage:
         return _park(db, run, "no qualified metered continuation until existing execution usage is available")
     return _save(db, run)
@@ -961,7 +1414,7 @@ def advance(db, run_id):
             reason = _budget_reason(run)
             return _finish(db, run, "budget_exhausted", reason) if reason else _park(
                 db, run, "no eligible frontier; recheck on frontier, authority or provider change")
-        record, meta, task, write, host, provider, revision, kind = chosen
+        record, meta, task, write, host, provider, revision, kind, scope = chosen
         # The coordinator's decomposition/next_action stay checkpointed as
         # untrusted advisory evidence only (Sol review P1: never inject
         # model-generated instruction text into a worker objective).
@@ -970,7 +1423,11 @@ def advance(db, run_id):
         _save(db, run, current_task_id=str(meta.get("task_id") or record["ref"]),
               task_ref=record["ref"], repo_id=record["repo_id"],
               task_revision=revision, task_kind=kind,
-              dispatch_provider=provider,
+              dispatch_provider=provider, dispatch_write=write, write_scope=scope,
+              task_title=str(meta.get("title") or "")[:60],
+              dispatch_approval_scope=approval_scope(meta) if kind == "reconnaissance" else None,
+              dispatch_review_required=_review_required(meta),
+              dispatch_approval_required=meta.get("approval_required") is True,
               acceptance_criteria={"contract_ref": record["ref"], "verification_route": meta.get("verification_route")},
               phase="preparing", next_action="preflight")
         if write:
@@ -1006,6 +1463,8 @@ def advance(db, run_id):
             return _park(db, run, "delegation preflight has no qualified route")
         run = _load(db, run.id)
         reason = _budget_reason(run)
+        if not reason and _token_headroom_exhausted(run, provider, write):
+            reason = "max_tokens"       # the conservative estimate of this dispatch would cross the ceiling
         if reason:
             _release_owned_lease(db, run)
             return _finish(db, run, "budget_exhausted", reason)
@@ -1081,6 +1540,45 @@ def advance(db, run_id):
         _checkpoint(run, phase="idle")
         _release_owned_lease(db, run)
         return _park(db, run, "attempt interrupted: " + type(exc).__name__)
+
+
+def supersede_review_debts(db, owner, run_id, task_refs, *, reason, evidence):
+    """Retire review debts that rest on unusable evidence (e.g. fabricated local-model output).
+
+    Only the owner's explicit, evidenced decision may do this; the route requires the execute
+    scope. The debt is not deleted silently: it is moved to `review_supersessions` with the
+    principal, reason and evidence, which also becomes a tombstone for every later activation.
+    It never marks a task delivered."""
+    if not isinstance(owner, str) or not owner.strip():
+        raise RunError(422, "owner is required")
+    if not isinstance(reason, str) or not reason.strip():
+        raise RunError(422, "a reason is required")
+    if (not isinstance(evidence, list) or not evidence
+            or any(not isinstance(item, str) or not item.strip() for item in evidence)):
+        raise RunError(422, "evidence references are required")
+    if not isinstance(task_refs, list) or not task_refs or any(not isinstance(r, str) for r in task_refs):
+        raise RunError(422, "task_refs must be a non-empty list")
+    run = _load(db, run_id)
+    if run.state not in TERMINAL:
+        db.rollback()
+        raise RunError(409, "only a finished activation's debts can be superseded")
+    owed = list((run.checkpoint or {}).get("owed_reviews") or [])
+    missing = [ref for ref in task_refs if not any(d.get("task_ref") == ref for d in owed)]
+    if missing:
+        db.rollback()
+        raise RunError(404, "no such owed review in this run: " + ", ".join(missing))
+    now = utcnow_naive().isoformat()
+    records = list((run.checkpoint or {}).get("review_supersessions") or [])
+    for debt in owed:
+        if debt.get("task_ref") in task_refs:
+            records.append({"task_ref": debt["task_ref"], "gate": _debt_gate(debt), "original": dict(debt),
+                            "reason": reason.strip(), "evidence": [e.strip() for e in evidence],
+                            "by": owner, "at": now})
+    _checkpoint(run, owed_reviews=[d for d in owed if d.get("task_ref") not in task_refs],
+                review_supersessions=records)
+    db.commit()
+    return {"run_id": run.id, "superseded": sorted(set(task_refs)),
+            "remaining": len(run.checkpoint["owed_reviews"])}
 
 
 def lifecycle_tick():

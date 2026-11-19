@@ -75,17 +75,37 @@ Within the existing runtime ceilings, a recoverable provider block parks only de
 ### Read delivery status
 
 - `checkpoint.task_kind` / `ledger[ref].kind` is `implementation`, `reconnaissance`, `evidence`, `review` or `protected_handoff`
-  (legacy ledger entries may be null). Only `implementation` can deliver. Successful `reconnaissance`, `evidence` and `review`
-  runs are advisory output, never delivery; report their ledger outcome `advisory_complete` as advisory completion.
+  (legacy ledger entries may be null). `implementation` delivers; an `evidence` card delivers only when it names a
+  deliverable inside `automation/review/` (a review-side artifact, never canon); `reconnaissance`, `review` and
+  `protected_handoff` never deliver. Report a read-only `advisory_complete` as advisory completion.
+- Four separate pieces of evidence live in `checkpoint.stages[ref]`: `execution` (the run finished), `verification`
+  (a deterministic check: the router gate, or worker-attested finalisation of an in-scope, non-empty commit; exit
+  code or prose alone is not a check), `review` (`not_required`, `required`, `not_independent` or `recorded`; an
+  approving review by ANOTHER model family) and `acceptance` (owner card done with acceptance evidence). `complete`
+  needs every required stage. Never merge them into one claim: an `accepted_unproven` outcome means the owner
+  accepted but verification or independent review is still owed.
 - `checkpoint.skipped` maps candidate refs to why they were not dispatched: for example `protected_handoff`,
-  `requires_zotero_unavailable`, `no_deliverable_surface`, `ungrounded_local_executor`, `result_reusable`,
-  `failure_backoff` or `awaiting_owner_acceptance`. List `protected_handoff` entries as operator actions for the human;
-  never dispatch or retry them (the planner sees them only as excluded evidence).
-- `ledger` outcomes (for example `advisory_complete`, `delivered_pending_acceptance`, `failed`, `quota_parked`,
-  `protected_handoff`, `delivered`, `attempted_legacy`) persist across activations (last 10 in-scope terminal runs). An unchanged
-  card is not re-dispatched while its result is fresh (advisory/handoff/delivered 24 h, failure 1 h); a changed card or a due
-  `retry_after` time allows a retry through the existing dispatch gates, and neither waives protected handoffs.
-- `delivered_pending_acceptance` means a worker result passed the deterministic gate and owner acceptance is pending while the
-  card is non-terminal; required independent review and merge live on the owner card, not the ledger. Report it as owed, not shipped.
+  `requires_zotero_unavailable`, `requires_web_unavailable`, `execution_host_not_a_worker`, `execution_host_unresolved`,
+  `deliverable_outside_review_area`, `no_deliverable_surface`, `ungrounded_local_executor`, `result_reusable`,
+  `failure_backoff`, `awaiting_owner_acceptance` or `awaiting_owner_approval`. List `protected_handoff` entries as
+  operator actions for the human; never dispatch or retry them.
+- An `approval_required` card is first re-adjudicated (`reconnaissance`), ledger outcome `awaiting_approval`. The one
+  concrete owner step is in the `owner_approval` debt: record an `approval` block on the card bound to the listed
+  `scope_sha256`. Only that, never model output, lifts the gate; any change to the card's scope invalidates it.
+- `ledger` outcomes (`advisory_complete`, `awaiting_approval`, `delivered_pending_acceptance`, `accepted_unproven`,
+  `finalize_failed`, `scope_violation`, `unverified`, `failed`, `quota_parked`, `protected_handoff`, `delivered`,
+  `attempted_legacy`) persist across activations. An unchanged card is not re-dispatched while its result is fresh
+  (advisory/handoff/delivered 24 h, failure 1 h); a changed card or a due `retry_after` allows a retry.
+- Debt is per repository, taken from its newest run, and a card the owner settled stays settled (`settled_reviews`).
+  The owner can retire debts resting on unusable output with `POST /api/lazy-usage/supersede` (reason and evidence
+  required); report supersessions as owner decisions, never as delivery.
+- The backend finalises its own successful write (commit on the leased branch, scope enforced, lease released). A
+  `finalization` debt or `finalize_failed` outcome means that did not hold; report it and the recover path, do not
+  hide it. Push and merge are separate governed steps.
+- `usage` separates `dispatches` (worker/provider calls) from tokens: `tokens_measured` where the provider reports
+  them, and a conservative `tokens_assumed` estimate where it cannot. `max_tokens` ends the run on either. Never
+  present dispatch counts as consumption.
+- `delivered_pending_acceptance` means a verified write is awaiting owner acceptance; required independent review and
+  merge live on the owner card. Report it as owed, not shipped.
 
 Report completed work only when the owner acceptance criteria, deterministic checks, required independent review, merge/deployment where required, and task-status reconciliation are proved. Keep owed review, child-usage accounting uncertainty, pending leases and required operator actions visible. Preserve prompt-application/evolution traces through the central register only when the registered initialiser is actually applied. The skill is a control interface; it does not itself certify backend outcomes.
