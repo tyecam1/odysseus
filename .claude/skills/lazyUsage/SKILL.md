@@ -72,4 +72,20 @@ For operator commands: `am lazy status [RUN_ID]`, `am lazy pause [RUN_ID]`, `am 
 
 Within the existing runtime ceilings, a recoverable provider block parks only dependent acceptance/review; remaining independent tasks may proceed. Inspect actual owner authority before treating stale `approval_required` as a human gate; protected actions remain protected. No repeated identical failed calls, model self-certification, costly no-op reviews or unchanged-HEAD repeats.
 
+### Read delivery status
+
+- `checkpoint.task_kind` / `ledger[ref].kind` is `implementation`, `reconnaissance`, `evidence`, `review` or `protected_handoff`
+  (legacy ledger entries may be null). Only `implementation` can deliver. Successful `reconnaissance`, `evidence` and `review`
+  runs are advisory output, never delivery; report their ledger outcome `advisory_complete` as advisory completion.
+- `checkpoint.skipped` maps candidate refs to why they were not dispatched: for example `protected_handoff`,
+  `requires_zotero_unavailable`, `no_deliverable_surface`, `ungrounded_local_executor`, `result_reusable`,
+  `failure_backoff` or `awaiting_owner_acceptance`. List `protected_handoff` entries as operator actions for the human;
+  never dispatch or retry them (the planner sees them only as excluded evidence).
+- `ledger` outcomes (for example `advisory_complete`, `delivered_pending_acceptance`, `failed`, `quota_parked`,
+  `protected_handoff`, `delivered`, `attempted_legacy`) persist across activations (last 10 in-scope terminal runs). An unchanged
+  card is not re-dispatched while its result is fresh (advisory/handoff/delivered 24 h, failure 1 h); a changed card or a due
+  `retry_after` time allows a retry through the existing dispatch gates, and neither waives protected handoffs.
+- `delivered_pending_acceptance` means a worker result passed the deterministic gate and owner acceptance is pending while the
+  card is non-terminal; required independent review and merge live on the owner card, not the ledger. Report it as owed, not shipped.
+
 Report completed work only when the owner acceptance criteria, deterministic checks, required independent review, merge/deployment where required, and task-status reconciliation are proved. Keep owed review, child-usage accounting uncertainty, pending leases and required operator actions visible. Preserve prompt-application/evolution traces through the central register only when the registered initialiser is actually applied. The skill is a control interface; it does not itself certify backend outcomes.
