@@ -30,6 +30,7 @@ DEFAULT_POLICY = {"enabled": True,
                   "min_paid_budget_remaining": 2}
 CALL_TIMEOUT_S = 120.0
 MAX_CANDIDATES = 15
+MAX_EXCLUDED = 12
 MAX_SELECTED = 12
 MAX_STEPS = 8
 MAX_STEP_CHARS = 200
@@ -42,7 +43,12 @@ Order the candidate owner tasks for THIS turn and outline execution of the first
 Rules: shipping-first (near-complete, unblocking or safety-gated work first);
 prefer the cheapest adequate qualified route; respect protected gates, owner
 acceptance and verification requirements; propose nothing outside the listed
-candidates. Use the included budget/usage state: spend attention where the
+candidates. Every candidate is already validated as dispatchable: prefer those
+with delivers=true (an implementation that can land) over advisory kinds
+(reconnaissance, evidence, review), which never deliver by themselves, and
+deprioritise a candidate whose last_outcome shows its result is already in
+hand. excluded lists tasks that cannot be delivered now and why; never select
+them. Use the included budget/usage state: spend attention where the
 remaining budget makes real delivery plausible this turn.
 
 Answer with ONE JSON object and nothing else, exactly this shape:
@@ -54,6 +60,7 @@ prose outside the JSON.
 
 Context:
 candidates: {candidates}
+excluded: {excluded}
 owed_reviews: {owed}
 budgets: {budgets}
 counters: {counters}
@@ -110,14 +117,9 @@ def _budgets(run):
 
 def _qualified_executors():
     host_id = estate_router.current_host_id()
-    try:
-        entry = next((h for h in estate_router._load_yaml("estate").get("hosts", [])
-                      if h.get("id") == host_id), None)
-    except estate_router.RoutingConfigError:
-        return []
-    if entry is None:
-        return []
-    return estate_router.host_static_state(entry).get("qualified_executors") or []
+    # Static registry presence alone is not live worker eligibility.
+    return next((h.get("qualified_executors") or [] for h in estate_router.eligible_hosts()
+                 if h.get("host_id") == host_id and h.get("eligible")), [])
 
 
 def select_lane(run, *, high_consequence):
@@ -144,24 +146,37 @@ def select_lane(run, *, high_consequence):
     return {"lane": None, "reason": "no_qualified_coordinator_lane", "considered": considered}
 
 
-def _candidates(frontier):
+def _candidates(frontier, evidence=None):
     from src.lazy_usage_runtime import TASK_TERMINAL
     rows = [r for r in frontier["records"]
             if r.get("bucket") not in {"inbox", "blocked", "blocked-human"}
             and str(r.get("status", "")).lower() not in TASK_TERMINAL]
+    if evidence is not None:
+        # Only candidates the runtime has validated as dispatchable are shown,
+        # in the runtime's own order, so a ranking can never name dead ends.
+        feasible = [e["ref"] for e in evidence if e.get("feasible")]
+        by_ref = {r["ref"]: r for r in rows}
+        rows = [by_ref[ref] for ref in feasible if ref in by_ref]
     return rows[:MAX_CANDIDATES]
 
 
-def build_prompt(frontier, run):
+def build_prompt(frontier, run, evidence=None):
+    facts = {e["ref"]: e for e in evidence or []}
     candidates = [{"ref": r["ref"], "bucket": r.get("bucket"),
-                   "priority": r.get("priority"), "status": r.get("status")}
-                  for r in _candidates(frontier)]
+                   "priority": r.get("priority"), "status": r.get("status"),
+                   **({k: facts[r["ref"]].get(k) for k in
+                       ("kind", "delivers", "title", "verification_route", "approval_required", "last_outcome")}
+                      if r["ref"] in facts else {})}
+                  for r in _candidates(frontier, evidence)]
+    excluded = [{"ref": e["ref"], "why": e.get("blocker")}
+                for e in (evidence or []) if not e.get("feasible")][:MAX_EXCLUDED]
     owed = [{"task_ref": d.get("task_ref"), "gate": d.get("gate"),
              "retry_after": d.get("retry_after")}
             for d in (run.checkpoint or {}).get("owed_reviews", [])]
     return PROMPT.format(json_shape=JSON_SHAPE, max_selected=MAX_SELECTED, max_steps=MAX_STEPS,
                          max_step_chars=MAX_STEP_CHARS, max_next_action_chars=MAX_NEXT_ACTION_CHARS,
                          candidates=json.dumps(candidates, sort_keys=True),
+                         excluded=json.dumps(excluded, sort_keys=True),
                          owed=json.dumps(owed, sort_keys=True),
                          budgets=json.dumps(_budgets(run), sort_keys=True),
                          counters=json.dumps(run.counters or {}, sort_keys=True))
@@ -214,7 +229,7 @@ def high_consequence(checkpoint, counters):
     return bool(cp.get("owed_reviews")) or (counters or {}).get("repeated_failures", 0) >= 2
 
 
-def coordinator_step(db, run, frontier, digest):
+def coordinator_step(db, run, frontier, digest, evidence=None):
     """One bounded advisory planning call; commits before the provider boundary.
 
     Returns a validated plan dict, a persisted plan on an unchanged key (no
@@ -226,6 +241,17 @@ def coordinator_step(db, run, frontier, digest):
         return None
     if not master_enabled():
         _checkpoint(run, coordinator_skip="coordinator_disabled")
+        db.commit()
+        return None
+    from src.lazy_usage_runtime import _budget_reason, utcnow_naive
+    if _budget_reason(run) or run.state != "running":
+        _checkpoint(run, coordinator_skip="coordinator_budget_or_state_gate")
+        db.commit()
+        return None
+    if not _candidates(frontier, evidence):
+        # Nothing dispatchable: a paid plan cannot change the outcome.
+        _checkpoint(run, coordinator_skip="no_feasible_candidates" if evidence is not None
+                    else "no_coordinator_candidates")
         db.commit()
         return None
     key = plan_key(digest, cp)
@@ -248,7 +274,12 @@ def coordinator_step(db, run, frontier, digest):
         db.commit()
         return None
     provider, variant = LANE_ROUTES[lane]
-    prompt = build_prompt(frontier, run)
+    prompt = build_prompt(frontier, run, evidence)
+    remaining_seconds = _budgets(run)["max_seconds"] - (utcnow_naive() - run.started_at).total_seconds()
+    if remaining_seconds <= 0:
+        _checkpoint(run, coordinator_skip="coordinator_budget_or_state_gate")
+        db.commit()
+        return None
     # Charge BEFORE the call so spent accounting survives a crash mid-call.
     # The attempted-digest fence in the same commit guarantees exactly one
     # coordinator call per frontier digest even across crashes.
@@ -259,9 +290,9 @@ def coordinator_step(db, run, frontier, digest):
     try:
         if provider == "glm":
             kwargs = {"variant": variant} if variant else {}
-            result = estate_router.execute_glm(prompt, timeout=CALL_TIMEOUT_S, **kwargs)
+            result = estate_router.execute_glm(prompt, timeout=min(CALL_TIMEOUT_S, remaining_seconds), **kwargs)
         else:
-            result = estate_router.execute_claude(prompt, timeout=CALL_TIMEOUT_S)
+            result = estate_router.execute_claude(prompt, timeout=min(CALL_TIMEOUT_S, remaining_seconds))
     except Exception:
         _checkpoint(run, coordinator_skip="provider_exception")
         db.commit()
@@ -271,7 +302,10 @@ def coordinator_step(db, run, frontier, digest):
         _checkpoint(run, coordinator_skip="provider_failed_" + str(result.get("error_code") or "unknown")[:60])
         db.commit()
         return None
-    plan = parse_plan(result.get("output"), {r["ref"] for r in _candidates(frontier)})
+    # Real spend remains evidence even when the model's plan is invalid.
+    _checkpoint(run, coordinator_usage=result.get("provider_usage"),
+                coordinator_model=result.get("concrete_model"))
+    plan = parse_plan(result.get("output"), {r["ref"] for r in _candidates(frontier, evidence)})
     if plan is None:
         _checkpoint(run, coordinator_skip="plan_validation_failed",
                     coordinator_model=result.get("concrete_model"))
@@ -281,6 +315,7 @@ def coordinator_step(db, run, frontier, digest):
                 coordinator_primary=plan["primary"], coordinator_decomposition=plan["decomposition"],
                 coordinator_next_action=plan["next_action"], coordinator_lane=lane,
                 coordinator_model=result.get("concrete_model"),
+                coordinator_usage=result.get("provider_usage"),
                 coordinator_high_consequence=high_consequence(cp, run.counters))
     db.commit()
     return plan

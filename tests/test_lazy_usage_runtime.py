@@ -54,7 +54,9 @@ def frontier(tmp_path, monkeypatch):
 
     def add(name="a", write=False, **meta):
         metadata = {"task_id": name, "title": name, "status": "ready", "priority": "high",
-                    "execution_mode": "implementation" if write else "read-only", **meta}
+                    "execution_mode": "implementation" if write else "read-only",
+                    # An implementation must name where its output lands.
+                    **({"allowed_paths": ["src/**"]} if write else {}), **meta}
         import yaml
         (queue / (name + ".md")).write_text("---\n" + yaml.safe_dump(metadata) +
                                            "---\nRun the bounded owning task.\n")
@@ -558,7 +560,10 @@ def test_stale_approval_claim_gets_read_only_assessment(db, frontier, monkeypatc
     assert not db.query(ParkLease).count()
 
 
-def test_unreported_child_usage_fences_continuation_until_accounted(db, frontier, monkeypatch):
+def test_advisory_call_is_metered_by_construction_and_does_not_fence(db, frontier, monkeypatch):
+    """run_task is one synchronous call with no children: the runtime records what it
+    charged. The unreported-usage fence for durable worker boundaries is covered in
+    test_lazy_usage_delivery.py::test_missing_worker_usage_still_fences_continuation."""
     add, _ = frontier
     add("a")
     add("b")
@@ -566,18 +571,10 @@ def test_unreported_child_usage_fences_continuation_until_accounted(db, frontier
     monkeypatch.setattr(estate_router, "run_task", lambda task: (calls.append(task), read_result())[1])
     run_id = activate(db)
     result = rt.advance(db, run_id)
-    assert result["state"] == "paused"
-    execution_id = result["checkpoint"]["usage_accounting_pending"]
-    rt.resume_run(db, run_id, "operator")
-    assert rt.advance(db, run_id)["state"] == "paused"
-    assert len(calls) == 1
-    execution = db.get(EstateExecution, execution_id)
-    execution.result_json = json.dumps(read_result(usage={"paid_calls": 2, "tool_calls": 10}))
-    db.commit()
-    rt.resume_run(db, run_id, "operator")
-    result = rt.advance(db, run_id)
+    assert not result["checkpoint"].get("usage_accounting_pending")
+    assert result["state"] == "running"
+    assert rt.advance(db, run_id)["counters"]["tool_calls"] >= 2
     assert len(calls) == 2
-    assert result["counters"]["paid_calls"] == 3
 
 
 def test_simultaneous_activations_use_database_singleton_guard(db):

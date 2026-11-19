@@ -1751,9 +1751,14 @@ def execute_claude(objective: str, *, timeout: float = 120.0) -> dict:
                 return {**common, "ok": False, "error_code": "model_mismatch",
                         "error": "claude result has no single Sonnet-class model attestation",
                         "observed_models": [str(model)[:80] for model in models[:5]]}
+            tokens = usage[models[0]]
+            provider_usage = {k: tokens[k] for k in ("inputTokens", "outputTokens", "cacheReadInputTokens",
+                                                     "cacheCreationInputTokens")
+                              if isinstance(tokens, dict) and type(tokens.get(k)) is int and tokens[k] >= 0}
             return {**base, "executed": True, "ok": True, "output": result_text,
                     "exit_code": proc.returncode, "concrete_model": models[0],
                     "model_unverified": False, "model_attestation": "provider-usage-response",
+                    "provider_usage": provider_usage,
                     "latency_ms": int((time.monotonic() - started) * 1000)}
         outcome.update(ok=False, state="failed", error_code="nonzero_exit")
         return {**common, "ok": False, "error_code": "nonzero_exit",

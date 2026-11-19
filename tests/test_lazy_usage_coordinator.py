@@ -93,9 +93,10 @@ def _run(db, paid_calls=0, **coordinator):
     run_id = rt.activate_run(db, "operator", ["odysseus"], None,
                              {"enabled": True} if coordinator.pop("on", True) else None)["id"]
     run = db.get(cdb.LazyUsageRun, run_id)
+    run.state = "running"   # the coordinator only plans for a running activation
     if paid_calls:
         run.counters = {**run.counters, "paid_calls": paid_calls}
-        db.commit()
+    db.commit()
     return run
 
 
