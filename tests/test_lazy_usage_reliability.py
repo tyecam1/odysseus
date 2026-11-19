@@ -636,3 +636,190 @@ def test_a_pre_upgrade_debt_keyed_only_by_task_id_is_carried_forward(db):
     terminal(db, ["obsidian-phd"], [legacy], minutes_ago=300)
     _, owed = rt._inherited_history(db, ["obsidian-phd"])
     assert [d["task_id"] for d in owed] == ["2026-06-11-old-task"]
+
+
+# ================ live run ae1b1f20 (2026-11-19): a quota-failed write left its lease active ==========
+
+QUOTA_RESULT = {"ok": False, "exit_code": 1, "error": "ERROR: You've hit your usage limit. try again at Nov 20th, 2026 9:08 PM.",
+                "provider": "codex"}
+
+
+def failed_write(db, worker, run_id, result=None, *, dirty=False):
+    view = rt.advance(db, run_id)
+    execution_id = view["checkpoint"]["in_flight_execution_id"]
+    worker.clean = not dirty                # the writer ran after admission; it may have left partial work
+    worker.set_state(execution_id, "failed", result=result or dict(QUOTA_RESULT))
+    worker.executions[execution_id]["usage"] = {"paid_calls": 1, "tool_calls": 1}
+    lane._apply_view(execution_id, worker._view(execution_id))
+    return execution_id, rt.advance(db, run_id)
+
+
+def lease_of(db, run_id):
+    row = db.query(cdb.ParkLease).filter_by(session_id=run_id).one()
+    db.refresh(row)
+    return row
+
+
+def test_a_failed_write_releases_its_own_lease_without_the_controller(db, queue, monkeypatch):
+    ref, worker = write_card(queue, monkeypatch)
+    run_id = activate(db)
+    execution_id, view = failed_write(db, worker, run_id)
+    assert lease_of(db, run_id).status == "released"
+    row = db.get(cdb.EstateExecution, execution_id)
+    db.refresh(row)
+    assert row.worktree_resolution == "recovered"
+    assert view["checkpoint"].get("lease") is None and not view["checkpoint"].get("lease_release_debt")
+    assert all(d["gate"] != "recovery" for d in view["owed_reviews"])
+
+
+def test_a_failed_write_with_a_dirty_worktree_is_not_auto_recovered(db, queue, monkeypatch):
+    """Partial work may be in the tree: only the governed controller path may decide about it."""
+    ref, worker = write_card(queue, monkeypatch)
+    run_id = activate(db)
+    execution_id, view = failed_write(db, worker, run_id, dirty=True)
+    assert lease_of(db, run_id).status == "active"
+    assert "recovery" in {d["gate"] for d in view["owed_reviews"] if d["task_ref"] == ref}
+    assert view["checkpoint"]["lease_release_debt"]
+
+
+def test_a_quota_refused_write_is_charged_no_assumed_tokens(db, queue, monkeypatch):
+    ref, worker = write_card(queue, monkeypatch)
+    run_id = activate(db)
+    _, view = failed_write(db, worker, run_id)
+    assert view["checkpoint"]["ledger"][ref]["outcome"] == "quota_parked"
+    assert view["counters"].get("tokens_assumed", 0) == 0     # the provider refused it; nothing ran
+    assert view["counters"]["paid_calls"] == 1                # the dispatch itself is still counted
+
+
+def test_a_lease_left_by_a_finished_activation_is_recovered_by_the_next_one(db, queue, monkeypatch):
+    """Restart recovery: the previous run stopped with a failed execution still holding the lease."""
+    ref, worker = write_card(queue, monkeypatch)
+    first = activate(db)
+    execution_id, _ = failed_write(db, worker, first)
+    # Undo the in-run recovery to model the state the deployed code left behind.
+    row = db.get(cdb.EstateExecution, execution_id)
+    lease = lease_of(db, first)
+    row.worktree_resolution, lease.status, lease.released_at = "unresolved", "active", None
+    db.commit()
+    rt.stop_run(db, first, "operator")
+    second = activate(db)
+    monkeypatch.setattr(estate_router, "execute_write_via_worker", no_dispatch)
+    view = rt.advance(db, second)
+    assert lease_of(db, first).status == "released"
+    assert view["checkpoint"]["recovered_leases"][0]["execution_id"] == execution_id
+    assert view["checkpoint"]["skipped"].get(ref) != "repo_lease_held"
+
+
+def test_coordinator_tokens_are_metered_from_provider_usage(db, queue, monkeypatch):
+    impl = queue.add("odysseus", "impl", **WRITE)
+    monkeypatch.setattr(coord, "master_enabled", lambda: True)
+    monkeypatch.setattr(coord, "_qualified_executors", lambda: ["glm", "claude"])
+    usage = {"inputTokens": 2, "outputTokens": 5000, "cacheReadInputTokens": 7000, "cacheCreationInputTokens": 9000}
+    monkeypatch.setattr(estate_router, "execute_glm", lambda prompt, **kw: {
+        **_coordinator_plan(impl), "provider_usage": usage})
+    run = db.get(LazyUsageRun, activate(db, ("odysseus",), {"enabled": True}))
+    run.state = "running"
+    db.commit()
+    frontier = rt.refresh_frontier(["odysseus"])
+    coord.coordinator_step(db, run, frontier, "digest", rt.candidate_evidence(frontier, run))
+    assert run.counters["tokens_measured"] == 21002
+    assert run.counters.get("tokens_assumed", 0) == 0
+
+
+def test_an_unmeasured_coordinator_call_is_charged_an_estimate(db, queue, monkeypatch):
+    impl = queue.add("odysseus", "impl", **WRITE)
+    monkeypatch.setattr(coord, "master_enabled", lambda: True)
+    monkeypatch.setattr(coord, "_qualified_executors", lambda: ["glm", "claude"])
+    monkeypatch.setattr(estate_router, "execute_glm", lambda prompt, **kw: _coordinator_plan(impl))
+    run = db.get(LazyUsageRun, activate(db, ("odysseus",), {"enabled": True}))
+    run.state = "running"
+    db.commit()
+    frontier = rt.refresh_frontier(["odysseus"])
+    coord.coordinator_step(db, run, frontier, "digest", rt.candidate_evidence(frontier, run))
+    assert run.counters["tokens_assumed"] == coord.COORDINATOR_TOKEN_ESTIMATE
+
+
+def _coordinator_plan(ref):
+    return {"ok": True, "executed": True, "provider": "glm", "concrete_model": "glm-5.3-flash",
+            "output": json.dumps({"selected": [ref], "decomposition": ["step"], "next_action": "go"})}
+
+
+# ------------------------------------------------ independent review of the lease-recovery delta (GLM-5.3)
+
+def stuck_orphan(db, queue, monkeypatch, name="w"):
+    """A terminal activation's failed write whose worktree is dirty: recovery can never succeed."""
+    ref, worker = write_card(queue, monkeypatch, name)
+    first = activate(db)
+    execution_id, _ = failed_write(db, worker, first, dirty=True)
+    rt.stop_run(db, first, "operator")
+    worker.clean = False
+    return ref, worker, first, execution_id
+
+
+def test_a_permanently_unrecoverable_orphan_is_attempted_once_per_activation(db, queue, monkeypatch):
+    ref, worker, first, _ = stuck_orphan(db, queue, monkeypatch)
+    monkeypatch.setattr(estate_router, "execute_write_via_worker", no_dispatch)
+    second = activate(db)
+    rt.advance(db, second)
+    after_first_pass = db.get(LazyUsageRun, second).counters["tool_calls"]
+    verifies = worker.verbs().count("worktree.verify")
+    for _ in range(3):
+        row = db.get(LazyUsageRun, second)
+        row.state = "running"
+        row.checkpoint = {**row.checkpoint, "recheck_at": None, "phase": "idle"}
+        db.commit()
+        rt.advance(db, second)
+    # No further recovery attempts (worker calls) and no further budget drain on the foreign lease.
+    assert worker.verbs().count("worktree.verify") == verifies
+    attempts = [e for e in db.get(LazyUsageRun, second).checkpoint["recovered_leases"]]
+    assert len(attempts) == 1 and attempts[0]["recovered"] is False
+    assert lease_of(db, first).status == "active"            # still protected: dirty work is never discarded
+
+
+def test_foreign_leases_are_left_alone_while_the_orphan_is_recovered(db, queue, monkeypatch):
+    ref, worker, first, execution_id = stuck_orphan(db, queue, monkeypatch)
+    worker.clean = True                                      # the owner has since cleaned it: recoverable
+    for i, repo in enumerate(("misumi", "obsidian-phd")):    # operator park leases on the other repos in scope
+        park_lease_ops.park_repo(repo, LAB, f"/w/op{i}", branch=f"op/{i}", session_id=f"operator-{i}")
+    second = rt.activate_run(db, "operator", ["odysseus", "misumi", "obsidian-phd"], {})["id"]
+    monkeypatch.setattr(estate_router, "execute_write_via_worker", no_dispatch)
+    rt.advance(db, second)
+    assert lease_of(db, first).status == "released"
+    assert db.query(cdb.ParkLease).filter(cdb.ParkLease.session_id.like("operator-%"),
+                                          cdb.ParkLease.status == "active").count() == 2
+
+
+def test_a_foreign_active_lease_is_never_touched_by_the_sweep(db, queue, monkeypatch):
+    queue.add("odysseus", "a", execution_mode="read-only")
+    park_lease_ops.park_repo("odysseus", LAB, "/w/op", branch="op/x", session_id="operator-session")
+    monkeypatch.setattr(estate_router, "run_task", lambda task: advisory_pass())
+    run_id = activate(db)
+    view = rt.advance(db, run_id)
+    lease = db.query(cdb.ParkLease).filter_by(session_id="operator-session").one()
+    db.refresh(lease)
+    assert lease.status == "active" and not view["checkpoint"].get("recovered_leases")
+
+
+def test_a_failed_coordinator_call_is_charged_an_estimate_but_a_refusal_is_not(db, queue, monkeypatch):
+    impl = queue.add("odysseus", "impl", **WRITE)
+    monkeypatch.setattr(coord, "master_enabled", lambda: True)
+    monkeypatch.setattr(coord, "_qualified_executors", lambda: ["glm", "claude"])
+    frontier = None
+
+    def run_with(result):
+        nonlocal frontier
+        for live in db.query(LazyUsageRun).filter(LazyUsageRun.state.notin_(rt.TERMINAL)).all():
+            rt.stop_run(db, live.id, live.created_by)
+        monkeypatch.setattr(estate_router, "execute_glm", lambda prompt, **kw: result)
+        run = db.get(LazyUsageRun, activate(db, ("odysseus",), {"enabled": True}))
+        run.state = "running"
+        db.commit()
+        frontier = rt.refresh_frontier(["odysseus"])
+        coord.coordinator_step(db, run, frontier, "digest", rt.candidate_evidence(frontier, run))
+        return run.counters
+
+    timed_out = run_with({"ok": False, "executed": True, "error": "timed out after 120s", "error_code": "timeout"})
+    assert timed_out["tokens_assumed"] == coord.COORDINATOR_TOKEN_ESTIMATE
+    refused = run_with({"ok": False, "executed": True, "provider": "glm", "stderr": "usage limit reached",
+                        "error": "You've hit your usage limit", "error_code": "quota_exhausted"})
+    assert refused.get("tokens_assumed", 0) == 0
