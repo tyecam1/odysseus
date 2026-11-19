@@ -1628,7 +1628,16 @@ def execute_claude(objective: str, *, timeout: float = 120.0) -> dict:
     no repository access: text-in/text-out for the cognitive-coordinator
     role. Credential handling stays entirely inside the CLI; this function
     never reads tokens or profile files. Fail-closed typed outcomes mirror
-    execute_glm, including provider-health recording."""
+    execute_glm, including provider-health recording.
+
+    Unlike the GLM lane (env-var auth), subscription OAuth needs the CLI's
+    normal config context: --bare skips it and reliably fails "Not logged
+    in" (verified live 2026-11-18). Isolation is therefore by construction:
+    an Odysseus-owned CLAUDE_CONFIG_DIR stub (empty settings with
+    disableAllHooks, no plugins/skills/user CLAUDE.md, and only a SYMLINK to
+    the operator's credential store - the CLI, never this code, reads it)
+    plus an owned empty working directory. Verified live 2026-11-18:
+    authenticated claude-sonnet-5 with a project-hook canary NOT firing."""
     import os
     import subprocess
     import time
@@ -1656,13 +1665,30 @@ def execute_claude(objective: str, *, timeout: float = 120.0) -> dict:
             outcome["error_code"] = "launcher_missing"
             return {**base, "ok": False, "executed": False, "error_code": "launcher_missing",
                     "error": "claude CLI is missing or not executable"}
+        lane_home = Path.home() / ".cache" / "aoteru" / "claude-lane"
+        config_dir = lane_home / "config"
+        lane_cwd = lane_home / "cwd"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        lane_cwd.mkdir(parents=True, exist_ok=True)
+        try:
+            (config_dir / "settings.json").write_text('{"disableAllHooks": true}\n')
+        except OSError:
+            return {**base, "ok": False, "executed": False, "error_code": "launcher_missing",
+                    "error": "claude lane config directory is not writable"}
+        link = config_dir / ".credentials.json"
+        if not link.exists():
+            try:
+                link.symlink_to(Path.home() / ".claude" / ".credentials.json")
+            except OSError:
+                pass  # typed auth_failed below if the login is unreachable
         proc = subprocess.Popen(
             [str(launcher), "--print", "--output-format", "json", "--model", _claude_model_alias(),
              "--max-turns", "1",
              "--disallowedTools", "Bash,Write,Edit,NotebookEdit,WebFetch,WebSearch,Task,Skill,Agent,TodoWrite,Read,Grep,Glob",
-             "--strict-mcp-config", "--bare", "--disable-slash-commands", "--no-session-persistence"],
+             "--strict-mcp-config", "--disable-slash-commands", "--no-session-persistence"],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, start_new_session=True, cwd=None,
+            text=True, start_new_session=True, cwd=lane_cwd,
+            env={**os.environ, "CLAUDE_CONFIG_DIR": str(config_dir)},
         )
         stdout, stderr = proc.communicate(input=objective, timeout=timeout)
         for token in objective.split():
