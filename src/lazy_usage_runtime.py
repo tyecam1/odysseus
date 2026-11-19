@@ -339,6 +339,32 @@ def _static_blocker(kind, meta, write):
     return None
 
 
+def _repo_lease_held(run, repo_id):
+    """An active or preparing write lease on this repo (typically this run's own earlier,
+    still-unfinalized write) makes park_with_worktree raise ParkConflict. That is a known
+    precondition, not a failure of the task: skip it and let independent work proceed."""
+    from sqlalchemy.orm import object_session
+    session = object_session(run)
+    if session is None:
+        from core.database import SessionLocal
+        with SessionLocal() as own:
+            return _repo_lease_held_in(own, repo_id)
+    return _repo_lease_held_in(session, repo_id)
+
+
+def _repo_lease_held_in(db, repo_id):
+    """Mirror park_repo's own conflict rule (lease_authority_state), so this only blocks
+    where park_with_worktree would raise ParkConflict: a stale unprotected lease is
+    reclaimable and an old `preparing` reservation is resolved by its probe, so neither
+    counts as held."""
+    existing = db.query(ParkLease).filter(ParkLease.repo_id == repo_id,
+                                          ParkLease.status.in_(("active", "preparing"))).first()
+    if existing is None:
+        return False
+    authority = park_lease_ops.lease_authority_state(db, existing)
+    return not (authority["reclaimable"] or authority.get("prepare_probe_due"))
+
+
 def _age_seconds(stamp):
     try:
         return (utcnow_naive() - datetime.fromisoformat(stamp)).total_seconds()
@@ -392,6 +418,8 @@ def _assess(frontier, run, record):
                "blocker": None, "revision": revision, "meta": meta, "body": body, "title": meta.get("title")}
     write = kind == "implementation"
     verdict["blocker"] = _static_blocker(kind, meta, write) or _recent_blocker(run, record["ref"], revision)
+    if not verdict["blocker"] and write and _repo_lease_held(run, record["repo_id"]):
+        verdict["blocker"] = "repo_lease_held"
     if verdict["blocker"]:
         return verdict
     task, write = _task(record, meta, body, kind)

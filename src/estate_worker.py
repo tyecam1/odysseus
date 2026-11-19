@@ -1558,7 +1558,8 @@ def _finalize_logic(execution_id: str, spool: Path, request: dict) -> dict:
         status = _run(["status", "--porcelain"])
         if status.returncode != 0:
             return _failure({"outcome": "authority_denied", "reason": "git status failed"})
-        dirty_paths = [line[3:] for line in status.stdout.splitlines() if line.strip()]
+        dirty = [(line[:2], line[3:]) for line in status.stdout.splitlines() if line.strip()]
+        dirty_paths = [path_ for _code, path_ in dirty]
         if not dirty_paths:
             if _head() != expected or read_decision(commit_record) is not None:
                 # A concurrent same-execution attempt committed between our
@@ -1568,7 +1569,15 @@ def _finalize_logic(execution_id: str, spool: Path, request: dict) -> dict:
             return {"outcome": "finalized", "committed": False, "adopted": False, "commit_sha": head,
                     "parent_sha": None, "dirty_paths": [],
                     "push": {"state": "not_required", "commit_sha": head, "branch": branch}}
-        added = _run(["add", "--", *dirty_paths])
+        # Tracked paths (modified/deleted) are staged with `add -u`: plain `add --` on a
+        # tracked file under a gitignored directory (e.g. .claude/) stages it but exits 1
+        # with the ignore warning, which looked like a failed finalize. Only untracked
+        # paths need the plain form, and those honour .gitignore as before.
+        tracked = [path_ for code, path_ in dirty if code != "??"]
+        untracked = [path_ for code, path_ in dirty if code == "??"]
+        added = _run(["add", "-u", "--", *tracked]) if tracked else None
+        if untracked and (added is None or added.returncode == 0):
+            added = _run(["add", "--", *untracked])
         committed = _run(["commit", "-m", f"{request['commit_message']}\n\nAoteru-Execution: {execution_id}"]) \
             if added.returncode == 0 else added
         if committed.returncode != 0:
