@@ -1,0 +1,89 @@
+schema_version: 1
+application_id: 2026-11-20-lazyusage-owning-acceptance
+prompt_id: estate-queue-priority-execution
+prompt_version: 2
+application_scope: operator-selected-owning-task-only
+repository: tyecam1/odysseus
+branch: task/lazyusage-f4b6f653-be3e-4e6c-a62b-f8f117bea279-db3dbf2aa2
+session_started_at: '2026-11-20T21:27:33.858799Z'
+session_ended_at: '2026-11-20T21:35:50.397107+00:00'
+start_commit: b38d3388947d46c4e93ed66183c25c9ec23dc1c9
+end_commit: b38d3388947d46c4e93ed66183c25c9ec23dc1c9
+working_tree_changes: true
+commits: []
+outcome_status: partial
+stop_reason: Return bounded admitted worker delta for existing controller finalization.
+  Independent qualified V3 review, authoritative child-budget accounting, real queued
+  delivery, controlled live restart, merge and deployment remain owed. Sandbox HTTP/systemd
+  and shared-Git access cannot establish live acceptance. Owning card remains ready;
+  parent activation is not stopped or renewed.
+models_routes:
+- provider: codex
+  executor: codex-write
+  host: hz2-workstation
+  execution_id: 4bdbd84c-ba79-41f8-a0f3-5aa7c4a092b4
+  lease_id: c687ee33-1b3a-4d50-bc46-fed358d8a5c8
+  concrete_model: controller terminal envelope required; not independently attested
+    within worker
+  note: Already-admitted worker; no nested paid dispatch or reviewer.
+- executor: deterministic
+  host: hz2-workstation
+  note: Local lab subprocesses; real preflight on temporary snapshot confirms lane.
+nondelegation_reason: final_acceptance
+authority_evidence:
+- Production DB opened mode=ro confirms exact active lease, running execution, admission
+  SHA and parent activation.
+- Canonical CLI and bundled HTTP preflight attempted; real Python preflight on fresh
+  SQLite backup confirms deterministic lab lane and write authority; existing launch
+  fences new Codex admission.
+- Owner-card paths are explicitly denied by admitted write scope; card unchanged.
+  No new lease, credentials, worker qualification, merge or deployment.
+usage_status:
+  codex: Current admitted worker running; remaining quota unknown.
+  claude: Provider health ok; quota and approved review-role capacity unknown.
+  glm: Provider health ok and launcher present; quota and review/currency qualification
+    unproven.
+verification:
+- 'Failing-first regression selection: 3 failed, 1 passed against old runtime.'
+- 'Disposable persistence acceptance: 4 passed.'
+- 'Final runtime/delivery/reliability/coordinator/preflight/provider-health/finalisation
+  selection: 319 passed, 1 warning in 77.27s. Disposable acceptance separately: 4
+  passed.'
+- git diff --check passed.
+acceptance:
+  shipped: false
+  independent_review: owed; no verdict invented
+  merged: false
+  deployed: false
+  owner_task_status: ready
+  result_path: docs/runtime-work-packages/2026-11-09-lazyusage-lab-persistence-acceptance.md
+frontier:
+  scope: owning task only; no unrelated child work
+  shipped_in_this_application: 0
+  selected_accepted_remaining: 1
+  global_backlog_reconciled: false
+failure_tags:
+- independent_review_and_live_acceptance_owed
+- child_usage_totals_not_authoritatively_enforced
+- sandbox_http_systemd_git_finalization_unavailable
+- overbroad_environment_listing
+rating:
+  scale: 5
+  goal_progress: 3
+  correctness_verification: 4
+  authority_scope_discipline: 5
+  routing_resource_efficiency: 3
+  continuity_handoff_quality: 4
+  agent_overall: 3.8
+  operator_overall: null
+  operator_note: null
+prompt_revision_recommended: false
+revision_reason: Existing initializer requires real delivery, live evidence and qualified
+  routes. Preserve it; runtime/accounting and transport gaps do not justify weakening
+  the prompt.
+evidence:
+- docs/runtime-work-packages/2026-11-09-lazyusage-lab-persistence-acceptance.md
+- src/lazy_usage_runtime.py
+- tests/test_lazy_usage_reliability.py
+- tests/test_lazy_usage_delivery.py
+- tests/test_lazy_usage_coordinator.py

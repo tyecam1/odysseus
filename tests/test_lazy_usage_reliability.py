@@ -179,11 +179,22 @@ def test_a_rejecting_or_unattributed_review_is_not_a_review():
         assert stages(meta={**V3, "review_evidence": [entry]})["review"]["status"] == "required"
 
 
-def test_finalization_attests_verification_for_a_write_and_scope_violation_fails_it():
+def test_finalization_does_not_substitute_for_deterministic_verification():
     ok = stages(result={"ok": True, "output": "done", "exit_code": 0},
                 finalization={"finalized": True, "committed": True, "scope_violations": []})
-    assert ok["verification"]["status"] == "pass" and ok["verification"]["basis"] == "worker_finalize_attested"
-    bad = stages(result={"ok": True, "output": "done", "exit_code": 0},
+    assert ok["verification"]["status"] == "unverified"
+    assert ok["verification"]["basis"] == "no_deterministic_check"
+    checked = stages(finalization={"finalized": True, "committed": True, "scope_violations": []})
+    assert checked["verification"] == {"status": "pass", "basis": "deterministic_gate"}
+    rejected = stages(result={"ok": True, "deterministic_gate": "fail"},
+                      finalization={"finalized": True, "committed": True, "scope_violations": []})
+    assert rejected["verification"]["status"] == "fail"
+    accepted = stages(result={"ok": True, "output": "done", "exit_code": 0}, acceptance=ACCEPTED,
+                      meta={**V3, "review_evidence": [
+                          {"reviewer_provider": "claude", "verdict": "approve", "ref": "review"}]},
+                      finalization={"finalized": True, "committed": True, "scope_violations": []})
+    assert accepted["review"]["status"] == "recorded" and accepted["complete"] is False
+    bad = stages(result=PASS,
                  finalization={"finalized": True, "committed": True, "scope_violations": ["src/x"]})
     assert bad["verification"]["status"] == "fail" and bad["verification"]["scope_violations"] == ["src/x"]
     empty = stages(result={"ok": True, "output": "done", "exit_code": 0},
@@ -434,11 +445,46 @@ def test_a_successful_write_is_finalised_and_its_lease_released_without_the_cont
     assert row.worktree_resolution == "finalized"
     assert "worktree.finalize" in worker.verbs()
     assert view["checkpoint"].get("lease") is None and not view["checkpoint"].get("lease_release_debt")
-    assert view["checkpoint"]["ledger"][ref]["outcome"] == "delivered_pending_acceptance"
-    assert view["checkpoint"]["stages"][ref]["verification"]["basis"] == "worker_finalize_attested"
+    assert view["checkpoint"]["ledger"][ref]["outcome"] == "unverified"
+    assert view["checkpoint"]["stages"][ref]["verification"]["basis"] == "no_deterministic_check"
+    assert {d["gate"] for d in view["owed_reviews"] if d["task_ref"] == ref} == {"verification"}
     lease = db.query(cdb.ParkLease).filter_by(session_id=run_id).one()
     db.refresh(lease)
     assert lease.status == "released"
+
+
+@pytest.mark.parametrize("requires_review", [False, True])
+def test_unverified_write_keeps_its_debt_and_is_not_reimplemented_next_activation(
+        db, queue, monkeypatch, requires_review):
+    ref, worker = write_card(queue, monkeypatch, **(V3 if requires_review else {}))
+    first = activate(db)
+    execution_id, view = finish_write(db, worker, first)
+    assert view["counters"]["no_delivery_turns"] == 1
+    assert view["checkpoint"]["acceptance"]["status"] == "verification_pending"
+    gap = next(d for d in view["owed_reviews"] if d["gate"] == "verification")
+    assert gap["evidence_gap"] is True and gap["execution_id"] == execution_id
+    assert {d["gate"] for d in view["owed_reviews"]} == (
+        {"verification", "independent_review"} if requires_review else {"verification"})
+    rt.stop_run(db, first, "operator")
+    monkeypatch.setattr(estate_router, "execute_write_via_worker", no_dispatch)
+    second = activate(db)
+    view = rt.advance(db, second)
+    assert view["checkpoint"]["skipped"][ref] == "awaiting_verification"
+    assert view["counters"]["paid_calls"] == 0
+    assert any(d["gate"] == "verification" for d in view["owed_reviews"])
+
+
+def test_a_deterministically_checked_write_can_await_owner_acceptance(db, queue, monkeypatch):
+    ref, worker = write_card(queue, monkeypatch)
+    _, view = finish_write(db, worker, activate(db), result=PASS)
+    assert view["checkpoint"]["ledger"][ref]["outcome"] == "delivered_pending_acceptance"
+    assert {d["gate"] for d in view["owed_reviews"] if d["task_ref"] == ref} == {"owner_acceptance"}
+
+
+def test_legacy_verification_helper_rejects_success_prose_without_a_check():
+    assert not rt.verify_attempt({"lifecycle_state": "succeeded", "result": {
+        "ok": True, "exit_code": 0, "output": "tests all passed"}}, {})
+    assert rt.verify_attempt({"lifecycle_state": "succeeded", "result": PASS}, {})
 
 
 def test_finalisation_carries_the_cards_scope_and_a_provenance_message(db, queue, monkeypatch):
@@ -823,3 +869,123 @@ def test_a_failed_coordinator_call_is_charged_an_estimate_but_a_refusal_is_not(d
     refused = run_with({"ok": False, "executed": True, "provider": "glm", "stderr": "usage limit reached",
                         "error": "You've hit your usage limit", "error_code": "quota_exhausted"})
     assert refused.get("tokens_assumed", 0) == 0
+
+
+# ====== live run f4b6f653 (2026-11-20): findings from the first successful unattended writes ======
+
+def test_observing_an_in_flight_write_is_not_charged_as_tool_usage(db, queue, monkeypatch):
+    """Polling a running writer (every tick, plus lease renewal) consumed the 150 tool-call ceiling in
+    ~40 minutes, so a healthy gpt-6.2-sol write was cancelled by a budget stop."""
+    ref, worker = write_card(queue, monkeypatch)
+    run_id = activate(db)
+    first = rt.advance(db, run_id)
+    baseline = first["counters"]["tool_calls"]
+    for _ in range(12):
+        view = rt.advance(db, run_id)
+    assert view["checkpoint"]["in_flight_execution_id"] == first["checkpoint"]["in_flight_execution_id"]
+    assert view["counters"]["tool_calls"] == baseline
+
+
+def test_a_budget_stop_that_cancels_a_write_is_recorded_as_interrupted_not_failed(db, queue, monkeypatch):
+    ref, worker = write_card(queue, monkeypatch)
+    run_id = activate(db)
+    execution_id = rt.advance(db, run_id)["checkpoint"]["in_flight_execution_id"]
+
+    def cancel_ends_the_writer(host, verb, payload):
+        if verb == "cancel":
+            worker.set_state(payload["execution_id"], "failed", result={"ok": False, "error": "execution cancelled"})
+            worker.executions[payload["execution_id"]]["usage"] = {"paid_calls": 1, "tool_calls": 1}
+            lane._apply_view(payload["execution_id"], worker._view(payload["execution_id"]))   # as the real worker reports it
+
+    worker.on_call = cancel_ends_the_writer
+    row = db.get(LazyUsageRun, run_id)
+    row.counters = {**row.counters, "tool_calls": rt.CEILINGS["max_tool_calls"] + 1}      # budget exhausted in flight
+    db.commit()
+    view = rt.advance(db, run_id)
+    for _ in range(3):
+        if view["state"] in rt.TERMINAL:
+            break
+        view = rt.advance(db, run_id)
+    assert view["state"] == "budget_exhausted"
+    assert view["checkpoint"]["ledger"][ref]["outcome"] == "interrupted"
+    assert view["counters"]["repeated_failures"] == 0
+    # and the next activation may retry it at once: an interrupted run is not evidence about the task
+    successor = db.get(LazyUsageRun, activate(db))
+    assert successor.checkpoint["ledger"][ref]["outcome"] == "interrupted"
+    assert rt._recent_blocker(successor, ref, view["checkpoint"]["ledger"][ref]["revision"]) is None
+
+
+@pytest.mark.parametrize("outcome", ["scope_violation", "finalize_failed", "failed"])
+def test_outcomes_that_cost_a_whole_write_back_off_before_the_next_attempt(db, queue, outcome):
+    ref = queue.add("odysseus", "w", **WRITE)
+    run = db.get(LazyUsageRun, activate(db))
+    revision = rt._assess(rt.refresh_frontier(["odysseus"]), run,
+                          {"ref": ref, "repo_id": "odysseus", "bucket": "ready"})["revision"]
+    rt._ledger_put(run, ref, revision, "implementation", outcome, "e1")
+    assert rt._recent_blocker(run, ref, revision) == "failure_backoff"
+    ledger = json.loads(json.dumps(run.checkpoint["ledger"]))
+    ledger[ref]["at"] = (utcnow_naive() - timedelta(seconds=rt.FAILURE_RETRY_SECONDS + 5)).isoformat()
+    run.checkpoint = {**run.checkpoint, "ledger": ledger}
+    assert rt._recent_blocker(run, ref, revision) is None
+
+
+SHA = "c" * 40
+
+
+def verification_debt(ref):
+    return {"task_ref": ref, "gate": "verification", "evidence_gap": True, "commit_sha": SHA,
+            "execution_id": "e", "opened_at": utcnow_naive().isoformat()}
+
+
+def with_debt(db, queue, **card):
+    ref = queue.add("odysseus", "w", **{**WRITE, **card})
+    run = db.get(LazyUsageRun, activate(db))
+    run.checkpoint = {**run.checkpoint, "owed_reviews": [verification_debt(ref)]}
+    return ref, run
+
+
+def test_finalised_write_debt_records_the_commit_it_covers(db, queue, monkeypatch):
+    ref, worker = write_card(queue, monkeypatch)
+    run_id = activate(db)
+    _, view = finish_write(db, worker, run_id)
+    gap = [d for d in view["owed_reviews"] if d["task_ref"] == ref and d["gate"] == "verification"]
+    assert gap and gap[0]["commit_sha"] == worker.finalize_outcome["commit_sha"]
+
+
+def test_a_passing_verification_record_for_that_exact_commit_clears_the_debt(db, queue):
+    good = [{"result": "pass", "commit_sha": SHA, "ref": "pytest tests -q: 9748 passed", "verified_by": "tye"}]
+    ref, run = with_debt(db, queue, verification_evidence=good)
+    rt._resolve_met_debts(run, ref, rt.refresh_frontier(["odysseus"]))
+    assert run.checkpoint["owed_reviews"] == []
+
+
+@pytest.mark.parametrize("record", [
+    {"result": "pass", "commit_sha": "d" * 40, "ref": "r", "verified_by": "tye"},       # another commit
+    {"result": "fail", "commit_sha": SHA, "ref": "r", "verified_by": "tye"},            # a failing check
+    {"result": "pass", "commit_sha": SHA, "ref": "r"},                                  # nobody attests it
+    {"result": "pass", "commit_sha": SHA, "verified_by": "tye"},                        # no reference
+    "pass",
+])
+def test_a_verification_record_that_does_not_attest_this_commit_keeps_the_debt(db, queue, record):
+    ref, run = with_debt(db, queue, verification_evidence=[record])
+    rt._resolve_met_debts(run, ref, rt.refresh_frontier(["odysseus"]))
+    assert [d["gate"] for d in run.checkpoint["owed_reviews"]] == ["verification"]
+
+
+def test_a_real_failure_that_coincides_with_a_pending_stop_is_still_a_failure(db, queue, monkeypatch):
+    """Review (GLM-5.3): `interrupted` must not hide a deterministic failure from the repeat guard."""
+    ref, worker = write_card(queue, monkeypatch)
+    run_id = activate(db)
+    execution_id = rt.advance(db, run_id)["checkpoint"]["in_flight_execution_id"]
+    worker.set_state(execution_id, "failed", result={"ok": False, "error": "codex crashed: segmentation fault"})
+    worker.executions[execution_id]["usage"] = {"paid_calls": 1, "tool_calls": 1}
+    lane._apply_view(execution_id, worker._view(execution_id))
+    rt.stop_run(db, run_id, "operator")                       # the stop lands while the failure is unobserved
+    view = db.get(LazyUsageRun, run_id)
+    for _ in range(3):
+        if view.state in rt.TERMINAL:
+            break
+        rt.advance(db, run_id)
+        db.refresh(view)
+    assert view.checkpoint["ledger"][ref]["outcome"] == "failed"
+    assert view.counters["repeated_failures"] == 1

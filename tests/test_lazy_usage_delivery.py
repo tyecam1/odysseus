@@ -488,7 +488,7 @@ def test_terminal_result_keeps_worker_reported_usage_and_is_metered(db, queue, m
     assert not view["checkpoint"].get("usage_accounting_pending")
     assert view["state"] == "running"       # metered, so not fenced
     entry = next(iter(view["checkpoint"]["ledger"].values()))
-    assert entry["kind"] == "implementation" and entry["outcome"] == "delivered_pending_acceptance"
+    assert entry["kind"] == "implementation" and entry["outcome"] == "unverified"
 
 
 def test_missing_worker_usage_still_fences_continuation(db, queue, monkeypatch):

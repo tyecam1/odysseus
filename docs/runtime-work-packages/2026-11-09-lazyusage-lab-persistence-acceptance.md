@@ -283,3 +283,92 @@ run; `git revert e940e4f4` on dev redeployed via the deploy branch plus
 `systemctl restart` restores pre-feature behaviour; the `lazy_usage_runs` table
 is additive (no destructive migration). Deployment rollback to
 `deploy/dev-20261109` was left in place as the named prior deploy branch.
+
+## Owning-task execution, 2026-11-20 (acceptance remains incomplete)
+
+This section supersedes any earlier implication that fixture delivery or a
+finalised commit discharges the owning task's live acceptance. **Not shipped.**
+The owner card stays `ready`; this writer cannot edit owner cards or approve
+itself. No unrelated task was started or closed.
+
+Authority and current state:
+
+- Admission/source HEAD and registered `origin/dev`: `b38d3388947d46c4e93ed66183c25c9ec23dc1c9`
+  (includes #294). The registered deployment checkout is
+  `deploy/dev-20261119f` at that SHA. This is checkout evidence, not a fresh
+  observation of the running service's loaded version. The local `dev` ref is
+  stale (`75b24f72`); it was not treated as the current upstream head.
+- Explicit activation `f4b6f653-be3e-4e6c-a62b-f8f117bea279`, Odysseus only;
+  current admitted worker `4bdbd84c-ba79-41f8-a0f3-5aa7c4a092b4`, `codex-write`,
+  lab `hz2-workstation`; matching active lease
+  `c687ee33-1b3a-4d50-bc46-fed358d8a5c8` binds this worktree and admission SHA.
+  These were read from production SQLite with `mode=ro`. No lease was acquired,
+  changed or released by this worker.
+- `aoteru preflight` was attempted (binary absent); the bundled HTTP client was
+  unconfigured. Real `delegation_preflight` on a fresh read-only-source SQLite
+  backup under `/tmp` confirmed the lab, deterministic lane and active write
+  authority. A new Codex admission was refused because the **existing running
+  worker's** launch outcome is not yet recorded. Work continued inside that
+  admitted worker; no nested paid launch or substitute router was used.
+- The selected active initializer is `estate-queue-priority-execution@v2`,
+  unchanged. Controller retention: `nondelegation_reason: final_acceptance`.
+  Remaining subscription capacity is unknown. Provider health is not remaining
+  quota: the snapshot reports GLM/Claude `ok` and Codex's in-flight launch
+  `unknown`, with an observation deadline, not a provider-stated reset.
+
+### Bounded correction and deterministic evidence
+
+The deployed runtime used `worker_finalize_attested` as a verification pass:
+committing in-scope changes substituted for deterministic checks, even when
+no test result existed. Three new regressions first failed against the old
+code (one positive-control check passed). The correction:
+
+- Finalisation still commits through the existing lease/worker mechanism and
+  releases a resolved lease, but never establishes deterministic verification.
+  Scope/finalisation failures still fail closed; a recorded passing gate is
+  required separately. A failed gate cannot be overridden by a successful commit.
+- A successful unverified write keeps a verification evidence gap, plus any
+  independent-review debt. Its checkpoint says `verification_pending` and its
+  ledger says `unverified`. The next activation excludes an unchanged card as
+  `awaiting_verification`, so it does not pay to repeat implementation while
+  verification of the existing execution is owed.
+- The legacy `verify_attempt` helper also rejects exit-zero success prose.
+  Acceptance plus an independent review still cannot make an unchecked commit
+  a complete delivery.
+- Provider fixture tests now use a disposable home for lane settings/login-link
+  paths. Seven wider-test failures had exposed their attempt to write the real
+  host's read-only lane config; no credentials were read or changed.
+
+Final runtime, delivery, reliability, coordinator, preflight, provider-health
+and finalisation selection: **319 passed, 1 warning** (77.27s).
+The **four disposable acceptance tests passed**, including disconnect, recreation
+of the loop over durable state, single dispatch and rollback behavior. These
+remain fixture evidence. API tests required a temporary test-runner-only 50ms
+selector-wait cap because this sandbox cannot wake the asyncio selector through
+its socket path; repository assertions were unchanged. Interrupted preliminary
+runs are not counted as passes.
+
+### Live acceptance ledger and exact remaining work
+
+| Required evidence | Current conclusion / next qualifying event |
+| --- | --- |
+| Real queued delivery with owner acceptance, tests, independent verification and trace | Still owed. This activation genuinely dispatched the owning queued task under its lease, but this worker has not completed its owner acceptance, merge or deployment. A terminal worker result is not delivery. |
+| Client disconnect and existing-service restart without duplication | Historical 2026-11-11 parked-run restart evidence above remains useful. No fresh write-in-flight systemd restart or real delivery after disconnect is proven here. Recheck after controlled deployment/service access. |
+| Protected gate, stale approval metadata, quota isolation, GLM write refusal, stale HEAD/lease collision, correct host | Existing deterministic tests exercise governance boundaries. The full required live demonstration remains owed; do not promote fixture results to live evidence. |
+| Stop/cost, interruptions, transport loss and no orphan processes | Disposable tests cover lifecycle boundaries. Runtime child accounting also needs acceptance: `estate_worker._execution_usage` currently counts the writer and finalize/push decision files, **not all tools/model calls inside the writer**. Those values cannot establish the required total-child 150-tool/12-paid-call ceilings. Recheck on authoritative child-usage enforcement/evidence; no unlimited activation is authorised. |
+| Qualified independent V3 acceptance of this delta | Owed. No independent reviewer was invoked. The central router lacks a complete approved-economy reviewer selector; Claude's configured advisory alias is Sonnet, Codex's resolver selects premium implementations, and GLM-Flash's coordinator launcher is not by itself review/currency qualification. This sandbox also cannot write the authoritative dispatch DB. Do not use premium substitution or same-family self-approval. Recheck when the controller can admit an actually qualified Haiku/Terra/GLM-Flash review with scope/identity evidence. |
+| Merge, deployment, service health/version, activation state and actual outcome | Owed for this delta and required to close the owning task. HTTP to `127.0.0.1:7001` is unavailable inside this sandbox; systemd bus access returns `Operation not permitted`. These are execution-environment constraints, not proof the service is down or a new human gate. Existing release/controller authority must perform the normal finalization/review/release path. |
+
+This worker did not stop or renew the parent activation, change host policy,
+copy credentials, install a harness, restart a service or modify task authority.
+The existing backend observes this same execution; do not submit a duplicate
+implementation while it is unresolved. No additional billable activation is
+implied by returning a worker result.
+
+Rollback for this delta: stop an active run through the existing controls before
+a governed code rollback; revert this packet's eventual commit and deploy the
+previous reviewed service revision through the normal release path. No schema
+migration was added. Existing `owed_reviews` and ledger entries must be retained;
+older code does not enforce the new `awaiting_verification` exclusion. Code
+rollback does not make unchecked commits verified. Activation rollback remains
+`POST /api/lazy-usage/stop` with the existing audit/cancellation/lease protections.
