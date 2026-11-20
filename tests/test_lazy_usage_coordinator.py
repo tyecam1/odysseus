@@ -7,6 +7,7 @@ docs/runtime-work-packages/2026-11-16-lazyusage-sonnet-coordinator-lab.md.
 import json
 import os
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -410,8 +411,11 @@ def test_advance_restart_reuses_plan_without_second_call(db, frontier, monkeypat
 # ------------------------------------------------------------ claude provider lane
 
 @pytest.fixture
-def claude_admission(monkeypatch):
+def claude_admission(monkeypatch, tmp_path):
     outcomes = []
+    # The CLI is a fixture: its lane settings and login link must also stay
+    # inside the disposable home, never the operator's actual config directory.
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
     monkeypatch.setenv("DATABASE_URL", "test-only")
 
     def admit(provider, **kwargs):

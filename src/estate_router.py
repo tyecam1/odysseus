@@ -1291,13 +1291,60 @@ def _resolve_codex_binary() -> tuple[Optional[str], str]:
     read-only` either way — this only changes which binary answers the
     same call, never the flags/isolation)."""
     local_candidate = Path.home() / ".local" / "codex-cli" / "node_modules" / ".bin" / "codex"
-    if local_candidate.exists():
-        return str(local_candidate), "user-local (~/.local/codex-cli, no sudo/global-policy change)"
     import shutil
+    candidates = []
+    if local_candidate.exists():
+        candidates.append((str(local_candidate), "user-local (~/.local/codex-cli, no sudo/global-policy change)"))
+    standalone_candidate = Path.home() / ".local" / "bin" / "codex"
+    if standalone_candidate.exists():
+        candidates.append((str(standalone_candidate), "standalone (~/.local/bin/codex)"))
     system_candidate = shutil.which("codex")
     if system_candidate:
-        return system_candidate, "system PATH"
-    return None, "not found (checked user-local and system PATH)"
+        candidates.append((system_candidate, "system PATH"))
+    if not candidates:
+        return None, "not found (checked user-local, standalone and system PATH)"
+    # The "latest model" the write lane selects is the newest entry of the CHOSEN binary's
+    # authenticated catalogue, so a stale install silently pins an old model (live 2026-11-20: the
+    # user-local npm install sat on 0.163.0 / gpt-6.1-sol while 0.171.0 offered gpt-6.2-sol). Keep
+    # the documented preference order, but prefer a strictly newer installed release. A preferred
+    # install whose version cannot be read is kept: never replace it on a guess.
+    preferred = candidates[0]
+    preferred_version = _codex_version(preferred[0])
+    if preferred_version is None:
+        return preferred
+    best, best_version = preferred, preferred_version
+    for candidate in candidates[1:]:
+        version = _codex_version(candidate[0])
+        if version is not None and version > best_version:
+            best, best_version = candidate, version
+    if best is preferred:
+        return preferred
+    return best[0], (f"newest installed ({best[1]} {'.'.join(map(str, best_version))} over "
+                     f"{preferred[1]} {'.'.join(map(str, preferred_version))})")
+
+
+_CODEX_VERSION_CACHE: dict = {}
+
+
+def _codex_version(binary: str) -> Optional[tuple]:
+    """(major, minor, patch) from `codex --version`, cached per binary file identity; None if unreadable."""
+    import subprocess
+    try:
+        stat = Path(binary).stat()
+    except OSError:
+        return None
+    key = (binary, stat.st_mtime_ns, stat.st_size)
+    if key in _CODEX_VERSION_CACHE:
+        return _CODEX_VERSION_CACHE[key]
+    version = None
+    try:
+        done = subprocess.run([binary, "--version"], capture_output=True, text=True, timeout=5, check=False)
+        match = re.search(r"(\d+)\.(\d+)\.(\d+)", done.stdout or "") if done.returncode == 0 else None
+        version = tuple(int(part) for part in match.groups()) if match else None
+    except (OSError, subprocess.SubprocessError):
+        version = None
+    _CODEX_VERSION_CACHE[key] = version
+    return version
 
 
 def _codex_available() -> tuple[bool, str]:

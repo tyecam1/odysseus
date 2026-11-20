@@ -1,0 +1,20 @@
+schema_version: 1
+event_id: 2026-11-20-lazyusage-owning-acceptance
+prompt_id: estate-queue-priority-execution
+application_id: 2026-11-20-lazyusage-owning-acceptance
+application_trace: evals/prompt-applications/estate-queue-priority-execution/2026-11-20-lazyusage-owning-acceptance.yaml
+from: prompt:v2
+to: prompt:v2
+type: reinforcement
+reason: Preserve independent verification and live-shipment gates. Failing regressions
+  exposed finalisation masquerading as verification; fix runtime evidence, not the
+  immutable initializer. Live child-budget and release evidence remain owed.
+active_head_changed: false
+guardrail_validation:
+  repository_scope_preserved: true
+  authority_scope_preserved: true
+  evidence_and_verification_preserved: true
+  model_identity_discipline_preserved: true
+  prompt_application_trace_recorded: true
+  operator_rating_invented: false
+  stop_and_safety_gates_preserved: true

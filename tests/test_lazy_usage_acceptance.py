@@ -206,7 +206,8 @@ async def test_new_lifecycle_loop_recovers_checkpoint_without_duplicate_dispatch
             await restarted
     assert ticks[1]["checkpoint"]["in_flight_execution_id"] == execution_id
     assert ticks[1]["counters"]["paid_calls"] == first["counters"]["paid_calls"] == 1
-    assert ticks[1]["counters"]["tool_calls"] > first["counters"]["tool_calls"]
+    # Re-observing the existing execution after a restart is not charged as tool usage.
+    assert ticks[1]["counters"]["tool_calls"] >= first["counters"]["tool_calls"]
     deliver(execution_id)
     with factory() as db:
         final = rt.advance(db, run_id)

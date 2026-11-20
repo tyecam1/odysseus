@@ -274,6 +274,9 @@ def test_stop_uses_worker_cancel_and_preserves_unresolved_lease(db, frontier, mo
     lease = db.query(ParkLease).one()
     assert lease.status == "active"  # existing unresolved-worktree gate wins
     assert stopped["checkpoint"]["lease_release_debt"]
+    # Our own cancel is not evidence about the task (live 2026-11-20: a budget stop cancelled a healthy write).
+    assert next(iter(stopped["checkpoint"]["ledger"].values()))["outcome"] == "interrupted"
+    assert stopped["counters"]["repeated_failures"] == 0
     rt.advance(db, run_id)
     assert worker.verbs().count("start") == 1
 
@@ -451,7 +454,7 @@ def test_child_usage_accounted_once_and_exhausts_budget(db, frontier, monkeypatc
     run_id = activate(db)
     result = rt.advance(db, run_id)
     assert result["counters"]["paid_calls"] == 12
-    assert result["counters"]["tool_calls"] == 33  # frontier/preflight/observation plus child aggregate
+    assert result["counters"]["tool_calls"] == 32  # frontier/preflight plus child aggregate; polling is not charged
     assert result["state"] == "budget_exhausted"
     assert rt.advance(db, run_id) == result
 

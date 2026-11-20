@@ -33,6 +33,34 @@ that unit tests had missed (each now has a failing-first regression test):
 * **Coordinator tokens were never metered** (`coordinator_usage` was recorded but not charged). They are
   now charged as measured tokens, or a 60k estimate when unmeasured.
 
+## Live findings on 2026-11-20 (activation `f4b6f653`, first successful unattended writes)
+
+After Codex's weekly reset the backend ran real writes with the laptop idle. Delivered unattended: two
+finalised commits on leased task branches (worker-owned `-z` finalisation, scope enforced: the writer's
+attempt to edit its own task card and two `evals/` files was reverted and reported), the lease released
+and the next write admitted, and the backend restarted mid-write with the detached writer unit surviving
+and the new instance resuming observation. It also found five defects, each now covered by a failing-first test:
+
+* **Stale model.** The write lane ran `gpt-6.1-sol` on a user-local npm Codex pinned to `^0.163.0` (a caret on a
+  0.x release pins the minor) while 0.171.0 offered `gpt-6.2-sol`. The lab install was updated, and
+  `_resolve_codex_binary` now prefers the newest installed binary (never replacing one whose version it
+  cannot read).
+* **Polling exhausted the tool-call ceiling.** Every observation tick (and lease renewal) was charged as a tool
+  call, so a 12-minute write cost ~50 and a budget stop cancelled a healthy write. Polling is no longer charged;
+  dispatch, finalize, recovery, release and the worker's own reported usage still are.
+* **A stop-cancelled write was recorded as a task failure.** It is now `interrupted` (no failure counted, no
+  backoff) only when the execution's own error shows our cancel/fence; a real failure that coincides with a
+  pending stop stays a failure.
+* **A wasted write was retried immediately.** `scope_violation` and `finalize_failed` now back off for an hour
+  like `failed`.
+* **A finalised write's verification debt could never clear.** Verification is the router's deterministic gate
+  only (a commit, an exit code and prose are not checks; this part is the Codex worker's own change, reviewed).
+  The debt records the finalised `commit_sha` and clears only when the owner card carries a
+  `verification_evidence` entry (`result: pass`, that exact `commit_sha`, a `ref`, `verified_by`).
+
+Both writers reported their task as unfinished (`ready`, not shipped), so neither card is accepted: acceptance
+stays with the owner, and independent review and CI-equivalent verification remain owed per card.
+
 ## Known limits
 
 * Verification for a write is worker-attested finalisation, not a repository test run; CI on

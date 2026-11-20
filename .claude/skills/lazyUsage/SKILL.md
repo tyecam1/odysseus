@@ -105,6 +105,10 @@ Within the existing runtime ceilings, a recoverable provider block parks only de
 - A write that fails at the provider (for example a usage limit) is recovered by the backend itself when its
   worktree is clean, releasing the lease; a dirty tree leaves a `recovery` debt. `checkpoint.recovered_leases` lists
   leases a later activation cleared. An operator stop keeps the lease for the controller.
+- `interrupted` means our own stop cancelled the writer; it is not task evidence and is retried. `scope_violation`,
+  `finalize_failed` and `failed` back off for an hour. A `verification` debt on a finalised write records its
+  `commit_sha`; it clears only when the owner card carries `verification_evidence` (`result: pass` for that exact
+  commit, a `ref` and `verified_by`). Observation polling is not charged as tool usage.
 - `usage` separates `dispatches` (worker/provider calls) from tokens: `tokens_measured` where the provider reports
   them, and a conservative `tokens_assumed` estimate where it cannot. `max_tokens` ends the run on either. Never
   present dispatch counts as consumption.

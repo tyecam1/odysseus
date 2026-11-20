@@ -53,7 +53,7 @@ DELIVERING_KINDS = frozenset({"implementation", "evidence"})
 REVIEW_SIDE_KINDS = frozenset({"evidence"})
 REVIEW_SIDE_PREFIX = "automation/review/"
 CONTROLLER_ROLES = frozenset({"laptop", "interface", "experiment-edge"})
-VERIFICATION_PASS_BASES = ("deterministic_gate", "worker_finalize_attested")
+VERIFICATION_PASS_BASES = ("deterministic_gate",)
 HANDOFF_TASK_TYPES = frozenset({"human-approval", "human-handoff", "handoff"})
 EVIDENCE_TASK_TYPES = frozenset({"evidence-synthesis", "evidence-gathering", "evidence"})
 READ_ONLY_MODES = frozenset({"read-only", "read_only", "advisory"})
@@ -449,12 +449,27 @@ def _resolve_met_debts(run, task_ref, frontier):
             gate = _debt_gate(debt)
             if gate == "owner_approval" and _approval_valid(meta):
                 continue
+            if gate == "verification" and _verification_recorded(meta, debt.get("commit_sha")):
+                continue
             if gate == "independent_review" and evidence_stages(
                     {"lifecycle_state": "succeeded"}, {"ok": True}, {"delivered": False}, meta,
                     author_provider=debt.get("author_provider"))["review"]["status"] == "recorded":
                 continue
         kept.append(debt)
     _set_review_debts(run, kept)
+
+
+def _verification_recorded(meta, commit_sha):
+    """A passing deterministic check recorded on the card for EXACTLY this commit, with a reference
+    and an attesting principal. It clears the verification debt of a finalised write; nothing the
+    writer itself produced can do so (its directory is denied to it)."""
+    if not isinstance(commit_sha, str) or not commit_sha:
+        return False
+    return any(isinstance(entry, dict) and str(entry.get("result", "")).lower() == "pass"
+               and entry.get("commit_sha") == commit_sha
+               and isinstance(entry.get("ref"), str) and entry["ref"].strip()
+               and isinstance(entry.get("verified_by"), str) and entry["verified_by"].strip()
+               for entry in (meta.get("verification_evidence") or []))
 
 
 def _deliverable_surface(meta):
@@ -577,7 +592,7 @@ def _recent_blocker(run, ref, revision):
     if outcome in {"advisory_complete", "protected_handoff", "attempted_legacy",
                    "delivered"} and age < ADVISORY_REUSE_SECONDS:
         return "result_reusable"
-    if outcome == "failed" and age < FAILURE_RETRY_SECONDS:
+    if outcome in {"failed", "scope_violation", "finalize_failed"} and age < FAILURE_RETRY_SECONDS:
         return "failure_backoff"
     if outcome == "quota_parked" and not retry_due and (
             any(d.get("error") and d.get("retry_after") for d in debts) or age < FAILURE_RETRY_SECONDS):
@@ -586,6 +601,8 @@ def _recent_blocker(run, ref, revision):
         return "quota_retry_pending"
     if outcome == "delivered_pending_acceptance" and any(_debt_gate(d) == "owner_acceptance" for d in debts):
         return "awaiting_owner_acceptance"
+    if outcome == "unverified" and any(_debt_gate(d) == "verification" and _evidence_gap(d) for d in debts):
+        return "awaiting_verification"
     if outcome == "awaiting_approval" and any(_debt_gate(d) == "owner_approval" for d in debts):
         return "awaiting_owner_approval"
     return None
@@ -872,8 +889,8 @@ def evidence_stages(view, result, acceptance, meta, *, author_provider=None, fin
     """Four separate pieces of evidence; none stands in for another.
 
     1. execution:     the worker/provider run finished successfully (it says nothing about quality);
-    2. verification:  a deterministic check passed (the router gate, or worker-attested finalisation
-                      of an in-scope, non-empty commit). Exit code and non-empty prose are NOT checks;
+    2. verification:  a deterministic check passed (the router gate). A finalised commit,
+                      exit code and non-empty prose are NOT checks;
     3. review:        where the card's route demands it, an approving review by ANOTHER model family;
     4. acceptance:    the owner card is done with acceptance evidence.
     `complete` needs every required stage."""
@@ -883,17 +900,13 @@ def evidence_stages(view, result, acceptance, meta, *, author_provider=None, fin
     gate = result.get("deterministic_gate") or result.get("verification_outcome")
     if not ok:
         verification = {"status": "fail", "basis": "execution_failed"}
-    elif finalization is not None:
-        violations = list(finalization.get("scope_violations") or [])
-        if violations:
-            verification = {"status": "fail", "basis": "scope_violation", "scope_violations": violations}
-        elif not finalization.get("finalized"):
-            verification = {"status": "fail", "basis": "finalization_failed"}
-        elif finalization.get("committed"):
-            verification = {"status": "pass", "basis": "worker_finalize_attested",
-                            "commit_sha": finalization.get("commit_sha")}
-        else:
-            verification = {"status": "unverified", "basis": "nothing_committed"}
+    elif finalization is not None and finalization.get("scope_violations"):
+        verification = {"status": "fail", "basis": "scope_violation",
+                        "scope_violations": list(finalization["scope_violations"])}
+    elif finalization is not None and not finalization.get("finalized"):
+        verification = {"status": "fail", "basis": "finalization_failed"}
+    elif finalization is not None and not finalization.get("committed"):
+        verification = {"status": "unverified", "basis": "nothing_committed"}
     elif gate == "pass":
         verification = {"status": "pass", "basis": "deterministic_gate"}
     elif gate:
@@ -1078,7 +1091,7 @@ def verify_attempt(view, checkpoint):
     result = view.get("result") or {}
     gate = result.get("deterministic_gate") or result.get("verification_outcome")
     return (view.get("lifecycle_state") == "succeeded" and result.get("ok") is True
-            and (gate == "pass" or (result.get("exit_code") == 0 and bool(result.get("output", "").strip()))))
+            and gate == "pass")
 
 
 def reconcile_task_status(checkpoint, view):
@@ -1166,7 +1179,10 @@ def _observe(db, run):
         db.commit()
         return run_dict(run)
     execution_id = run.checkpoint["in_flight_execution_id"]
-    _charge(run, tool_calls=1)
+    # Polling an in-flight execution (and renewing its lease) is controller bookkeeping, not model or
+    # tool usage: charging it exhausted the tool-call ceiling in ~40 minutes and cancelled a healthy
+    # write (live 2026-11-20). Real actions (dispatch, finalize, recovery, release) and the worker's
+    # own reported usage are still charged; max_seconds bounds a stuck observation.
     _save(db, run, phase="observing", next_action="observe", in_flight_execution_id=execution_id)
     view = estate_router.get_estate_execution(execution_id, wait_s=0)
     run = _load(db, run.id)
@@ -1177,7 +1193,6 @@ def _observe(db, run):
         return _park(db, run, "dispatch outcome uncertain; reconcile the reserved execution id", automatic=False)
     if view.get("lifecycle_state") not in EXECUTION_TERMINAL:
         if view.get("lease_id"):
-            _charge(run, tool_calls=1)
             db.commit()
             park_lease_ops.renew_lease_for_execution(execution_id)
         if view.get("lifecycle_state") == "lost":
@@ -1232,13 +1247,23 @@ def _observe(db, run):
     _reconcile_review_debts(run, task_ref, verified=passed, acceptance=acceptance)
     task_terminal = str(acceptance.get("status", "")).lower() in TASK_TERMINAL
     if not passed and not acceptance["delivered"] and not task_terminal:
-        acceptance = {"delivered": False, "status": "verification_pending" if parked else "failed"}
+        pending = parked or (ran_ok and not fin_failed and not scope_failed)
+        acceptance = {"delivered": False, "status": "verification_pending" if pending else "failed"}
     now = utcnow_naive().isoformat()
     base = {"task_id": run.checkpoint["current_task_id"], "task_ref": task_ref, "execution_id": execution_id,
             "provider": None, "error": None, "retry_after": None, "opened_at": now,
-            "author_provider": run.checkpoint.get("dispatch_provider") or "local"}
+            "author_provider": run.checkpoint.get("dispatch_provider") or "local",
+            "commit_sha": (finalization or {}).get("commit_sha")}
     new_debts = []
     review_open = stg["review"]["status"] in {"required", "not_independent"}
+    if (ran_ok and wrote and not fin_failed and not scope_failed and not task_terminal
+            and not acceptance["delivered"] and stg["verification"]["status"] != "pass"):
+        new_debts.append({**base, "gate": "verification", "evidence_gap": True,
+                          "next_action": "deterministically verify the existing finalised execution; "
+                                         "do not repeat implementation or infer checks from its commit"})
+        if review_open:
+            new_debts.append({**base, "gate": "independent_review", "evidence_gap": True,
+                              "next_action": "independent review by another model family"})
     if passed and not acceptance["delivered"] and not task_terminal:
         if kind == "reconnaissance":
             # A re-adjudication report is not the task's output; it asks for ONE concrete owner step.
@@ -1291,14 +1316,23 @@ def _observe(db, run):
                    else "delivered_pending_acceptance" if wrote else "advisory_complete")
     elif stg["execution"]["status"] == "succeeded":
         outcome = "unverified"
+    elif stopping and any(marker in " ".join(str(v or "") for v in (
+            result.get("error"), provider_result.get("error"), view.get("error"))).lower()
+                          for marker in ("cancel", "fenced", "never ran")):
+        # Our own stop (budget or operator) cancelled or fenced the writer: that says nothing about the task.
+        # A genuine failure that merely coincides with a pending stop stays a failure, so the
+        # repeat-failure guard still binds on a task that fails deterministically.
+        outcome = "interrupted"
     else:
         outcome = "failed"
     if delivered_clean:
         run.counters = {**run.counters, "no_delivery_turns": 0, "repeated_failures": 0,
                         "last_failure_signature": None}
     elif not accounted:
-        if outcome in {"advisory_complete", "delivered_pending_acceptance", "awaiting_approval", "unverified",
-                       "accepted_unproven"}:
+        if outcome == "interrupted":
+            pass
+        elif outcome in {"advisory_complete", "delivered_pending_acceptance", "awaiting_approval", "unverified",
+                         "accepted_unproven"}:
             # Executed but not accepted: not a failure. It only spends a no-delivery turn.
             _no_delivery(run)
         else:
