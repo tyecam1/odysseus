@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.helpers import live_units
 from tests.helpers.import_state import clear_fake_database_modules
 from tests.helpers.sqlite_db import make_temp_sqlite
 
@@ -36,6 +37,12 @@ def _git(cwd, *args):
 
 @pytest.fixture
 def estate(tmp_path, monkeypatch):
+    busy = live_units.busy_units()
+    if busy:
+        # A real worker (e.g. a paid /lazyUsage writer) is running on this host; these tests kill
+        # units, so they must not run now (2026-11-21: they killed a live gpt-6.2-sol writer).
+        pytest.skip("a real aoteru worker unit is active on this host: " + ", ".join(sorted(busy)))
+    units_before = live_units.active_units()
     home = tmp_path / "home"
     (home / ".aoteru").mkdir(parents=True)
     (home / ".aoteru" / "worker_selftest_enabled").touch()
@@ -71,16 +78,7 @@ def estate(tmp_path, monkeypatch):
     yield {"home": home, "repo": repo, "origin": origin}
     engine.dispose()
     os.unlink(tmpfile.name)
-    _stop_units()
-
-
-def _stop_units():
-    env = {**os.environ, "XDG_RUNTIME_DIR": os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")}
-    listing = subprocess.run(["systemctl", "--user", "list-units", "--all", "--no-legend", "aoteru-*"],
-                             capture_output=True, text=True, env=env).stdout
-    for line in listing.splitlines():
-        unit = line.split()[0].lstrip("●")
-        subprocess.run(["systemctl", "--user", "kill", "--signal=KILL", unit], capture_output=True, env=env)
+    live_units.stop_units_started_since(units_before)
 
 
 def _wait_row(execution_id, predicate, timeout=40):
