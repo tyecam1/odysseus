@@ -79,15 +79,32 @@ _TOKEN_KEYS = ("inputTokens", "outputTokens", "cacheReadInputTokens", "cacheCrea
                "input_tokens", "output_tokens")
 
 
+_INPUT_SIDE = ("inputTokens", "input_tokens", "cacheReadInputTokens", "cacheCreationInputTokens")
+_OUTPUT_SIDE = ("outputTokens", "output_tokens")
+
+
+def usage_tokens(usage, estimate):
+    """(measured, assumed) tokens for one call.
+
+    A provider report counts as MEASURED only when it covers both sides of the call (some input-side and
+    some output-side count). A fragment (for example only `outputTokens: 7` from a launcher that omitted
+    the rest) says nothing reliable about the whole call, so it is charged as an assumption: the larger of
+    the conservative estimate and what was reported. Never less than the estimate (Sol review of #297)."""
+    ints = ({k: v for k, v in usage.items() if type(v) is int and v > 0} if isinstance(usage, dict) else {})
+    total = sum(v for k, v in ints.items() if k in _TOKEN_KEYS)
+    covers = any(k in ints for k in _INPUT_SIDE) and any(k in ints for k in _OUTPUT_SIDE)
+    if covers and total:
+        return total, 0
+    return 0, max(estimate, total)
+
+
 def _meter_tokens(run, result):
-    """Measured provider tokens when reported, else a conservative estimate for a completed call."""
-    usage = result.get("provider_usage")
-    measured = (sum(usage[k] for k in _TOKEN_KEYS if type(usage.get(k)) is int and usage[k] > 0)
-                if isinstance(usage, dict) else 0)
+    """Measured provider tokens when fully reported, else a conservative estimate for a completed call."""
+    measured, assumed = usage_tokens(result.get("provider_usage"), COORDINATOR_TOKEN_ESTIMATE)
     if measured:
         _charge(run, tokens_measured=measured)
-    else:
-        _charge(run, tokens_assumed=COORDINATOR_TOKEN_ESTIMATE)
+    if assumed:
+        _charge(run, tokens_assumed=assumed)
 
 
 def _charge(run, **counts):

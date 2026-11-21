@@ -971,27 +971,36 @@ def _reported_usage(result):
     return usage
 
 
-def _measured_tokens(*results):
-    """Provider-reported token usage (Claude `modelUsage`-style keys); 0 when none was reported."""
+def _reported_usage_dict(*results):
+    """The best provider usage report among the candidate results.
+
+    A report that covers both sides of a call wins (largest first); otherwise the largest fragment, so a
+    tokenless or smaller fragment in one result can never shadow a better report in another."""
+    best, best_rank = None, (-1, -1)
     for result in results:
         usage = (result or {}).get("provider_usage")
-        if isinstance(usage, dict):
-            total = sum(usage[k] for k in TOKEN_KEYS if type(usage.get(k)) is int and usage[k] > 0)
-            if total:
-                return total
-    return 0
+        if not isinstance(usage, dict) or not usage:
+            continue
+        measured, assumed = coordinator.usage_tokens(usage, 0)
+        rank = (1 if measured else 0, measured or assumed)
+        if rank > best_rank:
+            best, best_rank = usage, rank
+    return best
 
 
 def _charge_tokens(run, result, provider_result):
-    """Meter tokens once per execution: measured where reported, else a conservative estimate.
+    """Meter tokens once per execution: measured where FULLY reported, else a conservative estimate.
 
-    A dispatch that used a paid provider but reported nothing is never charged zero."""
-    measured = _measured_tokens(provider_result, result)
+    A fully reported call is always charged as measured, whatever route produced it (the router may escalate
+    a read-only task to a paid model). A dispatch that used a paid provider but reported nothing is never
+    charged zero, and a partial report (one side of the call only) is charged at least the estimate (Sol
+    review of #297, GLM-5.3 review of this fix)."""
+    estimate = UNMEASURED_WRITE_TOKEN_ESTIMATE if run.checkpoint.get("dispatch_write") else UNMEASURED_TOKEN_ESTIMATE
+    measured, assumed = coordinator.usage_tokens(_reported_usage_dict(provider_result, result), estimate)
     if measured:
         _charge(run, tokens_measured=measured)
-    elif run.checkpoint.get("dispatch_provider"):
-        _charge(run, tokens_assumed=UNMEASURED_WRITE_TOKEN_ESTIMATE if run.checkpoint.get("dispatch_write")
-                else UNMEASURED_TOKEN_ESTIMATE)
+    elif run.checkpoint.get("dispatch_provider") and assumed:
+        _charge(run, tokens_assumed=assumed)
 
 
 def _finalize_owned(db, run, execution_id):

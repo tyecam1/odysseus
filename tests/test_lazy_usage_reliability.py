@@ -1037,3 +1037,104 @@ def test_a_recovery_debt_with_an_unknown_execution_is_kept(db, queue):
          "opened_at": utcnow_naive().isoformat()}]}
     rt._resolve_met_debts(run, ref, rt.refresh_frontier(["odysseus"]))
     assert [d["gate"] for d in run.checkpoint["owed_reviews"]] == ["recovery"]
+
+
+# ---- Sol review (gpt-6.2-sol) of #297, 2026-11-21: partial provider usage must not under-charge --------------
+
+def _plan_with_usage(usage):
+    return {"ok": True, "executed": True, "provider": "glm", "concrete_model": "glm-5.3-flash",
+            "output": json.dumps({"selected": [], "decomposition": ["s"], "next_action": "go"}),
+            **({"provider_usage": usage} if usage is not None else {})}
+
+
+def _coordinator_counters(db, queue, monkeypatch, usage):
+    impl = queue.add("odysseus", "impl", **WRITE)
+    monkeypatch.setattr(coord, "master_enabled", lambda: True)
+    monkeypatch.setattr(coord, "_qualified_executors", lambda: ["glm", "claude"])
+    result = _plan_with_usage(usage)
+    result["output"] = json.dumps({"selected": [impl], "decomposition": ["s"], "next_action": "go"})
+    monkeypatch.setattr(estate_router, "execute_glm", lambda prompt, **kw: result)
+    run = db.get(LazyUsageRun, activate(db, ("odysseus",), {"enabled": True}))
+    run.state = "running"
+    db.commit()
+    frontier = rt.refresh_frontier(["odysseus"])
+    coord.coordinator_step(db, run, frontier, "digest", rt.candidate_evidence(frontier, run))
+    return run.counters
+
+
+def test_partial_coordinator_usage_is_charged_the_estimate_not_the_fragment(db, queue, monkeypatch):
+    """The reviewer's scenario: a Flash response reporting only outputTokens: 7 used to count as 7 tokens."""
+    counters = _coordinator_counters(db, queue, monkeypatch, {"outputTokens": 7})
+    assert counters.get("tokens_measured", 0) == 0
+    assert counters["tokens_assumed"] == coord.COORDINATOR_TOKEN_ESTIMATE
+
+
+def test_partial_usage_larger_than_the_estimate_is_charged_in_full(db, queue, monkeypatch):
+    counters = _coordinator_counters(db, queue, monkeypatch, {"inputTokens": 500000})
+    assert counters["tokens_assumed"] == 500000 and counters.get("tokens_measured", 0) == 0
+
+
+def test_complete_coordinator_usage_is_still_charged_as_measured(db, queue, monkeypatch):
+    usage = {"inputTokens": 2, "outputTokens": 5000, "cacheReadInputTokens": 7000, "cacheCreationInputTokens": 9000}
+    counters = _coordinator_counters(db, queue, monkeypatch, usage)
+    assert counters["tokens_measured"] == 21002 and counters.get("tokens_assumed", 0) == 0
+
+
+@pytest.mark.parametrize("usage", [{"outputTokens": 9}, {"inputTokens": 40}, {"cacheReadInputTokens": 5}, {}])
+def test_partial_advisory_usage_is_charged_the_estimate(db, queue, monkeypatch, usage):
+    queue.add("odysseus", "a", execution_mode="read-only")
+    monkeypatch.setattr(estate_router, "run_task", lambda task: advisory_pass(provider_usage=usage))
+    counters = rt.advance(db, activate(db))["counters"]
+    assert counters.get("tokens_measured", 0) == 0
+    assert counters["tokens_assumed"] == rt.UNMEASURED_TOKEN_ESTIMATE
+
+
+def test_a_partial_write_report_is_charged_at_least_the_write_estimate(db, queue, monkeypatch):
+    ref, worker = write_card(queue, monkeypatch)
+    run_id = activate(db)
+    view = rt.advance(db, run_id)
+    execution_id = view["checkpoint"]["in_flight_execution_id"]
+    worker.set_state(execution_id, "succeeded", result={"ok": True, "output": "d", "exit_code": 0,
+                                                        "provider_usage": {"outputTokens": 11}})
+    worker.executions[execution_id]["usage"] = {"paid_calls": 1, "tool_calls": 1}
+    lane._apply_view(execution_id, worker._view(execution_id))
+    rt.advance(db, run_id)
+    row = db.get(LazyUsageRun, run_id)
+    assert row.counters["tokens_assumed"] == rt.UNMEASURED_WRITE_TOKEN_ESTIMATE
+
+
+# ---- GLM-5.3 review of the partial-usage fix ---------------------------------------------------------------
+
+class _FakeRun:
+    def __init__(self, **checkpoint):
+        self.checkpoint, self.counters = checkpoint, {}
+
+
+def test_a_complete_paid_report_is_charged_even_when_no_dispatch_provider_was_recorded():
+    run = _FakeRun(dispatch_provider=None)
+    rt._charge_tokens(run, {"provider_usage": {"inputTokens": 90000, "outputTokens": 5000}}, {})
+    assert run.counters == {"tokens_measured": 95000}
+
+
+def test_no_report_and_no_provider_charges_nothing():
+    run = _FakeRun(dispatch_provider=None)
+    rt._charge_tokens(run, {}, {})
+    assert run.counters == {}
+
+
+def test_a_tokenless_fragment_does_not_shadow_a_complete_report():
+    run = _FakeRun(dispatch_provider="codex")
+    inner = {"provider_usage": {"outputTokens": 0}}
+    outer = {"provider_usage": {"inputTokens": 8000, "outputTokens": 1200}}
+    rt._charge_tokens(run, outer, inner)
+    assert run.counters == {"tokens_measured": 9200}
+
+
+def test_a_complete_report_beats_a_larger_fragment_and_the_larger_fragment_beats_a_smaller_one():
+    run = _FakeRun(dispatch_provider="codex")
+    rt._charge_tokens(run, {"provider_usage": {"inputTokens": 100, "outputTokens": 50}},
+                      {"provider_usage": {"inputTokens": 900000}})
+    assert run.counters == {"tokens_measured": 150}
+    run = _FakeRun(dispatch_provider="codex")
+    rt._charge_tokens(run, {"provider_usage": {"outputTokens": 10}}, {"provider_usage": {"inputTokens": 700000}})
+    assert run.counters == {"tokens_assumed": 700000}
