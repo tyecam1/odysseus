@@ -53,6 +53,18 @@ def setup_lazy_usage_routes():
             return runtime.run_dict(run) if run else {"state": None, "counters": {}, "budgets": {},
                                                      "checkpoint": {}, "owed_reviews": []}
 
+    @router.get("/decisions")
+    def decisions(request: Request):
+        """The owner decisions currently pending (ranked cards), read-only; no webhook or secret is returned."""
+        from src import owner_decisions
+        owner = _scope_owner(request, {"estate:read", "estate:execute"})
+        with get_db_session() as db:
+            run = db.query(LazyUsageRun).filter_by(created_by=owner).order_by(LazyUsageRun.created_at.desc()).first()
+            owed = list((run.checkpoint or {}).get("owed_reviews") or []) if run else []
+            run_id = run.id if run else None
+        cards = owner_decisions.build_cards(owed)
+        return {"run_id": run_id, "cards": cards, "message": owner_decisions.render(cards)}
+
     @router.get("/history")
     def history(request: Request, limit: int = 20):
         owner = _scope_owner(request, {"estate:read", "estate:execute"})

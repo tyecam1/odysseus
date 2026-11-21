@@ -1728,6 +1728,16 @@ def supersede_review_debts(db, owner, run_id, task_refs, *, reason, evidence):
             "remaining": len(run.checkpoint["owed_reviews"])}
 
 
+def _offer_owner_decisions(view):
+    """Best-effort: send the owner's pending decision cards (approvals, acceptances) to the private channel,
+    each once, at most hourly. It can never affect the run: any failure is swallowed."""
+    try:
+        from src import owner_decisions
+        owner_decisions.notify((view or {}).get("owed_reviews") or [])
+    except Exception:
+        log.warning("owner decision notification failed")
+
+
 def lifecycle_tick():
     from core.database import SessionLocal
     db = SessionLocal()
@@ -1740,7 +1750,9 @@ def lifecycle_tick():
         db.commit()
         estate_router.reconcile_stale_estate_executions(db, EstateExecution)
         db.commit()
-        return advance(db, run_id)
+        view = advance(db, run_id)
+        _offer_owner_decisions(view)
+        return view
     finally:
         db.close()
 
