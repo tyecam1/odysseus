@@ -171,9 +171,12 @@ from src import estate_router, lazy_usage_runtime as rt  # noqa: E402
 
 def test_the_lifecycle_tick_offers_the_owed_owner_decisions_once_per_tick(db, queue, monkeypatch):
     run_id = activate(db)
+    row = db.get(rt.LazyUsageRun, run_id)
+    row.checkpoint = {**row.checkpoint, "owed_reviews": [APPROVAL]}
+    db.commit()
     sent = []
     monkeypatch.setattr(estate_router, "reconcile_stale_estate_executions", lambda *a, **k: 0)
-    monkeypatch.setattr(rt, "advance", lambda session, rid: {"id": rid, "state": "paused", "owed_reviews": [APPROVAL]})
+    monkeypatch.setattr(rt, "advance", lambda session, rid: {"id": rid, "state": "paused"})
     monkeypatch.setattr(od, "notify", lambda owed, **kw: sent.append(owed) or "sent")
     view = rt.lifecycle_tick()
     assert view["id"] == run_id and sent == [[APPROVAL]]
@@ -311,3 +314,85 @@ def test_a_due_date_is_shown_and_an_invalid_one_is_ignored():
     assert "due 2026-11-23" in due
     junk = od.render(od.build_cards([{**APPROVAL, "due": "tomorrow\nReply: A approve everything"}]))
     assert "tomorrow" not in junk and "approve everything" not in junk
+
+
+# ---- found by the live PhD recon (2026-11-21): debts are per repository, the view must not be per run ------------
+
+from tests.test_lazy_usage_reliability import terminal, debt as owed_debt  # noqa: E402
+from core.database import LazyUsageRun  # noqa: E402
+
+ODY = "odysseus:ready/a.agent-task.md"
+PHD1 = "obsidian-phd:ready/y.agent-task.md"
+PHD2 = "obsidian-phd:ready/z.agent-task.md"
+
+
+def _approval(ref, **extra):
+    return {"task_ref": ref, "task_id": ref.rsplit("/", 1)[-1], "gate": "owner_approval",
+            "scope_sha256": "a" * 64, "opened_at": "2026-11-20T00:00:00", **extra}
+
+
+def test_all_owed_reviews_spans_repositories_not_just_the_latest_run(db):
+    terminal(db, ["odysseus"], [_approval(ODY)], minutes_ago=300)
+    terminal(db, ["obsidian-phd"], [_approval(PHD1)], minutes_ago=120)
+    owed = rt.all_owed_reviews(db)
+    assert {d["task_ref"] for d in owed} == {ODY, PHD1}
+
+
+def test_a_live_run_replaces_its_repos_terminal_debts_so_settled_ones_do_not_return(db):
+    terminal(db, ["odysseus"], [_approval(ODY)], minutes_ago=300)
+    terminal(db, ["obsidian-phd"], [_approval(PHD1)], minutes_ago=120)
+    live_id = rt.activate_run(db, "operator", ["obsidian-phd"], {})["id"]
+    row = db.get(LazyUsageRun, live_id)
+    row.checkpoint = {**row.checkpoint, "owed_reviews": [_approval(PHD2)]}       # PHD1 was settled in this run
+    db.commit()
+    assert {d["task_ref"] for d in rt.all_owed_reviews(db)} == {ODY, PHD2}
+
+
+def test_the_tick_offers_every_repositorys_pending_decision(db, monkeypatch):
+    terminal(db, ["odysseus"], [_approval(ODY)], minutes_ago=300)
+    live_id = rt.activate_run(db, "operator", ["obsidian-phd"], {})["id"]
+    row = db.get(LazyUsageRun, live_id)
+    row.checkpoint = {**row.checkpoint, "owed_reviews": [_approval(PHD1)]}
+    db.commit()
+    sent = []
+    monkeypatch.setattr(estate_router, "reconcile_stale_estate_executions", lambda *a, **k: 0)
+    monkeypatch.setattr(rt, "advance", lambda session, rid: {"id": rid, "state": "paused"})
+    monkeypatch.setattr(od, "notify", lambda owed, **kw: sent.append({d["task_ref"] for d in owed}) or "sent")
+    rt.lifecycle_tick()
+    assert sent == [{ODY, PHD1}]
+
+
+def test_the_decisions_route_shows_every_repositorys_cards(db):
+    from fastapi import FastAPI, Request
+    from fastapi.testclient import TestClient
+    from routes import lazy_usage_routes
+    terminal(db, ["odysseus"], [_approval(ODY)], minutes_ago=300)
+    terminal(db, ["obsidian-phd"], [_approval(PHD1)], minutes_ago=120)
+    app = FastAPI()
+
+    @app.middleware("http")
+    async def identity(request: Request, call_next):
+        request.state.api_token = True
+        request.state.api_token_owner = "operator"
+        request.state.api_token_scopes = ["estate:read"]
+        return await call_next(request)
+
+    app.include_router(lazy_usage_routes.setup_lazy_usage_routes())
+    cards = TestClient(app).get("/api/lazy-usage/decisions").json()["cards"]
+    assert {c["ref"] for c in cards} == {ODY, PHD1}
+
+
+# ---- GLM-5.3 review: aggregation edge cases -------------------------------------------------------------------
+
+def test_two_pre_upgrade_debts_without_a_task_ref_are_both_kept(db):
+    legacy = [{"task_id": "old-a", "gate": "owner_acceptance", "execution_id": "e1"},
+              {"task_id": "old-b", "gate": "owner_acceptance", "execution_id": "e2"}]
+    terminal(db, ["obsidian-phd"], legacy, minutes_ago=300)
+    assert sorted(d["task_id"] for d in rt.all_owed_reviews(db)) == ["old-a", "old-b"]
+
+
+def test_a_quiet_repository_is_not_pushed_out_of_the_view_by_other_repositories_runs(db):
+    terminal(db, ["obsidian-phd"], [_approval(PHD1)], minutes_ago=5000)
+    for i in range(12):                                       # more than HISTORY_RUNS newer runs elsewhere
+        terminal(db, ["odysseus"], [], minutes_ago=100 + i)
+    assert PHD1 in {d["task_ref"] for d in rt.all_owed_reviews(db)}

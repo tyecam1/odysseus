@@ -73,7 +73,29 @@ def _provider_outcome(result: dict, now=None, *, host_tz=None) -> dict:
         # or an old error line must never turn a clean run into a failure. Text only explains runs that did not succeed.
         return {"state": "ok", "retry_after": None, "reason": "no provider error", "retry_after_assumed": False}
     glm_code = result.get("error_code") if result.get("provider") in {"glm", "claude"} else None
-    text = "\n".join(str(result.get(k) or "") for k in ("error", "output", "stdout", "stderr"))
+    # A FAILED call that ran an agent session leaves a transcript, and execute_codex embeds the last 1000
+    # characters of it in `error`. That prose (a model reading code that mentions "authentication" or "usage
+    # limit") must never create an auth or quota state: live 2026-11-21 a plain Codex timeout was recorded as
+    # auth_failed and gated the provider. So, for a call that ran a session (its output carries the session
+    # markers) the state comes only from the launcher's own header and from the CLI's own error lines (a line
+    # that starts, after an optional timestamp, with ERROR or FATAL); a timeout is classified from its header
+    # alone. A launch that failed before any session keeps the full text (a bare failure message is evidence).
+    fields = {k: str(result.get(k) or "") for k in ("error", "stderr", "output", "stdout")}
+    header = fields["error"].partition("\n")[0]
+    session = re.search(r"openai codex v\d|session id:|tokens used", "\n".join(fields.values()), re.I) is not None
+    if "timed out" in header.lower() and len(header) < 200:
+        evidence = [header]
+    elif session:
+        launcher = re.match(r"(.*?exited \d+:)(.*)", header)
+        evidence = [launcher.group(1) if launcher else header]
+        if launcher and re.match(r"\s*(?:\S+\s+)?(?:error|fatal)\b", launcher.group(2), re.I):
+            evidence.append(launcher.group(2))          # the CLI's own error on the header line
+        for value in fields.values():
+            evidence += [line for line in value.splitlines()
+                         if re.match(r"\s*(?:\S+\s+)?(?:error|fatal)\b", line, re.I)]
+    else:
+        evidence = list(fields.values())
+    text = "\n".join(evidence)
     text = (text + "\n" + "\n".join(map(str, states))).lower().replace("’", "'")
     now = now.replace(tzinfo=host_tz) if now.tzinfo is None else now.astimezone(host_tz)
     retry = now + timedelta(minutes=15)

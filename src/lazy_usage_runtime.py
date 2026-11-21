@@ -1729,12 +1729,42 @@ def supersede_review_debts(db, owner, run_id, task_refs, *, reason, evidence):
             "remaining": len(run.checkpoint["owed_reviews"])}
 
 
-def _offer_owner_decisions(view):
+def all_owed_reviews(db):
+    """Every repository's pending debts, for the owner's decision view (debts are per repository, not per run).
+
+    Terminal runs supply each repository's newest debts (`_inherited_history`); the live run, if any, is the
+    truth for the repositories in its own scope, so debts it settled cannot return from an older copy."""
+    live = db.query(LazyUsageRun).filter(LazyUsageRun.state.notin_(TERMINAL)).first()
+    live_scope = set(live.repo_scope or []) if live else set()
+
+    def key(debt):
+        ref = debt.get("task_ref")
+        # a pre-upgrade debt has only a task_id: keep each one distinct, never collapse them
+        return (_task_key(ref) if ref else "id:" + str(debt.get("task_id")), _debt_gate(debt))
+
+    merged = {}
+    for repo in portfolio.LAYOUT:
+        if repo in live_scope:
+            continue
+        # per repository, so a quiet repo is never pushed out by the history cap of busier ones
+        _, owed = _inherited_history(db, [repo])
+        for debt in owed:
+            ref = debt.get("task_ref")
+            if ref and str(ref).split(":", 1)[0] != repo:
+                continue
+            merged[key(debt)] = debt
+    if live:
+        for debt in (live.checkpoint or {}).get("owed_reviews") or []:
+            merged[key(debt)] = debt
+    return list(merged.values())
+
+
+def _offer_owner_decisions(db):
     """Best-effort: send the owner's pending decision cards (approvals, acceptances) to the private channel,
     each once, at most hourly. It can never affect the run: any failure is swallowed."""
     try:
         from src import owner_decisions
-        owner_decisions.notify((view or {}).get("owed_reviews") or [])
+        owner_decisions.notify(all_owed_reviews(db))
     except Exception:
         log.warning("owner decision notification failed")
 
@@ -1752,7 +1782,7 @@ def lifecycle_tick():
         estate_router.reconcile_stale_estate_executions(db, EstateExecution)
         db.commit()
         view = advance(db, run_id)
-        _offer_owner_decisions(view)
+        _offer_owner_decisions(db)
         return view
     finally:
         db.close()

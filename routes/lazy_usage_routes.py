@@ -60,8 +60,8 @@ def setup_lazy_usage_routes():
         owner = _scope_owner(request, {"estate:read", "estate:execute"})
         with get_db_session() as db:
             run = db.query(LazyUsageRun).filter_by(created_by=owner).order_by(LazyUsageRun.created_at.desc()).first()
-            owed = list((run.checkpoint or {}).get("owed_reviews") or []) if run else []
             run_id = run.id if run else None
+            owed = runtime.all_owed_reviews(db)          # every repository, not just the latest run
         cards = owner_decisions.build_cards(owed)
         return {"run_id": run_id, "cards": cards, "message": owner_decisions.render(cards)}
 
