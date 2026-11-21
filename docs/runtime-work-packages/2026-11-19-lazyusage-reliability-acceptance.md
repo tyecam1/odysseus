@@ -61,6 +61,30 @@ and the new instance resuming observation. It also found five defects, each now 
 Both writers reported their task as unfinished (`ready`, not shipped), so neither card is accepted: acceptance
 stays with the owner, and independent review and CI-equivalent verification remain owed per card.
 
+## Controller mistakes and learnings (2026-11-19 to 2026-11-21)
+
+Recorded in `evals/prompt-applications/estate-queue-priority-execution/2026-11-21-lazyusage-reliability-live-acceptance.yaml`
+and its evolution event; the improvements below are already in the code unless marked pending.
+
+* **I ran the full test suite on the execution host while a real write was in flight, and it killed the writer.** The cause
+  was a live-unit test that SIGKILLed every `aoteru-*` unit; the backend recorded the execution `interrupted` and protected
+  the partial work, but the delivery was lost and a lease needed a manual `am recover`. Fixed in the tests (#296: only units
+  the test created, wait for idle, an unreadable listing is an error). Practice: run suites on a snapshot elsewhere, or
+  between activations.
+* **"Latest model" depended on which Codex binary the service resolved**, not on the CLI I had updated. Fixed (#295, resolver
+  prefers the newest install); the lab install was updated. Practice: read the model from the dispatched execution's result.
+* **Controller bookkeeping must not look like consumption.** Polling consumed the tool-call ceiling and a budget stop
+  cancelled a healthy write (#295). Practice: meter what the worker or provider reports, estimate only where it cannot.
+* **A scope gate that discards work should be explained up front.** Writers edited their own owner card and recorded
+  `evals/` traces; the worker reverted them (correct) but the run was a `scope_violation`. The write objective now says the
+  controller records those (this change).
+* **A finalised commit is not verification** (the Codex worker's own correction, reviewed and merged in #295) and a debt that
+  nothing can clear is a dead end: verification debts now record the commit and clear through owner-card
+  `verification_evidence` for that exact commit.
+* **Pending:** within a priority, order delivering candidates before reconnaissance of approval-gated cards, so paid
+  dispatches are not spent on owner-approval asks while a verified write candidate waits.
+* **Independent review stayed GLM-5.3 only** (Codex was at its limit): corroborating, not a Sol or Codex verdict.
+
 ## Known limits
 
 * Verification for a write is worker-attested finalisation, not a repository test run; CI on
