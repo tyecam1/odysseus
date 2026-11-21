@@ -1007,3 +1007,33 @@ def test_a_write_objective_tells_the_writer_the_controller_records_traces_and_ow
 def test_a_read_only_objective_is_not_given_the_write_scope_notice(db, queue):
     ref = queue.add("odysseus", "a", execution_mode="read-only")
     assert "controller records" not in assess(db, queue, ref)["task"]["objective"]
+
+
+def test_a_recovery_debt_clears_once_the_governed_recovery_has_resolved_the_execution(db, queue, monkeypatch):
+    """Live 2026-11-21: after `am recover` cleared a killed write's lease, the `recovery` debt (an evidence gap that
+    outlives acceptance) stayed in every later activation because nothing could clear it."""
+    ref, worker = write_card(queue, monkeypatch)
+    run_id = activate(db)
+    execution_id, view = failed_write(db, worker, run_id, dirty=True)           # auto-recovery refused: dirty tree
+    assert "recovery" in {d["gate"] for d in view["owed_reviews"] if d["task_ref"] == ref}
+    successor = db.get(LazyUsageRun, run_id)
+    rt.stop_run(db, run_id, "operator")
+    nxt = db.get(LazyUsageRun, activate(db))
+    assert "recovery" in {d["gate"] for d in nxt.checkpoint["owed_reviews"] if d["task_ref"] == ref}   # still unresolved
+    rt._resolve_met_debts(nxt, ref, rt.refresh_frontier(["odysseus"]))
+    assert "recovery" in {d["gate"] for d in nxt.checkpoint["owed_reviews"] if d["task_ref"] == ref}   # kept while unresolved
+    row = db.get(cdb.EstateExecution, execution_id)
+    row.worktree_resolution = "recovered"                                         # the controller ran `am recover`
+    db.commit()
+    rt._resolve_met_debts(nxt, ref, rt.refresh_frontier(["odysseus"]))
+    assert "recovery" not in {d["gate"] for d in nxt.checkpoint["owed_reviews"] if d["task_ref"] == ref}
+
+
+def test_a_recovery_debt_with_an_unknown_execution_is_kept(db, queue):
+    ref = queue.add("odysseus", "w", **WRITE)
+    run = db.get(LazyUsageRun, activate(db))
+    run.checkpoint = {**run.checkpoint, "owed_reviews": [
+        {"task_ref": ref, "gate": "recovery", "evidence_gap": True, "execution_id": "no-such-execution",
+         "opened_at": utcnow_naive().isoformat()}]}
+    rt._resolve_met_debts(run, ref, rt.refresh_frontier(["odysseus"]))
+    assert [d["gate"] for d in run.checkpoint["owed_reviews"]] == ["recovery"]
