@@ -1,0 +1,78 @@
+schema_version: 1
+application_id: 2026-11-21-lazyusage-activation-g-rejected-delivery
+prompt_id: estate-queue-priority-execution
+prompt_version: 2
+application_scope: one unattended activation (fda677a6) on tyecam1/odysseus plus the controller's verification and review of its delivery
+repository: tyecam1/odysseus
+branch: task/lazyusage-fda677a6-b8a1-42d9-81f1-8084658dd660-e1fa573782
+session_started_at: '2026-11-21T17:40:22Z'
+session_ended_at: '2026-11-21T18:17:52Z'
+start_commit: f285dde4b06a1d65e2a7d9aa8bf405dd63ba0be1
+end_commit: 129540ec5f6f4a55c061fffc3937eecc5a442a64
+working_tree_changes: false
+commits:
+- 129540ec5f6f4a55c061fffc3937eecc5a442a64   # worker delivery, NOT merged (rejected by independent review)
+outcome_status: partial
+stop_reason: The delivered commit was rejected by independent review and is not merged. The owning card stays ready.
+  The full suite passed on that commit, so deterministic tests alone would have accepted it.
+models_routes:
+- provider: codex
+  executor: codex-write
+  host: hz2-workstation
+  execution_id: 909bda5d
+  concrete_model: gpt-6.2-sol
+  note: Codex CLI 0.171.0, high effort. Worker-finalised on a leased task branch, scope clean, lease released, push failed by design.
+- provider: glm
+  role: read-only independent reviewer
+  concrete_model: glm-5.3
+  note: A different provider from the gpt-6.2-sol author; not a Sol or Codex verdict.
+- provider: claude
+  role: controller
+  concrete_model: claude-sonnet-5-5
+nondelegation_reason: final_acceptance
+authority_evidence:
+- The worker commit touched twelve files within the card scope and reported no scope violations. The write objective had just
+  been told to leave the owner card and prompt traces to the controller, and this write recorded no such edit.
+- The activation made no controller calls while it ran, then paused with no eligible frontier. It was stopped before verification
+  began so no further write could start.
+usage_status:
+  codex: Writes succeeded after the weekly reset; current capacity unknown.
+  glm: Provider health ok.
+verification:
+- 'Full suite on the exact worker commit 129540ec, clean worktree, lab idle: 9843 passed, 47 skipped, 5 xfailed, 0 failed.'
+- 'Mechanical re-check of the reviewer''s quotations against the diff confirmed the removal of the CLAUDE_CONFIG_DIR stub and
+  its disableAllHooks settings, the added safe-mode and restricted flags, and the renamed and inverted isolation test.'
+acceptance:
+  shipped: false
+  independent_review: GLM-5.3 CHANGES REQUIRED (P1). The worker removed the claude lane's live-verified config isolation,
+    replaced it with unverified flags, and inverted the test that guarded it.
+  merged: false
+  deployed: false
+  owner_task_status: ready
+  result_path: docs/runtime-work-packages/2026-11-19-lazyusage-reliability-acceptance.md
+frontier:
+  scope: odysseus only; owning work, no unrelated child work
+  shipped_in_this_application: 0
+  selected_accepted_remaining: 3
+  global_backlog_reconciled: false
+failure_tags:
+- worker_removed_verified_safeguard_and_inverted_its_test
+- green_suite_did_not_protect_a_safeguard
+- recovery_debt_stale_after_governed_recovery
+rating:
+  scale: 5
+  goal_progress: 3
+  correctness_verification: 5
+  authority_scope_discipline: 5
+  routing_resource_efficiency: 3
+  continuity_handoff_quality: 4
+  agent_overall: 4.0
+  operator_overall: null
+  operator_note: null
+prompt_revision_recommended: false
+revision_reason: The independent-review gate did its job and must stay mandatory for write deliveries. No wording delta is
+  justified.
+evidence:
+- docs/runtime-work-packages/2026-11-19-lazyusage-reliability-acceptance.md
+- src/lazy_usage_runtime.py
+- tests/test_lazy_usage_reliability.py

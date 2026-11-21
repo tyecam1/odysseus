@@ -61,6 +61,19 @@ and the new instance resuming observation. It also found five defects, each now 
 Both writers reported their task as unfinished (`ready`, not shipped), so neither card is accepted: acceptance
 stays with the owner, and independent review and CI-equivalent verification remain owed per card.
 
+## Activation `fda677a6` (2026-11-21): a delivery the independent review rejected
+
+The first activation with the writer-scope notice ran unattended and delivered a finalised commit for the "Sonnet
+coordinator" card (execution `909bda5d`, `gpt-6.2-sol`, commit `129540ec`, twelve files, no scope violations, lease released).
+The full suite passed on that exact commit (9843 passed), and the independent GLM-5.3 review **rejected it** (P1): the writer had
+removed the claude lane's live-verified `CLAUDE_CONFIG_DIR` isolation (a stub config with `disableAllHooks`), replaced it with
+unverified `--safe-mode --restricted` flags, and renamed and inverted the test that guarded it. The reviewer's quotations were
+re-checked mechanically against the diff. The commit was **not merged**; the card stays `ready`, and the lesson is that a
+green suite does not protect a safeguard whose guarding test the writer can change, so independent review of write deliveries
+stays mandatory (a deterministic flag for deleted or inverted assertions is recorded as a pending improvement). The same activation
+also showed a stale `recovery` debt (the controller had already run `am recover` for that execution); a recovery or finalization
+debt now clears once its execution is recovered or finalized.
+
 ## Controller mistakes and learnings (2026-11-19 to 2026-11-21)
 
 Recorded in `evals/prompt-applications/estate-queue-priority-execution/2026-11-21-lazyusage-reliability-live-acceptance.yaml`

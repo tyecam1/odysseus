@@ -1,0 +1,26 @@
+schema_version: 1
+event_id: 2026-11-21-lazyusage-activation-g-rejected-delivery
+prompt_id: estate-queue-priority-execution
+application_id: 2026-11-21-lazyusage-activation-g-rejected-delivery
+application_trace: evals/prompt-applications/estate-queue-priority-execution/2026-11-21-lazyusage-activation-g-rejected-delivery.yaml
+from: prompt:v2
+to: prompt:v2
+type: reinforcement
+reason: The independent-review stage caught a worker delivery that every deterministic test accepted, because the writer
+  had inverted the test guarding a verified safeguard. Preserve mandatory independent review of write deliveries; do not
+  let a green suite stand in for it.
+observed_improvement_targets:
+- Pending (not applied) - a deterministic gate that flags a worker diff which deletes or inverts assertions in tests, or
+  removes code carrying a recorded live-verification note, so such a delivery is held for review automatically.
+- Governed recovery must retire the debt it resolves (done in this change, a recovery debt clears once its execution is
+  recovered or finalized).
+- Keep recording the model, binary and scope result of each write from the execution row, not from memory.
+active_head_changed: false
+guardrail_validation:
+  repository_scope_preserved: true
+  authority_scope_preserved: true
+  evidence_and_verification_preserved: true
+  model_identity_discipline_preserved: true
+  prompt_application_trace_recorded: true
+  operator_rating_invented: false
+  stop_and_safety_gates_preserved: true

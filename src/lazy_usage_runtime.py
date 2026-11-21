@@ -446,6 +446,20 @@ def _evidence_gap(debt):
     return bool(debt.get("evidence_gap")) or _debt_gate(debt) in {"independent_review", "finalization", "recovery"}
 
 
+def _execution_resolved(run, execution_id):
+    """The execution's worktree is no longer `unresolved`: the governed recover/finalize path has run (live
+    2026-11-21: `am recover` cleared a killed write's lease but its `recovery` debt stayed forever)."""
+    from sqlalchemy.orm import object_session
+    session = object_session(run)
+    if not execution_id or session is None:
+        return False
+    row = session.get(EstateExecution, execution_id)
+    if row is None:
+        return False
+    session.refresh(row)
+    return row.worktree_resolution in {"recovered", "finalized"}
+
+
 def _resolve_met_debts(run, task_ref, frontier):
     """Drop debts whose own condition is now met by the owner card (approval, review evidence)."""
     key = _task_key(task_ref)
@@ -457,6 +471,8 @@ def _resolve_met_debts(run, task_ref, frontier):
             if gate == "owner_approval" and _approval_valid(meta):
                 continue
             if gate == "verification" and _verification_recorded(meta, debt.get("commit_sha")):
+                continue
+            if gate in {"recovery", "finalization"} and _execution_resolved(run, debt.get("execution_id")):
                 continue
             if gate == "independent_review" and evidence_stages(
                     {"lifecycle_state": "succeeded"}, {"ok": True}, {"delivered": False}, meta,
