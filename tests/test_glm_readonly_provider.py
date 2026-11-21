@@ -221,17 +221,30 @@ def test_explicit_glm_selects_qualified_host(monkeypatch):
     assert host["host_id"] == "glm-host" and executor == "none"
 
 
-def test_unready_glm_host_is_not_selected(monkeypatch):
+@pytest.mark.parametrize("provider", ["glm", "glm-flash"])
+@pytest.mark.parametrize("error_code", ["provider_unavailable", "worker_unreachable"])
+def test_unready_glm_host_is_not_selected(monkeypatch, provider, error_code):
     from src import estate_worker_client
     monkeypatch.setattr(estate_router, "eligible_hosts", lambda repo_id=None: [
-        {"host_id": "glm-host", "eligible": True, "qualified_executors": ["glm"]}])
+        {"host_id": "glm-host", "eligible": True, "qualified_executors": [provider]}])
     monkeypatch.setattr(estate_router, "resolve_alias", lambda alias, host_id: {"resolved": False})
-    monkeypatch.setattr(estate_worker_client, "worker_health", lambda host_id: {
-        "glm": {"available": False}})
+    monkeypatch.setattr(estate_router, "provider_allows_dispatch", lambda name: {"allowed": True})
+
+    def health(host_id):
+        if error_code == "worker_unreachable":
+            raise estate_worker_client.WorkerTransportError(error_code)
+        return {provider: {"available": False}}
+
+    monkeypatch.setattr(estate_worker_client, "worker_health", health)
     result = estate_router.resolve_route({"requirements": {"capabilities": ["code-strong"]},
-                                          "routing": {"paid_provider": "glm"}}, record_decision=False)
-    assert result["error_code"] == "provider_unavailable"
+                                          "routing": {"paid_provider": provider}}, record_decision=False)
+    assert result["error_code"] == error_code
     assert result.get("route") is None and result["executed"] is False
+    unit = {"task_class": "code_review", "objective": "Review the patch", "paid_provider": provider,
+            "allow_paid_escalation": True}
+    preflight = delegation_preflight.delegation_preflight([unit])["units"][0]
+    assert preflight["error_code"] == error_code
+    assert preflight["recommended_route"] is None
 
 
 def test_glm_dispatch_rechecks_worker_readiness(monkeypatch):
@@ -246,6 +259,29 @@ def test_glm_dispatch_rechecks_worker_readiness(monkeypatch):
     result = estate_router.run_task({"objective": "Review the patch", "requirements": {"capabilities": ["code-strong"]},
                                     "routing": {"allow_paid_escalation": True, "paid_provider": "glm"}})
     assert result["error_code"] == "provider_unavailable" and result["executed"] is False
+
+
+@pytest.mark.parametrize("provider", ["glm", "glm-flash"])
+@pytest.mark.parametrize("executed", [False, True])
+def test_glm_quota_failure_preserves_provider_attribution(monkeypatch, provider, executed):
+    from src import estate_worker_client
+    route = {"route": {"host": "lab", "executor": "none", "model_alias": "code-strong"},
+             "decision_id": "decision", "hosts_checked": [{"host_id": "lab", "qualified_executors": [provider]}]}
+    monkeypatch.setattr(estate_router, "resolve_route", lambda task: route)
+    monkeypatch.setattr(estate_worker_client, "worker_health", lambda host: {provider: {"available": True}})
+    monkeypatch.setattr(estate_router, "_dispatch_advisory_call", lambda *args: {
+        "ok": False, "executed": executed, "error_code": "quota_exhausted",
+        "placement": {"attested": True, "executed_host": "lab" if executed else None},
+    })
+    decisions = []
+    monkeypatch.setattr(estate_router, "_update_decision_outcome", lambda decision_id, **data: decisions.append(data))
+
+    result = estate_router.run_task({"objective": "Review the patch",
+                                    "routing": {"allow_paid_escalation": True, "paid_provider": provider}})
+
+    assert result["executed"] is executed
+    assert result["error_code"] == result["escalation_reason"] == "quota_exhausted"
+    assert decisions[-1]["escalation_reason"] == "quota_exhausted"
 
 
 def test_glm_exact_stdin_readonly_args_and_attested_model(tmp_path, monkeypatch, glm_admission):
@@ -312,6 +348,238 @@ def test_glm_missing_model_usage_fails_closed(tmp_path, monkeypatch, glm_admissi
     _launcher(tmp_path, monkeypatch, f"print({json.dumps(response)!r})")
     result = estate_router.execute_glm("Review the patch", timeout=2)
     assert result["error_code"] == "model_mismatch" and result["observed_models"] == []
+
+
+@pytest.mark.parametrize("variant,model,expected", [
+    ("standard", "glm-5.3", True),
+    ("standard", "glm-6.1", True),
+    ("standard", "glm-5.3-flash", False),
+    ("standard", "glm-latest", False),
+    ("standard", "glm-5.3-preview", False),
+    ("flash", "glm-5.3-flash", True),
+    ("flash", "glm-6.1-flash", True),
+    ("flash", "glm-5.3", False),
+    ("flash", "glm-5.3-flashx", False),
+    ("flash", "glm-flash-latest", False),
+])
+def test_glm_variant_identity_cannot_be_substituted(
+        tmp_path, monkeypatch, glm_admission, variant, model, expected):
+    capture = tmp_path / "prompt"
+    launcher = _launcher(tmp_path, monkeypatch,
+                         "import sys, pathlib\n"
+                         f"pathlib.Path({str(capture)!r}).write_text(sys.stdin.read())\n"
+                         + _json_stdout("EXACT-SENTINEL", {model: {}}))
+    monkeypatch.setattr(estate_router, "_glm_variant_launcher_path", lambda variant: launcher)
+    prompt = 'Reply exactly: EXACT-SENTINEL\n"preserve stdin"'
+    result = estate_router.execute_glm(prompt, timeout=2, variant=variant)
+    assert capture.read_text() == prompt and result["exit_code"] == 0
+    assert result["ok"] is expected and result["variant"] == variant
+    assert result["provider"] == "glm" and result["model_currency_attested"] is False
+    if expected:
+        assert result["concrete_model"] == model and result["output"] == "EXACT-SENTINEL"
+    else:
+        assert result["error_code"] == "model_mismatch"
+        assert result["observed_models"] == [model]
+        assert "output" not in result
+        assert estate_router._provider_outcome(glm_admission[-1])["state"] == "unknown"
+
+
+def test_unknown_glm_variant_refused_before_admission(monkeypatch):
+    monkeypatch.setattr(estate_router, "provider_allows_dispatch", lambda *a, **kw: pytest.fail("admitted"))
+    result = estate_router.execute_glm("advise", variant="flashx")
+    assert result["error_code"] == "bad_request" and result["executed"] is False
+
+
+@pytest.mark.parametrize("variant", ["standard", "flash"])
+@pytest.mark.parametrize("output", ["", " \n\t"])
+def test_blank_glm_response_is_not_success(tmp_path, monkeypatch, glm_admission, variant, output):
+    model = "glm-5.3-flash" if variant == "flash" else "glm-5.3"
+    launcher = _launcher(tmp_path, monkeypatch, _json_stdout(output, {model: {}}))
+    monkeypatch.setattr(estate_router, "_glm_variant_launcher_path", lambda variant: launcher)
+    result = estate_router.execute_glm("advise", timeout=2, variant=variant)
+    assert result["ok"] is False and result["error_code"] == "bad_output"
+    assert estate_router._provider_outcome(glm_admission[-1])["state"] == "unknown"
+
+
+@pytest.mark.parametrize("variant", ["standard", "flash"])
+def test_glm_usage_is_provider_stated_and_bounded(tmp_path, monkeypatch, glm_admission, variant):
+    model = "glm-5.3-flash" if variant == "flash" else "glm-5.3"
+    usage = {"inputTokens": 11, "outputTokens": 7, "cacheReadInputTokens": 0,
+             "cacheCreationInputTokens": True, "secret": "DO-NOT-COPY", "costUSD": 123}
+    launcher = _launcher(tmp_path, monkeypatch, _json_stdout(model_usage={model: usage}))
+    monkeypatch.setattr(estate_router, "_glm_variant_launcher_path", lambda variant: launcher)
+    result = estate_router.execute_glm("advise", timeout=2, variant=variant)
+    assert result["provider_usage"] == {"inputTokens": 11, "outputTokens": 7, "cacheReadInputTokens": 0}
+    assert "DO-NOT-COPY" not in str(result) and "costUSD" not in result
+
+
+def test_flash_registry_keeps_codex_default():
+    assert estate_router._resolve_paid_provider(None, explicit_provider="glm-flash")["provider"] == "glm-flash"
+    assert estate_router._resolve_paid_provider("code-strong")["provider"] == "codex"
+
+
+def test_flash_route_refuses_standard_only_qualification(monkeypatch):
+    monkeypatch.setattr(estate_router, "eligible_hosts", lambda repo_id=None: [
+        {"host_id": "lab", "eligible": True, "qualified_executors": ["glm"]}])
+    monkeypatch.setattr(estate_router, "resolve_alias", lambda alias, host_id: {"resolved": False})
+    result = estate_router.resolve_route({"requirements": {"capabilities": ["code-strong"]},
+                                          "routing": {"paid_provider": "glm-flash"}}, record_decision=False)
+    assert result["error_code"] == "provider_unqualified" and result["executed"] is False
+
+
+def test_flash_and_standard_share_launch_reservation_and_quota(monkeypatch, glm_health_db):
+    first = estate_router.provider_allows_dispatch("glm", launch_timeout=30)
+    assert first["allowed"] is True
+    assert estate_router.provider_allows_dispatch("glm-flash", launch_timeout=30)["allowed"] is False
+    estate_router._record_provider_outcome({"provider": "glm", "ok": False,
+                                           "error_code": "quota_exhausted", "exit_code": 7}, first["outcome_id"])
+    flash = estate_router.provider_allows_dispatch("glm-flash")
+    assert flash["provider"] == "glm" and flash["state"] == "quota_exhausted" and not flash["allowed"]
+    assert estate_router.provider_allows_dispatch("codex")["allowed"] is True
+
+
+def test_flash_override_updates_shared_provider_scope(glm_health_db):
+    first = estate_router.provider_allows_dispatch("glm", launch_timeout=30)
+    estate_router._record_provider_outcome({"provider": "glm", "ok": False,
+                                           "error_code": "quota_exhausted", "exit_code": 7}, first["outcome_id"])
+    result = estate_router.record_operator_provider_override("glm-flash", "operator observed recovery",
+                                                             requested_by="test-operator")
+    assert result["provider"] == "glm"
+    assert estate_router.provider_allows_dispatch("glm")["allowed"] is True
+
+
+@pytest.mark.parametrize("qualified,ready,write,expected", [
+    (False, True, False, False),
+    (True, False, False, False),
+    (True, True, True, False),
+    (True, True, False, True),
+])
+def test_flash_preflight_uses_separate_qualification_and_readiness(
+        monkeypatch, qualified, ready, write, expected):
+    from src import estate_worker_client
+    hosts = [{"host_id": "lab", "eligible": True,
+              "qualified_executors": ["glm"] + (["glm-flash"] if qualified else [])}]
+    monkeypatch.setattr(estate_router, "eligible_hosts", lambda repo_id=None: hosts)
+    monkeypatch.setattr(estate_router, "provider_allows_dispatch", lambda provider, **kwargs: {
+        "allowed": True, "provider": provider})
+    monkeypatch.setattr(estate_worker_client, "worker_health", lambda host_id: {
+        "glm": {"available": True}, "glm-flash": {"available": ready}})
+    monkeypatch.setattr(estate_router, "resolve_route", lambda *a, **kw: {
+        "ok": False, "route": {"host": "lab", "executor": "none"}, "hosts_checked": hosts})
+    unit = {"task_class": "code_review", "objective": "Review the patch", "paid_provider": "glm-flash",
+            "allow_paid_escalation": True, "requires_repo_write": write}
+    result = delegation_preflight.delegation_preflight([unit])["units"][0]
+    assert result["ok"] is expected
+    assert result["recommended_route"] == ("glm-flash" if expected else None)
+
+
+@pytest.mark.parametrize("variant", ["standard", "flash"])
+@pytest.mark.parametrize("stderr,code", [
+    ("invalid api key", "auth_failed"), ("quota exceeded", "quota_exhausted"),
+    ("HTTP 429 Too Many Requests", "rate_limited"), ("ordinary error", "nonzero_exit"),
+])
+def test_both_glm_launchers_preserve_nonzero_status_and_typed_errors(
+        tmp_path, monkeypatch, glm_admission, variant, stderr, code):
+    launcher = _launcher(tmp_path, monkeypatch, "import sys\n"
+                         + _json_stdout(model_usage={"glm-5.3-flash" if variant == "flash" else "glm-5.3": {}})
+                         + f"\nprint({stderr!r}, file=sys.stderr)\nsys.exit(7)")
+    monkeypatch.setattr(estate_router, "_glm_variant_launcher_path", lambda variant: launcher)
+    result = estate_router.execute_glm("advise", timeout=2, variant=variant)
+    assert result["ok"] is False and result["exit_code"] == 7 and result["error_code"] == code
+    assert result["variant"] == variant
+
+
+@pytest.mark.parametrize("provider", ["glm", "glm-flash"])
+def test_glm_routes_do_not_gain_write_implementation(monkeypatch, provider):
+    route = {"route": {"host": "lab", "executor": "none", "model_alias": "code-strong"},
+             "decision_id": "decision", "hosts_checked": [{"host_id": "lab", "qualified_executors": [provider]}]}
+    monkeypatch.setattr(estate_router, "resolve_route", lambda task: route)
+    monkeypatch.setattr(estate_router, "_dispatch_advisory_call", lambda *a, **kw: pytest.fail("dispatched"))
+    result = estate_router.run_task({"objective": "Implement a fix", "repo": "odysseus",
+                                    "routing": {"paid_provider": provider, "allow_paid_escalation": True,
+                                                "mode": "implementation"}})
+    assert result["error_code"] == "provider_unqualified" and result["executed"] is False
+    assert "no qualified write route" in result["execution_error"]
+
+
+@pytest.mark.parametrize("qualified", [False, True])
+def test_flash_worker_requires_its_own_qualification(monkeypatch, qualified):
+    monkeypatch.setattr(estate_router, "current_host_id", lambda: "lab")
+    monkeypatch.setattr(estate_router, "_load_yaml", lambda name: {
+        "hosts": [{"id": "lab", "worker": {"qualified_executors": ["glm"] + (["glm-flash"] if qualified else [])}}]})
+    monkeypatch.setattr(estate_router, "execute_glm_flash", lambda objective, **kwargs: {
+        "ok": True, "output": objective, "variant": "flash"})
+    monkeypatch.setattr(estate_router, "execute_glm", lambda *a, **kw: pytest.fail("standard substituted"))
+    payload = {"kind": "glm-flash-readonly", "objective": "sentinel", "timeout_s": 1}
+    if qualified:
+        assert estate_worker._verb_execute(payload)["variant"] == "flash"
+    else:
+        with pytest.raises(estate_worker.WorkerError) as error:
+            estate_worker._verb_execute(payload)
+        assert error.value.code == "executor_unqualified"
+
+
+@pytest.mark.parametrize("provider,variant,model", [
+    ("glm", "standard", "glm-5.3"),
+    ("glm-flash", "flash", "glm-5.3-flash"),
+])
+def test_glm_http_envelope_to_worker_and_launcher(tmp_path, monkeypatch, glm_health_db, provider, variant, model):
+    """Disposable qualifications and transport fixture; not a lab canary."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from routes.estate_routing_routes import setup_estate_routing_routes
+    from src import estate_worker_client
+
+    monkeypatch.setattr(estate_router, "current_host_id", lambda: "lab")
+    sentinel = f'{variant.upper()}-HTTP-SENTINEL\n"quoted"'
+    capture = tmp_path / "stdin"
+    launcher = _launcher(tmp_path, monkeypatch,
+                         "import pathlib, sys\n"
+                         f"pathlib.Path({str(capture)!r}).write_text(sys.stdin.read())\n"
+                         + _json_stdout(sentinel, {model: {"outputTokens": 7}}))
+    monkeypatch.setattr(estate_router, "_glm_variant_launcher_path",
+                        lambda kind: launcher if kind == variant else None)
+    monkeypatch.setattr(estate_router, "_glm_launcher_path",
+                        lambda: launcher if variant == "standard" else tmp_path / "missing-standard")
+    hosts = [{"host_id": "lab", "eligible": True, "qualified_executors": [provider]}]
+    monkeypatch.setattr(estate_router, "eligible_hosts", lambda repo_id=None: hosts)
+    monkeypatch.setattr(estate_router, "resolve_alias", lambda *a: {"resolved": False})
+    load_yaml = estate_router._load_yaml
+    monkeypatch.setattr(estate_router, "_load_yaml", lambda name: {
+        "hosts": [{"id": "lab", "worker": {"qualified_executors": [provider]}}]
+    } if name == "estate" else load_yaml(name))
+    monkeypatch.setattr(estate_worker_client, "worker_health", lambda host: {provider: {"available": True}})
+    calls = []
+
+    def worker_fixture(host, verb, payload, **kwargs):
+        assert host == "lab" and verb == "execute" and payload["kind"] == f"{provider}-readonly"
+        calls.append(payload)
+        return {"result": estate_worker._verb_execute(payload), "attestation": {"host_id": "lab"}}
+
+    monkeypatch.setattr(estate_worker_client, "call_worker", worker_fixture)
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    app = FastAPI()
+    app.include_router(setup_estate_routing_routes())
+    with TestClient(app) as client:
+        response = client.post("/api/estate/run", json={
+            "task_class": "code_review", "objective": sentinel, "paid_provider": provider,
+            "requirements": {"capabilities": ["code-strong"]}, "allow_paid_escalation": True})
+    assert response.status_code == 200
+    result = response.json()
+    assert result["ok"] is True and result["route"]["executor"] == provider
+    execution = result["execution"]
+    assert execution["output"] == capture.read_text() == sentinel
+    assert execution["variant"] == variant and execution["provider"] == "glm"
+    assert execution["exit_code"] == 0 and execution["concrete_model"] == model
+    assert execution["provider_usage"] == {"outputTokens": 7}
+    assert result["placement"]["executed_host"] == "lab"
+    assert len(calls) == 1
+    with cdb.get_db_session() as db:
+        decision = db.get(cdb.RoutingDecision, result["decision_id"])
+        assert (decision.actual_route, decision.concrete_model, decision.executed_host_id) == (provider, model, "lab")
+        account_outcome = db.query(cdb.RoutingDecision).filter_by(task_class="provider_outcome").one()
+        assert account_outcome.executor == "glm"
+        assert account_outcome.status == "complete"
 
 
 def test_glm_error_result_is_failure(tmp_path, monkeypatch, glm_admission):
@@ -517,15 +785,20 @@ def test_worker_glm_readonly_rejects_unqualified_host(monkeypatch):
     assert error.value.code == "executor_unqualified"
 
 
-def test_worker_health_reports_glm_launcher_readiness(tmp_path, monkeypatch):
+@pytest.mark.parametrize("flash_ready", [False, True])
+def test_worker_health_reports_glm_launcher_readiness(tmp_path, monkeypatch, flash_ready):
     launcher = tmp_path / "claude-glm"
     launcher.write_text("#!/bin/sh\n")
     launcher.chmod(0o755)
     monkeypatch.setattr(estate_worker.estate_router, "_glm_launcher_path", lambda: launcher)
+    monkeypatch.setattr(estate_worker.estate_router, "_glm_variant_launcher_path",
+                        lambda variant: launcher if flash_ready else tmp_path / "missing-flash")
     monkeypatch.setattr(estate_worker, "_ollama_inventory", lambda: (False, [], "offline"))
     monkeypatch.setattr(estate_worker.estate_router, "_codex_available", lambda: (False, "absent"))
     monkeypatch.setattr(estate_worker.estate_router, "experiment_priority_active", lambda: (False, "idle"))
     monkeypatch.setattr(estate_worker.estate_router, "host_gpu_admission_config", lambda host: None)
     monkeypatch.setattr(estate_worker, "_in_flight_execution_ids", lambda: [])
     monkeypatch.setattr(estate_worker, "_write_prerequisites", lambda: {})
-    assert estate_worker._verb_health({})["glm"]["available"] is True
+    health = estate_worker._verb_health({})
+    assert health["glm"]["available"] is True
+    assert health["glm-flash"]["available"] is flash_ready

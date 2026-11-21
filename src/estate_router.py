@@ -137,6 +137,10 @@ def _glm_contextual_429(stderr: str) -> bool:
 def provider_allows_dispatch(provider: str, *, now: Optional[datetime] = None,
                              launch_timeout: Optional[float] = None) -> dict:
     """Read health; launch admission atomically reserves one provider attempt."""
+    # Flash is a distinct execution route sharing the GLM account/quota.
+    # Use the existing reservation for both; independent keys would allow
+    # overlapping launches and bypass the other route's quota cooldown.
+    provider = "glm" if provider == "glm-flash" else provider
     from core.database import RoutingDecision, get_db_session
     from sqlalchemy import text
     now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
@@ -202,6 +206,7 @@ def record_operator_provider_override(provider: str, reason: str, *, requested_b
     from sqlalchemy import text
     if not _resolve_paid_provider(None, explicit_provider=provider).get("provider"):
         raise ValueError("unknown provider")
+    provider = "glm" if provider == "glm-flash" else provider
     if not reason.strip() or not requested_by.strip():
         raise ValueError("reason and requesting identity are required")
     health = {"state": "ok", "retry_after": None, "retry_after_assumed": False,
@@ -802,10 +807,9 @@ def _select_host(eligible: list[dict], capabilities: list[str], *, paid_provider
        paid lane then fails `executor_unavailable` truthfully rather than
        this function inventing a placement.
 
-    Returns `(host, capability_resolutions, executor)`. `executor` is one
-    of `deterministic` / `local` / `none`; an explicit GLM request returns
-    no host when every qualified host reports GLM unavailable. `resolve_route` decides the
-    final recorded status (a `local` candidate can still be downgraded to
+    Returns `(host, capability_resolutions, executor)`. With no host for an
+    explicit GLM request, the third value is the readiness error code instead.
+    `resolve_route` decides the final recorded status (a `local` candidate can still be downgraded to
     `needs_escalation` by a quality-floor/context failure `resolve_alias`
     itself can't see)."""
     if not capabilities:
@@ -824,6 +828,8 @@ def _select_host(eligible: list[dict], capabilities: list[str], *, paid_provider
     # not necessarily every candidate's).
     from src.estate_worker_client import WorkerTransportError, worker_health
     provider_qualified = False
+    worker_reached = False
+    worker_error = None
     for host in eligible:
         provider = paid_provider or "codex"
         if provider not in (host.get("qualified_executors") or []):
@@ -831,8 +837,10 @@ def _select_host(eligible: list[dict], capabilities: list[str], *, paid_provider
         provider_qualified = True
         try:
             health = worker_health(host["host_id"])
-        except WorkerTransportError:
+        except WorkerTransportError as exc:
+            worker_error = worker_error or exc.code
             continue
+        worker_reached = True
         if (health.get(provider) or {}).get("available"):
             # capability_resolutions must describe *this* host, not
             # whichever host happened to be eligible[0] -- a route whose
@@ -842,8 +850,8 @@ def _select_host(eligible: list[dict], capabilities: list[str], *, paid_provider
             resolutions = [resolve_alias(alias, host["host_id"]) for alias in capabilities]
             return host, resolutions, "none"
 
-    if paid_provider == "glm" and provider_qualified:
-        return None, [], "none"
+    if paid_provider in {"glm", "glm-flash"} and provider_qualified:
+        return None, [], "provider_unavailable" if worker_reached else (worker_error or "worker_unreachable")
 
     # No host resolved every alias locally and no codex-qualified host is
     # healthy either -- capability_resolutions for the response/telemetry
@@ -945,12 +953,16 @@ def resolve_route(task: dict, *, record_decision: bool = True) -> dict:
         _select_host(eligible, capabilities) if explicit_provider is None else
         _select_host(eligible, capabilities, paid_provider=explicit_provider))
     if host is None:
-        reason = "GLM is unavailable on every qualified eligible host"
+        reason = (
+            f"{explicit_provider!r} launcher is unavailable on the reachable qualified workers"
+            if candidate_executor == "provider_unavailable" else
+            f"no qualified worker could attest {explicit_provider!r} launcher readiness: {candidate_executor}"
+        )
         decision_id = _record_decision(
             task, host_id=None, executor="none", model_alias=None,
             concrete_model=None, status="blocked",
         ) if record_decision else None
-        return {"ok": False, "executed": False, "error_code": "provider_unavailable",
+        return {"ok": False, "executed": False, "error_code": candidate_executor,
                 "error": reason, "reason": reason, "hosts_checked": hosts,
                 "decision_id": decision_id}
     alias = capabilities[0] if capabilities else None
@@ -1539,6 +1551,9 @@ def execute_glm(objective: str, *, timeout: float = 180.0, cwd: Optional[str] = 
     base = {"provider": "glm", "host_id": current_host_id(), "variant": variant,
             "concrete_model": None, "model_unverified": True,
             "model_currency_attested": False, "exit_code": None}
+    if variant not in {"standard", "flash"}:
+        return {**base, "ok": False, "executed": False, "error_code": "bad_request",
+                "error": "GLM variant must be standard or flash"}
     if not isinstance(objective, str) or not objective.strip():
         return {**base, "ok": False, "executed": False, "error_code": "nonzero_exit",
                 "error": "GLM objective must be a non-empty string"}
@@ -1546,7 +1561,7 @@ def execute_glm(objective: str, *, timeout: float = 180.0, cwd: Optional[str] = 
         "allowed": False, "reason": "provider glm: authoritative DATABASE_URL required", "state": "unknown"}
     if not health["allowed"]:
         state = health.get("state")
-        code = state if state in {"auth_failed", "quota_exhausted"} else "rate_limited" if state == "rate_limited" else "nonzero_exit"
+        code = state if state in {"auth_failed", "quota_exhausted", "rate_limited"} else "provider_unavailable"
         return {**base, "ok": False, "executed": False, "error_code": code, "error": health["reason"]}
 
     launcher = _glm_launcher_path() if variant == "standard" else _glm_variant_launcher_path(variant)
@@ -1615,21 +1630,33 @@ def execute_glm(objective: str, *, timeout: float = 180.0, cwd: Optional[str] = 
             outcome.update(ok=False, state="failed", error_code=code)
             error = "GLM launcher returned an error result" if proc.returncode == 0 else f"GLM launcher exited {proc.returncode}"
             return {**common, "ok": False, "error_code": code, "error": error}
-        if not isinstance(response.get("result"), str):
+        if not isinstance(response.get("result"), str) or not response["result"].strip():
             outcome.update(ok=False, state="failed", error_code="bad_output")
             return {**common, "ok": False, "error_code": "bad_output",
                     "error": "GLM launcher returned an invalid result object"}
         if proc.returncode == 0:
             usage = response.get("modelUsage")
             models = list(usage) if isinstance(usage, dict) else []
-            if len(models) != 1 or not isinstance(models[0], str) or not models[0].startswith("glm-"):
+            # Verify the requested family independently of the launcher.
+            # This checks identity, not currency: no version is pinned and
+            # unknown suffixes (including FlashX) fail closed.
+            pattern = r"glm-\d+(?:\.\d+)*" + ("-flash" if variant == "flash" else "")
+            if (len(models) != 1 or not isinstance(models[0], str)
+                    or re.fullmatch(pattern, models[0]) is None):
                 outcome.update(ok=False, state="failed", error_code="model_mismatch")
                 return {**common, "ok": False, "error_code": "model_mismatch",
-                        "error": "GLM result has no single GLM model attestation",
+                        "error": f"GLM result has no single {variant} model attestation",
                         "observed_models": [str(model)[:80] for model in models[:5]]}
+            model_usage = usage[models[0]]
+            # Keep only provider-stated token counts; never copy arbitrary
+            # launcher fields or invent usage when the provider omits it.
+            provider_usage = {key: model_usage[key] for key in (
+                "inputTokens", "outputTokens", "cacheReadInputTokens", "cacheCreationInputTokens"
+            ) if isinstance(model_usage, dict) and type(model_usage.get(key)) is int and model_usage[key] >= 0}
             return {**common, "ok": True, "output": response["result"],
                     "concrete_model": models[0], "model_unverified": False,
-                    "model_attestation": "provider-usage-response"}
+                    "model_attestation": "provider-usage-response",
+                    **({"provider_usage": provider_usage} if provider_usage else {})}
         outcome.update(ok=False, state="failed", error_code="nonzero_exit")
         return {**common, "ok": False, "error_code": "nonzero_exit",
                 "error": f"GLM launcher exited {proc.returncode}"}
@@ -1652,6 +1679,11 @@ def execute_glm(objective: str, *, timeout: float = 180.0, cwd: Optional[str] = 
     finally:
         if health.get("outcome_id"):
             _record_provider_outcome(outcome, health["outcome_id"])
+
+
+def execute_glm_flash(objective: str, *, timeout: float = 180.0, cwd: Optional[str] = None) -> dict:
+    """Explicit Flash advisory adapter; host qualification is separate."""
+    return execute_glm(objective, timeout=timeout, cwd=cwd, variant="flash")
 
 
 def _claude_launcher_path() -> Path:
@@ -2038,6 +2070,7 @@ def execute_codex_write_durable(objective: str, *, repo_id: str, host_id: str,
 # same way they already monkeypatch `execute_local`; binding the object
 # here at import time would silently stop honouring that patch.
 _PAID_PROVIDER_FUNCTION_NAMES = {"codex": "execute_codex", "glm": "execute_glm",
+                                 "glm-flash": "execute_glm_flash",
                                  "claude": "execute_claude"}
 # Stage 6: the write lane dispatches through the worker on route.host.
 _PAID_PROVIDER_WRITE_FUNCTION_NAMES = {"codex": "execute_write_via_worker"}
@@ -2121,7 +2154,7 @@ def _dispatch_read_only(host_id: str, executor: str, task: dict, *, concrete_mod
             "objective": objective,
             "timeout_s": float(timeout or 60.0),
         }
-    elif executor in {"codex", "glm", "claude"}:
+    elif executor in {"codex", "glm", "glm-flash", "claude"}:
         payload = {
             "kind": f"{executor}-readonly",
             "objective": objective if isinstance(objective, str) else str(objective),
@@ -2323,10 +2356,10 @@ def run_task(task: dict, *, packet_authority: Optional[dict] = None) -> dict:
             )
             provider_fn_name = provider_functions.get(provider_name)
             provider_fn = globals().get(provider_fn_name) if provider_fn_name else None
-            if implementation_mode and provider_name == "glm":
+            if implementation_mode and provider_name in {"glm", "glm-flash"}:
                 return {**route, "ok": False, "executed": False,
                         "error_code": "provider_unqualified",
-                        "execution_error": "provider 'glm' has no qualified write route"}
+                        "execution_error": f"provider {provider_name!r} has no qualified write route"}
             if provider_name is None or provider_fn is None:
                 return {**route, "executed": False, "execution_error": provider_choice.get(
                     "reason", f"paid provider {provider_name!r} has no "
@@ -2335,6 +2368,7 @@ def run_task(task: dict, *, packet_authority: Optional[dict] = None) -> dict:
             objective = task.get("objective")
             paid_objective = objective if isinstance(objective, str) else str(objective)
             executor_name = provider_name
+            paid_error = provider_failure = None
             paid_host = route["route"].get("host")
             paid_entry = next((h for h in (route.get("hosts_checked") or []) if h.get("host_id") == paid_host), None) or {}
             if not implementation_mode and provider_name not in (paid_entry.get("qualified_executors") or []):
@@ -2348,20 +2382,22 @@ def run_task(task: dict, *, packet_authority: Optional[dict] = None) -> dict:
                 return {**route, "ok": False, "executed": False,
                         "execution_error": f"executor {provider_name!r} not qualified on {paid_host!r}",
                         "error_code": "provider_unqualified", "escalation_reason": "worker_failed"}
-            if not implementation_mode and provider_name == "glm":
+            if not implementation_mode and provider_name in {"glm", "glm-flash"}:
                 from src.estate_worker_client import WorkerTransportError, worker_health
+                readiness_error = None
                 try:
-                    glm_ready = bool((worker_health(paid_host).get("glm") or {}).get("available"))
-                except WorkerTransportError:
-                    glm_ready = False
-                if not glm_ready:
+                    if not (worker_health(paid_host).get(provider_name) or {}).get("available"):
+                        readiness_error = "provider_unavailable"
+                except WorkerTransportError as exc:
+                    readiness_error = exc.code
+                if readiness_error:
                     _update_decision_outcome(
                         route["decision_id"], status="blocked", deterministic_gate="fail",
                         escalation_reason="worker_failed", verification_outcome="fail",
                     )
                     return {**route, "ok": False, "executed": False,
-                            "execution_error": f"GLM is unavailable on {paid_host!r}",
-                            "error_code": "provider_unavailable", "escalation_reason": "worker_failed"}
+                            "execution_error": f"{provider_name!r} readiness on {paid_host!r}: {readiness_error}",
+                            "error_code": readiness_error, "escalation_reason": "worker_failed"}
             if implementation_mode:
                 if task.get("prepared_items") is not None:
                     return {**route, "ok": False, "executed": False,
@@ -2450,7 +2486,7 @@ def run_task(task: dict, *, packet_authority: Optional[dict] = None) -> dict:
                         "escalation_reason": None, "reason": reason,
                     }
             else:
-                if task.get("prepared_items") is not None and provider_name == "glm":
+                if task.get("prepared_items") is not None and provider_name in {"glm", "glm-flash"}:
                     return {**route, "ok": False, "executed": False, "error_code": "provider_unqualified",
                             "execution_error": "GLM prepared-item dispatch is not qualified"}
                 if task.get("prepared_items") is not None:
@@ -2462,6 +2498,10 @@ def run_task(task: dict, *, packet_authority: Optional[dict] = None) -> dict:
                 # actually grounds a repo-aware task now that host
                 # selection can name a host other than this backend.
                 result = _dispatch_advisory_call(task, route, provider_name)
+                paid_error = result.get("error_code") if provider_name in {"glm", "glm-flash"} else None
+                provider_failure = paid_error if paid_error in {
+                    "auth_failed", "quota_exhausted", "rate_limited", "provider_unavailable",
+                } else None
                 if (result.get("placement") or {}).get("executed_host") is None:
                     # Same truthful-failure requirement as the local
                     # branch below: a transport/protocol/pre-execution
@@ -2479,26 +2519,30 @@ def run_task(task: dict, *, packet_authority: Optional[dict] = None) -> dict:
                     actual_route = _dispatch_failure_actual_route(result)
                     _update_decision_outcome(
                         route["decision_id"], status="failed", deterministic_gate="fail",
-                        escalation_reason="worker_failed", verification_outcome="fail",
+                        escalation_reason=provider_failure or "worker_failed", verification_outcome="fail",
                         actual_route=actual_route,
                     )
                     return {
                         **route, "ok": False, "executed": False,
                         "execution": result,
                         "execution_error": result.get("error"),
+                        **({"error_code": paid_error} if paid_error else {}),
                         "deterministic_gate": "fail",
-                        "escalation_reason": "worker_failed",
+                        "escalation_reason": provider_failure or "worker_failed",
                         "verification_outcome": "fail",
                         "placement": result.get("placement"),
                     }
             gate = "pass" if result.get("ok") and (result.get("output") or "").strip() else "fail"
+            escalation = "insufficient_capability" if gate == "pass" else "worker_failed"
+            if provider_failure:
+                escalation = provider_failure
             if not implementation_mode:
                 _update_decision_outcome(
                     route["decision_id"],
                     status="complete" if gate == "pass" else "failed",
                     deterministic_gate=gate,
                     latency_ms=result.get("latency_ms"),
-                    escalation_reason="insufficient_capability" if gate == "pass" else "worker_failed",
+                    escalation_reason=escalation,
                     executor=executor_name,
                     escalated=True,
                     actual_route=executor_name,
@@ -2525,9 +2569,10 @@ def run_task(task: dict, *, packet_authority: Optional[dict] = None) -> dict:
             }
             return {
                 **route, "executed": True, "execution": result,
+                **({"error_code": paid_error} if paid_error else {}),
                 "execution_id": result.get("execution_id"),
                 "deterministic_gate": gate, "verification_outcome": gate,
-                "escalation_reason": "insufficient_capability" if gate == "pass" else "worker_failed",
+                "escalation_reason": escalation,
                 "placement": result.get("placement"),
             }
         return {**route, "executed": False}

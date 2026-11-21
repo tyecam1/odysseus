@@ -334,6 +334,8 @@ def _verb_health(payload: dict) -> dict:
     codex_available, codex_detail = estate_router._codex_available()
     glm_launcher = estate_router._glm_launcher_path()
     glm_available = glm_launcher.is_file() and os.access(glm_launcher, os.X_OK)
+    flash_launcher = estate_router._glm_variant_launcher_path("flash")
+    flash_available = flash_launcher is not None and flash_launcher.is_file() and os.access(flash_launcher, os.X_OK)
     gpu_active, gpu_reason = estate_router.experiment_priority_active()
     # Raw GPU readings only, and only on a host whose registry entry opts in (worker.gpu_admission); the
     # router classifies them. No block -> no sampling cost and no behaviour change.
@@ -344,6 +346,8 @@ def _verb_health(payload: dict) -> dict:
         "codex": {"available": codex_available, "detail": codex_detail},
         "glm": {"available": glm_available,
                 "detail": "launcher present" if glm_available else "launcher missing or not executable"},
+        "glm-flash": {"available": flash_available,
+                      "detail": "launcher present" if flash_available else "launcher missing or not executable"},
         "gpu_yield": {"active": gpu_active, "reason": gpu_reason},
         "gpu_load": gpu_load,
         "in_flight": _in_flight_execution_ids(),
@@ -399,6 +403,8 @@ def _verb_inventory(payload: dict) -> dict:
     codex_available, _detail = estate_router._codex_available()
     glm_launcher = estate_router._glm_launcher_path()
     glm_available = glm_launcher.is_file() and os.access(glm_launcher, os.X_OK)
+    flash_launcher = estate_router._glm_variant_launcher_path("flash")
+    flash_available = flash_launcher is not None and flash_launcher.is_file() and os.access(flash_launcher, os.X_OK)
     registry = estate_router._load_yaml("repositories")
     repos = []
     for entry in registry.get("repos", []):
@@ -420,6 +426,7 @@ def _verb_inventory(payload: dict) -> dict:
             "local": reachable,
             "codex": codex_available,
             "glm": glm_available,
+            "glm-flash": flash_available,
             "codex-write": codex_available and _detached_spawn_verified() and _write_prerequisites_ok(),
         },
         "repos": repos,
@@ -476,14 +483,15 @@ def _verb_execute(payload: dict) -> dict:
         result.setdefault("concrete_model", "codex-cli")
         result.setdefault("retries", 0)
         return result
-    if kind == "glm-readonly":
+    if kind in {"glm-readonly", "glm-flash-readonly"}:
+        executor = "glm-flash" if kind == "glm-flash-readonly" else "glm"
         if not isinstance(objective, str):
-            raise WorkerError("bad_request", "glm-readonly objective must be a string")
+            raise WorkerError("bad_request", f"{kind} objective must be a string")
         host_id = estate_router.current_host_id()
         host = next((entry for entry in estate_router._load_yaml("estate").get("hosts", [])
                      if entry.get("id") == host_id), None)
-        if "glm" not in (estate_router.host_static_state(host)["qualified_executors"] if host else []):
-            raise WorkerError("executor_unqualified", f"executor 'glm' not qualified on {host_id!r}")
+        if executor not in (estate_router.host_static_state(host)["qualified_executors"] if host else []):
+            raise WorkerError("executor_unqualified", f"executor {executor!r} not qualified on {host_id!r}")
         repo_id = payload.get("repo_id")
         cwd = None
         if repo_id is not None:
@@ -492,7 +500,8 @@ def _verb_execute(payload: dict) -> dict:
             cwd = estate_router.resolve_repo_path(repo_id)
             if cwd is None:
                 raise WorkerError("repo_unavailable", f"repo {repo_id!r} does not resolve on this worker")
-        return estate_router.execute_glm(objective, timeout=timeout_s, cwd=cwd)
+        execute = estate_router.execute_glm_flash if executor == "glm-flash" else estate_router.execute_glm
+        return execute(objective, timeout=timeout_s, cwd=cwd)
     if kind == "claude-readonly":
         if not isinstance(objective, str):
             raise WorkerError("bad_request", "claude-readonly objective must be a string")
