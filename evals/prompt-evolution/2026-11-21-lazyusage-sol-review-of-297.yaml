@@ -1,0 +1,27 @@
+schema_version: 1
+event_id: 2026-11-21-lazyusage-sol-review-of-297
+prompt_id: estate-queue-priority-execution
+application_id: 2026-11-21-lazyusage-sol-review-of-297
+application_trace: evals/prompt-applications/estate-queue-priority-execution/2026-11-21-lazyusage-sol-review-of-297.yaml
+from: prompt:v2
+to: prompt:v2
+type: reinforcement
+reason: A bounded Sol review found a metering regression that an earlier cross-provider review approved past. Keep the
+  independent-review requirement and the option to escalate a bounded review to Sol when the owner authorises it. No gate
+  was weakened and no wording delta is justified.
+observed_improvement_targets:
+- When worker or controller changes touch metering, usage limits or safety gates, request a bounded Sol review before relying on
+  an economical reviewer's approval alone (owner authorisation required for Sol).
+- Treat provider usage as measured only when it covers both input and output sides of a call; a fragment is an assumption
+  charged at least the estimate (done in this change).
+- Re-check a reviewer's claim against the code before acting, and record the reviewer's exact model from the run header
+  because the model's own self-report can be shortened.
+active_head_changed: false
+guardrail_validation:
+  repository_scope_preserved: true
+  authority_scope_preserved: true
+  evidence_and_verification_preserved: true
+  model_identity_discipline_preserved: true
+  prompt_application_trace_recorded: true
+  operator_rating_invented: false
+  stop_and_safety_gates_preserved: true

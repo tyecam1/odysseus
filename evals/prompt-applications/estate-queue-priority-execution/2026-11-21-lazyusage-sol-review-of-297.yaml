@@ -1,0 +1,71 @@
+schema_version: 1
+application_id: 2026-11-21-lazyusage-sol-review-of-297
+prompt_id: estate-queue-priority-execution
+prompt_version: 2
+application_scope: one owner-authorised Sol review of merged worker groundwork (#297) and the fix it required
+repository: tyecam1/odysseus
+branch: dev
+session_started_at: '2026-11-21T18:47:38Z'
+session_ended_at: '2026-11-21T19:09:37Z'
+start_commit: 32417d71fef853c3ad86247802595ca4b1ab7f83
+end_commit: 32417d71fef853c3ad86247802595ca4b1ab7f83
+working_tree_changes: true
+commits: []
+outcome_status: partial
+stop_reason: The authorised Sol review overturned the earlier GLM-5.3 approval of the merged increment. The fix is in a new
+  PR. The owning card stays ready and owner acceptance is not claimed.
+models_routes:
+- provider: codex
+  role: independent reviewer, read-only
+  concrete_model: gpt-6.2-sol
+  note: Codex CLI 0.171.0. The run header confirmed gpt-6.2-sol; the model's own MODEL line was shortened to gpt-6. One
+    bounded review, authorised by the owner for the merged increment f0a10e03.
+- provider: glm
+  role: earlier reviewer of the same increment
+  concrete_model: glm-5.3
+  note: Approved it with one pre-existing P2 and missed the finding below.
+- provider: claude
+  role: controller and author of the fix
+  concrete_model: claude-sonnet-5-5
+nondelegation_reason: final_acceptance
+authority_evidence:
+- The owner authorised one bounded Sol or Codex review in the session. The review was read-only. No acceptance, approval or
+  card edit was made on the owner's behalf.
+usage_status:
+  codex: One review, about 130k tokens, no usage-limit error.
+verification:
+- 'Mechanical re-check of the reviewer''s claim against the code confirmed the cause: the merged increment made the GLM launcher
+  return partial provider usage, and the existing metering charged a fragment as measured tokens instead of the estimate.'
+- 'Six failing-first regression tests for the fix, then 292 related tests passing.'
+acceptance:
+  shipped: false
+  independent_review: gpt-6.2-sol CHANGES REQUIRED (P1, fixed in the follow-up PR). It supersedes the GLM-5.3 approval.
+  merged: false
+  deployed: false
+  owner_task_status: ready
+  result_path: docs/runtime-work-packages/2026-11-19-lazyusage-reliability-acceptance.md
+frontier:
+  scope: the merged GLM Flash increment only
+  shipped_in_this_application: 0
+  selected_accepted_remaining: 1
+  global_backlog_reconciled: false
+failure_tags:
+- cross_provider_review_missed_interaction_defect
+- partial_provider_usage_charged_as_measured
+rating:
+  scale: 5
+  goal_progress: 3
+  correctness_verification: 4
+  authority_scope_discipline: 5
+  routing_resource_efficiency: 4
+  continuity_handoff_quality: 4
+  agent_overall: 4.0
+  operator_overall: null
+  operator_note: null
+prompt_revision_recommended: false
+revision_reason: The review gates worked in sequence. A cheaper reviewer approved and a stronger one found a regression, so
+  routine groundwork that touches metering or safety gates is worth a bounded Sol review. No wording delta is justified.
+evidence:
+- src/lazy_usage_coordinator.py
+- src/lazy_usage_runtime.py
+- tests/test_lazy_usage_reliability.py
