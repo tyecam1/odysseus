@@ -1,4 +1,6 @@
-# Lab GLM and GLM Flash execution: partial evidence (phase 1 implemented, not qualified)
+# Lab GLM and GLM Flash execution evidence
+
+**2026-11-21 status:** The lab registry lists advisory `glm`, and the coordinator has historical Flash evidence. The separate `glm-flash` estate route is a worktree candidate. Both routes still owe this task's current-model and deployed backend acceptance evidence. See the 2026-11-21 continuation below.
 
 Task: `2026-11-09-qualify-glm-and-glm-flash-on-lab-odysseus`. Status of this document: **partial**. Reconciliation and the launcher smoke test came first. Since then phase 1 (explicit read-only GLM, #261) was merged and deployed, and this change adds effective-model attestation, failure classification from provider evidence and an in-process real-path proof (see below). **No host is qualified for GLM** (a policy blocker is recorded below), there is only a negative HTTP-level `/api/estate/run` proof (the explicit route is refused while no host is qualified) and **no positive qualified-route proof**, no write-mode route and no Flash qualification; the task stays unfinished. The sections below this status line are written in the order they were produced; where they say that no code exists they describe the state at that time.
 
@@ -83,3 +85,88 @@ To unblock: either (a) a tested provider-specific latest resolver (for example a
 ## Rollback
 
 For the reconciliation and smoke-test steps nothing was changed. For the code in #261 and this change: revert the merge and, if deployed, restart `odysseus-aoteru-lab.service`; since no host lists `glm` in `qualified_executors`, an explicit GLM request is refused with `provider_unqualified` and no GLM process can be launched through the backend.
+
+## 2026-11-21 continuation under `estate-queue-priority-execution@v2`
+
+The owning card remains **ready and unfinished**. GitHub's authenticated
+comparison confirmed that the admitted checkout `7f42dc506b40` matched `dev`.
+The lab checkout on disk also pointed at that revision. `hostname` matched
+`hz2-workstation`'s registered Linux hostname. The read-only lab database query
+confirmed the running `codex-write` execution
+`5e6d932e-5ee8-4849-a730-c327f28bbd71`, its active lease
+`0f4bc921-5db8-470c-98f0-be5958cccf24`, and this isolated worktree. The
+provider launch reservation belonged to that execution. Subscription capacity
+and reset times remain unknown for Codex, Claude and GLM. The latest completed
+GLM and Claude records indicated success on 2026-11-19 and 2026-11-20 respectively.
+
+The bundled client had no backend configuration, the loopback API connection
+failed, and the registered tailnet HTTP and SSH hostname did not resolve in this
+worker. Creating an IPv4 socket returned `EPERM`. Systemd state queries also
+returned `Operation not permitted`. The canonical Python preflight was run with
+a temporary database containing only the relevant lease and provider-outcome
+records. It confirmed the active write authority and recommended deterministic
+checks on `hz2-workstation`. It refused a second Codex launch with `unknown`
+because the running launch had no recorded outcome yet. The existing provider
+registry returned `unknown_provider` for `glm-flash`. Reconciliation was retained
+with `nondelegation_reason: final_acceptance`.
+
+### Candidate and verification
+
+- Reconciled the closed [PR #38](https://github.com/tyecam1/odysseus/pull/38)
+  candidate with `dev`. Its launcher's credential boundary and piped input
+  still apply. Its candidate bypass, in-process write path and inferred model
+  label do not satisfy the current authority or evidence requirements.
+  [PR #130](https://github.com/tyecam1/odysseus/pull/130) supplies the quota
+  policy and [PR #133](https://github.com/tyecam1/odysseus/pull/133) supplies
+  commissioning history. [The coordinator evidence](2026-11-16-lazyusage-sonnet-coordinator-lab.md)
+  records the existing advisory qualification and historical live Flash call.
+- Reused the runtime and adapter-test delta from the previous unmerged owning
+  execution at local commit `171b5a3a`. GitHub's comparison for that commit
+  returned 404. The coordinator test fixture change in that commit was already
+  present in `dev`. The updated candidate gives Flash its own explicit
+  dispatch and worker qualification check, with GLM and Flash sharing one
+  account reservation and cooldown. It checks the answering model family and
+  returns available token counts. It preserves distinct errors for worker
+  transport, launcher readiness and provider quota, auth or rate limits.
+  Codex is the default and both GLM routes refuse implementation mode.
+- Both host-local launcher files were executable with mode `0700`. The
+  [Z.AI Coding Plan overview](https://docs.z.ai/devpack/overview) documents
+  GLM-5.3 and GLM-5.3-Flash and upstream model remapping. Account-specific
+  entitlement and the current answering model require authenticated lab
+  evidence. The launcher files were not invoked after the socket probe
+  established that this worker could not reach Z.AI. No account action is
+  established as necessary.
+- Disposable HTTP tests exercise exact multiline stdin and response, route,
+  model, exit status, host and available usage for both variants through the
+  FastAPI envelope, router, worker verb and fixture launchers. The worker
+  attestation and host qualification in those tests are fixtures. The real
+  socket round-trip test failed at socket creation with `EPERM` and remains
+  owed on the governed lab route. The rest of the targeted regression
+  selection passed with 472 tests. The HTTP tests used a bounded selector
+  wait to work around sandbox socket wakeups. Both HTTP cases passed again
+  after adding assertions on the persisted route, model, host and shared
+  account outcome. `git diff --check` passed.
+
+### Owner acceptance and rollback
+
+The next recheck is when the owning controller can reach the authenticated lab
+service and dispatch a qualified verifier. Verify both current model families
+against an authenticated, launcher-owned catalogue and enforce the resulting
+currency gate. Then prove the exact launcher and `/api/estate/run` canaries for
+each route. Separately authorised write canaries, quota-only failover to
+qualified standard GLM, V3 independent verification, merge, restart and
+post-restart production checks remain open. Keep the owner card in `ready`
+until the acceptance evidence is complete.
+
+The candidate was prepared in the admitted worktree. If rejected before merge,
+discard it through the owning controller's finalization path. If merged and
+deployed, revert its merge through the owner and restart the existing supervised
+service under the release authority. Check health, Codex-default dispatch,
+explicit Flash refusal and lease/lifecycle state against the known-good
+deployment. Independent confirmation of this rollback is still owed.
+
+Prompt application `2026-11-21-lab-glm-route-continuation` records this partial
+result. Its application trace and evolution event are prepared for append by
+the Odysseus prompt-register owner because `evals/**` is outside the card's
+write paths. This application exposed a worker transport restriction and left
+the registered prompt version unchanged.

@@ -189,34 +189,48 @@ def delegation_preflight(units: Iterable[dict]) -> dict:
         for resolved in route.get("capability_resolutions") or []:
             alias_resolutions[resolved["alias"]] = resolved
 
-        if (explicit_provider == "glm" and (route.get("route") or {}).get("executor") == "none"
+        if (explicit_provider in {"glm", "glm-flash"} and (route.get("route") or {}).get("executor") == "none"
                 and task["routing"]["allow_paid_escalation"] and task.get("objective") is not None):
             unit_host = (route.get("route") or {}).get("host")
             unit_entry = next((h for h in (route.get("hosts_checked") or [])
                                if h.get("host_id") == unit_host), None) or {}
-            qualified = "glm" in (unit_entry.get("qualified_executors") or [])
-            try:
-                live = bool((worker_health(unit_host).get("glm") or {}).get("available")) if unit_host else False
-            except WorkerTransportError:
-                live = False
-            glm_health = estate_router.provider_allows_dispatch("glm")
+            qualified = explicit_provider in (unit_entry.get("qualified_executors") or [])
+            readiness_error = None
+            if unit_host and qualified:
+                try:
+                    if not (worker_health(unit_host).get(explicit_provider) or {}).get("available"):
+                        readiness_error = "provider_unavailable"
+                except WorkerTransportError as exc:
+                    readiness_error = exc.code
+            glm_health = estate_router.provider_allows_dispatch(explicit_provider)
             glm_write_requested = (_requires_repo_write(unit)
                                    or unit.get("mode") == "implementation"
                                    or unit.get("write") is True
                                    or unit.get("requires_repo_write") is True)
-            ok = bool(unit_host and qualified and live and glm_health["allowed"]
-                      and not glm_write_requested)
+            if glm_write_requested or not qualified:
+                error_code = "provider_unqualified"
+                reason = ("GLM has no qualified write route" if glm_write_requested else
+                          f"{explicit_provider!r} is not qualified on {unit_host!r}")
+            elif readiness_error:
+                error_code = readiness_error
+                reason = f"{explicit_provider!r} readiness on {unit_host!r}: {readiness_error}"
+            elif not glm_health["allowed"]:
+                state = glm_health.get("state")
+                error_code = state if state in {"auth_failed", "quota_exhausted", "rate_limited"} else "provider_unavailable"
+                reason = glm_health["reason"]
+            else:
+                error_code = None
+                reason = f"{explicit_provider!r} read-only advisory is ready"
+            ok = error_code is None
             recommendations.append({"index": index, "task_class": task["task_class"],
                                     "classification": structural_lane,
-                                    "recommended_route": "glm" if ok else None,
-                                    "ok": ok, "error_code": None if ok else "provider_unqualified",
+                                    "recommended_route": explicit_provider if ok else None,
+                                    "ok": ok, "error_code": error_code,
                                     "route": route.get("route"), "hosts_checked": route.get("hosts_checked") or hosts,
                                     "provider_health": glm_health,
-                                    "reason": "GLM has no qualified write route in phase 1" if glm_write_requested else
-                                              "GLM read-only advisory is ready" if ok else
-                                              "GLM read-only advisory is not qualified for this unit on the routed host"})
+                                    "reason": reason})
             continue
-        if explicit_provider == "glm":
+        if explicit_provider in {"glm", "glm-flash"}:
             glm_pass_write = _requires_repo_write(unit)
             recommendations.append({
                 "index": index,
@@ -224,7 +238,7 @@ def delegation_preflight(units: Iterable[dict]) -> dict:
                 "classification": structural_lane,
                 "recommended_route": None if glm_pass_write else route.get("route"),
                 "ok": False if glm_pass_write else bool(route.get("ok")),
-                "error_code": "write_intent_requires_codex_write_lane" if glm_pass_write else None,
+                "error_code": "write_intent_requires_codex_write_lane" if glm_pass_write else route.get("error_code"),
                 "requires_justification": False,
                 "nondelegation_reason": None,
                 "route": route.get("route"),

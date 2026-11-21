@@ -54,6 +54,9 @@ paid_providers:
     # coordinator lane (operator-directed, 2026-11-16).
     launchers:
       flash: claude-glm-flash
+  - name: glm-flash
+    # Explicit backend route, qualified nowhere until its own real-path
+    # and model-currency evidence exists. Shares GLM account admission.
   - name: claude
     concrete_model_label: claude-subscription
     # Rolling subscription alias resolved by the unmodified official CLI at
