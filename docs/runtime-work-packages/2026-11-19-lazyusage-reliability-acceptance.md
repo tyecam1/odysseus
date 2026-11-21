@@ -83,7 +83,9 @@ and its evolution event; the improvements below are already in the code unless m
   `verification_evidence` for that exact commit.
 * **Pending:** within a priority, order delivering candidates before reconnaissance of approval-gated cards, so paid
   dispatches are not spent on owner-approval asks while a verified write candidate waits.
-* **Independent review stayed GLM-5.3 only** (Codex was at its limit): corroborating, not a Sol or Codex verdict.
+* **Independent review stayed GLM-5.3 only**: Codex was at its limit for the first reviews, and after its reset the later
+  reviews stayed on GLM-5.3 under the economical-review policy (no premium review for routine work). It is a
+  cross-provider but corroborating verdict, not a Sol or Codex one; none was run.
 
 ## Known limits
 

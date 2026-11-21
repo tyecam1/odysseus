@@ -19,7 +19,9 @@ commits:
 outcome_status: partial
 stop_reason: Owner-only stages remain. No queued card reached accepted completion (both writers reported their tasks
   unfinished; acceptance is the owner's). The PhD evidence task needs an owner approval block that only the owner can
-  record. Independent review was GLM-5.3 only because Codex hit its weekly usage limit (reset 2026-11-20T21:08Z).
+  record. Independent review was GLM-5.3 only (Codex was at its weekly usage limit for the first reviews, reset
+  2026-11-20T21:08Z, and after the reset the later reviews stayed on GLM-5.3 under the standing economical-review
+  policy, which does not authorise premium Sol or Codex review for routine work). No Sol or Codex review was run.
 models_routes:
 - provider: claude
   role: controller and author
