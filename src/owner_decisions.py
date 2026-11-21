@@ -33,6 +33,9 @@ SEND_TIMEOUT_SECONDS = 5           # the send runs inside the lifecycle tick: ke
 MIN_INTERVAL_SECONDS = 3600        # at most one message an hour; the rest wait (no bursts of cards)
 _LAST = "__last_sent"
 OWNER_GATES = ("owner_acceptance", "owner_approval")           # ranked: finished work first
+# Open evidence on the same task that the AGENT must close before the owner is asked to accept it.
+AGENT_FIRST_GATES = frozenset({"verification", "independent_review", "recovery", "finalization"})
+_DUE = re.compile(r"\d{4}-\d{2}-\d{2}\Z")
 _WEBHOOK = re.compile(r"https://(?:discord|discordapp)\.com/api/webhooks/\d+/[A-Za-z0-9_\-]+\Z")
 _STATE_KEEP = 400
 
@@ -49,28 +52,47 @@ def _ref_text(ref: str) -> str:
     return re.sub(r"[^A-Za-z0-9:/._-]+", "_", str(ref))[:140]
 
 
+def _task_key(ref) -> str:
+    repo, _, rest = str(ref).partition(":")
+    return f"{repo}:{rest.rsplit('/', 1)[-1]}"
+
+
 def build_cards(owed_reviews: list) -> list:
-    """Owner-gate debts -> ranked cards (finished work awaiting acceptance first, then oldest approval)."""
+    """Owner-gate debts -> ranked cards.
+
+    An acceptance is only asked once nothing else is owed on that task: while verification, independent
+    review or recovery is still open it is the agent's job, and asking would invite the owner to accept
+    unverified work. Approvals rank by due date, then age."""
+    open_agent_gates = {}
+    for debt in owed_reviews or []:
+        if debt.get("gate") in AGENT_FIRST_GATES and debt.get("task_ref"):
+            open_agent_gates.setdefault(_task_key(debt["task_ref"]), set()).add(debt["gate"])
     cards = []
     for debt in owed_reviews or []:
         gate = debt.get("gate")
         if gate not in OWNER_GATES or not debt.get("task_ref"):
             continue
+        if gate == "owner_acceptance" and open_agent_gates.get(_task_key(debt["task_ref"])):
+            continue
+        due = str(debt.get("due") or "")
+        due = due if _DUE.match(due) else ''
         title = _title(debt)
         if gate == "owner_acceptance":
-            why = "work was delivered and verified; it is waiting for your acceptance or rejection"
+            why = "delivered and no verification or review is still owed on it; waiting for your accept or reject"
             options = "A accept | B reject | C retry"
         else:
             scope = str(debt.get("scope_sha256") or "")[:12]
             why = f"the pipeline is gated on your approval of this exact scope (digest {scope})" if scope else \
                 "the pipeline is gated on your approval of this scope"
+            if due:
+                why += f"; due {due}"
             options = "A approve (I send the exact block) | B not now"
         key = hashlib.sha256("|".join([debt["task_ref"], gate, str(debt.get("scope_sha256") or ""),
                                        str(debt.get("execution_id") or "")]).encode()).hexdigest()[:16]
         cards.append({"key": key, "gate": gate, "ref": debt["task_ref"], "title": title, "why": why,
                       "options": options, "default": "If no reply I skip it and continue other work.",
-                      "opened_at": str(debt.get("opened_at") or "")})
-    cards.sort(key=lambda c: (OWNER_GATES.index(c["gate"]), c["opened_at"], c["ref"]))
+                      "due": due, "opened_at": str(debt.get("opened_at") or "")})
+    cards.sort(key=lambda c: (OWNER_GATES.index(c["gate"]), c["due"] or "9999-99-99", c["opened_at"], c["ref"]))
     return cards
 
 

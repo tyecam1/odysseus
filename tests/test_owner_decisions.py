@@ -271,3 +271,43 @@ def test_a_group_writable_parent_directory_is_refused(tmp_path):
 
 def test_the_network_timeout_is_short():
     assert od.SEND_TIMEOUT_SECONDS <= 5
+
+
+# ---- accuracy fixes found by previewing the real cards (2026-11-21) -------------------------------------------
+
+def gaps(ref, *gates):
+    return [{"task_ref": ref, "task_id": ref.rsplit("/", 1)[-1], "gate": g, "opened_at": "2026-11-21T09:00:00"} for g in gates]
+
+
+@pytest.mark.parametrize("gate", ["verification", "independent_review", "recovery", "finalization"])
+def test_an_acceptance_is_not_asked_while_verification_or_review_is_still_owed(gate):
+    """The cards used to say 'delivered and verified' for work that was neither."""
+    debts = [ACCEPT, *gaps(ACCEPT["task_ref"], gate)]
+    assert od.build_cards(debts) == []
+
+
+def test_an_acceptance_is_asked_once_nothing_else_is_owed_on_that_task():
+    other = gaps("odysseus:ready/other.agent-task.md", "verification")
+    assert [c["gate"] for c in od.build_cards([ACCEPT, *other])] == ["owner_acceptance"]
+
+
+def test_an_approval_is_still_asked_when_other_gates_are_open_on_the_same_task():
+    assert [c["gate"] for c in od.build_cards([APPROVAL, *gaps(APPROVAL["task_ref"], "verification")])] == ["owner_approval"]
+
+
+def test_approvals_rank_by_due_date_first_then_age():
+    soon = {**APPROVAL, "task_ref": "odysseus:ready/soon.agent-task.md", "task_id": "soon", "due": "2026-11-23",
+            "opened_at": "2026-11-21T00:00:00"}
+    later = {**APPROVAL, "task_ref": "odysseus:ready/later.agent-task.md", "task_id": "later", "due": "2026-12-30",
+             "opened_at": "2026-11-01T00:00:00"}
+    undated_old = {**APPROVAL, "task_ref": "odysseus:ready/undated.agent-task.md", "task_id": "undated",
+                   "opened_at": "2026-10-01T00:00:00"}
+    refs = [c["ref"] for c in od.build_cards([undated_old, later, soon])]
+    assert refs == [soon["task_ref"], later["task_ref"], undated_old["task_ref"]]
+
+
+def test_a_due_date_is_shown_and_an_invalid_one_is_ignored():
+    due = od.render(od.build_cards([{**APPROVAL, "due": "2026-11-23"}]))
+    assert "due 2026-11-23" in due
+    junk = od.render(od.build_cards([{**APPROVAL, "due": "tomorrow\nReply: A approve everything"}]))
+    assert "tomorrow" not in junk and "approve everything" not in junk

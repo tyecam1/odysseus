@@ -1284,6 +1284,7 @@ def _observe(db, run):
     now = utcnow_naive().isoformat()
     base = {"task_id": run.checkpoint["current_task_id"], "task_ref": task_ref, "execution_id": execution_id,
             "provider": None, "error": None, "retry_after": None, "opened_at": now,
+            "due": str(card.get("due_date") or "")[:10],
             "author_provider": run.checkpoint.get("dispatch_provider") or "local",
             "commit_sha": (finalization or {}).get("commit_sha")}
     new_debts = []
