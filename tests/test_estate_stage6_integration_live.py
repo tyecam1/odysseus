@@ -37,7 +37,7 @@ def _git(cwd, *args):
 
 @pytest.fixture
 def estate(tmp_path, monkeypatch):
-    busy = live_units.busy_units()
+    busy = live_units.wait_until_idle()
     if busy:
         # A real worker (e.g. a paid /lazyUsage writer) is running on this host; these tests kill
         # units, so they must not run now (2026-11-21: they killed a live gpt-6.2-sol writer).
@@ -76,9 +76,12 @@ def estate(tmp_path, monkeypatch):
 
     monkeypatch.setattr(lane, "_start_payload", _selftest_payload)
     yield {"home": home, "repo": repo, "origin": origin}
+    # Units are named after the execution/lease ids that created them: only those are this test's own.
+    with session_local() as _db:
+        owned_ids = ({row.id for row in _db.query(EstateExecution)} | {row.id for row in _db.query(ParkLease)})
     engine.dispose()
     os.unlink(tmpfile.name)
-    live_units.stop_units_started_since(units_before)
+    live_units.stop_units_started_since(units_before, owned_ids)
 
 
 def _wait_row(execution_id, predicate, timeout=40):
