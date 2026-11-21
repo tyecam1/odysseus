@@ -989,3 +989,21 @@ def test_a_real_failure_that_coincides_with_a_pending_stop_is_still_a_failure(db
         db.refresh(view)
     assert view.checkpoint["ledger"][ref]["outcome"] == "failed"
     assert view.counters["repeated_failures"] == 1
+
+
+# ---- learning ingested from live runs f4b6f653 / 473209ae (2026-11-20/21) ----------------------------
+
+def test_a_write_objective_tells_the_writer_the_controller_records_traces_and_owner_cards(db, queue):
+    """Writers kept editing their own owner card and recording evals/ prompt-application traces; the scope
+    gate reverts those and reports a scope_violation that costs a whole write. Say so up front."""
+    ref = queue.add("odysseus", "w", **WRITE)
+    verdict = assess(db, queue, ref)
+    objective = verdict["task"]["objective"]
+    assert "outside the allowed paths" in objective
+    assert "prompt-application" in objective and "controller records" in objective
+    assert "owner task card" in objective
+
+
+def test_a_read_only_objective_is_not_given_the_write_scope_notice(db, queue):
+    ref = queue.add("odysseus", "a", execution_mode="read-only")
+    assert "controller records" not in assess(db, queue, ref)["task"]["objective"]

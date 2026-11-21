@@ -1,0 +1,112 @@
+schema_version: 1
+application_id: 2026-11-21-lazyusage-reliability-live-acceptance
+prompt_id: estate-queue-priority-execution
+prompt_version: 2
+application_scope: controller-driven reliability work plus six live activations on tyecam1/odysseus
+repository: tyecam1/odysseus
+branch: dev
+session_started_at: '2026-11-19T18:00:00Z'
+session_ended_at: '2026-11-21T12:20:00Z'
+start_commit: 9c5549a0   # short SHA as recorded at session start
+end_commit: f0a10e031ab5c3a26fc8bfa46930bd69351e7456
+working_tree_changes: false
+commits:
+- 6c2bbc0b8273ad8472c401ccaac8c28b9eb129bc   # #293 reliability and acceptance corrections
+- b38d3388947d46c4e93ed66183c25c9ec23dc1c9   # #294 failed-write/orphan-lease recovery, coordinator tokens
+- 7f42dc506b402bc3b68c2084674cce55951fac88   # #295 newest codex binary, free polling, interrupted/backoff, clearable verification debt
+- 5aeaeca0b0af7934df0f195e176dbb4087e117f0   # #296 live-unit tests kill only their own units
+- f0a10e031ab5c3a26fc8bfa46930bd69351e7456   # #297 worker increment: unqualified GLM Flash route (task unfinished)
+outcome_status: partial
+stop_reason: Owner-only stages remain. No queued card reached accepted completion (both writers reported their tasks
+  unfinished; acceptance is the owner's). The PhD evidence task needs an owner approval block that only the owner can
+  record. Independent review was GLM-5.3 only because Codex hit its weekly usage limit (reset 2026-11-20T21:08Z).
+models_routes:
+- provider: claude
+  role: controller and author
+  concrete_model: claude-sonnet-5-5
+- provider: claude
+  role: lazyUsage coordinator
+  concrete_model: claude-sonnet-5
+  note: The CLI reports modelUsage key claude-sonnet-5; the minor release cannot be attested from the CLI.
+- provider: codex
+  executor: codex-write
+  host: hz2-workstation
+  note: Five writes. d9d83eca and 4bdbd84c ran on gpt-6.1-sol via a stale user-local npm codex 0.163.0 (the latest-model
+    rule was violated until the install was updated). 3333860b (cancelled by a budget stop) and 5e6d932e (finalised
+    as d7304448) ran on gpt-6.2-sol, Codex CLI 0.171.0. b9e42973 was killed by the controller's own concurrent
+    full-suite run; its model was not recorded.
+- provider: glm
+  role: read-only independent reviewer
+  concrete_model: glm-5.3
+  note: Five reviews (PR 293, PR 294, PR 295 branch, d7304448, PR 296). A different provider from the Claude and Codex
+    authors; NOT a Sol or Codex verdict.
+activations:
+- ae1b1f20   # first activation on deployed #293: found three defects
+- 5fb94a5c   # backend cleared its own orphan lease; coordinator tokens measured
+- c4e4732b   # PhD-scope reconnaissance (grounded GLM re-adjudication)
+- f4b6f653   # first unattended writes; restart survived mid-write; budget stop cancelled a healthy write
+- 5a12a35c   # laptop session suspended ~13 h; ran to completion unattended
+- 473209ae   # gpt-6.2-sol write finalised; next write killed by the controller's own test run
+nondelegation_reason: final_acceptance
+authority_evidence:
+- Writers were confined to the card scope; the worker reverted three out-of-scope edits (the writer's own owner card and
+  two evals traces) and reported them as scope_violations; nothing was committed outside scope.
+- Merges followed the standing Odysseus autonomy rule (tests green, template complete, a review lane looked).
+- Two orphan leases were recovered through the governed am recover path after preserving the partial diffs under
+  /home/agent/aoteru-orphans/ (manual controller steps, disclosed).
+usage_status:
+  codex: Weekly pool exhausted 2026-11-19; reset 2026-11-20T21:08Z; later writes succeeded. am usage reads stale rollout data.
+  claude: Provider health ok; usage not machine-readable.
+  glm: Provider health ok throughout.
+verification:
+- 'Full suite on the lab: 9748 passed (#293/#294), 9771 passed (#295), 9818 passed on worker commit d7304448; 0 failed.'
+- Every defect fixed has a regression test that failed first (reproduction recorded in the PR bodies).
+- 'Live: restart of the lab backend mid-write left the detached writer running and the new instance resumed observing;
+  worker-owned finalisation, scope revert and lease release held without controller intervention; polling cost 3
+  tool calls over a 10-minute write after the fix.'
+acceptance:
+  shipped: false
+  independent_review: GLM-5.3 only (cross-provider, not Sol/Codex); no Sol approval claimed
+  merged: true
+  deployed: true
+  owner_task_status: ready   # every queue card; none accepted
+  result_path: docs/runtime-work-packages/2026-11-19-lazyusage-reliability-acceptance.md
+frontier:
+  scope: odysseus (plus a PhD-scope reconnaissance); owning work, no unrelated child work
+  shipped_in_this_application: 0
+  selected_accepted_remaining: 3
+  global_backlog_reconciled: false
+failure_tags:
+- stale_user_local_codex_binary_pinned_old_model
+- observation_polling_charged_as_tool_usage
+- budget_stop_cancelled_healthy_write
+- scope_violation_writer_edited_own_card_and_evals_traces
+- controller_full_suite_killed_live_writer
+- live_unit_tests_killed_every_aoteru_unit
+- finalised_commit_counted_as_verification
+- verification_debt_had_no_clearing_path
+- reconnaissance_ranked_before_delivering_candidates
+- independent_review_glm_only_codex_limited
+- manual_orphan_lease_recovery_twice
+- heredoc_and_pkill_transport_mistakes
+rating:
+  scale: 5
+  goal_progress: 3
+  correctness_verification: 4
+  authority_scope_discipline: 4
+  routing_resource_efficiency: 3
+  continuity_handoff_quality: 4
+  agent_overall: 3.6
+  operator_overall: null
+  operator_note: null
+prompt_revision_recommended: false
+revision_reason: The initializer's gates held and exposed the defects; the improvements belong to the runtime, tests and
+  worker objective (done), not to weaker or reworded prompt gates. A delivery-first ordering rule is recorded as a
+  pending improvement target, not applied.
+evidence:
+- docs/runtime-work-packages/2026-11-19-lazyusage-reliability-acceptance.md
+- src/lazy_usage_runtime.py
+- src/estate_router.py
+- tests/test_lazy_usage_reliability.py
+- tests/test_codex_newest_binary.py
+- tests/test_live_unit_hygiene.py

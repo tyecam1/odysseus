@@ -371,6 +371,13 @@ def _task(record, meta, body, kind=None):
                      "claim against current HEAD, repository authority and acceptance evidence. Identify stale, "
                      "agent-resolvable or genuinely protected gates and report evidence. Do not execute the "
                      "underlying task, change permissions, or publish anything.\n" + body)
+    if write:
+        # Live runs f4b6f653 / 473209ae: writers kept editing their own owner task card and recording
+        # prompt-application/evolution traces under evals/. The scope gate reverts those and reports a
+        # scope_violation, which costs a whole write. Say it up front; the controller does both.
+        objective += ("\nMake no edit outside the allowed paths. In particular do not edit the owner task card and do "
+                      "not record prompt-application or prompt-evolution traces: the controller records those "
+                      "after verification and review.")
     if write and kind in REVIEW_SIDE_KINDS:
         scope = _write_scope(record["repo_id"], meta)
         objective += ("\nDeliver a review-side artifact only. Write only under: " + ", ".join(scope["allowed"]) +
