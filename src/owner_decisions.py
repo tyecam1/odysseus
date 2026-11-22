@@ -83,7 +83,7 @@ def build_cards(owed_reviews: list) -> list:
             why = "delivered and no verification or review is still owed on it; waiting for your accept or reject"
             options = "A accept | B reject | C retry"
         else:
-            scope = str(debt.get("scope_sha256") or "")[:12]
+            scope = (_HEX.match(str(debt.get("scope_sha256") or "")) or [""])[0][:12]
             why = f"the pipeline is gated on your approval of this exact scope (digest {scope})" if scope else \
                 "the pipeline is gated on your approval of this scope"
             if due:
@@ -92,24 +92,145 @@ def build_cards(owed_reviews: list) -> list:
         key = hashlib.sha256("|".join([debt["task_ref"], gate, str(debt.get("scope_sha256") or ""),
                                        str(debt.get("execution_id") or "")]).encode()).hexdigest()[:16]
         cards.append({"key": key, "gate": gate, "ref": debt["task_ref"], "title": title, "why": why,
+                      "debt": debt, "commit_sha": debt.get("commit_sha"), "author_provider": debt.get("author_provider"),
+                      "scope_digest": (_HEX.match(str(debt.get("scope_sha256") or "")) or [""])[0][:12],
                       "options": options, "default": "If no reply I skip it and continue other work.",
                       "due": due, "opened_at": str(debt.get("opened_at") or "")})
     cards.sort(key=lambda c: (OWNER_GATES.index(c["gate"]), c["due"] or "9999-99-99", c["opened_at"], c["ref"]))
     return cards
 
 
-def render(cards: list) -> str:
-    shown, rest = cards[:MAX_CARDS], cards[MAX_CARDS:]
-    lines = []
-    for index, card in enumerate(shown, 1):
-        verb = "Accept" if card["gate"] == "owner_acceptance" else "Approve"
-        lines.append(f"Decision needed ({index}/{len(shown)}) - {verb}: {card['title']}\n"
-                     f"Why now: {card['why']}\n"
-                     f"Reply: {card['options']}\n"
-                     f"{card['default']}")
-    if rest:
-        lines.append(f"+{len(rest)} more waiting (lower priority)")
-    return "\n\n".join(lines)[:MAX_MESSAGE]
+_URL = re.compile(r"(?:https?://\S+|\S*discord(?:app)?\.com/api/webhooks\S*)", re.I)
+_TOKEN = re.compile(r"[A-Za-z0-9_-]{40,}")
+_MARKDOWN = re.compile(r"[`*_~|>#\[\]]")
+_HEX = re.compile(r"[0-9a-f]+")
+
+
+def _redact_tokens(text: str) -> str:
+    """A long mixed-case-and-digit run is a secret-shaped string (a webhook token): never echo it."""
+    def one(match):
+        run = match.group(0)
+        shaped = (any(c.islower() for c in run) and any(c.isupper() for c in run) and any(c.isdigit() for c in run)
+                  and run.count("-") < 3)
+        return "[redacted]" if shaped else run
+    return _TOKEN.sub(one, text)
+
+
+_MARKDOWN_PATH = re.compile(r"[`~|>#\[\]]")
+
+
+def _clean(value, limit: int, path: bool = False) -> str:
+    """Text safe for a chat card: printable ASCII only, one line, no link (no preview), no mention, bounded."""
+    text = _URL.sub("[link]", str(value or ""))
+    text = re.sub(r"[^\x20-\x7e]", " ", text).replace("@", "at ")
+    # card text never carries Discord formatting or a secret; a path keeps its glob and underscores because it is
+    # shown inside a code span, where they are literal
+    text = _redact_tokens((_MARKDOWN_PATH if path else _MARKDOWN).sub(" ", text))
+    text = re.sub(r"\s+", " ", text).strip()
+    return text if len(text) <= limit else text[: limit - 3].rstrip() + "..."
+
+
+def _paths(values, shown: int = 3, each: int = 70) -> str:
+    items = [_clean(v, each, path=True) for v in (values or []) if str(v or "").strip()]
+    items = [i for i in items if i]
+    if not items:
+        return ""
+    text = ", ".join(f"`{i}`" for i in items[:shown])
+    return text + (f" (+{len(items) - shown} more)" if len(items) > shown else "")
+
+
+def _rich_block(index: int, count: int, card: dict, ctx: dict) -> str:
+    """One decision: what it is, what each answer does, what it binds. Only allow-listed fields, each bounded."""
+    accept = card["gate"] == "owner_acceptance"
+    verb = "Accept" if accept else "Approve"
+    title = _clean(ctx.get("title"), 110) or card["title"]
+    lines = [f"Decision needed ({index}/{count}) - {verb}: {title}"]
+    what = _clean(ctx.get("what"), 200)
+    if what:
+        lines.append(f"What: {what}")
+    facts = [_clean(ctx.get("kind"), 60)]
+    for label, key in (("priority", "priority"), ("risk", "risk")):
+        if _clean(ctx.get(key), 20):
+            facts.append(f"{label} {_clean(ctx.get(key), 20)}")
+    if card.get("due"):
+        facts.append(f"due {card['due']}")
+    facts = [f for f in facts if f]
+    if facts:
+        lines.append("Type: " + "; ".join(facts) + ".")
+    if accept:
+        sha = _clean(card.get("commit_sha"), 40)[:8]
+        author = _clean(card.get("author_provider"), 20)
+        delivered = f"commit {sha}" if sha else "a delivery"
+        lines.append(f"Delivered: {delivered}{' by ' + author if author else ''}. Nothing else is owed on it: "
+                     "verification and review are closed.")
+        result = _clean(ctx.get("result_path"), 110)
+        extra = ctx.get("outputs_count")
+        if result:
+            more = f" and {extra - 1} other output{'s' if extra - 1 != 1 else ''}" if isinstance(extra, int) and extra > 1 else ""
+            lines.append(f"Review: {result}{more}.")
+        lines.append("If you accept: reply A and I record it on the owner card, so the task closes as delivered. "
+                     "If you reject or ask for a retry, it is not closed as delivered.")
+    else:
+        paths = _paths(ctx.get("write_paths"))
+        denied = ctx.get("denied_count")
+        limit = (f"; {denied} protected paths and the owner task cards stay off limits"
+                 if isinstance(denied, int) and denied >= 0 else "; the owner task cards stay off limits")
+        if paths:
+            lines.append(f"If you approve: it may write only under {paths}" + limit
+                         + ". Its result is unaccepted until you accept it.")
+        else:
+            lines.append("If you approve: nothing can be written yet, because the card names no writable path"
+                         + limit + ". It would need a scope first.")
+        lines.append("If you decline: it stays blocked and other work continues.")
+        digest = _clean(card.get("scope_digest"), 12)
+        if digest:
+            lines.append(f"Binds scope {digest}; any scope change voids it.")
+        if ctx.get("scope_changed"):
+            lines.append("Note: the card's scope changed after this request, so approving needs a new digest.")
+    lines.append(f"Reply: {card['options']}")
+    return "\n".join(lines)
+
+
+def _plain_block(index: int, count: int, card: dict) -> str:
+    verb = "Accept" if card["gate"] == "owner_acceptance" else "Approve"
+    return (f"Decision needed ({index}/{count}) - {verb}: {card['title']}\n"
+            f"Why now: {card['why']}\n"
+            f"Reply: {card['options']}\n"
+            f"{card['default']}")
+
+
+def _context_for(card: dict, context) -> dict:
+    try:
+        return context(card.get("debt") or {}) or {}
+    except Exception:                                       # a failing context never breaks the tick
+        return {}
+
+
+def render_shown(cards: list, context=None) -> tuple:
+    """(message, the cards actually shown). With a context function every shown card is rich; a card whose card
+    cannot be read is held back for a later tick rather than sent plain (a plain send would be recorded as sent
+    and suppress the rich version). Shows as many of the top cards as fit one message."""
+    pool = cards[:MAX_CARDS]
+    contexts = {}
+    if context is not None:
+        for card in pool:                                   # one read per card, never repeated while fitting
+            contexts[card["key"]] = _context_for(card, context)
+        pool = [card for card in pool if contexts[card["key"]]]
+    for count in range(len(pool), 0, -1):
+        shown = pool[:count]
+        rest = len(cards) - count
+        blocks = [(_rich_block(i, count, card, contexts[card["key"]]) if context is not None
+                   else _plain_block(i, count, card)) for i, card in enumerate(shown, 1)]
+        if rest:
+            blocks.append(f"+{rest} more waiting (lower priority)")
+        text = "\n\n".join(blocks)
+        if len(text) <= MAX_MESSAGE or count == 1:
+            return text[:MAX_MESSAGE], shown
+    return "", []
+
+
+def render(cards: list, context=None) -> str:
+    return render_shown(cards, context)[0]
 
 
 def _load_channel(path: Path) -> tuple:
@@ -204,7 +325,7 @@ def _write_state(path: Path, state: dict) -> None:
 
 def notify(owed_reviews: list, *, state_path: Optional[Path] = None, channel_path: Optional[Path] = None,
            post: Optional[Callable] = None, clock: Optional[Callable] = None,
-           min_interval: float = MIN_INTERVAL_SECONDS) -> str:
+           min_interval: float = MIN_INTERVAL_SECONDS, context: Optional[Callable] = None) -> str:
     """Send the cards not yet sent. Returns a short status; never raises."""
     import fcntl
     import time
@@ -221,7 +342,7 @@ def notify(owed_reviews: list, *, state_path: Optional[Path] = None, channel_pat
             fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)   # read state, send and record under one lock
         except BlockingIOError:
             return "busy"                            # another sender is mid-call: never stall the lifecycle tick
-        return _notify_locked(owed_reviews, now, state_path, channel_path, post, min_interval)
+        return _notify_locked(owed_reviews, now, state_path, channel_path, post, min_interval, context)
     except Exception as exc:
         log.warning("decision notify failed: %s", type(exc).__name__)
         return "error"
@@ -229,7 +350,7 @@ def notify(owed_reviews: list, *, state_path: Optional[Path] = None, channel_pat
         os.close(lock_fd)                            # closing the descriptor releases the lock
 
 
-def _notify_locked(owed_reviews, now, state_path, channel_path, post, min_interval):
+def _notify_locked(owed_reviews, now, state_path, channel_path, post, min_interval, context=None):
     try:
         cards = build_cards(owed_reviews)
         status, url = _load_channel(channel_path)
@@ -242,14 +363,17 @@ def _notify_locked(owed_reviews, now, state_path, channel_path, post, min_interv
         if now - float(state.get(_LAST, 0) or 0) < min_interval:
             return "cooldown"
         try:
-            code = post(url, {"content": render(fresh), "allowed_mentions": {"parse": []}}, SEND_TIMEOUT_SECONDS)
+            text, shown = render_shown(fresh, context)
+            if not shown:
+                return "deferred"                           # nothing readable to show yet: try again next tick
+            code = post(url, {"content": text, "allowed_mentions": {"parse": []}}, SEND_TIMEOUT_SECONDS)
         except Exception as exc:                                         # never include the URL or the payload
             log.warning("decision card send failed: %s", type(exc).__name__)
             return "send_failed"
         if not isinstance(code, int) or not 200 <= code < 300:
             log.warning("decision card send failed: HTTP %s", code)
             return "send_failed"
-        for card in fresh[:MAX_CARDS]:
+        for card in shown:
             state[card["key"]] = now
         state[_LAST] = now
         _write_state(state_path, state)

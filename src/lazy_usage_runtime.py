@@ -1847,12 +1847,46 @@ def all_owed_reviews(db, owner=None):
     return list(merged.values())
 
 
+def decision_context(debt, frontier):
+    """The few structured card fields that let the owner decide: what the task is, its type, priority, risk, its
+    write scope and how many paths are protected. A fixed allow-list: never the card body, a runtime error,
+    model output or any other front-matter field. Empty when the card cannot be read."""
+    ref = debt.get("task_ref") if isinstance(debt, dict) else None
+    if not isinstance(ref, str) or ":" not in ref:
+        return {}
+    meta = _card_meta({"task_ref": ref, "repo_id": ref.split(":", 1)[0]}, frontier)
+    if not meta:
+        return {}
+    kind = ", ".join(str(meta[k]) for k in ("task_type", "execution_mode") if meta.get(k))
+    recorded = str(debt.get("scope_sha256") or "")
+    changed = bool(debt.get("gate") == "owner_approval" and recorded and approval_scope(meta) != recorded)
+    notes = meta.get("notes")
+    denied = [p for p in (meta.get("denied_paths") or []) if isinstance(p, str)]
+    return {"title": meta.get("title") if isinstance(meta.get("title"), str) else "",
+            "what": notes if isinstance(notes, str) else "", "kind": kind,
+            "priority": str(meta.get("priority") or ""), "risk": str(meta.get("risk_level") or ""),
+            "write_paths": _allowed_paths(meta), "denied_count": len(denied), "scope_changed": changed,
+            "result_path": meta.get("result_path") if isinstance(meta.get("result_path"), str) else "",
+            "outputs_count": len([o for o in (meta.get("outputs") or []) if isinstance(o, str)])}
+
+
+def _context_provider():
+    """A decision-context function that reads the task cards lazily, once, and only if a card is actually shown."""
+    cache = {}
+
+    def provide(debt):
+        if "frontier" not in cache:
+            cache["frontier"] = refresh_frontier(list(portfolio.LAYOUT))
+        return decision_context(debt, cache["frontier"])
+    return provide
+
+
 def _offer_owner_decisions(db):
     """Best-effort: send the owner's pending decision cards (approvals, acceptances) to the private channel,
     each once, at most hourly. It can never affect the run: any failure is swallowed."""
     try:
         from src import owner_decisions
-        owner_decisions.notify(all_owed_reviews(db))
+        owner_decisions.notify(all_owed_reviews(db), context=_context_provider())
     except Exception:
         log.warning("owner decision notification failed")
 
