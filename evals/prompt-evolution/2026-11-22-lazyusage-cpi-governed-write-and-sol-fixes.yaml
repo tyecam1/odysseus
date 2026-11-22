@@ -1,0 +1,28 @@
+schema_version: 1
+event_id: 2026-11-22-lazyusage-cpi-governed-write-and-sol-fixes
+prompt_id: estate-queue-priority-execution
+application_id: 2026-11-22-lazyusage-cpi-governed-write-and-sol-fixes
+application_trace: evals/prompt-applications/estate-queue-priority-execution/2026-11-22-lazyusage-cpi-governed-write-and-sol-fixes.yaml
+from: prompt:v2
+to: prompt:v2
+type: reinforcement
+reason: Independent review kept finding real defects across five rounds and a same-family review found a P1 that a cross-family review missed, so the independent-review requirement stays and no gate was weakened. A real approved write ran unattended and was finalised by the worker. The gaps observed are tooling and sequencing, recorded as targets below, with no wording delta justified yet.
+observed_improvement_targets:
+- Validate an approved card's frontmatter with the owning repository's own validator before dispatch. The vault parser is flat and read a nested approval block as the card's own status, which failed the vault gate; an inline mapping satisfies both parsers.
+- Cap review rounds on one change at about three, then list the residuals once the findings narrow, and say which fix was not re-reviewed.
+- Use a mock only for the boundary under test. A mocked helper hid that a persisted finalisation record is JSON text, and the independent review caught it.
+- Run an owner-approved write before unrelated read-only reconnaissance cards, because each reconnaissance spends a dispatch and a timeout gates the provider for a cooldown.
+- Never stash a single file in a worktree holding uncommitted work; commit a work-in-progress snapshot instead.
+- A same-family review is not an independence check; pair it with a cross-family reviewer and state both verdicts.
+active_head_changed: false
+planner_decision: 'evolve (scripts/prompt_evolution.py reports next_version 3 from the recorded failure tags)'
+child_draft_deferred: true
+child_draft_deferred_reason: 'The targets are mostly runtime, validator and sequencing fixes that belong in code and checks, not in the initialiser text. No child is drafted in this change. If the same tags recur in the next application, draft the smallest child that addresses them and compare outcomes before promotion.'
+guardrail_validation:
+  repository_scope_preserved: true
+  authority_scope_preserved: true
+  evidence_and_verification_preserved: true
+  model_identity_discipline_preserved: true
+  prompt_application_trace_recorded: true
+  operator_rating_invented: false
+  stop_and_safety_gates_preserved: true
