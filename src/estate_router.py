@@ -86,11 +86,11 @@ def _provider_outcome(result: dict, now=None, *, host_tz=None) -> dict:
     # execute_codex embeds the LAST 1000 characters of a transcript in `error`, which may have lost its banner.
     # A long multi-line failure text without session markers is such a tail: its words never set `auth_failed`
     # (Sol review of #304). Quota and transport evidence are unchanged.
-    transcript_tail = not session and len(fields["error"]) > 400 and "\n" in fields["error"]
+    transcript_tail = not session and len(fields["error"]) > 400
     if "timed out" in header.lower() and len(header) < 200:
         evidence = [header]
     elif session:
-        launcher = re.match(r"(.*?exited \d+:)(.*)", header)
+        launcher = re.match(r"(.*?exited -?\d+:)(.*)", header)
         evidence = [launcher.group(1) if launcher else header]
         if launcher and re.match(r"\s*(?:\S+\s+)?(?:error|fatal)\b", launcher.group(2), re.I):
             evidence.append(launcher.group(2))          # the CLI's own error on the header line
@@ -105,7 +105,7 @@ def _provider_outcome(result: dict, now=None, *, host_tz=None) -> dict:
     retry = now + timedelta(minutes=15)
     # A long markerless transcript tail never sets auth_failed from its prose; the launcher header and stderr
     # still can (a genuine 401 reaches the CLI's stderr), so a real auth failure keeps its timed retry.
-    launcher_header = (re.match(r"(.*?exited \d+:)", header) or re.match(r"(.*)", header))[1]
+    launcher_header = (re.match(r"(.*?exited -?\d+:)", header) or re.match(r"(.*)", header))[1]
     auth_text = text if not transcript_tail else " ".join([launcher_header, fields["stderr"]]).lower()
     if (glm_code == "quota_exhausted" or
             glm_code is None and re.search(r"usage limit|quota (?:exhausted|exceeded)|insufficient_quota", text)):

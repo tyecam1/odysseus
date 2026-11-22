@@ -280,3 +280,32 @@ def test_markerless_stdout_after_the_launcher_header_never_sets_auth_failed():
     result = estate_router._provider_outcome({"ok": False, "provider": "codex",
                                               "error": "codex exec exited 1: " + prose + chr(10) + prose})
     assert result["state"] != "auth_failed"
+
+
+# ---- round 4 (final bounded check) ------------------------------------------------------------------------------------
+
+def test_a_backslash_allowed_path_is_slash_form_for_the_guard_and_the_worker():
+    meta = {"allowed_paths": [chr(92).join(["automation", "review", "report.md"])]}
+    assert rt._allowed_paths(meta) == ["automation/review/report.md"]
+    assert rt._within_review_area(meta) is True
+    assert rt._write_scope("odysseus", meta)["allowed"] == ["automation/review/report.md"]
+
+
+def test_a_newly_verified_commit_replaces_an_older_acceptance_debt_and_keeps_the_fence(db, queue):
+    good = [{"result": "pass", "commit_sha": SHA, "ref": "pytest tests -q: 9748 passed", "verified_by": "tye"}]
+    ref = queue.add("odysseus", "w", **{**WRITE, "verification_evidence": good})
+    run = db.get(LazyUsageRun, activate(db))
+    older = {**verification_debt(ref), "gate": "owner_acceptance", "commit_sha": "a" * 40, "evidence_gap": False}
+    run.checkpoint = {**run.checkpoint, "owed_reviews": [older, verification_debt(ref)]}
+    rt._resolve_met_debts(run, ref, rt.refresh_frontier(["odysseus"]))
+    owed = run.checkpoint["owed_reviews"]
+    assert [d["gate"] for d in owed] == ["owner_acceptance"] and owed[0]["commit_sha"] == SHA
+    assert owed[0]["acceptance_after_verification"] is True
+    assert rt._recent_blocker(run, ref, "a-new-revision") == "awaiting_owner_acceptance"
+
+
+def test_a_signal_terminated_codex_with_prose_after_the_header_never_sets_auth_failed():
+    prose = "I am checking the authentication module and its 401 handler. " * 10
+    result = estate_router._provider_outcome({"ok": False, "provider": "codex",
+                                              "error": "codex exec exited -9: " + prose})
+    assert result["state"] != "auth_failed"

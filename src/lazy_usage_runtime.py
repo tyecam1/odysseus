@@ -349,12 +349,13 @@ def _allowed_paths(meta):
     left the worker's allow-list empty, so any path outside the denied list passed finalisation). `outputs` is
     prose-capable and is not a path allow-list: widening the scope with it could pass the review-area guard,
     which sees only allowed_paths and result_path."""
-    allowed = [p for p in (meta.get("allowed_paths") or []) if isinstance(p, str)]
+    slash = lambda p: p.replace(chr(92), "/")
+    allowed = [slash(p) for p in (meta.get("allowed_paths") or []) if isinstance(p, str)]
     if allowed:
         return allowed
     result = meta.get("result_path")
     if isinstance(result, str) and result:
-        return [result]
+        return [slash(result)]
     # outputs-only card: only literal repository paths count; descriptive prose ("minimal documentation
     # updates") names no file and must never become a scope
     outputs = meta.get("outputs") or []
@@ -487,18 +488,22 @@ def _resolve_met_debts(run, task_ref, frontier):
     key = _task_key(task_ref)
     meta = _card_meta({"task_ref": task_ref, "repo_id": task_ref.split(":", 1)[0]}, frontier)
     kept = []
-    for debt in run.checkpoint.get("owed_reviews", []):
+    owed = run.checkpoint.get("owed_reviews", [])
+    verified_now = any(_task_key(d.get("task_ref") or "?:?") == key and _debt_gate(d) == "verification"
+                       and _verification_recorded(meta, d.get("commit_sha")) and not _settled_after(run, key, d)
+                       for d in owed)
+    for debt in owed:
         if _task_key(debt.get("task_ref") or "?:?") == key:
             gate = _debt_gate(debt)
+            if gate == "owner_acceptance" and verified_now:
+                continue                  # an older commit's acceptance is replaced by the newly verified one
             if gate == "owner_approval" and _approval_valid(meta):
                 continue
             if gate == "verification" and _verification_recorded(meta, debt.get("commit_sha")):
                 # The deterministic check is now on the card, so the finalised write is ready for the owner:
                 # queue its acceptance (held back by any open review debt) instead of leaving the task with no
                 # open item, which made it eligible for a repeat dispatch (Sol review of #301-#304).
-                if not _settled_after(run, key, debt) and not any(
-                        _task_key(d.get("task_ref") or "?:?") == key and _debt_gate(d) == "owner_acceptance"
-                        for d in run.checkpoint.get("owed_reviews", [])):
+                if not _settled_after(run, key, debt):
                     kept.append({**{k: v for k, v in debt.items() if k not in {"evidence_gap", "error"}},
                                  "gate": "owner_acceptance", "acceptance_after_verification": True,
                                  "next_action": "owner_acceptance_and_required_independent_verification"})
