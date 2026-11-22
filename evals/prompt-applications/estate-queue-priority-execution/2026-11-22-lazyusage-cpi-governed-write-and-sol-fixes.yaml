@@ -1,0 +1,80 @@
+schema_version: 1
+application_id: 2026-11-22-lazyusage-cpi-governed-write-and-sol-fixes
+prompt_id: estate-queue-priority-execution
+prompt_version: 2
+application_scope: a five-round Sol review and fix of #300-#304 (merged and deployed as #305), then one governed live write of the approved CPI supervision package, with a deliberate laptop-silence test
+repository: tyecam1/odysseus
+branch: dev
+session_started_at: '2026-11-22T00:00:00Z'
+session_ended_at: '2026-11-22T06:10:00Z'
+start_commit: ad381be5
+end_commit: 82031f13
+working_tree_changes: false
+commits:
+- 82031f13
+outcome_status: partial
+stop_reason: The CPI package was written, finalised and independently reviewed, and it is published as an unmerged draft PR in the vault. Owner review and acceptance are the remaining step and are not claimed.
+models_routes:
+- provider: codex
+  role: independent reviewer of the fixes, read-only, five passes
+  concrete_model: gpt-6.2-sol
+  note: Codex CLI 0.171.0. Every run header confirmed gpt-6.2-sol. Sol never returned APPROVE on the full change; it confirmed the last narrow fix.
+- provider: codex
+  role: writer of the CPI package (governed lazyUsage write lane)
+  concrete_model: gpt-6.2-sol
+  note: From the execution record, high reasoning effort, execution 1054b2fd, worker-finalised as commit 653e01db2e.
+- provider: glm
+  role: cross-family reviewer of the CPI package, read-only
+  concrete_model: glm-5.3
+  note: APPROVE with no P1 or P2. The same-family Sol review of the same package returned CHANGES REQUIRED and found a real P1 that GLM did not.
+- provider: claude
+  role: controller and author of the fixes
+  concrete_model: claude-sonnet-5-5
+nondelegation_reason: final_acceptance
+authority_evidence:
+- The owner approved the CPI scope in the session, answered that unreviewed draft results appear on the deck, and asked whether the controller could merge the card PR. The controller merged the vault PR that carried that approval, on that basis, and disclosed it.
+- The deployment, supersession and merge of #305 used the standing Odysseus merge authority. No acceptance, card status change or approval was made on the owner's behalf.
+usage_status:
+  codex: Five Sol reviews of about 60k to 140k tokens each, plus one writer run and one verification review. No usage-limit error.
+  lazyusage_run_0c191d4c: Three dispatches, budget_exhausted on max_paid_calls as configured; tokens assumed 700000 (a conservative estimate, provider usage not measurable).
+verification:
+- 'Full lab suite on the final #305 head: 9850 passed, 51 skipped, 5 xfailed, 0 failed (two spreadsheet test files excluded because the lab environment lacks openpyxl).'
+- 'Failing-first tests for every accepted finding (38 in tests/test_sol_later_review.py); the deny-rule fix was shown to fail without the change.'
+- 'Live: run 0c191d4c, execution 1054b2fd succeeded and was finalised by the worker with no scope violation, lease released, recorded model gpt-6.2-sol. The backend advanced through a failed read-only task, a provider cooldown and an automatic resume while the laptop made no request for 14 minutes (03:47 to 04:01 UTC); the lab ssh log showed no laptop session in that window.'
+- 'CPI package: scope exactly the three outputs plus build_deck.py; zero en and em dashes; slide 7 questions equal to the deck; all 36 plotted counts recomputed from the recorded strings; deck opened in PowerPoint and every slide inspected; the deck regenerates deterministically from the source.'
+acceptance:
+  shipped: false
+  independent_review: 'Sol CHANGES REQUIRED on the CPI package (same family as the writer, not independent; P1 fixed by a controller edit); GLM-5.3 APPROVE (cross-family).'
+  merged: true
+  deployed: true
+  owner_task_status: ready
+  result_path: automation/review/cpi/2026-10-30-supervision/meeting-brief.md
+frontier:
+  scope: obsidian-phd CPI card and the lazyUsage reliability fixes
+  shipped_in_this_application: 1
+  selected_accepted_remaining: 1
+  global_backlog_reconciled: false
+failure_tags:
+- cross_cutting_review_finds_new_defects_each_round
+- test_mock_hid_real_column_type
+- vault_flat_parser_collides_with_nested_approval_block
+- provider_timeout_cooldown_delays_approved_write
+- queue_ordering_spends_dispatch_on_reconnaissance_before_approved_write
+- controller_stashed_uncommitted_work_by_mistake
+rating:
+  scale: 5
+  goal_progress: 3
+  correctness_verification: 4
+  authority_scope_discipline: 4
+  routing_resource_efficiency: 3
+  continuity_handoff_quality: 4
+  agent_overall: 3.6
+  operator_overall: null
+  operator_note: null
+prompt_revision_recommended: true
+revision_reason: Three observed gaps are worth an eventual child version, none a gate change. Before dispatching an approved card, validate its frontmatter with the owning repository's own validator, not only the runtime's parser. Cap independent-review rounds on one change and list residuals once the findings are narrow. Let an owner-approved write run before unrelated reconnaissance cards.
+evidence:
+- src/lazy_usage_runtime.py
+- src/owner_decisions.py
+- src/estate_router.py
+- tests/test_sol_later_review.py
