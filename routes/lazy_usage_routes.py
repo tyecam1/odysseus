@@ -63,7 +63,11 @@ def setup_lazy_usage_routes():
             run_id = run.id if run else None
             owed = runtime.all_owed_reviews(db, owner)   # every repository, but only this owner's runs
         cards = owner_decisions.build_cards(owed)
-        return {"run_id": run_id, "cards": cards, "message": owner_decisions.render(cards)}
+        message = owner_decisions.render(cards, context=runtime._context_provider())
+        public = ("key", "gate", "ref", "title", "why", "options", "default", "due", "opened_at", "scope_digest")
+        return {"run_id": run_id,
+                "cards": [{k: (c[k] if isinstance(c.get(k), str) else "") for k in public} for c in cards],
+                "message": message}
 
     @router.get("/history")
     def history(request: Request, limit: int = 20):
