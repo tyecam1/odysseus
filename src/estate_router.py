@@ -83,6 +83,10 @@ def _provider_outcome(result: dict, now=None, *, host_tz=None) -> dict:
     fields = {k: str(result.get(k) or "") for k in ("error", "stderr", "output", "stdout")}
     header = fields["error"].partition("\n")[0]
     session = re.search(r"openai codex v\d|session id:|tokens used", "\n".join(fields.values()), re.I) is not None
+    # execute_codex embeds the LAST 1000 characters of a transcript in `error`, which may have lost its banner.
+    # A long multi-line failure text without session markers is such a tail: its words never set `auth_failed`
+    # (Sol review of #304). Quota and transport evidence are unchanged.
+    transcript_tail = not session and len(fields["error"]) > 400 and "\n" in fields["error"]
     if "timed out" in header.lower() and len(header) < 200:
         evidence = [header]
     elif session:
@@ -133,7 +137,7 @@ def _provider_outcome(result: dict, now=None, *, host_tz=None) -> dict:
             except ValueError:
                 pass
         state = "quota_exhausted"
-    elif (glm_code == "auth_failed" or glm_code is None and
+    elif (glm_code == "auth_failed" or glm_code is None and not transcript_tail and
             re.search(r"unauthorized|authentication|invalid.api.key|not logged in|login required|\b401\b", text)):
         state, reason = "auth_failed", "provider authentication failed"
     elif result.get("provider") in {"glm", "claude"} and (glm_code == "rate_limited" or glm_code is None and

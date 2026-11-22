@@ -339,11 +339,20 @@ def _writes(kind, meta):
     return kind == "implementation" or (kind in REVIEW_SIDE_KINDS and _deliverable_surface(meta))
 
 
+def _allowed_paths(meta):
+    """What a writer may commit: the card's allowed_paths, else exactly its declared outputs and result_path.
+    Never empty-means-everything (Sol review of #301-#304: an outputs-only approval left the worker's allow-list
+    empty, so any path outside the denied list passed finalisation)."""
+    allowed = [p for p in (meta.get("allowed_paths") or []) if isinstance(p, str)]
+    if allowed:
+        return allowed
+    declared = [p for p in [*(meta.get("outputs") or []), meta.get("result_path")] if isinstance(p, str) and p]
+    return list(dict.fromkeys(declared))
+
+
 def _write_scope(repo_id, meta):
     """Paths a writer may commit, and paths it may never touch (always incl. the owner cards)."""
-    allowed = [p for p in (meta.get("allowed_paths") or []) if isinstance(p, str)]
-    if not allowed and isinstance(meta.get("result_path"), str):
-        allowed = [meta["result_path"]]
+    allowed = _allowed_paths(meta)
     denied = [p for p in (meta.get("denied_paths") or []) if isinstance(p, str)]
     card_dir = str(Path(portfolio.LAYOUT[repo_id][0])).replace("\\", "/") + "/**"
     return {"allowed": allowed, "denied": list(dict.fromkeys([*denied, card_dir]))}
@@ -471,6 +480,14 @@ def _resolve_met_debts(run, task_ref, frontier):
             if gate == "owner_approval" and _approval_valid(meta):
                 continue
             if gate == "verification" and _verification_recorded(meta, debt.get("commit_sha")):
+                # The deterministic check is now on the card, so the finalised write is ready for the owner:
+                # queue its acceptance (held back by any open review debt) instead of leaving the task with no
+                # open item, which made it eligible for a repeat dispatch (Sol review of #301-#304).
+                if not any(_task_key(d.get("task_ref") or "?:?") == key and _debt_gate(d) == "owner_acceptance"
+                           for d in run.checkpoint.get("owed_reviews", [])):
+                    kept.append({**{k: v for k, v in debt.items() if k not in {"evidence_gap", "error"}},
+                                 "gate": "owner_acceptance",
+                                 "next_action": "owner_acceptance_and_required_independent_verification"})
                 continue
             if gate in {"recovery", "finalization"} and _execution_resolved(run, debt.get("execution_id")):
                 continue
@@ -511,6 +528,8 @@ def _static_blocker(kind, meta, write):
         return "requires_zotero_unavailable"
     if write and not _deliverable_surface(meta):
         return "no_deliverable_surface"
+    if write and not _allowed_paths(meta):
+        return "write_scope_missing"
     if kind in REVIEW_SIDE_KINDS and write and not _within_review_area(meta):
         return "deliverable_outside_review_area"
     return None
@@ -807,9 +826,11 @@ def _ledger_put(run, task_ref, revision, kind, outcome, execution_id=None):
     _checkpoint(run, ledger=ledger)
 
 
-def _prior_runs(db, scope):
-    candidates = db.query(LazyUsageRun).filter(LazyUsageRun.state.in_(TERMINAL)).order_by(
-        LazyUsageRun.started_at.desc()).limit(HISTORY_SCAN_ROWS).all()
+def _prior_runs(db, scope, owner=None):
+    query = db.query(LazyUsageRun).filter(LazyUsageRun.state.in_(TERMINAL))
+    if owner is not None:
+        query = query.filter(LazyUsageRun.created_by == owner)
+    candidates = query.order_by(LazyUsageRun.started_at.desc()).limit(HISTORY_SCAN_ROWS).all()
     return [old for old in candidates if set(old.repo_scope or []) & set(scope)][:HISTORY_RUNS]   # newest first
 
 
@@ -820,10 +841,10 @@ def _stamp(value):
         return None
 
 
-def _inherited_settlements(db, scope):
+def _inherited_settlements(db, scope, owner=None):
     """Tombstones (settled or superseded cards) from the recent runs, newest decision wins."""
     settled = {}
-    for old in reversed(_prior_runs(db, scope)):
+    for old in reversed(_prior_runs(db, scope, owner)):
         cp = old.checkpoint or {}
         for key, entry in (cp.get("settled_reviews") or {}).items():
             if isinstance(entry, dict):
@@ -836,7 +857,7 @@ def _inherited_settlements(db, scope):
     return {key: settled[key] for key in newest}
 
 
-def _inherited_history(db, scope):
+def _inherited_history(db, scope, owner=None):
     """Carry results and acceptance debt across activations (newest wins).
 
     Ledger entries only suppress re-dispatch of an unchanged revision inside the reuse
@@ -848,7 +869,7 @@ def _inherited_history(db, scope):
     already reconciled). A tombstone newer than a debt's `opened_at` also removes it, so
     a card moved ready -> done cannot reappear from any copy.
     """
-    prior = _prior_runs(db, scope)
+    prior = _prior_runs(db, scope, owner)
     ledger = {}
     in_scope = lambda ref: isinstance(ref, str) and ref.split(":", 1)[0] in scope
     for old in reversed(prior):
@@ -866,7 +887,7 @@ def _inherited_history(db, scope):
         for repo in old.repo_scope or []:
             if repo in scope:
                 authority.setdefault(repo, old)
-    settled = _inherited_settlements(db, scope)
+    settled = _inherited_settlements(db, scope, owner)
     owed = {}
     for repo, old in authority.items():
         for debt in (old.checkpoint or {}).get("owed_reviews") or []:
@@ -1022,7 +1043,22 @@ def _finalize_owned(db, run, execution_id):
     except Exception as exc:       # never store exception text: it can carry a task prompt
         outcome = {"finalized": False, "reason": "finalize_raised_" + type(exc).__name__}
     db.expire_all()
+    if not outcome.get("finalized") and _execution_finalized(run, execution_id):
+        # Another observer (/stop and the lifecycle tick can both see the same success) finalised it first.
+        return {**outcome, "finalized": True, "already_finalized": True}
     return outcome
+
+
+def _execution_finalized(run, execution_id):
+    from sqlalchemy.orm import object_session
+    session = object_session(run)
+    if not execution_id or session is None:
+        return False
+    row = session.get(EstateExecution, execution_id)
+    if row is None:
+        return False
+    session.refresh(row)
+    return row.worktree_resolution == "finalized"
 
 
 def _recover_failed_write(db, run, execution_id):
@@ -1729,12 +1765,15 @@ def supersede_review_debts(db, owner, run_id, task_refs, *, reason, evidence):
             "remaining": len(run.checkpoint["owed_reviews"])}
 
 
-def all_owed_reviews(db):
+def all_owed_reviews(db, owner=None):
     """Every repository's pending debts, for the owner's decision view (debts are per repository, not per run).
 
     Terminal runs supply each repository's newest debts (`_inherited_history`); the live run, if any, is the
     truth for the repositories in its own scope, so debts it settled cannot return from an older copy."""
-    live = db.query(LazyUsageRun).filter(LazyUsageRun.state.notin_(TERMINAL)).first()
+    live_query = db.query(LazyUsageRun).filter(LazyUsageRun.state.notin_(TERMINAL))
+    if owner is not None:                       # a read for one owner never shows another owner's debts
+        live_query = live_query.filter(LazyUsageRun.created_by == owner)
+    live = live_query.first()
     live_scope = set(live.repo_scope or []) if live else set()
 
     def key(debt):
@@ -1747,7 +1786,7 @@ def all_owed_reviews(db):
         if repo in live_scope:
             continue
         # per repository, so a quiet repo is never pushed out by the history cap of busier ones
-        _, owed = _inherited_history(db, [repo])
+        _, owed = _inherited_history(db, [repo], owner)
         for debt in owed:
             ref = debt.get("task_ref")
             if ref and str(ref).split(":", 1)[0] != repo:

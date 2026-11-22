@@ -79,7 +79,9 @@ _TOKEN_KEYS = ("inputTokens", "outputTokens", "cacheReadInputTokens", "cacheCrea
                "input_tokens", "output_tokens")
 
 
-_INPUT_SIDE = ("inputTokens", "input_tokens", "cacheReadInputTokens", "cacheCreationInputTokens")
+# Cache counters alone are a fragment: only an ordinary input count says the whole call was reported (Sol review of
+# #301-#304: {cacheReadInputTokens: 20, outputTokens: 7} was counted as a complete 27-token report).
+_INPUT_SIDE = ("inputTokens", "input_tokens")
 _OUTPUT_SIDE = ("outputTokens", "output_tokens")
 
 
