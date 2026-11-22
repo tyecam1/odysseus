@@ -94,7 +94,9 @@ def usage_tokens(usage, estimate):
     the conservative estimate and what was reported. Never less than the estimate (Sol review of #297)."""
     ints = ({k: v for k, v in usage.items() if type(v) is int and v > 0} if isinstance(usage, dict) else {})
     total = sum(v for k, v in ints.items() if k in _TOKEN_KEYS)
-    covers = any(k in ints for k in _INPUT_SIDE) and any(k in ints for k in _OUTPUT_SIDE)
+    # an explicit zero input count is a real report (a fully cached call), unlike an absent one
+    given = {k for k, v in (usage.items() if isinstance(usage, dict) else []) if type(v) is int and v >= 0}
+    covers = any(k in given for k in _INPUT_SIDE) and any(k in given for k in _OUTPUT_SIDE)
     if covers and total:
         return total, 0
     return 0, max(estimate, total)

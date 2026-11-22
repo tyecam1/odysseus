@@ -12,6 +12,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -154,8 +155,8 @@ def activate_run(db, owner, repo_scope=None, budget_overrides=None, coordinator=
         db.rollback()
         raise RunError(409, "a non-terminal activation already exists")
     scope = list(dict.fromkeys(scope))
-    ledger, owed = _inherited_history(db, scope)
-    settled = _inherited_settlements(db, scope)
+    ledger, owed = _inherited_history(db, scope, owner)
+    settled = _inherited_settlements(db, scope, owner)
     run = LazyUsageRun(id=str(uuid.uuid4()), state="requested", created_by=owner,
                        initializer=INITIALIZER, repo_scope=scope,
                        budgets=budgets, started_at=utcnow_naive(),
@@ -339,15 +340,24 @@ def _writes(kind, meta):
     return kind == "implementation" or (kind in REVIEW_SIDE_KINDS and _deliverable_surface(meta))
 
 
+_LITERAL_PATH = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_./-]*\Z")
+
+
 def _allowed_paths(meta):
-    """What a writer may commit: the card's allowed_paths, else exactly its declared outputs and result_path.
-    Never empty-means-everything (Sol review of #301-#304: an outputs-only approval left the worker's allow-list
-    empty, so any path outside the denied list passed finalisation)."""
+    """What a writer may commit: the card's allowed_paths, else its result_path, else nothing (and a write
+    with nothing is refused). Never empty-means-everything (Sol review of #301-#304: an outputs-only approval
+    left the worker's allow-list empty, so any path outside the denied list passed finalisation). `outputs` is
+    prose-capable and is not a path allow-list: widening the scope with it could pass the review-area guard,
+    which sees only allowed_paths and result_path."""
     allowed = [p for p in (meta.get("allowed_paths") or []) if isinstance(p, str)]
     if allowed:
         return allowed
-    declared = [p for p in [*(meta.get("outputs") or []), meta.get("result_path")] if isinstance(p, str) and p]
-    return list(dict.fromkeys(declared))
+    result = meta.get("result_path")
+    if isinstance(result, str) and result:
+        return [result]
+    # outputs-only card: only literal repository paths count; descriptive prose ("minimal documentation
+    # updates") names no file and must never become a scope
+    return [p for p in (meta.get("outputs") or []) if isinstance(p, str) and _LITERAL_PATH.match(p)]
 
 
 def _write_scope(repo_id, meta):
@@ -483,8 +493,9 @@ def _resolve_met_debts(run, task_ref, frontier):
                 # The deterministic check is now on the card, so the finalised write is ready for the owner:
                 # queue its acceptance (held back by any open review debt) instead of leaving the task with no
                 # open item, which made it eligible for a repeat dispatch (Sol review of #301-#304).
-                if not any(_task_key(d.get("task_ref") or "?:?") == key and _debt_gate(d) == "owner_acceptance"
-                           for d in run.checkpoint.get("owed_reviews", [])):
+                if key not in (run.checkpoint.get("settled_reviews") or {}) and not any(
+                        _task_key(d.get("task_ref") or "?:?") == key and _debt_gate(d) == "owner_acceptance"
+                        for d in run.checkpoint.get("owed_reviews", [])):
                     kept.append({**{k: v for k, v in debt.items() if k not in {"evidence_gap", "error"}},
                                  "gate": "owner_acceptance",
                                  "next_action": "owner_acceptance_and_required_independent_verification"})
@@ -537,9 +548,7 @@ def _static_blocker(kind, meta, write):
 
 def _within_review_area(meta):
     """An evidence/review artifact lands in the non-canonical review area, never canon."""
-    paths = [p for p in (meta.get("allowed_paths") or []) if isinstance(p, str)]
-    if not paths and isinstance(meta.get("result_path"), str):
-        paths = [meta["result_path"]]
+    paths = _allowed_paths(meta)
     return bool(paths) and all(p.replace("\\", "/").startswith(REVIEW_SIDE_PREFIX) and ".." not in p.split("/")
                               for p in paths)
 
@@ -1033,6 +1042,8 @@ def _finalize_owned(db, run, execution_id):
     if not lease:
         return {"finalized": False, "reason": "no lease recorded for this write"}
     scope = cp.get("write_scope") or {}
+    if not scope.get("allowed"):
+        return {"finalized": False, "reason": "write_scope_missing"}
     _charge(run, tool_calls=1)
     db.commit()
     try:
@@ -1043,22 +1054,30 @@ def _finalize_owned(db, run, execution_id):
     except Exception as exc:       # never store exception text: it can carry a task prompt
         outcome = {"finalized": False, "reason": "finalize_raised_" + type(exc).__name__}
     db.expire_all()
-    if not outcome.get("finalized") and _execution_finalized(run, execution_id):
-        # Another observer (/stop and the lifecycle tick can both see the same success) finalised it first.
-        return {**outcome, "finalized": True, "already_finalized": True}
+    if not outcome.get("finalized"):
+        recorded = _execution_finalization(run, execution_id)
+        if recorded is not None:
+            # Another observer (/stop and the lifecycle tick can both see the same success) finalised it first:
+            # report that finalisation, with its persisted commit, not a failure.
+            keep = {k: recorded.get(k) for k in ("committed", "adopted", "commit_sha", "parent_sha", "push",
+                                                  "scope_violations") if k in recorded}
+            return {**keep, "finalized": True, "already_finalized": True}
     return outcome
 
 
-def _execution_finalized(run, execution_id):
+def _execution_finalization(run, execution_id):
+    """The persisted finalisation record of an execution that is already `finalized`, else None."""
     from sqlalchemy.orm import object_session
     session = object_session(run)
     if not execution_id or session is None:
-        return False
+        return None
     row = session.get(EstateExecution, execution_id)
     if row is None:
-        return False
+        return None
     session.refresh(row)
-    return row.worktree_resolution == "finalized"
+    if row.worktree_resolution != "finalized":
+        return None
+    return dict(row.finalization_json or {})
 
 
 def _recover_failed_write(db, run, execution_id):

@@ -36,9 +36,15 @@ def test_ordinary_input_plus_output_is_still_measured():
 
 # ---- write scope ------------------------------------------------------------------------------------------------
 
-def test_an_outputs_only_card_is_scoped_to_its_outputs():
-    scope = rt._write_scope("odysseus", {"outputs": ["docs/a.md", "docs/b.md"], "result_path": "docs/a.md"})
-    assert scope["allowed"] == ["docs/a.md", "docs/b.md"]
+def test_a_card_without_allowed_paths_is_scoped_to_its_result_path_only():
+    meta = {"outputs": ["docs/a.md", "docs/b.md"], "result_path": "docs/a.md"}
+    assert rt._write_scope("odysseus", meta)["allowed"] == ["docs/a.md"]
+
+
+def test_outputs_never_widen_the_scope_past_the_review_area_check():
+    # `outputs` can name a canonical file while result_path sits in the review area: it must not be writable.
+    meta = {"result_path": "automation/review/report.md", "outputs": ["docs/canonical.md", "minimal documentation updates"]}
+    assert rt._write_scope("odysseus", meta)["allowed"] == ["automation/review/report.md"]
 
 
 def test_explicit_allowed_paths_still_win():
@@ -46,12 +52,30 @@ def test_explicit_allowed_paths_still_win():
     assert scope["allowed"] == ["docs/**"]
 
 
-def test_a_write_with_no_scope_at_all_is_refused_before_dispatch():
-    meta = {"execution_mode": "implementation", "outputs": []}
+def test_an_outputs_only_card_is_scoped_to_its_literal_output_paths():
+    meta = {"execution_mode": "implementation", "outputs": ["docs/result.md", "docs/other.md"]}
+    assert rt._allowed_paths(meta) == ["docs/result.md", "docs/other.md"]
+    assert rt._static_blocker("implementation", meta, True) is None
+
+
+def test_prose_outputs_name_no_file_and_the_write_is_refused_before_dispatch():
+    meta = {"execution_mode": "implementation", "outputs": ["minimal documentation/contract updates"]}
     assert rt._allowed_paths(meta) == []
-    assert rt._static_blocker("implementation", {**meta, "allowed_paths": ["src/**"]}, True) is None
-    assert rt._static_blocker("implementation", {"execution_mode": "implementation", "result_path": ""}, True) in {
-        "write_scope_missing", "no_deliverable_surface"}
+    assert rt._static_blocker("implementation", meta, True) == "write_scope_missing"
+
+
+def test_a_review_side_card_cannot_smuggle_a_canonical_output_past_the_review_area_check():
+    meta = {"outputs": ["docs/canonical.md"]}
+    assert rt._within_review_area(meta) is False
+
+
+def test_a_run_checkpointed_with_an_empty_allow_list_cannot_finalise(db, queue, monkeypatch):
+    run = db.get(LazyUsageRun, activate(db))
+    run.checkpoint = {**run.checkpoint, "lease": {"repo_id": "odysseus", "host_id": "lab"},
+                      "write_scope": {"allowed": [], "denied": []}}
+    monkeypatch.setattr(rt.estate_write_lane, "finalize_execution",
+                        lambda **kw: pytest.fail("finalisation must not run without an allow-list"))
+    assert rt._finalize_owned(db, run, "exec-1") == {"finalized": False, "reason": "write_scope_missing"}
 
 
 # ---- owner view -------------------------------------------------------------------------------------------------
@@ -92,15 +116,32 @@ def test_recorded_verification_of_a_finalised_write_queues_owner_acceptance(db, 
 
 # ---- concurrent finalisation ----------------------------------------------------------------------------------------
 
-def test_a_losing_observer_does_not_overwrite_a_successful_finalisation(db, queue, monkeypatch):
+def test_a_losing_observer_reports_the_winners_finalisation_with_its_commit(db, queue, monkeypatch):
     run = db.get(LazyUsageRun, activate(db))
     run.checkpoint = {**run.checkpoint, "lease": {"repo_id": "odysseus", "host_id": "lab"},
                       "write_scope": {"allowed": ["src/**"], "denied": []}}
     monkeypatch.setattr(rt.estate_write_lane, "finalize_execution",
                         lambda **kw: {"finalized": False, "reason": "finalize_failed"})
-    monkeypatch.setattr(rt, "_execution_finalized", lambda run_, execution_id: True)
+    monkeypatch.setattr(rt, "_execution_finalization", lambda run_, execution_id: {"committed": True, "commit_sha": SHA})
     outcome = rt._finalize_owned(db, run, "exec-1")
-    assert outcome["finalized"] is True and outcome.get("already_finalized") is True
+    assert outcome["finalized"] is True and outcome["already_finalized"] is True
+    assert outcome["committed"] is True and outcome["commit_sha"] == SHA
+
+
+def test_a_settled_task_is_not_reopened_for_acceptance_by_a_later_verification_record(db, queue):
+    good = [{"result": "pass", "commit_sha": SHA, "ref": "pytest tests -q: 9748 passed", "verified_by": "tye"}]
+    ref = queue.add("odysseus", "w", **{**WRITE, "verification_evidence": good})
+    run = db.get(LazyUsageRun, activate(db))
+    run.checkpoint = {**run.checkpoint, "owed_reviews": [verification_debt(ref)],
+                      "settled_reviews": {rt._task_key(ref): {"at": "2026-11-22T00:00:00", "status": "done"}}}
+    rt._resolve_met_debts(run, ref, rt.refresh_frontier(["odysseus"]))
+    assert run.checkpoint["owed_reviews"] == []
+
+
+def test_activation_does_not_import_another_owners_debts(db):
+    terminal(db, ["odysseus"], owed=[debt(ODY, "owner_approval")])
+    bob = db.get(LazyUsageRun, rt.activate_run(db, "bob", ["odysseus"], {}, None)["id"])
+    assert [d for d in bob.checkpoint.get("owed_reviews", []) if d.get("task_ref") == ODY] == []
 
 
 # ---- Discord channel and state files --------------------------------------------------------------------------------
@@ -163,7 +204,7 @@ def test_two_callers_do_not_both_send_the_same_card(tmp_path):
         t.start()
     for t in threads:
         t.join(10)
-    assert len(sent) == 1 and sorted(results) == ["nothing_new", "sent"]
+    assert len(sent) == 1 and sorted(results) == ["busy", "sent"]
 
 
 # ---- provider health ----------------------------------------------------------------------------------------------
@@ -173,3 +214,14 @@ def test_a_long_transcript_tail_without_session_markers_does_not_set_auth_failed
     result = estate_router._provider_outcome({"ok": False, "provider": "codex",
                                               "error": "codex exec exited 1:\n" + tail})
     assert result["state"] != "auth_failed"
+
+
+def test_an_explicit_zero_input_count_is_a_real_report():
+    assert coord.usage_tokens({"inputTokens": 0, "cacheReadInputTokens": 20, "outputTokens": 7}, 150_000) == (27, 0)
+
+
+def test_a_genuine_auth_failure_with_long_diagnostics_still_sets_auth_failed():
+    detail = "diagnostic line about the request pipeline and retry policy. " * 10
+    result = estate_router._provider_outcome({"ok": False, "provider": "codex", "stderr": "ERROR 401 Unauthorized",
+                                              "error": "codex exec exited 1:" + chr(10) + detail})
+    assert result["state"] == "auth_failed"

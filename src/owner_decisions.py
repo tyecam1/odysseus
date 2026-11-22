@@ -217,7 +217,10 @@ def notify(owed_reviews: list, *, state_path: Optional[Path] = None, channel_pat
         log.warning("decision notify lock failed: %s", type(exc).__name__)
         return "error"
     try:
-        fcntl.flock(lock_fd, fcntl.LOCK_EX)          # read state, send and record under one lock
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)   # read state, send and record under one lock
+        except BlockingIOError:
+            return "busy"                            # another sender is mid-call: never stall the lifecycle tick
         return _notify_locked(owed_reviews, now, state_path, channel_path, post, min_interval)
     except Exception as exc:
         log.warning("decision notify failed: %s", type(exc).__name__)
