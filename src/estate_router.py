@@ -105,7 +105,8 @@ def _provider_outcome(result: dict, now=None, *, host_tz=None) -> dict:
     retry = now + timedelta(minutes=15)
     # A long markerless transcript tail never sets auth_failed from its prose; the launcher header and stderr
     # still can (a genuine 401 reaches the CLI's stderr), so a real auth failure keeps its timed retry.
-    auth_text = text if not transcript_tail else " ".join([header, fields["stderr"]]).lower()
+    launcher_header = (re.match(r"(.*?exited \d+:)", header) or re.match(r"(.*)", header))[1]
+    auth_text = text if not transcript_tail else " ".join([launcher_header, fields["stderr"]]).lower()
     if (glm_code == "quota_exhausted" or
             glm_code is None and re.search(r"usage limit|quota (?:exhausted|exceeded)|insufficient_quota", text)):
         reason = "provider usage limit; retry_after_assumed"

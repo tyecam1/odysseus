@@ -357,7 +357,10 @@ def _allowed_paths(meta):
         return [result]
     # outputs-only card: only literal repository paths count; descriptive prose ("minimal documentation
     # updates") names no file and must never become a scope
-    return [p for p in (meta.get("outputs") or []) if isinstance(p, str) and _LITERAL_PATH.match(p)]
+    outputs = meta.get("outputs") or []
+    outputs = [outputs] if isinstance(outputs, str) else outputs
+    return [p for p in outputs if isinstance(p, str) and _LITERAL_PATH.match(p)
+            and all(seg not in {"", ".", ".."} for seg in p.split("/"))]
 
 
 def _write_scope(repo_id, meta):
@@ -493,11 +496,11 @@ def _resolve_met_debts(run, task_ref, frontier):
                 # The deterministic check is now on the card, so the finalised write is ready for the owner:
                 # queue its acceptance (held back by any open review debt) instead of leaving the task with no
                 # open item, which made it eligible for a repeat dispatch (Sol review of #301-#304).
-                if key not in (run.checkpoint.get("settled_reviews") or {}) and not any(
+                if not _settled_after(run, key, debt) and not any(
                         _task_key(d.get("task_ref") or "?:?") == key and _debt_gate(d) == "owner_acceptance"
                         for d in run.checkpoint.get("owed_reviews", [])):
                     kept.append({**{k: v for k, v in debt.items() if k not in {"evidence_gap", "error"}},
-                                 "gate": "owner_acceptance",
+                                 "gate": "owner_acceptance", "acceptance_after_verification": True,
                                  "next_action": "owner_acceptance_and_required_independent_verification"})
                 continue
             if gate in {"recovery", "finalization"} and _execution_resolved(run, debt.get("execution_id")):
@@ -508,6 +511,15 @@ def _resolve_met_debts(run, task_ref, frontier):
                 continue
         kept.append(debt)
     _set_review_debts(run, kept)
+
+
+def _settled_after(run, key, debt):
+    """The task was settled at or after this debt opened (a settlement of an EARLIER attempt does not count)."""
+    entry = (run.checkpoint.get("settled_reviews") or {}).get(key)
+    if not isinstance(entry, dict):
+        return False
+    settled_at, opened_at = _stamp(entry.get("at")), _stamp(debt.get("opened_at"))
+    return settled_at is None or opened_at is None or settled_at >= opened_at
 
 
 def _verification_recorded(meta, commit_sha):
@@ -629,6 +641,8 @@ def _recent_blocker(run, ref, revision):
     cp = run.checkpoint
     debts = [d for d in cp.get("owed_reviews", []) if _task_key(d.get("task_ref") or "?:?") == _task_key(ref)]
     retry_due = False
+    if any(d.get("acceptance_after_verification") and _debt_gate(d) == "owner_acceptance" for d in debts):
+        return "awaiting_owner_acceptance"           # recording the check edits the card, so the revision moved on
     for debt in debts:
         if not debt.get("error") or not debt.get("retry_after"):
             continue
@@ -1065,6 +1079,17 @@ def _finalize_owned(db, run, execution_id):
     return outcome
 
 
+def _json_record(value):
+    """A persisted JSON column value (text or already a dict) as a dict; anything else is empty."""
+    if isinstance(value, dict):
+        return dict(value)
+    try:
+        data = json.loads(value) if isinstance(value, (str, bytes)) and value else {}
+    except ValueError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 def _execution_finalization(run, execution_id):
     """The persisted finalisation record of an execution that is already `finalized`, else None."""
     from sqlalchemy.orm import object_session
@@ -1077,7 +1102,7 @@ def _execution_finalization(run, execution_id):
     session.refresh(row)
     if row.worktree_resolution != "finalized":
         return None
-    return dict(row.finalization_json or {})
+    return _json_record(row.finalization_json)
 
 
 def _recover_failed_write(db, run, execution_id):

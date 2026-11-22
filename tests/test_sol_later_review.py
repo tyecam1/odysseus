@@ -133,7 +133,7 @@ def test_a_settled_task_is_not_reopened_for_acceptance_by_a_later_verification_r
     ref = queue.add("odysseus", "w", **{**WRITE, "verification_evidence": good})
     run = db.get(LazyUsageRun, activate(db))
     run.checkpoint = {**run.checkpoint, "owed_reviews": [verification_debt(ref)],
-                      "settled_reviews": {rt._task_key(ref): {"at": "2026-11-22T00:00:00", "status": "done"}}}
+                      "settled_reviews": {rt._task_key(ref): {"at": "2099-01-01T00:00:00", "status": "done"}}}
     rt._resolve_met_debts(run, ref, rt.refresh_frontier(["odysseus"]))
     assert run.checkpoint["owed_reviews"] == []
 
@@ -225,3 +225,58 @@ def test_a_genuine_auth_failure_with_long_diagnostics_still_sets_auth_failed():
     result = estate_router._provider_outcome({"ok": False, "provider": "codex", "stderr": "ERROR 401 Unauthorized",
                                               "error": "codex exec exited 1:" + chr(10) + detail})
     assert result["state"] == "auth_failed"
+
+
+# ---- round 3 -----------------------------------------------------------------------------------------------------
+
+def test_a_json_text_finalisation_column_is_parsed_not_dict_converted():
+    assert rt._json_record('{"committed": true, "commit_sha": "abc"}') == {"committed": True, "commit_sha": "abc"}
+    assert rt._json_record({"commit_sha": "abc"}) == {"commit_sha": "abc"}
+    assert rt._json_record(None) == {} and rt._json_record("not json") == {} and rt._json_record("[1]") == {}
+
+
+def test_a_scalar_outputs_value_is_one_path_not_its_characters():
+    assert rt._allowed_paths({"outputs": "docs/report.md"}) == ["docs/report.md"]
+
+
+@pytest.mark.parametrize("path", ["docs/./report.md", "docs/../report.md", "docs//report.md", "/abs/report.md",
+                                  "docs/*.md", "../x.md"])
+def test_non_canonical_output_paths_are_never_a_scope(path):
+    assert rt._allowed_paths({"outputs": [path]}) == []
+
+
+@pytest.mark.skipif(os.sep != "/", reason="a backslash is a separator only on Windows")
+def test_a_posix_file_name_with_backslashes_is_not_the_slash_path_it_resembles():
+    from src.estate_worker import _scope_violation
+    name = chr(92).join(["automation", "review", "report.md"])
+    assert _scope_violation(name, ["automation/review/report.md"], []) is True
+    assert _scope_violation("automation/review/report.md", ["automation/review/report.md"], []) is False
+
+
+def _verified_debt(ref, opened):
+    return {**verification_debt(ref), "opened_at": opened}
+
+
+def test_an_old_settlement_does_not_suppress_acceptance_of_a_newer_attempt(db, queue):
+    good = [{"result": "pass", "commit_sha": SHA, "ref": "pytest tests -q: 9748 passed", "verified_by": "tye"}]
+    ref = queue.add("odysseus", "w", **{**WRITE, "verification_evidence": good})
+    run = db.get(LazyUsageRun, activate(db))
+    run.checkpoint = {**run.checkpoint, "owed_reviews": [_verified_debt(ref, "2026-11-22T00:00:00")],
+                      "settled_reviews": {rt._task_key(ref): {"at": "2020-01-01T00:00:00", "status": "superseded"}}}
+    rt._resolve_met_debts(run, ref, rt.refresh_frontier(["odysseus"]))
+    assert [d["gate"] for d in run.checkpoint["owed_reviews"]] == ["owner_acceptance"]
+
+
+def test_a_task_whose_verification_queued_acceptance_is_not_dispatched_again_after_the_card_changed(db, queue):
+    ref = queue.add("odysseus", "w", **WRITE)
+    run = db.get(LazyUsageRun, activate(db))
+    run.checkpoint = {**run.checkpoint, "owed_reviews": [
+        {**verification_debt(ref), "gate": "owner_acceptance", "acceptance_after_verification": True}]}
+    assert rt._recent_blocker(run, ref, "a-revision-the-ledger-has-never-seen") == "awaiting_owner_acceptance"
+
+
+def test_markerless_stdout_after_the_launcher_header_never_sets_auth_failed():
+    prose = "I am reading the authentication code and its 401 handler. " * 10
+    result = estate_router._provider_outcome({"ok": False, "provider": "codex",
+                                              "error": "codex exec exited 1: " + prose + chr(10) + prose})
+    assert result["state"] != "auth_failed"
