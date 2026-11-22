@@ -309,3 +309,12 @@ def test_a_signal_terminated_codex_with_prose_after_the_header_never_sets_auth_f
     result = estate_router._provider_outcome({"ok": False, "provider": "codex",
                                               "error": "codex exec exited -9: " + prose})
     assert result["state"] != "auth_failed"
+
+
+def test_a_backslash_deny_rule_is_slash_form_like_the_allow_rule():
+    bs = chr(92)
+    meta = {"allowed_paths": [bs.join(["automation", "review", "**"])],
+            "denied_paths": [bs.join(["automation", "review", "private", "**"])]}
+    scope = rt._write_scope("odysseus", meta)
+    assert scope["allowed"] == ["automation/review/**"]
+    assert "automation/review/private/**" in scope["denied"]

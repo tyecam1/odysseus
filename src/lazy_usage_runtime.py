@@ -367,7 +367,7 @@ def _allowed_paths(meta):
 def _write_scope(repo_id, meta):
     """Paths a writer may commit, and paths it may never touch (always incl. the owner cards)."""
     allowed = _allowed_paths(meta)
-    denied = [p for p in (meta.get("denied_paths") or []) if isinstance(p, str)]
+    denied = [p.replace(chr(92), "/") for p in (meta.get("denied_paths") or []) if isinstance(p, str)]
     card_dir = str(Path(portfolio.LAYOUT[repo_id][0])).replace("\\", "/") + "/**"
     return {"allowed": allowed, "denied": list(dict.fromkeys([*denied, card_dir]))}
 
