@@ -65,8 +65,10 @@ def build_cards(owed_reviews: list) -> list:
     unverified work. Approvals rank by due date, then age."""
     open_agent_gates = {}
     for debt in owed_reviews or []:
-        if debt.get("gate") in AGENT_FIRST_GATES and debt.get("task_ref"):
-            open_agent_gates.setdefault(_task_key(debt["task_ref"]), set()).add(debt["gate"])
+        # Any debt on the task that is not an owner gate is the agent's to close first, including a legacy
+        # debt recorded before gates existed (no `gate`, usually an `error`).
+        if debt.get("gate") not in OWNER_GATES and debt.get("task_ref"):
+            open_agent_gates.setdefault(_task_key(debt["task_ref"]), set()).add(str(debt.get("gate") or "legacy"))
     cards = []
     for debt in owed_reviews or []:
         gate = debt.get("gate")
@@ -104,8 +106,7 @@ def render(cards: list) -> str:
         lines.append(f"Decision needed ({index}/{len(shown)}) - {verb}: {card['title']}\n"
                      f"Why now: {card['why']}\n"
                      f"Reply: {card['options']}\n"
-                     f"{card['default']}\n"
-                     f"ref: {_ref_text(card['ref'])}")
+                     f"{card['default']}")
     if rest:
         lines.append(f"+{len(rest)} more waiting (lower priority)")
     return "\n\n".join(lines)[:MAX_MESSAGE]
@@ -120,7 +121,7 @@ def _load_channel(path: Path) -> tuple:
     except OSError:
         return "no_channel", None
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except FileNotFoundError:
         return "no_channel", None
     except OSError:
@@ -163,9 +164,20 @@ def _post(url: str, payload: dict, timeout: float) -> int:
 def _read_state(path: Path) -> dict:
     """Sent-card state; anything that is not a number is dropped so a corrupt file repairs itself."""
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    except OSError:
+        return {}
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return {}                                      # a FIFO or device must never block the tick
+        with os.fdopen(fd, "r", encoding="utf-8") as handle:
+            fd = None
+            data = json.loads(handle.read())
     except (OSError, ValueError):
         return {}
+    finally:
+        if fd is not None:
+            os.close(fd)
     if not isinstance(data, dict):
         return {}
     return {k: float(v) for k, v in data.items()
@@ -194,9 +206,30 @@ def notify(owed_reviews: list, *, state_path: Optional[Path] = None, channel_pat
            post: Optional[Callable] = None, clock: Optional[Callable] = None,
            min_interval: float = MIN_INTERVAL_SECONDS) -> str:
     """Send the cards not yet sent. Returns a short status; never raises."""
+    import fcntl
     import time
     now = (clock or time.time)()
     state_path, channel_path, post = state_path or STATE_PATH, channel_path or CHANNEL_PATH, post or _post
+    try:
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_fd = os.open(str(state_path) + ".lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    except Exception as exc:
+        log.warning("decision notify lock failed: %s", type(exc).__name__)
+        return "error"
+    try:
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)   # read state, send and record under one lock
+        except BlockingIOError:
+            return "busy"                            # another sender is mid-call: never stall the lifecycle tick
+        return _notify_locked(owed_reviews, now, state_path, channel_path, post, min_interval)
+    except Exception as exc:
+        log.warning("decision notify failed: %s", type(exc).__name__)
+        return "error"
+    finally:
+        os.close(lock_fd)                            # closing the descriptor releases the lock
+
+
+def _notify_locked(owed_reviews, now, state_path, channel_path, post, min_interval):
     try:
         cards = build_cards(owed_reviews)
         status, url = _load_channel(channel_path)

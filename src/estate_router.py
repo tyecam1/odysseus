@@ -83,10 +83,14 @@ def _provider_outcome(result: dict, now=None, *, host_tz=None) -> dict:
     fields = {k: str(result.get(k) or "") for k in ("error", "stderr", "output", "stdout")}
     header = fields["error"].partition("\n")[0]
     session = re.search(r"openai codex v\d|session id:|tokens used", "\n".join(fields.values()), re.I) is not None
+    # execute_codex embeds the LAST 1000 characters of a transcript in `error`, which may have lost its banner.
+    # A long multi-line failure text without session markers is such a tail: its words never set `auth_failed`
+    # (Sol review of #304). Quota and transport evidence are unchanged.
+    transcript_tail = not session and len(fields["error"]) > 400
     if "timed out" in header.lower() and len(header) < 200:
         evidence = [header]
     elif session:
-        launcher = re.match(r"(.*?exited \d+:)(.*)", header)
+        launcher = re.match(r"(.*?exited -?\d+:)(.*)", header)
         evidence = [launcher.group(1) if launcher else header]
         if launcher and re.match(r"\s*(?:\S+\s+)?(?:error|fatal)\b", launcher.group(2), re.I):
             evidence.append(launcher.group(2))          # the CLI's own error on the header line
@@ -99,6 +103,10 @@ def _provider_outcome(result: dict, now=None, *, host_tz=None) -> dict:
     text = (text + "\n" + "\n".join(map(str, states))).lower().replace("’", "'")
     now = now.replace(tzinfo=host_tz) if now.tzinfo is None else now.astimezone(host_tz)
     retry = now + timedelta(minutes=15)
+    # A long markerless transcript tail never sets auth_failed from its prose; the launcher header and stderr
+    # still can (a genuine 401 reaches the CLI's stderr), so a real auth failure keeps its timed retry.
+    launcher_header = (re.match(r"(.*?exited -?\d+:)", header) or re.match(r"(.*)", header))[1]
+    auth_text = text if not transcript_tail else " ".join([launcher_header, fields["stderr"]]).lower()
     if (glm_code == "quota_exhausted" or
             glm_code is None and re.search(r"usage limit|quota (?:exhausted|exceeded)|insufficient_quota", text)):
         reason = "provider usage limit; retry_after_assumed"
@@ -134,7 +142,7 @@ def _provider_outcome(result: dict, now=None, *, host_tz=None) -> dict:
                 pass
         state = "quota_exhausted"
     elif (glm_code == "auth_failed" or glm_code is None and
-            re.search(r"unauthorized|authentication|invalid.api.key|not logged in|login required|\b401\b", text)):
+            re.search(r"unauthorized|authentication|invalid.api.key|not logged in|login required|\b401\b", auth_text)):
         state, reason = "auth_failed", "provider authentication failed"
     elif result.get("provider") in {"glm", "claude"} and (glm_code == "rate_limited" or glm_code is None and
             (re.search(r"rate.limit|too many requests", text)

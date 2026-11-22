@@ -1548,7 +1548,7 @@ def _glob_regex(pattern: str):
 
 def _scope_violation(path_: str, allowed: list[str], denied: list[str]) -> bool:
     """True when `path_` is denied, or an allow-list exists and does not cover it."""
-    norm = path_.replace("\\", "/")
+    norm = path_.replace("\\", "/") if os.sep == "\\" else path_
     if any(_glob_regex(p).match(norm) for p in denied):
         return True
     return bool(allowed) and not any(_glob_regex(p).match(norm) for p in allowed)

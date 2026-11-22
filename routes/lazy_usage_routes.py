@@ -61,7 +61,7 @@ def setup_lazy_usage_routes():
         with get_db_session() as db:
             run = db.query(LazyUsageRun).filter_by(created_by=owner).order_by(LazyUsageRun.created_at.desc()).first()
             run_id = run.id if run else None
-            owed = runtime.all_owed_reviews(db)          # every repository, not just the latest run
+            owed = runtime.all_owed_reviews(db, owner)   # every repository, but only this owner's runs
         cards = owner_decisions.build_cards(owed)
         return {"run_id": run_id, "cards": cards, "message": owner_decisions.render(cards)}
 

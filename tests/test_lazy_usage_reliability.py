@@ -956,7 +956,8 @@ def test_a_passing_verification_record_for_that_exact_commit_clears_the_debt(db,
     good = [{"result": "pass", "commit_sha": SHA, "ref": "pytest tests -q: 9748 passed", "verified_by": "tye"}]
     ref, run = with_debt(db, queue, verification_evidence=good)
     rt._resolve_met_debts(run, ref, rt.refresh_frontier(["odysseus"]))
-    assert run.checkpoint["owed_reviews"] == []
+    # the verification debt is cleared and the finalised write is now ready for the owner (Sol review of #304)
+    assert [d["gate"] for d in run.checkpoint["owed_reviews"]] == ["owner_acceptance"]
 
 
 @pytest.mark.parametrize("record", [

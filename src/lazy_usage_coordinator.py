@@ -79,7 +79,9 @@ _TOKEN_KEYS = ("inputTokens", "outputTokens", "cacheReadInputTokens", "cacheCrea
                "input_tokens", "output_tokens")
 
 
-_INPUT_SIDE = ("inputTokens", "input_tokens", "cacheReadInputTokens", "cacheCreationInputTokens")
+# Cache counters alone are a fragment: only an ordinary input count says the whole call was reported (Sol review of
+# #301-#304: {cacheReadInputTokens: 20, outputTokens: 7} was counted as a complete 27-token report).
+_INPUT_SIDE = ("inputTokens", "input_tokens")
 _OUTPUT_SIDE = ("outputTokens", "output_tokens")
 
 
@@ -92,7 +94,9 @@ def usage_tokens(usage, estimate):
     the conservative estimate and what was reported. Never less than the estimate (Sol review of #297)."""
     ints = ({k: v for k, v in usage.items() if type(v) is int and v > 0} if isinstance(usage, dict) else {})
     total = sum(v for k, v in ints.items() if k in _TOKEN_KEYS)
-    covers = any(k in ints for k in _INPUT_SIDE) and any(k in ints for k in _OUTPUT_SIDE)
+    # an explicit zero input count is a real report (a fully cached call), unlike an absent one
+    given = {k for k, v in (usage.items() if isinstance(usage, dict) else []) if type(v) is int and v >= 0}
+    covers = any(k in given for k in _INPUT_SIDE) and any(k in given for k in _OUTPUT_SIDE)
     if covers and total:
         return total, 0
     return 0, max(estimate, total)
