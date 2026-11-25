@@ -17,6 +17,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # file-backed DB across processes - tests needing that must set DATABASE_URL.
 os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
 
+# The owner phone-alert channel lives in the real home directory on the lab. A test must never read it or send
+# through it: point the alert files at an empty scratch directory for the whole session.
+import tempfile as _tempfile
+os.environ["AOTERU_ALERTS_HOME"] = _tempfile.mkdtemp(prefix="aoteru-alerts-test-")
+
 # Pre-import real heavy modules BEFORE any test file's module-level stubs can
 # replace them with MagicMock. Some test files (e.g. test_llm_core_sanitize_*)
 # stub sqlalchemy/core.database at module scope with `if mod not in sys.modules`,

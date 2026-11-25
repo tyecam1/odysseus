@@ -1891,6 +1891,60 @@ def _offer_owner_decisions(db):
         log.warning("owner decision notification failed")
 
 
+def _offer_owner_alerts(db=None):
+    """Best-effort phone alert for whatever reached the owner-oversight gate: waiting decisions, a run that
+    ended or paused, a provider that needs the owner, and the daily heartbeat. It also runs when no run is
+    active, because the news that a run just ended (or that decisions are still waiting) arrives exactly then.
+
+    With no valid channel file this reads nothing and starts nothing. Otherwise the reads and the network send
+    run on one background worker with its own short-lived session, so the lifecycle tick never waits for them.
+    Any failure is swallowed: an alert can never affect a run."""
+    try:
+        from src import owner_alerts
+        owner = owner_alerts.enabled_owner()
+        if owner is None:
+            return None
+        return owner_alerts.start_worker(lambda: _deliver_owner_alerts(owner))
+    except Exception:
+        log.warning("owner alert failed")
+        return None
+
+
+def _deliver_owner_alerts(owner):
+    """Worker body. Reports only on `owner`'s runs and debts (the channel names one owner), never another's.
+    Runs are chosen by finish time, so an activation started during the cooldown cannot hide one that just ended.
+    The database session is closed before anything touches the network."""
+    from datetime import timedelta
+    from sqlalchemy import or_
+    from core.database import SessionLocal
+    from src import owner_alerts
+    db = SessionLocal()
+    try:
+        cutoff = utcnow_naive() - timedelta(hours=owner_alerts.FRESH_RUN_HOURS)
+        recent = (db.query(LazyUsageRun).filter(LazyUsageRun.created_by == owner)
+                  .filter(or_(LazyUsageRun.state.notin_(TERMINAL), LazyUsageRun.finished_at >= cutoff))
+                  .order_by(LazyUsageRun.created_at.desc()).limit(30).all())
+        latest = db.query(LazyUsageRun).filter(LazyUsageRun.created_by == owner).order_by(
+            LazyUsageRun.created_at.desc()).first()
+        if latest is not None and all(run.id != latest.id for run in recent):
+            recent.insert(0, latest)           # the heartbeat names the newest run even when it is old news
+        views = []
+        for run in recent:
+            view = run_dict(run)
+            view["pause_reason"] = (run.checkpoint or {}).get("pause_reason")
+            views.append(view)
+        owed = all_owed_reviews(db, owner)
+    finally:
+        db.close()
+    providers = {}
+    for name in ("claude", "codex", "glm"):
+        try:
+            providers[name] = estate_router.provider_allows_dispatch(name)
+        except Exception:
+            providers[name] = {"state": "unknown"}          # unreadable health is unknown, never "ok"
+    owner_alerts.notify(owed, views, providers, expected_owner=owner)
+
+
 def lifecycle_tick():
     from core.database import SessionLocal
     db = SessionLocal()
@@ -1898,6 +1952,7 @@ def lifecycle_tick():
         # No row means no calls, no frontier scan and no paid work.
         run = db.query(LazyUsageRun).filter(LazyUsageRun.state.notin_(TERMINAL)).first()
         if run is None:
+            _offer_owner_alerts(db)
             return None
         run_id = run.id
         db.commit()
@@ -1905,6 +1960,7 @@ def lifecycle_tick():
         db.commit()
         view = advance(db, run_id)
         _offer_owner_decisions(db)
+        _offer_owner_alerts(db)
         return view
     finally:
         db.close()
