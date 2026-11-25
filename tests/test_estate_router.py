@@ -1297,6 +1297,147 @@ def test_execute_codex_with_sandbox_kills_entire_process_group_on_timeout(runtim
     assert _wait_for_pid_exit(child_pid), f"child pid {child_pid} still exists after timeout cleanup"
 
 
+def test_a_codex_deadline_after_a_model_response_is_recorded_as_an_attempt_and_health_is_unchanged(
+        runtime_db, tmp_path, monkeypatch):
+    pid_dir = tmp_path / "pids"
+    pid_dir.mkdir()
+    monkeypatch.setenv("AOTERU_TEST_PID_DIR", str(pid_dir))
+    monkeypatch.setenv("AOTERU_TEST_MODE", "timeout_after_response")
+    monkeypatch.setenv("AOTERU_TEST_MODEL", "gpt-6.1-sol")          # the model the autouse fixture resolves
+    monkeypatch.setattr(estate_router, "_codex_available", lambda: (True, str(_CODEX_PROCESS_GROUP_FIXTURE)))
+
+    result = estate_router._execute_codex_with_sandbox(
+        "probe", sandbox="read-only", provider="codex", timeout=1.0, cwd=str(tmp_path))
+
+    result.pop("_advisory_launch")
+    assert result["ok"] is False and result["error"] == "codex exec timed out after 1.0s"
+    assert result["model_response_verified"] is True
+    assert "model: gpt-6.1-sol" in result["stderr_tail"] and len(result["stderr_tail"]) <= 1000
+    assert estate_router.provider_allows_dispatch("codex")["allowed"] is True
+    from core.database import RoutingDecision, get_db_session
+    with get_db_session() as db:
+        rows = db.query(RoutingDecision).filter_by(executor="codex").all()
+        assert [r.task_class for r in rows] == ["provider_attempt"]
+        assert rows[0].status == "failed"
+    assert _wait_for_pid_exit(int((pid_dir / "child.pid").read_text().strip()))
+
+
+def _cooldown_started():
+    health = estate_router.provider_allows_dispatch("codex")
+    return health["allowed"] is False and health["state"] == "unreachable"
+
+
+def test_a_cli_that_already_exited_nonzero_with_a_pipe_held_is_not_an_attempt(runtime_db, tmp_path, monkeypatch):
+    pid_dir = tmp_path / "pids"
+    pid_dir.mkdir()
+    monkeypatch.setenv("AOTERU_TEST_PID_DIR", str(pid_dir))
+    monkeypatch.setenv("AOTERU_TEST_MODE", "exit_with_pipe_held")
+    monkeypatch.setenv("AOTERU_TEST_MODEL", "gpt-6.1-sol")
+    monkeypatch.setattr(estate_router, "_codex_available", lambda: (True, str(_CODEX_PROCESS_GROUP_FIXTURE)))
+    result = estate_router._execute_codex_with_sandbox(
+        "probe", sandbox="read-only", provider="codex", timeout=1.0, cwd=str(tmp_path))
+    assert "model_response_verified" not in result and "timed out" in result["error"]
+    assert _cooldown_started()
+
+
+def test_incomplete_cleanup_never_converts_a_deadline_into_an_attempt(runtime_db, tmp_path, monkeypatch):
+    pid_dir = tmp_path / "pids"
+    pid_dir.mkdir()
+    monkeypatch.setenv("AOTERU_TEST_PID_DIR", str(pid_dir))
+    monkeypatch.setenv("AOTERU_TEST_MODE", "timeout_after_response")
+    monkeypatch.setenv("AOTERU_TEST_MODEL", "gpt-6.1-sol")
+    monkeypatch.setattr(estate_router, "_codex_available", lambda: (True, str(_CODEX_PROCESS_GROUP_FIXTURE)))
+    real = estate_router._kill_process_tree
+
+    def survivor(*args, **kwargs):
+        real(*args, **kwargs)
+        return {"ok": False, "still_alive_pids": [999999]}
+
+    monkeypatch.setattr(estate_router, "_kill_process_tree", survivor)
+    result = estate_router._execute_codex_with_sandbox(
+        "probe", sandbox="read-only", provider="codex", timeout=1.0, cwd=str(tmp_path))
+    assert result["cleanup_incomplete"] is True and "model_response_verified" not in result
+    assert _cooldown_started()
+
+
+@pytest.mark.parametrize("status,attempt", [(1, False), (0, False), (-11, False), (-9, True)])
+def test_only_our_own_kill_may_end_a_verified_attempt(runtime_db, tmp_path, monkeypatch, status, attempt):
+    import subprocess
+    transcript = ("OpenAI Codex v0.0.0\n--------\nmodel: gpt-6.1-sol\nsession id: 01a1face\n--------\nuser\nprobe\n"
+                  "codex\nworking\n")
+
+    class FakePopen:
+        calls = 0
+        pid = 424242
+        returncode = None
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def communicate(self, timeout=None):
+            type(self).calls += 1
+            if type(self).calls == 1:
+                raise subprocess.TimeoutExpired("codex", timeout)
+            self.returncode = status           # the status collected after cleanup
+            return "", transcript
+
+    monkeypatch.setattr(subprocess, "Popen", FakePopen)
+    monkeypatch.setattr(estate_router, "_kill_process_tree", lambda *a, **k: {"ok": True, "still_alive_pids": []})
+    monkeypatch.setattr(estate_router, "_codex_available", lambda: (True, "/bin/true"))
+    result = estate_router._execute_codex_with_sandbox(
+        "probe", sandbox="read-only", provider="codex", timeout=1.0, cwd=str(tmp_path))
+    assert result.get("model_response_verified", False) is attempt
+    assert estate_router.provider_allows_dispatch("codex")["allowed"] is attempt
+
+
+def test_a_cli_error_only_in_the_drain_snapshot_defeats_verification(runtime_db, tmp_path, monkeypatch):
+    import subprocess
+    banner = (b"OpenAI Codex v0.0.0\n--------\nmodel: gpt-6.1-sol\nsession id: 01a1face\n--------\nuser\nprobe\n"
+              b"codex\nworking\n")
+
+    class FakePopen:
+        calls = 0
+        pid = 424242
+        returncode = None
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def poll(self):
+            return None
+
+        def communicate(self, timeout=None):
+            type(self).calls += 1
+            extra = b"" if type(self).calls == 1 else b"ERROR: connection reset by peer\n"
+            raise subprocess.TimeoutExpired("codex", timeout, output=b"", stderr=banner + extra)
+
+    monkeypatch.setattr(subprocess, "Popen", FakePopen)
+    monkeypatch.setattr(estate_router, "_kill_process_tree", lambda *a, **k: {"ok": True, "still_alive_pids": []})
+    monkeypatch.setattr(estate_router, "_codex_available", lambda: (True, "/bin/true"))
+    result = estate_router._execute_codex_with_sandbox(
+        "probe", sandbox="read-only", provider="codex", timeout=1.0, cwd=str(tmp_path))
+    assert "model_response_verified" not in result and "connection reset" in result["stderr_tail"]
+    assert _cooldown_started()
+
+
+def test_a_codex_deadline_with_only_a_banner_still_starts_the_unreachable_cooldown(
+        runtime_db, tmp_path, monkeypatch):
+    pid_dir = tmp_path / "pids"
+    pid_dir.mkdir()
+    monkeypatch.setenv("AOTERU_TEST_PID_DIR", str(pid_dir))
+    monkeypatch.setenv("AOTERU_TEST_MODE", "timeout_banner_only")
+    monkeypatch.setenv("AOTERU_TEST_MODEL", "gpt-6.1-sol")
+    monkeypatch.setattr(estate_router, "_codex_available", lambda: (True, str(_CODEX_PROCESS_GROUP_FIXTURE)))
+
+    result = estate_router._execute_codex_with_sandbox(
+        "probe", sandbox="read-only", provider="codex", timeout=1.0, cwd=str(tmp_path))
+
+    assert "model_response_verified" not in result
+    health = estate_router.provider_allows_dispatch("codex")
+    assert health["allowed"] is False and health["state"] == "unreachable"
+    assert _wait_for_pid_exit(int((pid_dir / "child.pid").read_text().strip()))
+
+
 def test_execute_codex_with_sandbox_kills_process_that_escaped_pgid(runtime_db, tmp_path, monkeypatch):
     """The actual incident-observed topology (2026-09-01): a codex-
     launched MCP server descendant called setpgid(0, 0), landing in its
