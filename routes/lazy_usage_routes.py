@@ -22,6 +22,11 @@ class Supersession(BaseModel):
     evidence: list[str]
 
 
+class Revocation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    learning_id: str
+
+
 class RunControl(BaseModel):
     model_config = ConfigDict(extra="forbid")
     run_id: str
@@ -68,6 +73,23 @@ def setup_lazy_usage_routes():
         return {"run_id": run_id,
                 "cards": [{k: (c[k] if isinstance(c.get(k), str) else "") for k in public} for c in cards],
                 "message": message}
+
+    @router.get("/learnings")
+    def learnings(request: Request, limit: int = 50):
+        """Advisor learnings (adopted hints and proposals), read-only."""
+        owner = _scope_owner(request, {"estate:read", "estate:execute"})
+        from src import lazy_usage_advisor as advisor
+        with get_db_session() as db:
+            return {"learnings": advisor.list_learnings(db, owner, limit), "in_force": advisor.learnings_in_force(db, owner)}
+
+    @router.post("/learnings/revoke")
+    def revoke_learning(request: Request, body: Revocation):
+        owner = _scope_owner(request, {"estate:execute"})
+        from src import lazy_usage_advisor as advisor
+        with get_db_session() as db:
+            if not advisor.revoke(db, body.learning_id, owner):
+                raise HTTPException(404, "learning not found or already revoked")
+            return {"revoked": body.learning_id}
 
     @router.get("/history")
     def history(request: Request, limit: int = 20):

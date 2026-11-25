@@ -1813,7 +1813,7 @@ def _claude_model_alias() -> str:
     return alias if isinstance(alias, str) and alias.strip() else "sonnet"
 
 
-def execute_claude(objective: str, *, timeout: float = 120.0) -> dict:
+def execute_claude(objective: str, *, timeout: float = 120.0, role: str = "sonnet") -> dict:
     """One bounded planning/advisory call through the unmodified official
     Claude Code CLI under the host's existing subscription login. No tools,
     no repository access: text-in/text-out for the cognitive-coordinator
@@ -1828,10 +1828,16 @@ def execute_claude(objective: str, *, timeout: float = 120.0) -> dict:
     disableAllHooks, no plugins/skills/user CLAUDE.md, and only a SYMLINK to
     the operator's credential store - the CLI, never this code, reads it)
     plus an owned empty working directory. Verified live 2026-11-18:
-    authenticated claude-sonnet-5 with a project-hook canary NOT firing."""
+    authenticated claude-sonnet-5 with a project-hook canary NOT firing.
+
+    `role` selects the model class: "sonnet" (the coordinator, the default) or "opus" (the advisor checkpoint).
+    Either way the CLI resolves the rolling alias and the concrete model is attested from the provider's response;
+    a response from any other class fails as `model_mismatch`."""
     import os
     import subprocess
     import time
+    if role not in {"sonnet", "opus"}:
+        raise ValueError("unknown claude role")
 
     base = {"provider": "claude", "host_id": current_host_id(),
             "concrete_model": None, "model_unverified": True,
@@ -1873,7 +1879,7 @@ def execute_claude(objective: str, *, timeout: float = 120.0) -> dict:
             except OSError:
                 pass  # typed auth_failed below if the login is unreachable
         proc = subprocess.Popen(
-            [str(launcher), "--print", "--output-format", "json", "--model", _claude_model_alias(),
+            [str(launcher), "--print", "--output-format", "json", "--model", _claude_model_alias() if role == "sonnet" else role,
              "--max-turns", "1",
              "--disallowedTools", "Bash,Write,Edit,NotebookEdit,WebFetch,WebSearch,Task,Skill,Agent,TodoWrite,Read,Grep,Glob",
              "--strict-mcp-config", "--disable-slash-commands", "--no-session-persistence"],
@@ -1936,11 +1942,11 @@ def execute_claude(objective: str, *, timeout: float = 120.0) -> dict:
         if proc.returncode == 0:
             usage = response.get("modelUsage")
             models = list(usage) if isinstance(usage, dict) else []
-            if (len(models) != 1 or not isinstance(models[0], str)
-                    or "sonnet" not in models[0].lower()):
+            if (len(models) != 1 or not isinstance(models[0], str) or role not in models[0].lower()
+                    or (role == "opus" and not re.fullmatch(r"claude-opus-[0-9][0-9a-z._-]{0,40}", models[0].lower()))):
                 outcome.update(ok=False, state="failed", error_code="model_mismatch")
                 return {**common, "ok": False, "error_code": "model_mismatch",
-                        "error": "claude result has no single Sonnet-class model attestation",
+                        "error": f"claude result has no single {role.capitalize()}-class model attestation",
                         "observed_models": [str(model)[:80] for model in models[:5]]}
             tokens = usage[models[0]]
             provider_usage = {k: tokens[k] for k in ("inputTokens", "outputTokens", "cacheReadInputTokens",
