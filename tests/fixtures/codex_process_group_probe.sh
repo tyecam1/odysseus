@@ -16,6 +16,33 @@ done
 
 printf '%s\n' "$$" > "$pid_dir/wrapper.pid"
 
+if [ "$mode" = "timeout_after_response" ]; then
+    # Banner, requested model and one model turn, then still running when the caller's deadline expires.
+    printf 'OpenAI Codex v0.0.0\n--------\nmodel: %s\nsession id: 01a1face\n--------\nuser\nprobe\ncodex\nworking\n' \
+        "${AOTERU_TEST_MODEL:?}" >&2
+    sleep 30 &
+    printf '%s\n' "$!" > "$pid_dir/child.pid"
+    sleep 30
+    exit 0
+fi
+
+if [ "$mode" = "exit_with_pipe_held" ]; then
+    # The CLI itself failed and exited; a descendant still holds the output pipes open until the deadline.
+    printf 'OpenAI Codex v0.0.0\n--------\nmodel: %s\nsession id: 01a1face\n--------\nuser\nprobe\ncodex\nworking\n' \
+        "${AOTERU_TEST_MODEL:?}" >&2
+    sleep 30 &
+    printf '%s\n' "$!" > "$pid_dir/child.pid"
+    exit 1
+fi
+
+if [ "$mode" = "timeout_banner_only" ]; then
+    printf 'OpenAI Codex v0.0.0\n--------\nmodel: %s\nsession id: 01a1face\n--------\n' "${AOTERU_TEST_MODEL:?}" >&2
+    sleep 30 &
+    printf '%s\n' "$!" > "$pid_dir/child.pid"
+    sleep 30
+    exit 0
+fi
+
 if [ "$mode" = "timeout" ]; then
     sleep 30 &
     printf '%s\n' "$!" > "$pid_dir/child.pid"

@@ -103,6 +103,7 @@ def _provider_outcome(result: dict, now=None, *, host_tz=None) -> dict:
     text = (text + "\n" + "\n".join(map(str, states))).lower().replace("’", "'")
     now = now.replace(tzinfo=host_tz) if now.tzinfo is None else now.astimezone(host_tz)
     retry = now + timedelta(minutes=15)
+    attempt_only = False
     # A long markerless transcript tail never sets auth_failed from its prose; the launcher header and stderr
     # still can (a genuine 401 reaches the CLI's stderr), so a real auth failure keeps its timed retry.
     launcher_header = (re.match(r"(.*?exited -?\d+:)", header) or re.match(r"(.*)", header))[1]
@@ -148,14 +149,31 @@ def _provider_outcome(result: dict, now=None, *, host_tz=None) -> dict:
             (re.search(r"rate.limit|too many requests", text)
              or _glm_contextual_429(str(result.get("stderr") or "")))):
         state, reason = "rate_limited", "provider rate limited"
+    elif _codex_deadline_after_model_response(result):
+        # The CLI reached the model and the model was answering when OUR deadline expired: that proves the transport,
+        # login and quota worked, so it must not start a 15-minute `unreachable` cooldown. It is a failed attempt only.
+        state, reason, retry, attempt_only = ("unknown", "Codex deadline exceeded after a verified model response; "
+                                              "attempt only", None, True)
     elif result.get("provider") in {"glm", "claude"} and result.get("error_code") in {"launcher_missing", "timeout"}:
         state, reason = "unreachable", "GLM launcher unavailable or timed out"
     elif re.search(r"unreachable|connection|timed out|timeout|dns|network", text):
         state, reason = "unreachable", "provider transport unavailable"
     else:
         state, reason, retry = "unknown", "unclassified provider outcome", None
-    return {"state": state, "retry_after": min(retry, now + timedelta(days=7)).astimezone(timezone.utc).isoformat() if retry else None,
-            "reason": reason, "retry_after_assumed": "retry_after_assumed" in reason}
+    health = {"state": state, "retry_after": min(retry, now + timedelta(days=7)).astimezone(timezone.utc).isoformat() if retry else None,
+              "reason": reason, "retry_after_assumed": "retry_after_assumed" in reason}
+    if attempt_only:
+        health["attempt_only"] = True
+    return health
+
+
+def _codex_deadline_after_model_response(result: dict) -> bool:
+    """True only for a Codex call OUR deadline ended after the launcher verified a model response (structural flag
+    set by `_execute_codex_with_sandbox`; transcript prose never decides it)."""
+    header = str(result.get("error") or "").partition("\n")[0]
+    return (result.get("provider") == "codex" and result.get("ok") is not True
+            and result.get("model_response_verified") is True
+            and header.startswith("codex exec timed out after") and len(header) < 200)
 
 
 def _glm_contextual_429(stderr: str) -> bool:
@@ -267,12 +285,13 @@ def _record_provider_outcome(result: dict, outcome_id: str) -> Optional[str]:
     """Finalize the launch marker; GLM host-local failures remain attempt-only."""
     from core.database import RoutingDecision, get_db_session
     health = _provider_outcome(result)
+    attempt_only = health.pop("attempt_only", False)
     try:
         with get_db_session() as db:
             row = db.query(RoutingDecision).filter_by(id=outcome_id, task_class="provider_outcome").one()
             health["launched_at"] = json.loads(row.escalation_reason)["provider_health"]["launched_at"]
             row.status = "complete" if health["state"] == "ok" else "failed"
-            if result.get("provider") in {"glm", "claude"} and health["state"] not in {
+            if attempt_only or result.get("provider") in {"glm", "claude"} and health["state"] not in {
                     "ok", "quota_exhausted", "rate_limited", "auth_failed"}:
                 health["retry_after"] = None
                 row.task_class = "provider_attempt"
@@ -1418,6 +1437,56 @@ def _kill_process_tree(root_pid: int, process_group_id: int, *, reap_timeout: fl
         _estate_worker_procs._process_tree_pids = original_tree
 
 
+_CODEX_TURN_MARKER = re.compile(r"^(?:codex|exec|thinking)[ \t]*$", re.M)
+_CODEX_CLI_ERROR = re.compile(r"^\s*(?:(?:[\[\d]\S{0,40}\s+)?(?:ERROR|FATAL)\b|(?:error|fatal):)", re.I)
+
+
+def _leader_exited(proc) -> bool:
+    """Has the launched CLI already exited? Never reaps it: the zombie keeps its pid (and process group id)
+    reserved until `_kill_process_tree` has finished, so cleanup can never signal a recycled group."""
+    import os
+    try:
+        return os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
+    except (AttributeError, ChildProcessError, OSError):
+        return getattr(proc, "returncode", None) is not None   # not our child / no waitid: only an already-reaped state
+
+
+def _as_text(value) -> str:
+    """`TimeoutExpired.stdout/.stderr` are bytes even for text-mode pipes; normalise before any text use."""
+    if isinstance(value, (bytes, bytearray)):
+        return bytes(value).decode("utf-8", "replace")
+    return value or ""
+
+
+def _codex_model_response_verified(stdout, stderr, *, model: str, objective: str = "") -> bool:
+    """Evidence that Codex reached the REQUESTED model and the model was already answering: the CLI banner, a
+    `session id:`, a `model:` line equal to the model we passed, and a turn marker (`codex`, `exec` or `thinking`)
+    after it, with no CLI error line. The echoed prompt is removed first so a card that quotes those words cannot
+    fake it. A banner alone proves only a launch."""
+    prompt = (objective or "").replace("\r\n", "\n")
+    if not prompt:
+        return False
+    # The CLI writes its transcript to stderr; stdout only carries the final message. Position decides, not content.
+    raw = (_as_text(stderr) + "\n" + _as_text(stdout)).replace("\r\n", "\n")
+    banner = re.search(r"^OpenAI Codex v\d", raw, re.M)
+    if not banner:
+        return False
+    declared = re.compile(r"^model:\s*(\S+)\s*$", re.M).search(raw, banner.start())
+    session = re.compile(r"^session id:\s*\S+", re.M).search(raw, banner.start())
+    user = re.compile(r"^user\n", re.M).search(raw, declared.end()) if declared else None
+    if not (declared and session and user and declared[1] == model and session.start() < user.start()):
+        return False
+    if not raw.startswith(prompt, user.end()):
+        return False                     # the echo is not exactly the prompt we sent: fail closed
+    # Only the echoed prompt span is excluded; an error line anywhere else vetoes, even one the prompt also quotes.
+    before, after = raw[:user.end()], raw[user.end() + len(prompt):]
+    if after.lstrip("\n").startswith("<stdin>"):
+        return False                     # Codex appended piped input to the echo: the span is not just our prompt
+    if any(_CODEX_CLI_ERROR.match(line[:300]) for line in (before + "\n" + after).splitlines()):
+        return False
+    return _CODEX_TURN_MARKER.search(after) is not None
+
+
 def _execute_codex_with_sandbox(objective: str, *, sandbox: str, provider: str,
                                 timeout: float = 180.0, cwd: Optional[str] = None,
                                 on_started: Optional[Callable[[int], None]] = None) -> dict:
@@ -1465,6 +1534,7 @@ def _execute_codex_with_sandbox(objective: str, *, sandbox: str, provider: str,
                     "-o", out_path,
                     objective,
                 ],
+                stdin=subprocess.DEVNULL,     # an inherited stdin would be appended to the prompt by Codex
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
@@ -1510,23 +1580,35 @@ def _execute_codex_with_sandbox(objective: str, *, sandbox: str, provider: str,
             # same session -- walk real /proc parent-child links so
             # cleanup reaches it too, then re-scan to prove the tree is
             # actually gone rather than assuming the kill worked.
+            leader_exited_first = _leader_exited(proc)       # then only a descendant held the pipes open
             cleanup = _kill_process_tree(process_group_id, process_group_id)
             cleanup_incomplete = not cleanup["ok"]
             try:
                 stdout, stderr = proc.communicate(timeout=5)
-            except subprocess.TimeoutExpired:
-                stdout, stderr = exc.stdout, exc.stderr
+            except subprocess.TimeoutExpired as drained:
+                # the drain's snapshot is cumulative and newer than the first deadline's; never discard it
+                stdout, stderr = drained.stdout or exc.stdout, drained.stderr or exc.stderr
                 # Bounded reap so a cleanup call itself can never hang
                 # indefinitely - but if it still hasn't drained by then,
                 # something is holding the output pipes open past a
                 # reasonable window and that must be visible, not treated
                 # as a definite success.
                 cleanup_incomplete = True
+            stdout, stderr = _as_text(stdout), _as_text(stderr)
             result = {
                 "ok": False, "provider": provider,
                 "error": f"codex exec timed out after {timeout}s",
                 "latency_ms": int((time.monotonic() - started) * 1000),
             }
+            if (not cleanup_incomplete and not leader_exited_first
+                    and getattr(proc, "returncode", None) in (None, -signal.SIGKILL)
+                    and _codex_model_response_verified(stdout, stderr, model=subscription_model, objective=objective)):
+                # Not when a process outlived cleanup (admission must stay closed), the CLI had already exited, or it
+                # exited by itself between that check and our SIGKILL: only OUR kill may end a verified attempt.
+                result["model_response_verified"] = True
+            for key, value in (("stdout_tail", stdout), ("stderr_tail", stderr)):
+                if value:
+                    result[key] = value[-1000:]
             if cleanup_incomplete:
                 result["cleanup_incomplete"] = True
                 result["cleanup_still_alive_pids"] = cleanup["still_alive_pids"]
