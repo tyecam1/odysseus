@@ -1438,7 +1438,14 @@ def _kill_process_tree(root_pid: int, process_group_id: int, *, reap_timeout: fl
 
 
 _CODEX_TURN_MARKER = re.compile(r"^(?:codex|exec|thinking)[ \t]*$", re.M)
-_CODEX_CLI_ERROR = re.compile(r"^\s*(?:(?:[\[\d]\S{0,40}\s+)?(?:ERROR|FATAL)\b|(?:error|fatal):)", re.I)
+# The CLI's OWN error lines only: an uppercase ERROR/FATAL at column 0 (`ERROR: ...`, or a tracing line
+# `<timestamp>  ERROR module::path: ...`). The transcript also carries the output of the tools Codex ran, so a
+# lowercase `error:`, an indented line, or a grep/sed line such as `421:    error = parse(x)` is source code or a tool's
+# message, never the CLI failing: treating those as vetoes made every long source-reading run look "unverified".
+_ANSI = r"(?:\x1b\[[0-9;]*m)*"
+_CODEX_CLI_ERROR = re.compile(
+    _ANSI + r"\[?(?:\d{4}-\d{2}-\d{2}T[\d:.]+(?:Z|[+-]\d{2}:?\d{2})?\]?[ \t]+)?" + _ANSI +
+    r"(?:ERROR|FATAL)" + _ANSI + r"(?:\][ \t]|[ \t]*:[ \t]|[ \t]+[A-Za-z_][\w:]*:[ \t])")
 
 
 def _leader_exited(proc) -> bool:
