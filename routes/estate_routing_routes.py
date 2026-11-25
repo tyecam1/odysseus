@@ -370,7 +370,8 @@ def setup_estate_routing_routes() -> APIRouter:
         _scope_owner(request, {"estate:read", "estate:execute"})
         from src.routing_evaluator import get_decision_by_id
         row = get_decision_by_id(decision_id)
-        if row is None:
+        # Advisor reviews and learnings are owner-scoped: they are read through /api/lazy-usage/learnings only.
+        if row is None or row.get("task_class") in {"lazyusage_learning", "lazyusage_advisor_review"}:
             raise HTTPException(404, f"no routing decision found with id {decision_id!r}")
         return row
 

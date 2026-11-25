@@ -30,7 +30,10 @@ from src.runtime_paths import get_app_root
 log = logging.getLogger(__name__)
 INITIALIZER = "estate-queue-priority-execution@v2"
 CEILINGS = {"max_seconds": 14400, "max_paid_calls": 12, "max_tool_calls": 150,
-            "max_no_delivery_turns": 8, "max_repeat_failures": 3, "max_tokens": 2_000_000}
+            "max_no_delivery_turns": 8, "max_repeat_failures": 3, "max_tokens": 2_000_000,
+            # The advisor checkpoint (src/lazy_usage_advisor.py): `max_paid_calls` is then a tranche. Both are OFF
+            # (0) unless the owner's activation asks for them; the total is tranche x (1 + checkpoints) at most.
+            "advisor_checkpoints": 2, "max_advisor_calls": 3, "max_paid_calls_total": 36}
 # `paid_calls` counts worker/provider DISPATCHES, not model or token consumption. Where a
 # provider reports no usage (codex-write, plain advisory CLI output) the run is charged a
 # deliberately conservative estimate instead of zero, so the token ceiling still binds.
@@ -77,6 +80,20 @@ def _refresh_usage():
         provider_usage.refresh_usage()
     except Exception:
         log.warning("live usage refresh failed")
+
+
+def _budget_end(db, run, reason):
+    """The end of a run on a ceiling. A spent paid-call TRANCHE becomes an advisor checkpoint when the owner's
+    activation asked for one and every deterministic rule allows it; everything else ends exactly as before."""
+    if reason == "max_paid_calls" and not (run.checkpoint or {}).get("in_flight_execution_id"):
+        try:
+            from src import lazy_usage_advisor as advisor
+            review = advisor.can_review(run)
+        except Exception:
+            review = False
+        if review:
+            return _park(db, run, "advisor checkpoint", automatic=False, next_action="advisor_review")
+    return _finish(db, run, "budget_exhausted", reason)
 
 
 def _usage_block(provider, write):
@@ -150,6 +167,18 @@ def run_dict(run):
             "finished_at": run.finished_at.isoformat() if run.finished_at else None}
 
 
+def _advisor_start(db, budgets, ledger, owner):
+    """Checkpoint state for an activation that asked for the advisor, plus the learnings in force (advisory data)."""
+    if not budgets.get("advisor_checkpoints"):
+        return {}
+    from src import lazy_usage_advisor as advisor
+    try:
+        learned = advisor.learnings_in_force(db, owner)
+    except Exception:
+        learned = []
+    return {"advisor": advisor.initial_state({"ledger": ledger}), **({"learnings": learned} if learned else {})}
+
+
 def activate_run(db, owner, repo_scope=None, budget_overrides=None, coordinator=None):
     if not isinstance(owner, str) or not owner.strip():
         raise RunError(422, "owner is required")
@@ -160,11 +189,13 @@ def activate_run(db, owner, repo_scope=None, budget_overrides=None, coordinator=
     overrides = budget_overrides or {}
     if not isinstance(overrides, dict) or set(overrides) - CEILINGS.keys():
         raise RunError(422, "unknown budget")
-    budgets = dict(CEILINGS)
+    budgets = {**CEILINGS, "advisor_checkpoints": 0, "max_advisor_calls": 0}      # advisor off unless asked for
     for key, value in overrides.items():
         if type(value) is not int or value < 0:
             raise RunError(422, "budgets must be nonnegative integers")
         budgets[key] = min(value, CEILINGS[key])
+    if budgets["advisor_checkpoints"] and "max_advisor_calls" not in overrides:
+        budgets["max_advisor_calls"] = min(budgets["advisor_checkpoints"], CEILINGS["max_advisor_calls"])
     if coordinator is not None and (
             not isinstance(coordinator, dict) or set(coordinator) - {"enabled"}
             or type(coordinator.get("enabled")) is not bool):
@@ -183,6 +214,7 @@ def activate_run(db, owner, repo_scope=None, budget_overrides=None, coordinator=
                        checkpoint={"phase": "idle", "in_flight_execution_id": None,
                                    "owed_reviews": owed, "ledger": ledger, "settled_reviews": settled,
                                    "next_action": "refresh_frontier",
+                                   **_advisor_start(db, budgets, ledger, owner),
                                    **({"coordinator": coordinator} if coordinator and coordinator.get("enabled") else {})})
     db.add(run)
     try:
@@ -233,14 +265,30 @@ def stop_run(db, run_id, owner):
     return _stop(db, run)
 
 
-def _budget_reason(run, *, reserved=False):
-    budgets = {k: min((run.budgets or {}).get(k, v), v) for k, v in CEILINGS.items()}
+def _effective_budgets(run):
+    stored = run.budgets or {}
+    return {k: min(stored.get(k, 0 if k in ("advisor_checkpoints", "max_advisor_calls") else v), v)
+            for k, v in CEILINGS.items()}
+
+
+def _budget_reason(run, *, reserved=False, skip_paid=False):
+    """The first ceiling reached, or None. With the advisor on, `max_paid_calls` counts the CURRENT tranche only and
+    the total across tranches is capped separately; `skip_paid` asks about every OTHER ceiling."""
+    from src import lazy_usage_advisor as advisor
+    budgets = _effective_budgets(run)
     if run.started_at and (utcnow_naive() - run.started_at).total_seconds() >= budgets["max_seconds"]:
         return "max_seconds"
+    base = advisor.tranche_base(run)
+    cap = advisor.total_cap(budgets)
+    if not skip_paid and cap is not None and ((run.counters or {}).get("paid_calls", 0) > cap if reserved
+                                              else (run.counters or {}).get("paid_calls", 0) >= cap):
+        return "max_paid_calls"
     for ceiling, counter in (("max_paid_calls", "paid_calls"), ("max_tool_calls", "tool_calls"),
                              ("max_no_delivery_turns", "no_delivery_turns"),
                              ("max_repeat_failures", "repeated_failures")):
-        value = (run.counters or {}).get(counter, 0)
+        if skip_paid and counter == "paid_calls":
+            continue
+        value = (run.counters or {}).get(counter, 0) - (base if counter == "paid_calls" else 0)
         limit = budgets[ceiling]
         if (value > limit if reserved and counter in {"paid_calls", "tool_calls"} else value >= limit):
             return ceiling
@@ -272,7 +320,7 @@ def _finish(db, run, state, reason):
     return _save(db, run, next_action="fresh_activation" if state == "budget_exhausted" else "none")
 
 
-def _park(db, run, reason, *, automatic=True, recheck_seconds=None):
+def _park(db, run, reason, *, automatic=True, recheck_seconds=None, next_action=None):
     # The planning worker can race an operator stop. Only write fields it
     # owns before refreshing the authoritative lifecycle state.
     current_state = db.query(LazyUsageRun.state).filter_by(id=run.id).with_for_update().scalar()
@@ -294,7 +342,7 @@ def _park(db, run, reason, *, automatic=True, recheck_seconds=None):
     if run.state not in {"stop_requested", "stopping"}:
         run.state = "paused"
     wait = recheck_seconds or RECHECK_SECONDS
-    return _save(db, run, pause_reason=reason, next_action="event_recheck" if automatic else "operator_resume",
+    return _save(db, run, pause_reason=reason, next_action=next_action or ("event_recheck" if automatic else "operator_resume"),
                  recheck_at=(utcnow_naive() + timedelta(seconds=wait)).isoformat() if automatic else None)
 
 
@@ -1505,7 +1553,7 @@ def _observe(db, run):
                        run.checkpoint.get("budget_reason", "operator_stop"))
     reason = _budget_reason(run)
     if reason:
-        return _finish(db, run, "budget_exhausted", reason)
+        return _budget_end(db, run, reason)
     if fin_failed or rec_failed:
         return _park(db, run, ("finalization" if fin_failed else "recovery") + " failed for execution " + execution_id +
                      "; resolve it through the governed finalize/recover path", automatic=False)
@@ -1612,9 +1660,13 @@ def advance(db, run_id):
             return _stop(db, run)
         db.commit()
         return _observe(db, run)
+    if (run.state == "paused" and (run.checkpoint or {}).get("next_action") == "advisor_review"
+            and (run.checkpoint or {}).get("pause_reason") == "advisor checkpoint"):
+        from src import lazy_usage_advisor as advisor          # the owner's own pause carries another reason: it wins
+        return advisor.run_checkpoint(db, run)
     reason = _budget_reason(run)
     if reason:
-        return _finish(db, run, "budget_exhausted", reason)
+        return _budget_end(db, run, reason)
     if run.state == "paused":
         due = cp.get("recheck_at")
         if not due or utcnow_naive().isoformat() < due:
@@ -1629,7 +1681,7 @@ def advance(db, run_id):
         _checkpoint(run, usage_accounting_pending=None, usage_accounting_reason=None)
         reason = _budget_reason(run)
         if reason:
-            return _finish(db, run, "budget_exhausted", reason)
+            return _budget_end(db, run, reason)
     if cp.get("phase") in {"selecting", "preparing", "dispatching"}:
         # A competing advance, or interrupted pre-dispatch work. It cannot
         # safely issue anything while the owner may still be alive.
@@ -1728,7 +1780,7 @@ def advance(db, run_id):
             reason = "max_tokens"       # the conservative estimate of this dispatch would cross the ceiling
         if reason:
             _release_owned_lease(db, run)
-            return _finish(db, run, "budget_exhausted", reason)
+            return _budget_end(db, run, reason)
         if run.state != "running":
             return _save(db, run, phase="idle")
         if provider and not estate_router.provider_allows_dispatch(provider).get("allowed"):
