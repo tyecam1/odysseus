@@ -127,7 +127,19 @@ def test_piped_stdin_appended_to_the_echo_fails_closed():
 @pytest.mark.parametrize("line,vetoes", [
     ("ERROR: stream disconnected", True),
     ("2026-11-25T10:47:00Z  ERROR codex_core: request failed", True),
-    ("error: something broke", True),
+    ("FATAL: out of memory", True),
+    ("\x1b[31mERROR\x1b[0m: stream disconnected", True),                       # coloured by the CLI
+    ("[ERROR] stream disconnected before completion", True),
+    ("ERROR : request failed", True),
+    ("2026-11-25T10:47:00+01:00 ERROR codex_core: request failed", True),      # numeric timezone offset
+    ("[2026-11-25T10:47:00Z] ERROR codex_core: request failed", True),
+    ("2026-11-25T10:47:00.123456Z ERROR codex_core::client: stream error", True),
+    ("error: something broke", False),                          # a tool's output (git, cargo...), not the CLI failing
+    ("421:    error = parse(x)", False),                         # a `grep -n` line of source code Codex was reading
+    ("12:def error(msg):", False),
+    ("231:    ERROR_CODES = {}", False),
+    ("ERROR = 'x'", False),
+    ("    ERROR: indented tool output", False),
     ("    raise error", False),
     ("the error handler returns early", False),
     ("def error(msg):", False),
