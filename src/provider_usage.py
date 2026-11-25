@@ -322,10 +322,11 @@ def _live_reading(result, now: float | None = None) -> dict | None:
             return None                  # a malformed window invalidates the reading: never drop a pool silently
         if window:
             windows.append(window)
-    if not windows:
-        return None
     plan, reached, allowed = snapshot.get("planType"), snapshot.get("rateLimitReachedType"), result.get("ordinaryUsageAllowed")
-    return {"remaining": min(w["remaining_percent"] for w in windows),
+    refusal = reached in _REACHED_TYPES if isinstance(reached, str) else False
+    if not windows and not (refusal or allowed is False):
+        return None                      # no window and no explicit refusal says nothing at all
+    return {"remaining": min((w["remaining_percent"] for w in windows), default="unknown"),
             "reset": min((w["resets_at"] for w in windows if w["resets_at"]), default="unknown"),
             "windows": windows, "plan_type": plan if isinstance(plan, str) and plan in _PLAN_TYPES else None,
             "rate_limit_reached": reached if isinstance(reached, str) and reached in _REACHED_TYPES else None,
@@ -435,6 +436,25 @@ def _resolve_binary(clock) -> tuple:
     return value
 
 
+def codex_windows_cached(clock=None) -> dict:
+    """The last live reading if it is fresh enough to act on, else a labelled unknown. Never spawns anything: the
+    dispatch gate reads this inside the run's transaction, while `refresh_usage` refreshes it outside."""
+    clock = clock or time.monotonic
+    entry = _live_cache["entry"]
+    if entry is not None and 0 <= clock() - entry[0] < LIVE_TTL_SECONDS * 2:
+        return entry[1]
+    return {"remaining": "unknown", "reset": "unknown", "windows": [], "source": LIVE_SOURCE, "confidence": "none",
+            "reason": "no recent live usage reading", "observed_at": datetime.now(timezone.utc).isoformat()}
+
+
+def refresh_usage() -> None:
+    """Refresh the live reading (cached, single-flight). Called by the lifecycle tick before any run transaction."""
+    try:
+        codex_windows_live()
+    except Exception:
+        log.warning("live usage refresh failed")
+
+
 def codex_windows_live(binary: str | None = None, clock=time.monotonic) -> dict:
     """Provider-stated Codex windows from the CLI's own account read; unknown on any failure.
 
@@ -483,6 +503,64 @@ def codex_status() -> dict:
     fallback = codex_windows()
     fallback["live_read"] = live.get("reason")
     return fallback
+
+
+PARK_USED_PERCENT = 98            # a window this full cannot take another call: wait for its provider-stated reset
+WRITE_DEFER_USED_PERCENT = 85     # a write dispatch is estimated at 400k tokens: do not start one into a nearly spent window
+FIVE_HOUR_MINUTES = (240, 360)    # the pacing window, identified by its duration (not by the order or label)
+WEEK_MINUTES_MIN = 10000
+
+
+def dispatch_block(provider: str, *, write: bool = False, reading: dict | None = None, now: float | None = None) -> dict | None:
+    """Why a dispatch to `provider` should wait for a provider-stated reset, or None.
+
+    The 5-hour window is the pacing signal (it refills in hours); the weekly pool resets on a different day for each
+    provider and is only a hard stop. Windows are told apart by their reported duration, and a window whose reset has
+    already passed is ignored: its percentage describes a period that is over. Only a LIVE provider-stated reading can
+    hold work back (a rollout can be two days old), unknown never blocks, and nothing is ever invented: this can only
+    add caution, never raise a budget or dispatch past a refusal."""
+    if provider != "codex":
+        return None
+    reading = reading if reading is not None else codex_windows_cached()
+    if reading.get("confidence") != "provider-stated" or reading.get("source") != LIVE_SOURCE:
+        return None
+    now = datetime.now(timezone.utc).timestamp() if now is None else now
+
+    def current(window):
+        reset = window.get("resets_at")
+        if not reset:
+            return True
+        try:
+            return datetime.fromisoformat(reset).timestamp() > now
+        except ValueError:
+            return False
+
+    live = [w for w in reading.get("windows") or [] if current(w)]
+    fives = [w for w in live if w.get("window_minutes") and FIVE_HOUR_MINUTES[0] <= w["window_minutes"] <= FIVE_HOUR_MINUTES[1]]
+    weeks = [w for w in live if (w.get("window_minutes") or 0) >= WEEK_MINUTES_MIN]
+    five = max(fives, key=lambda w: w["used_percent"], default=None)      # the fullest decides: never admit past one
+    week = max(weeks, key=lambda w: w["used_percent"], default=None)
+    resets = [w["resets_at"] for w in live if w.get("resets_at")]
+
+    def block(why, window=None):
+        reset = (window or {}).get("resets_at") or (min(resets) if resets else None)
+        return {"provider": provider, "why": why, "resets_at": reset,
+                **({"used_percent": window["used_percent"]} if window else {})}
+
+    # An explicit refusal is only trusted from a reading that still has a current window (or none to expire).
+    expired_all = bool(reading.get("windows")) and not live
+    if not expired_all:
+        if reading.get("rate_limit_reached"):
+            return block("the provider reports a usage limit reached")
+        if reading.get("ordinary_usage_allowed") is False:
+            return block("the provider does not allow ordinary usage")
+    if five and five["used_percent"] >= PARK_USED_PERCENT:
+        return block("the 5-hour window is nearly spent", five)
+    if week and week["used_percent"] >= PARK_USED_PERCENT:
+        return block("the weekly window is nearly spent", week)
+    if write and five and five["used_percent"] >= WRITE_DEFER_USED_PERCENT:
+        return block("the 5-hour window is too full to start a write", five)
+    return None
 
 
 def claude_status() -> dict:

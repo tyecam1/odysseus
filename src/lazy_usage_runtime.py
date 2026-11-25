@@ -42,6 +42,7 @@ TERMINAL = frozenset({"completed", "stopped", "failed", "budget_exhausted"})
 EXECUTION_TERMINAL = frozenset({"succeeded", "failed", "timed_out", "interrupted"})
 TASK_TERMINAL = frozenset({"done", "completed", "rejected", "superseded", "closed", "cancelled", "canceled"})
 RECHECK_SECONDS = 300
+USAGE_RECHECK_SECONDS = 900
 LOOP_SECONDS = 25
 # Execution classes. Only an implementation can deliver; every other class
 # produces advisory evidence or a human handoff that never counts as delivery.
@@ -68,6 +69,23 @@ STAGES_MAX = 100
 HISTORY_RUNS = 10
 HISTORY_SCAN_ROWS = 500
 MAX_ASSESSED = 24
+
+
+def _refresh_usage():
+    try:
+        from src import provider_usage
+        provider_usage.refresh_usage()
+    except Exception:
+        log.warning("live usage refresh failed")
+
+
+def _usage_block(provider, write):
+    """The provider-stated reason a dispatch should wait, or None. Reading usage can never break a dispatch."""
+    try:
+        from src import provider_usage
+        return provider_usage.dispatch_block(provider, write=write)
+    except Exception:
+        return None
 
 
 def _checkpoint(run, **fields):
@@ -254,7 +272,7 @@ def _finish(db, run, state, reason):
     return _save(db, run, next_action="fresh_activation" if state == "budget_exhausted" else "none")
 
 
-def _park(db, run, reason, *, automatic=True):
+def _park(db, run, reason, *, automatic=True, recheck_seconds=None):
     # The planning worker can race an operator stop. Only write fields it
     # owns before refreshing the authoritative lifecycle state.
     current_state = db.query(LazyUsageRun.state).filter_by(id=run.id).with_for_update().scalar()
@@ -262,12 +280,22 @@ def _park(db, run, reason, *, automatic=True):
         db.rollback()
         db.refresh(run)
         return run_dict(run)
+    if current_state == "paused":
+        stored = db.query(LazyUsageRun.checkpoint).filter_by(id=run.id).scalar() or {}
+        if stored.get("pause_reason") == "operator":
+            # The operator paused it between this turn's last commit and now: that pause is theirs. Discard this
+            # turn's stale in-memory checkpoint (it must never be flushed over theirs) and never turn their pause
+            # into a timed recheck. An automatic pause, by contrast, simply renews its own deadline below.
+            db.rollback()
+            db.refresh(run)
+            return run_dict(run)
     db.flush()
     db.refresh(run, attribute_names=["state"])
     if run.state not in {"stop_requested", "stopping"}:
         run.state = "paused"
+    wait = recheck_seconds or RECHECK_SECONDS
     return _save(db, run, pause_reason=reason, next_action="event_recheck" if automatic else "operator_resume",
-                 recheck_at=(utcnow_naive() + timedelta(seconds=RECHECK_SECONDS)).isoformat() if automatic else None)
+                 recheck_at=(utcnow_naive() + timedelta(seconds=wait)).isoformat() if automatic else None)
 
 
 def refresh_frontier(repo_scope):
@@ -1707,6 +1735,18 @@ def advance(db, run_id):
             _checkpoint(run, phase="idle")
             _release_owned_lease(db, run)
             return _park(db, run, "provider unavailable before dispatch")
+        block = _usage_block(provider, write) if provider else None
+        if block:
+            # Wait for the provider's own reset. An automatic park rechecks every USAGE_RECHECK_SECONDS (a due
+            # recheck repeats the charged preparation, so it is spaced out) and resumes by itself.
+            _checkpoint(run, phase="idle", usage_block=block)
+            _release_owned_lease(db, run)
+            run = _load(db, run.id)
+            if run.state != "running":
+                return _save(db, run, phase="idle", usage_block=None)      # the operator acted meanwhile: theirs wins
+            return _park(db, run, "provider usage window: " + block["why"], recheck_seconds=USAGE_RECHECK_SECONDS)
+        if (run.checkpoint or {}).get("usage_block"):
+            _checkpoint(run, usage_block=None)
         execution_id = str(uuid.uuid4())
         # Charge BEFORE dispatch, preserving spent calls across crashes.
         _charge(run, tool_calls=1, paid_calls=int(provider is not None))
@@ -1956,6 +1996,7 @@ def lifecycle_tick():
             return None
         run_id = run.id
         db.commit()
+        _refresh_usage()                  # the dispatch gate only reads the cache: probing never runs inside a transaction
         estate_router.reconcile_stale_estate_executions(db, EstateExecution)
         db.commit()
         view = advance(db, run_id)
