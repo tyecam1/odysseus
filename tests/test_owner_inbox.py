@@ -2511,3 +2511,40 @@ def test_the_reviews_own_answer_stays_a_day_and_a_far_future_review_time_cannot_
     assert pub_id not in {m for _, m in rig.deleted}
     rig.run(T0 + 60 * 60 + 25 * 3600)
     assert pub_id in {m for _, m in rig.deleted}
+
+
+def test_a_leading_zero_is_read_as_the_letter_o_on_a_phone_keyboard(home):
+    rig = Rig(home)
+    two_open(rig)
+    rig.phone.say("approve 01", T0 + 5 * 60, mid="z1")
+    rig.phone.say("no 02", T0 + 5 * 60 + 5, mid="z2")
+    rig.run(T0 + 6 * 60)
+    assert [d["op"] for d in rig.applied] == ["approve", "decline"]
+    assert ib.zero_as_o("approve 01 and #02, 10, 0, 007 and 5") == "approve O1 and #O2, 10, 0, O07 and 5"
+    assert ib.zero_as_o("approve 01, 02.") == "approve O1, O2."
+    assert ib.zero_as_o("after 0800 or call 07700 900123, 007") == "after 0800 or call 07700 900123, O07"
+    assert ib.zero_as_o("on 2026-01-05 at 09:05, 1-08 and 05/01 and v1.01") == "on 2026-01-05 at 09:05, 1-08 and 05/01 and v1.01"
+
+
+def test_up_to_eight_labelled_decisions_in_one_message(home):
+    rig = Rig(home)
+    rig.candidates = [cand(task_ref=f"odysseus:ready/{n}.md", task_id=f"t{n}", scope=f"{n}" * 64, title=f"Thing {chr(97 + n)}") for n in range(9)]
+    rig.run(T0)
+    rig.run(T0 + 2 * 60)
+    rig.run(T0 + 3 * 60)                                                  # five requests are authored per cycle
+    rig.phone.say("approve O1, O2, O3, O4, O5, O6, O7, O8", T0 + 5 * 60, mid="z3")
+    rig.phone.say("approve O1, O2, O3, O4, O5, O6, O7, O8, O9", T0 + 5 * 60 + 5, mid="z4")
+    rig.run(T0 + 6 * 60)
+    assert len(rig.applied) == 8 and len(rig.parsed) == 1                 # nine parts is not read by code (and is never approved in bulk)
+    assert all(f"O{n}: Approved." in rig.phone.sent[-2]["body"] or f"O{n}: Approved." in rig.phone.sent[-1]["body"] for n in range(1, 9))
+
+
+def test_the_ledger_digest_and_the_log_use_what_the_owner_typed_not_the_rewritten_text(home):
+    import hashlib
+    rig = Rig(home)
+    two_open(rig)
+    digests = []
+    rig.apply = lambda do, items, digest: digests.append(digest) or ("Approved.", "done")
+    rig.phone.say("approve 01", T0 + 5 * 60, mid="z5")
+    rig.run(T0 + 6 * 60)
+    assert digests == [hashlib.sha256(b"approve 01").hexdigest()[:16]] and rig.saved()["log"][-1]["text"] == "approve 01"

@@ -823,7 +823,15 @@ def _direct(text: str, open_items: list, msg_time: Optional[float] = None) -> Op
 
 _SPLIT = re.compile(r"\s*(?:[.;\n]+|\s&\s|,\s*|\band\b|\bthen\b)\s*", re.I)
 _BARE_LABEL = re.compile(rf"^\s*{_LBL}\s*$", re.I | re.A)
-MAX_MULTI = 4
+MAX_MULTI = 8
+_ZERO_LABEL = re.compile(r"(?:(?<=^)|(?<=[\s,;&(]))(#?)0([0-9]{1,2})(?=$|[\s,;.!?)])")      # a standalone token only: never inside a date, time or range
+
+
+def zero_as_o(text: str) -> str:
+    """On a phone keyboard the digit 0 and the letter O look alike: a number with a LEADING zero ("01", "#02") is never a real bare
+    number, so it is read as the Odysseus label (O1, #O2)."""
+    return _ZERO_LABEL.sub(lambda m: f"{m.group(1)}O{m.group(2)}", text)
+
 
 
 def _multi(text: str, open_items: list, msg_time: Optional[float] = None) -> Optional[dict]:
@@ -1114,7 +1122,8 @@ def _cycle_locked(owner, channel, state_path, clock, gather, author, parse, appl
         state["cursor"] = message["id"]
         if first or message["time"] < state["started"] - (0 if channel.get("routes") else 60):
             continue
-        text = clean_reply(message["text"])
+        original = clean_reply(message["text"])               # what the owner typed: the ledger digest and the log use this
+        text = zero_as_o(original)                         # what is interpreted
         if not text:
             continue
         handled += 1
@@ -1128,8 +1137,8 @@ def _cycle_locked(owner, channel, state_path, clock, gather, author, parse, appl
                 state["echo"] = view["echo"] = None         # like any other message, it ends a pending confirmation (also in the copy taken for this topic)
                 notes, ids, all_ok = [], [], True
                 for do in multi["dos"]:
-                    note, status_m = apply(do, view["items"], hashlib.sha256((text + str(do["item"])).encode()).hexdigest()[:16])
-                    notes.append(f"{view['items'][do['item']].get('label')}: {note}" if note else "")
+                    note, status_m = apply(do, view["items"], hashlib.sha256((original + str(do["item"])).encode()).hexdigest()[:16])
+                    notes.append(f"{view['items'][do['item']].get('label')}: {plain(note, 24)}" if note else "")
                     if status_m in ("done", "stale"):
                         _after_action(do, state, now_ts)
                     else:
@@ -1146,7 +1155,7 @@ def _cycle_locked(owner, channel, state_path, clock, gather, author, parse, appl
             say = result["say"]
             apply_status = None
             if result["do"] is not None:
-                ack, status = apply(result["do"], view["items"], hashlib.sha256(text.encode()).hexdigest()[:16])     # a hidden request cannot be actioned
+                ack, status = apply(result["do"], view["items"], hashlib.sha256(original.encode()).hexdigest()[:16])     # a hidden request cannot be actioned
                 say = ack or say
                 apply_status = status
                 if status in ("done", "stale"):
@@ -1161,12 +1170,12 @@ def _cycle_locked(owner, channel, state_path, clock, gather, author, parse, appl
                 else:
                     state["echo"] = None                    # an echo the owner cannot have seen confirms nothing
             outcome.append("reply")
-            _track(state, message, reply_ch, ack, result, text, now_ts, apply_status, state_path.parent / "owner_messages.jsonl")
+            _track(state, message, reply_ch, ack, result, original, now_ts, apply_status, state_path.parent / "owner_messages.jsonl")
         except Exception as exc:
             log.warning("owner inbox reply failed: %s", type(exc).__name__)
             state["echo"] = None
             health["sends_ok"] = False
-            _log_owner(state, message, text, "error", now_ts, state_path.parent / "owner_messages.jsonl")
+            _log_owner(state, message, original, "error", now_ts, state_path.parent / "owner_messages.jsonl")
         save()                   # each reply is durable before the next, so a crash replays at most one
     # 3. every waiting approval is shown at once (only quiet hours hold them), each slot reserved durably BEFORE its post.
     #    Authoring is bounded per cycle, so a long queue goes out over a few cycles. No digest and no status message is ever
