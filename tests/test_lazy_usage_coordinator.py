@@ -304,9 +304,9 @@ def test_step_rejects_ref_beyond_bounded_candidate_window(db, frontier, monkeypa
     add, _ = frontier
     for i in range(coord.MAX_CANDIDATES + 1):
         add("task-%02d" % i)
-    # the 16th record exists in the frontier but was never shown to the
+    # the record just past the window exists in the frontier but was never shown to the
     # model; a plan promoting it must be rejected
-    unshown = "odysseus:ready/task-15.md"
+    unshown = "odysseus:ready/task-%02d.md" % coord.MAX_CANDIDATES
     assert unshown not in {r["ref"] for r in coord._candidates(rt.refresh_frontier(["odysseus"]))}
     monkeypatch.setattr(estate_router, "execute_glm", lambda prompt, **kw: glm_plan_result([unshown]))
     run = _run(db)

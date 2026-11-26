@@ -85,7 +85,7 @@ def test_the_ceilings_clamp_the_new_budgets_like_the_old_ones(db):
     result = rt.activate_run(db, "operator", ["odysseus"], {"advisor_checkpoints": 99, "max_advisor_calls": 99,
                                                            "max_paid_calls_total": 999})
     assert result["budgets"]["advisor_checkpoints"] == 2 and result["budgets"]["max_advisor_calls"] == 3
-    assert result["budgets"]["max_paid_calls_total"] == 36
+    assert result["budgets"]["max_paid_calls_total"] == 120
 
 
 def test_asking_for_checkpoints_without_a_call_cap_never_leaves_the_advisor_silently_dead(db):

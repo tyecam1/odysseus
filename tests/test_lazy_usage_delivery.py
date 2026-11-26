@@ -737,3 +737,28 @@ def test_a_fresh_lease_still_blocks_and_an_old_preparing_reservation_does_not(db
     row.heartbeat_at = utcnow_naive() - timedelta(seconds=park_lease_ops.PARK_PREPARE_STALE_SECONDS + 60)
     db.commit()
     assert rt._assess(frontier, db.get(LazyUsageRun, run_id), record)["blocker"] != "repo_lease_held"
+
+
+def test_a_long_gated_head_does_not_hide_feasible_work_from_the_coordinator(db, queue):
+    """The old 24-card window made the coordinator see nothing when the first 24 cards by priority were all gated."""
+    for i in range(rt.MAX_FEASIBLE_SHOWN + 6):
+        queue.add("obsidian-phd", "gate%02d" % i, **BRANCH_PROTECTION)                  # protected hand-offs: never feasible
+    work = queue.add("odysseus", "later-work", priority="low", execution_mode="implementation", allowed_paths=["src/**"])
+    run = db.get(LazyUsageRun, activate(db, ("odysseus", "obsidian-phd"), {"enabled": True}))
+    run.state = "running"
+    db.commit()
+    frontier = rt.refresh_frontier(["odysseus", "obsidian-phd"])
+    ordered = [r["ref"] for r in rt._ordered(frontier)]
+    assert ordered.index(work) > rt.MAX_FEASIBLE_SHOWN             # it really is past the old window
+    evidence = rt.candidate_evidence(frontier, run)
+    assert [e["ref"] for e in evidence if e["feasible"]] == [work]
+
+
+def test_evidence_stops_once_enough_feasible_candidates_are_found(db, queue):
+    for i in range(rt.MAX_FEASIBLE_SHOWN + 5):
+        queue.add("odysseus", "ok%02d" % i, execution_mode="implementation", allowed_paths=["src/**"])
+    run = db.get(LazyUsageRun, activate(db, ("odysseus",), {"enabled": True}))
+    run.state = "running"
+    db.commit()
+    evidence = rt.candidate_evidence(rt.refresh_frontier(["odysseus"]), run)
+    assert sum(1 for e in evidence if e["feasible"]) == rt.MAX_FEASIBLE_SHOWN
