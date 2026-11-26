@@ -20,7 +20,7 @@ NEXT_DAY = datetime(2026, 11, 27, 9, 0, tzinfo=timezone.utc).timestamp()
 
 class World:
     def __init__(self, tmp_path):
-        self.sent, self.inbox, self.now, self.parsed, self.answers = [], [], T0, [], []
+        self.sent, self.inbox, self.now, self.parsed, self.answers, self.deleted = [], [], T0, [], [], []
         self.state = tmp_path / "checklist_state.json"
         self.channel = {"user": "odysseus", "password": "pw", "owner": "operator", "url": f"{BASE}/odysseus-approvals",
                         "reply_url": f"{BASE}/reply-topic-1234", "base": BASE, "routes": {}}
@@ -28,7 +28,8 @@ class World:
 
     def send(self, channel, title, body, priority):
         self.sent.append({"title": title, "body": body, "url": channel["url"]})
-        channel["_published"].append(f"pub{len(self.sent)}")
+        self.posted = getattr(self, "posted", 0) + 1
+        channel["_published"].append(f"pub{self.posted}")
         return True
 
     def fetch(self, channel, url):
@@ -43,7 +44,8 @@ class World:
 
     def run(self, at=None):
         self.now = at if at is not None else self.now
-        return cl.step("operator", self.channel, URL, self.state, lambda: self.now, self.send, self.fetch, self.parse, self.source)
+        return cl.step("operator", self.channel, URL, self.state, lambda: self.now, self.send, self.fetch, self.parse, self.source,
+                       lambda ch, url, msg: self.deleted.append(msg) or True)
 
     def say(self, text, at, mid=None, **extra):
         self.inbox.append({"id": mid or f"o{len(self.inbox)}", "time": at, "text": text, "tags": [], **extra})
@@ -496,3 +498,69 @@ def test_the_list_names_what_was_dropped_today_so_it_can_be_reopened(w):
     w.say("drop 2", T0 + 60)
     w.run(T0 + 120)
     assert "Dropped today: 2" in w.sent[-1]["body"] and "reopen N" in w.sent[-1]["body"]
+
+
+# ---- only the latest list stays; the owner's commands and the replies are purged a few minutes after they are handled
+
+def test_a_new_list_deletes_the_previous_one_so_only_the_latest_stays(w):
+    w.ready()
+    first = w.saved()["last_list"]
+    assert first and w.deleted == []
+    w.say("done 1", T0 + 60, mid="c1")
+    w.run(T0 + 120)
+    assert first in w.deleted and w.saved()["last_list"] != first
+    assert w.saved()["last_list"] not in w.deleted
+
+
+def test_the_owners_command_is_deleted_ten_minutes_after_it_was_handled(w):
+    w.ready()
+    w.say("done 1", T0 + 60, mid="c1")
+    w.run(T0 + 120)
+    assert "c1" not in w.deleted
+    w.run(T0 + 120 + cl.PURGE_DELAY + 60)
+    assert "c1" in w.deleted
+
+
+def test_a_help_reply_and_the_message_it_answered_are_purged_too_and_logged(w):
+    w.ready()
+    w.say("zzz unintelligible", T0 + 60, mid="c2")
+    w.answers = [None]
+    w.run(T0 + 120)
+    assert [e["out"] for e in w.saved()["log"]] == ["help"]
+    w.run(T0 + 120 + cl.HELP_PURGE_DELAY + 60)                     # a command that did nothing keeps its thread for an hour
+    assert "c2" in w.deleted and any(m.startswith("pub") and m != w.saved()["last_list"] for m in w.deleted)
+    assert w.saved()["last_list"] not in w.deleted
+
+
+def test_the_checklists_retire_and_log_lists_are_validated_when_read(tmp_path):
+    path = tmp_path / "s.json"
+    path.write_text(json.dumps({"owner": "operator", "retire": [{"url": URL, "msg": "ok1", "due": 5}, {"url": URL, "msg": "bad/id"}, {"url": 5, "msg": "x"}],
+                                "last_list": "bad/id", "log": [{"id": "m1", "t": 1, "text": "t", "out": "help"}, {"id": 3}]}))
+    got = cl._read(path)
+    assert got["retire"] == [{"url": URL, "msg": "ok1", "tries": 0, "due": 5.0}] and got["last_list"] is None and [e["id"] for e in got["log"]] == ["m1"]
+
+
+def test_a_command_that_did_nothing_keeps_its_thread_for_an_hour_and_a_capped_one_is_logged(w):
+    w.ready()
+    w.say("zzz unintelligible", T0 + 60, mid="h1")
+    w.answers = [None]
+    w.run(T0 + 120)
+    w.run(T0 + 120 + cl.PURGE_DELAY + 60)
+    assert "h1" not in w.deleted                                      # ten minutes is not enough for a command that failed
+    w.run(T0 + 120 + cl.HELP_PURGE_DELAY + 60)
+    assert "h1" in w.deleted
+    for i in range(3):
+        w.say(f"please tidy up number {i}", T0 + 5000 + i, mid=f"k{i}")
+    w.answers = ['{"ops":[]}'] * 4
+    w.run(T0 + 5100)
+    assert "capped" in [e["out"] for e in w.saved()["log"]]
+
+
+def test_every_checklist_message_is_also_appended_in_full_to_the_evidence_file(w):
+    w.ready()
+    w.say("done 1 " + "really " * 30, T0 + 60, mid="v1")
+    w.say("zzz", T0 + 61, mid="v2")
+    w.answers = [None]
+    w.run(T0 + 120)
+    lines = [json.loads(l) for l in (w.state.parent / "owner_messages.jsonl").read_text().splitlines()]
+    assert [(l["id"], l["topic"]) for l in lines] == [("v1", "checklist"), ("v2", "checklist")] and lines[0]["text"].startswith("done 1 really")
