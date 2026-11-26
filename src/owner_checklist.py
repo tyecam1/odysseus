@@ -77,7 +77,8 @@ def load_topic(home: Path) -> Optional[str]:
 
 
 def _empty() -> dict:
-    return {"owner": None, "day": None, "items": [], "dropped": [], "processed": [], "published": [], "started": None, "posts": [], "next_id": 1, "posted_at": None, "calls": []}
+    return {"owner": None, "day": None, "items": [], "dropped": [], "processed": [], "published": [], "started": None, "posts": [], "next_id": 1,
+            "posted_at": None, "calls": [], "retire": [], "last_list": None, "log": []}
 
 
 def _num(value) -> bool:
@@ -128,6 +129,16 @@ def _read(path: Path) -> dict:
         state["calls"] = [float(x) for x in data["calls"] if _num(x)][-MAX_MODEL_CALLS_PER_DAY * 2:]
     if _num(data.get("posted_at")):
         state["posted_at"] = float(data["posted_at"])
+    if isinstance(data.get("retire"), list):
+        state["retire"] = [{"url": e["url"], "msg": e["msg"], "tries": e["tries"] if isinstance(e.get("tries"), int) and not isinstance(e.get("tries"), bool) else 0,
+                            "due": float(e["due"]) if _num(e.get("due")) else 0.0} for e in data["retire"][:100]
+                           if isinstance(e, dict) and isinstance(e.get("url"), str) and len(e["url"]) <= 200 and isinstance(e.get("msg"), str) and inbox._MSG_ID.match(e["msg"])]
+    if isinstance(data.get("last_list"), str) and inbox._MSG_ID.match(data["last_list"]):
+        state["last_list"] = data["last_list"]
+    if isinstance(data.get("log"), list):
+        state["log"] = [{"id": e["id"], "t": float(e["t"]), "text": e["text"][:200], "out": e["out"][:40], "reviewed": bool(e.get("reviewed"))}
+                        for e in data["log"][-100:] if isinstance(e, dict) and isinstance(e.get("id"), str) and len(e["id"]) <= 80 and _num(e.get("t"))
+                        and isinstance(e.get("text"), str) and isinstance(e.get("out"), str)]
     ids = [i["id"] for i in state["items"]]
     state["next_id"] = max([data["next_id"] if isinstance(data.get("next_id"), int) and not isinstance(data.get("next_id"), bool) and 0 < data["next_id"] <= 100_000 else 1]
                            + [n + 1 for n in ids])
@@ -330,8 +341,12 @@ def vault_source(vault: Optional[str] = None, today: Optional[date] = None) -> C
 
 # ------------------------------------------------------------------ one pass
 
+PURGE_DELAY = 600
+HELP_PURGE_DELAY = 3600                     # a command that did nothing keeps its thread longer, so the owner can see why
+
+
 def step(owner: str, channel: dict, url: str, state_path: Path, clock: Callable, send: Callable, fetch: Callable,
-         parse: Callable, source: Callable) -> str:
+         parse: Callable, source: Callable, delete: Optional[Callable] = None) -> str:
     now = clock()
     state = _read(state_path)
     if state["owner"] != owner:
@@ -348,11 +363,17 @@ def step(owner: str, channel: dict, url: str, state_path: Path, clock: Callable,
         pub.clear()
         _write(state_path, state)
 
-    def post(body: str) -> bool:
-        """True when delivered or the outcome is unknown (never re-posted); False only when the server refused."""
+    def schedule(mid, delay):
+        if isinstance(mid, str) and inbox._MSG_ID.match(mid) and len(state["retire"]) < 100:
+            state["retire"].append({"url": url, "msg": mid, "tries": 0, "due": now + delay})
+
+    def post(body: str, kind: str = "reply", delay: float = PURGE_DELAY) -> bool:
+        """True when delivered or the outcome is unknown (never re-posted); False only when the server refused. A list replaces the
+        previous list (which is deleted); any other post is a reply that goes a few minutes later."""
         state["posts"] = [t for t in state["posts"] if now - t < 86400]
         if len(state["posts"]) >= MAX_POSTS_PER_DAY:
             return False
+        before = len(pub)
         try:
             delivered = bool(send(ch, _title(now), body, 3))
         except Exception as exc:
@@ -360,6 +381,12 @@ def step(owner: str, channel: dict, url: str, state_path: Path, clock: Callable,
             delivered = True
         if delivered:
             state["posts"].append(now)
+            if len(pub) > before:
+                if kind == "list":
+                    schedule(state.get("last_list"), 0)
+                    state["last_list"] = pub[-1]
+                else:
+                    schedule(pub[-1], delay)
         return delivered
 
     try:
@@ -387,7 +414,11 @@ def step(owner: str, channel: dict, url: str, state_path: Path, clock: Callable,
         ops = fast_ops(text)
         if ops is None:
             if len(state["calls"]) >= MAX_MODEL_CALLS_PER_DAY or calls_now >= MAX_MODEL_CALLS_PER_CYCLE:
-                post(_CAP)                                        # the model is rationed; the simple commands always work
+                post(_CAP, "reply", HELP_PURGE_DELAY)             # the model is rationed; the simple commands always work
+                schedule(message["id"], HELP_PURGE_DELAY)
+                state["log"] = (state["log"] + [{"id": str(message["id"])[:80], "t": float(message["time"]), "text": text[:200], "out": "capped", "reviewed": False}])[-100:]
+                inbox._evidence(state_path.parent / "owner_messages.jsonl", {"id": str(message["id"])[:80], "topic": "checklist", "t": float(message["time"]),
+                                                                          "text": str(message.get("text") or text)[:2000], "out": "capped"})
                 save()
                 outcome.append("capped")
                 continue
@@ -398,19 +429,39 @@ def step(owner: str, channel: dict, url: str, state_path: Path, clock: Callable,
             except Exception as exc:
                 log.warning("owner checklist parse failed: %s", type(exc).__name__)
                 ops = None
+        schedule(message["id"], PURGE_DELAY)                      # the owner's own command goes once it has been handled (later if it did nothing)
         if ops and state["posted_at"] is not None and message["time"] < state["posted_at"] and any(o["ids"] for o in ops):
-            post(_STALE)                                          # typed against a list that has since been replaced
+            post(_STALE, "reply", HELP_PURGE_DELAY)                  # typed against a list that has since been replaced
+            result = "stale"
+        elif ops and apply_ops(state, ops):
             save()
-            outcome.append("stale")
-            continue
-        if ops and apply_ops(state, ops):
-            save()
-            post(render(state["items"]))
-            outcome.append("edit")
+            post(render(state["items"]), "list")
+            result = "edit"
         else:
-            post(_HELP)
-            outcome.append("help")
+            post(_HELP, "reply", HELP_PURGE_DELAY)
+            result = "help"
+        outcome.append(result)
+        if result in ("help", "stale"):
+            for e in state["retire"]:
+                if e["msg"] == message["id"]:
+                    e["due"] = now + HELP_PURGE_DELAY
+        state["log"] = (state["log"] + [{"id": str(message["id"])[:80], "t": float(message["time"]), "text": text[:200], "out": result, "reviewed": False}])[-100:]
+        inbox._evidence(state_path.parent / "owner_messages.jsonl", {"id": str(message["id"])[:80], "topic": "checklist", "t": float(message["time"]),
+                                                                  "text": str(message.get("text") or text)[:2000], "out": result})
         save()
+    kept, deleted = [], 0                                         # resolved messages are deleted (best effort), a few per pass
+    for entry in state["retire"]:
+        if entry.get("due", 0) > now or deleted >= 10:
+            kept.append(entry)
+            continue
+        deleted += 1
+        try:
+            gone = bool((delete or (lambda *a: True))(channel, entry["url"], entry["msg"]))
+        except Exception:
+            gone = False
+        if not gone and entry.get("tries", 0) + 1 < 5:
+            kept.append({**entry, "tries": entry.get("tries", 0) + 1})
+    state["retire"] = kept
     when = inbox._local(now)
     day = when.date().isoformat()
     if state["day"] != day and inbox.DIGEST_AT <= inbox.minutes_of_day(now) < inbox.QUIET_START:
@@ -419,7 +470,7 @@ def step(owner: str, channel: dict, url: str, state_path: Path, clock: Callable,
         state["day"] = day
         state["posted_at"] = now
         save()                                                    # reserved before the post, like the inbox's digest
-        if post(render(state["items"])):
+        if post(render(state["items"]), "list"):
             outcome.append("daily")
         else:
             state.update(before)                                  # refused: the old list is still the one on the phone
@@ -458,7 +509,7 @@ def run(owner: str, *, parse: Callable, source: Optional[Callable] = None, clock
             return "busy"
         return step(owner, channel, url, state_path, clock or time.time, send or inbox.send,
                     fetch or (lambda ch, u: inbox._fetch_topic(ch, u, "all", inbox.FETCH_TIMEOUT_SECONDS)),
-                    parse, source or vault_source())
+                    parse, source or vault_source(), inbox.delete_message)
     except Exception as exc:
         log.warning("owner checklist failed: %s", type(exc).__name__)
         return "error"

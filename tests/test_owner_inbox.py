@@ -38,6 +38,7 @@ class Phone:
 
     def __init__(self):
         self.sent, self.inbox, self.fail_sends, self.refuse_sends = [], [], 0, 0
+        self.posted = 0
         self.refuse_code = 403
 
     def send(self, channel, title, body, priority, *a, **k):
@@ -51,7 +52,8 @@ class Phone:
             raise OSError("timed out")        # outcome unknown
         self.sent.append({"title": title, "body": body, "priority": priority, "url": channel["url"]})
         if isinstance(channel.get("_published"), list):
-            channel["_published"].append(f"pub{len(self.sent) - 1}")           # the broker's id for the post
+            channel["_published"].append(f"pub{self.posted}")                   # the broker's id for the post (never reused)
+        self.posted += 1
         return True
 
     def fetch(self, channel, since):
@@ -67,7 +69,7 @@ class Phone:
 def cand(**over):
     base = {"kind": "approval", "task_ref": "odysseus:ready/glove.md", "task_id": "glove", "scope": "a" * 64, "fp": FP,
             "priority": "high", "opened_at": "2026-11-20", "title": "Glovebox shortlist", "card_line": "Glovebox shortlist, medium risk",
-            "context": {}}
+            "context": {"risk": "medium"}}              # readable facts and no decision class: not a protected request
     return {**base, **over}
 
 
@@ -133,7 +135,7 @@ def test_the_delegation_package_passes_the_fifteen_second_check():
 
 
 @pytest.mark.parametrize("title,body", [
-    ("", "x"), ("T " * 30, "x"), ("Approve: x", "word " * 210), ("Approve: x", "\n".join(["line"] * 12)),
+    ("", "x"), ("T " * 33, "x"), ("Approve: x", "word " * 210), ("Approve: x", "\n".join(["line"] * 12)),
     ("Approve: x", "see src/estate_router.py"), ("Approve: x", "task C:\\temp"), ("Approve: x", "commit 3f9a1c07b2d4"),
     ("Approve: x", "open http://x.y/z"), ("Approve: x", "the sha256 is"), ("Approve: x", "mail me at evil.com now"),
     ("Approve: x", "see notes.md"), ("Approve: x", "token abcdefghijklmnopqrstuvwxyz1234"),
@@ -481,7 +483,7 @@ def test_with_two_open_items_a_reply_that_names_neither_asks_which():
     state = {"items": {"a": {"id": "a", "name": "glovebox", "state": "open", "ask": "x", "detail": "d"},
                        "b": {"id": "b", "name": "ethics dossier", "state": "open", "ask": "y", "detail": "d"}}, "echo": None}
     out = ib.interpret("yes please", state, NOON, lambda t, o, e: {"target": None, "verdict": "yes", "condition": False, "confidence": 0.95})
-    assert out["do"] is None and "Which one: ethics dossier or glovebox?" == out["say"]
+    assert out["do"] is None and "Which one: ethics dossier, glovebox? Reply like 'approve P1'." == out["say"]
 
 
 def test_a_parser_naming_an_item_that_is_not_open_is_ignored():
@@ -1289,7 +1291,7 @@ def test_the_first_cycle_only_records_and_a_waiting_approval_goes_out_the_next_m
     assert rig.run(T0) == "first_run" and rig.phone.sent == []
     assert rig.run(T0 + 2 * 60) == "interrupt"
     sent = rig.phone.sent[0]
-    assert sent["priority"] == 4 and sent["title"] == "Approve: glovebox shortlist" and ib.fifteen_second_ok(sent["title"], sent["body"])
+    assert sent["priority"] == 4 and sent["title"] == "Approve O1: glovebox shortlist" and ib.fifteen_second_ok(sent["title"], sent["body"])
     assert "CARD: Glovebox shortlist, medium risk" in sent["body"]
 
 
@@ -1341,7 +1343,7 @@ def test_no_digest_and_no_status_message_is_ever_posted(home):
     rig.candidates = many(1)
     rig.run(NEXT_MORNING + 86400 + 3600)
     rig.run(NEXT_MORNING + 86400 + 3700)
-    assert [s["title"].startswith("Approve:") for s in rig.phone.sent] == [True]
+    assert [s["title"].startswith("Approve ") for s in rig.phone.sent] == [True]
 
 
 def test_a_refused_package_is_retried_later_and_does_not_block_the_others(home):
@@ -1545,7 +1547,9 @@ def test_an_answered_request_has_its_message_deleted(home):
     rig.phone.say("no thanks", T0 + 5 * 60)
     rig.verdicts = [{"target": "glovebox shortlist", "verdict": "no"}]
     run_with(rig, T0 + 6 * 60, deleted)
-    assert [m for _, m in deleted] == ["pub0"] and rig.saved()["retire"] == []
+    assert deleted == []                                          # the owner sees the confirmation first
+    run_with(rig, T0 + 6 * 60 + ib.RESOLVED_PURGE_DELAY + 60, deleted)
+    assert sorted(m for _, m in deleted) == ["pub0", "pub1"] and rig.saved()["retire"] == []      # the package and the acknowledgement
 
 
 def test_a_withdrawn_request_has_its_message_deleted_too(home):
@@ -1635,7 +1639,7 @@ def test_the_retire_list_is_validated_when_read(home):
         {"url": f"{BASE}/t", "msg": "ok1", "tries": 2}, {"url": f"{BASE}/t", "msg": "bad/id"}, {"url": 5, "msg": "x"}, "junk",
         {"url": "u" * 300, "msg": "ok2"}]}))
     got = ib._read_state(state)["retire"]
-    assert got == [{"url": f"{BASE}/t", "msg": "ok1", "tries": 2}]
+    assert got == [{"url": f"{BASE}/t", "msg": "ok1", "tries": 2, "due": 0.0}]
 
 
 def test_text_is_cut_at_a_sentence_or_a_word_never_in_the_middle_of_one():
@@ -1741,10 +1745,10 @@ def test_deletions_are_bounded_per_cycle_and_an_unpolled_topics_message_is_retir
     run_with(rig, T0, deleted)
     run_with(rig, T0 + 2 * 60, deleted)
     state = rig.saved()
-    state["retire"] = [{"url": f"{BASE}/t", "msg": f"m{i}", "tries": 0} for i in range(6)]
+    state["retire"] = [{"url": f"{BASE}/t", "msg": f"m{i}", "tries": 0} for i in range(14)]
     rig.state.write_text(json.dumps(state))
     run_with(rig, T0 + 4 * 60, deleted)
-    assert len(deleted) == 4 and len(rig.saved()["retire"]) == 2
+    assert len(deleted) == ib.RETIRE_PER_CYCLE == 12 and len(rig.saved()["retire"]) == 2
 
 
 def test_the_delegation_question_is_in_the_current_layout_and_is_not_re_sent_every_cycle(home):
@@ -1778,3 +1782,469 @@ def test_label_stripping_keeps_ordinary_text_and_removes_label_lines():
                        ib.card_brief(cand(context={"risk": "low"})))[1]
     assert "Pay the credit card: the supplier invoice." in body
     assert body.count("\nSCOPE:") == 1 and body.startswith("WHAT:") and body.count("ADVICE:") == 1 and "Scope" not in body   # only the code-built lines
+
+
+# ---- every request has a short label, and a reply that names it is understood by code
+
+def labels(rig):
+    return {i["name"]: i["label"] for i in rig.saved()["items"].values()}
+
+
+def multi(*refs):
+    return [cand(task_ref=ref, task_id=f"t{n}", scope=f"{n}" * 64, title=f"Thing {chr(97 + n)}") for n, ref in enumerate(refs)]
+
+
+def test_every_request_gets_a_short_label_per_repository_and_a_label_is_never_reused(home):
+    rig = Rig(home)
+    rig.candidates = multi("odysseus:ready/a.md", "odysseus:ready/b.md", "obsidian-phd:ready/c.md", "misumi:ready/d.md")
+    rig.run(T0)
+    rig.run(T0 + 2 * 60)
+    got = sorted(labels(rig).values())
+    assert got == ["M1", "O1", "O2", "P1"]
+    # one is answered and a new Odysseus request arrives: it is O3, never the freed O1
+    first = next(i for i in rig.saved()["items"].values() if i["label"] == "O1")
+    rig.phone.say("no O1", T0 + 5 * 60)
+    rig.run(T0 + 6 * 60)
+    rig.candidates = [c for c in rig.candidates if c["task_id"] != first["task_id"]] + multi("odysseus:ready/e.md", "odysseus:ready/f.md")[1:]
+    rig.run(T0 + 8 * 60)
+    rig.run(T0 + 10 * 60)
+    assert "O3" in labels(rig).values() and list(labels(rig).values()).count("O1") == 1
+
+
+def test_the_title_and_the_reply_hint_carry_the_label(home):
+    rig = Rig(home)
+    rig.run(T0)
+    rig.run(T0 + 2 * 60)
+    sent = rig.phone.sent[0]
+    assert sent["title"] == "Approve O1: glovebox shortlist"
+    assert sent["body"].splitlines()[-1] == "Reply: approve O1, no O1, later O1, or O1? to ask."
+
+
+def test_the_advisor_delegation_question_is_labelled_too(home):
+    rig = Rig(home)
+    rig.candidates = [cand(kind="delegation", task_ref="policy:advisor-approvals", task_id=ib.DELEGATION_TASK_ID, scope=ib.DELEGATION_SCOPE,
+                           title="advisor approvals", priority="critical")]
+    rig.run(T0)
+    rig.run(T0 + 2 * 60)
+    sent = rig.phone.sent[0]
+    assert sent["title"] == "Decide S1: advisor approvals" and sent["body"].splitlines()[-1] == "Reply: approve S1, no S1, later S1, or S1? to ask."
+    assert ib.fifteen_second_ok(sent["title"], sent["body"])
+
+
+@pytest.mark.parametrize("text", ["approve O1", "Approve o1.", "yes O1", "O1 yes", "#O1 approve", "go ahead O1", "approve O1 please",
+                                  "please approve O1", "confirm for O1", "O1: yes", "approve #O1!"])
+def test_a_reply_naming_the_label_approves_at_once_with_no_further_confirmation(home, text):
+    rig = Rig(home)
+    rig.open_one()
+    rig.phone.say(text, T0 + 41 * 60 - 30)
+    rig.run(T0 + 41 * 60)
+    assert [d["op"] for d in rig.applied] == ["approve"] and rig.applied[0]["confirmed"] is True
+    assert rig.parsed == [] and rig.saved()["echo"] is None                        # read by code, not by a model, and nothing left to confirm
+
+
+@pytest.mark.parametrize("text,op", [("no O1", "decline"), ("decline O1", "decline"), ("O1 no", "decline"), ("reject O1", "decline"),
+                                     ("later O1", "defer"), ("O1 later", "defer"), ("not yet O1", "defer"), ("snooze O1", "defer")])
+def test_declining_or_postponing_by_label_applies_at_once(home, text, op):
+    rig = Rig(home)
+    rig.open_one()
+    rig.phone.say(text, T0 + 41 * 60 - 30)
+    rig.run(T0 + 41 * 60)
+    assert [d["op"] for d in rig.applied] == [op] and rig.parsed == []
+
+
+@pytest.mark.parametrize("text", ["O1?", "o1 ?", "what is O1", "explain O1", "why O1?", "details on O1"])
+def test_asking_about_a_label_answers_from_the_stored_detail_and_changes_nothing(home, text):
+    rig = Rig(home)
+    rig.open_one()
+    rig.phone.say(text, T0 + 41 * 60 - 30)
+    rig.run(T0 + 41 * 60)
+    assert rig.applied == [] and rig.phone.sent[-1]["body"].startswith("Agents compare glovebox options")
+
+
+def test_a_label_that_is_not_open_here_changes_nothing_and_says_what_is(home):
+    rig = Rig(home)
+    rig.open_one()
+    rig.phone.say("approve O9", T0 + 41 * 60 - 30)
+    rig.run(T0 + 41 * 60)
+    assert rig.applied == [] and rig.phone.sent[-1]["body"] == "I do not see O9 open here. Open here: O1."
+
+
+def test_a_label_picks_exactly_that_request_among_several(home):
+    rig = Rig(home)
+    rig.candidates = multi("odysseus:ready/a.md", "odysseus:ready/b.md", "odysseus:ready/c.md")
+    rig.run(T0)
+    rig.run(T0 + 2 * 60)
+    target = next(i for i in rig.saved()["items"].values() if i["label"] == "O2")
+    rig.phone.say("approve O2", T0 + 5 * 60)
+    rig.run(T0 + 6 * 60)
+    assert rig.applied == [{"op": "approve", "item": target["id"], "confirmed": True}]
+
+
+def test_two_labels_in_one_reply_or_free_text_are_not_read_by_code(home):
+    rig = Rig(home)
+    rig.candidates = multi("odysseus:ready/a.md", "odysseus:ready/b.md")
+    rig.run(T0)
+    rig.run(T0 + 2 * 60)
+    rig.phone.say("approve O1 and O2", T0 + 5 * 60)
+    rig.phone.say("yes O1 but only the docs part", T0 + 5 * 60 + 5)
+    rig.run(T0 + 6 * 60)
+    assert rig.applied == [] and len(rig.parsed) == 2                                # both went to the model path, which asks, never approves
+
+
+def test_a_bare_yes_still_needs_the_confirmed_flow_even_when_one_request_is_open(home):
+    rig = Rig(home)
+    rig.open_one()
+    rig.phone.say("yes", T0 + 41 * 60 - 30)
+    rig.run(T0 + 41 * 60)
+    assert rig.applied == [] and rig.parsed == ["yes"]
+
+
+def test_the_confirmation_echo_names_the_label_for_free_text_approvals(home):
+    rig = Rig(home)
+    rig.open_one()
+    rig.phone.say("go ahead with the glovebox one", T0 + 41 * 60 - 30)
+    rig.verdicts = [{"target": "glovebox shortlist", "verdict": "yes"}]
+    rig.run(T0 + 41 * 60)
+    assert rig.phone.sent[-1]["body"].startswith("Understood: approve glovebox shortlist [O1] (")
+
+
+def test_the_model_may_name_the_request_by_its_label(home):
+    rig = Rig(home)
+    rig.open_one()
+    rig.phone.say("go ahead with that first one please", T0 + 41 * 60 - 30)
+    rig.verdicts = [{"target": "o1", "verdict": "yes"}]
+    rig.run(T0 + 41 * 60)
+    assert rig.phone.sent[-1]["body"].startswith("Understood: approve glovebox shortlist [O1]")
+
+
+def test_the_reply_prompt_shows_the_labels():
+    item = {"id": "a" * 12, "name": "glovebox shortlist", "label": "O1", "ask": "Let agents start?"}
+    prompt = ib.reply_prompt("approve it", [item], None)
+    assert '"label": "O1"' in prompt and "label (for example P2) or name" in prompt
+    assert ib.parse_reply(json.dumps({"target": "o1", "verdict": "yes", "condition": False, "confidence": 0.9}), {"glovebox shortlist", "o1"})["target"] == "o1"
+
+
+def test_a_label_on_another_topic_is_not_visible_here(home):
+    rig = two_way_rig(home)
+    rig.candidates = multi("odysseus:ready/a.md", "obsidian-phd:ready/b.md")
+    rig.run(T0)
+    rig.run(T0 + 2 * 60)
+    rig.phone.say("approve P1", T0 + 5 * 60, topic=f"{BASE}/odysseus-approvals", tags=[])           # P1 lives on the phd topic
+    rig.run(T0 + 6 * 60)
+    assert rig.applied == [] and rig.phone.sent[-1]["body"] == "I do not see P1 open here. Open here: O1."
+    rig.phone.say("approve P1", T0 + 7 * 60, topic=f"{BASE}/phd-approvals", tags=[])
+    rig.run(T0 + 8 * 60)
+    assert [d["op"] for d in rig.applied] == ["approve"]
+
+
+def test_a_request_keeps_its_label_when_it_is_shown_again(home):
+    rig = Rig(home)
+    rig.open_one()
+    before = labels(rig)
+    state = rig.saved()
+    for item in state["items"].values():
+        item["fmt"] = ib.PACKAGE_FORMAT - 1                  # shown in an older layout
+    rig.state.write_text(json.dumps(state))
+    rig.run(T0 + 50 * 60)
+    rig.run(T0 + 52 * 60)
+    assert labels(rig) == before == {"glovebox shortlist": "O1"} and "O1" in rig.phone.sent[-1]["title"]
+
+
+def test_the_label_counters_are_validated_when_read(home):
+    state = home / "inbox.json"
+    state.write_text(json.dumps({"owner": "operator", "channel": "c", "labels": {"O": 3, "p": 2, "PP": 1, "M": -1, "S": True, "X": 99999999, "Q": "5", "D": 7}}))
+    assert ib._read_state(state)["labels"] == {"O": 3, "D": 7}
+
+
+@pytest.mark.parametrize("text", ["approve 1", "do it 2", "1 yes", "no 1", "later #3", "approve \uff11"])
+def test_a_bare_number_never_applies_and_gets_a_hint(home, text):
+    rig = Rig(home)
+    rig.open_one()
+    rig.phone.say(text, T0 + 41 * 60 - 30)
+    rig.run(T0 + 41 * 60)
+    assert rig.applied == [] and rig.saved()["items"]
+    last = rig.phone.sent[-1]["body"]
+    expected = "Use the full label" if text != "approve \uff11" else None
+    assert rig.parsed == [] or text == "approve \uff11"
+    if expected:
+        assert last.startswith(expected)
+
+
+def test_a_number_on_one_topic_can_never_approve_another_repositorys_request(home):
+    rig = two_way_rig(home)
+    rig.candidates = multi("odysseus:ready/a.md", "obsidian-phd:ready/b.md")
+    rig.run(T0)
+    rig.run(T0 + 2 * 60)
+    for item in rig.saved()["items"].values():
+        pass
+    rig.phone.say("approve 1", T0 + 5 * 60, topic=f"{BASE}/odysseus-approvals", tags=[])
+    rig.run(T0 + 6 * 60)
+    assert rig.applied == []
+
+
+def test_a_decision_typed_before_the_current_version_was_sent_is_refused(home):
+    rig = Rig(home)
+    rig.open_one()
+    sent_at = next(iter(rig.saved()["items"].values()))["sent_at"]
+    rig.phone.say("approve O1", sent_at - 20)
+    rig.run(T0 + 41 * 60)
+    assert rig.applied == [] and "was sent again after your message" in rig.phone.sent[-1]["body"]
+
+
+def test_a_changed_card_is_a_new_request_with_a_new_label(home):
+    rig = Rig(home)
+    rig.open_one()
+    assert labels(rig) == {"glovebox shortlist": "O1"}
+    rig.candidates = [cand(fp="e" * 64)]                              # the card changed
+    rig.run(T0 + 45 * 60)
+    rig.run(T0 + 47 * 60)
+    assert labels(rig) == {"glovebox shortlist": "O2"} and "O2" in rig.phone.sent[-1]["title"]
+    rig.phone.say("approve O1", T0 + 50 * 60)
+    rig.run(T0 + 51 * 60)
+    assert rig.applied == [] and rig.phone.sent[-1]["body"] == "I do not see O1 open here. Open here: O2."
+
+
+@pytest.mark.parametrize("flag", ["gate", "unreadable"])
+def test_a_protected_request_keeps_one_restatement_even_when_named_by_label(home, flag):
+    rig = Rig(home)
+    rig.candidates = [cand(context=({**CTX} if flag == "gate" else {}))]
+    rig.open_one()
+    rig.phone.say("approve O1", T0 + 41 * 60 - 30)
+    rig.run(T0 + 41 * 60)
+    assert rig.applied == [] and rig.phone.sent[-1]["body"].startswith("Understood: approve glovebox shortlist [O1] (")
+    rig.phone.say("yes", T0 + 43 * 60)
+    rig.run(T0 + 44 * 60)
+    assert [d["op"] for d in rig.applied] == ["approve"] and rig.parsed == []
+
+
+def test_the_delegation_question_keeps_the_restatement_too(home):
+    rig = Rig(home)
+    rig.candidates = [cand(kind="delegation", task_ref="policy:advisor-approvals", task_id=ib.DELEGATION_TASK_ID, scope=ib.DELEGATION_SCOPE,
+                           title="advisor approvals", priority="critical")]
+    rig.open_one()
+    rig.phone.say("approve S1", T0 + 41 * 60 - 30)
+    rig.run(T0 + 41 * 60)
+    assert rig.applied == [] and rig.phone.sent[-1]["body"].startswith("Understood: approve advisor approvals [S1]")
+
+
+def test_a_labelled_decline_or_postponement_is_never_held_back_by_the_protection(home):
+    rig = Rig(home)
+    rig.candidates = [cand(context={**CTX})]
+    rig.open_one()
+    rig.phone.say("no O1", T0 + 41 * 60 - 30)
+    rig.run(T0 + 41 * 60)
+    assert [d["op"] for d in rig.applied] == ["decline"]
+
+
+def test_a_labelled_yes_for_another_request_is_not_swallowed_by_a_pending_confirmation(home):
+    rig = Rig(home)
+    rig.candidates = multi("odysseus:ready/a.md", "odysseus:ready/b.md")
+    rig.run(T0)
+    rig.run(T0 + 2 * 60)
+    o2 = next(i for i in rig.saved()["items"].values() if i["label"] == "O2")
+    rig.phone.say("go ahead with thing a", T0 + 5 * 60)
+    rig.verdicts = [{"target": "o1", "verdict": "yes"}]
+    rig.run(T0 + 6 * 60)
+    assert rig.saved()["echo"]["armed_at"] is not None
+    rig.phone.say("yes O2", T0 + 8 * 60)
+    rig.run(T0 + 9 * 60)
+    assert rig.applied == [{"op": "approve", "item": o2["id"], "confirmed": True}] and rig.saved()["echo"] is None
+
+
+def test_the_model_may_answer_with_the_label_in_any_case():
+    parsed = ib.parse_reply(json.dumps({"target": "P2", "verdict": "yes", "condition": False, "confidence": 0.9}), {"draft ethics", "p2"})
+    assert parsed["target"] == "p2"
+
+
+def test_the_label_counter_never_falls_behind_the_labels_already_issued(home):
+    rig = Rig(home)
+    rig.candidates = multi("odysseus:ready/a.md", "odysseus:ready/b.md")
+    rig.run(T0)
+    rig.run(T0 + 2 * 60)
+    state = rig.saved()
+    state["labels"] = {}                                              # the counters were lost
+    rig.state.write_text(json.dumps(state))
+    rig.candidates += multi("odysseus:ready/a.md", "odysseus:ready/b.md", "odysseus:ready/c.md")[2:]
+    rig.run(T0 + 5 * 60)
+    rig.run(T0 + 7 * 60)
+    got = list(labels(rig).values())
+    assert len(got) == len(set(got)) == 3 and "O3" in got
+
+
+def test_a_labelled_yes_for_the_request_awaiting_its_restatement_confirms_it(home):
+    rig = Rig(home)
+    rig.candidates = [cand(context={**CTX})]                         # a protected request
+    rig.open_one()
+    rig.phone.say("approve O1", T0 + 41 * 60 - 30)
+    rig.run(T0 + 41 * 60)
+    assert rig.applied == [] and rig.saved()["echo"]["armed_at"] is not None
+    rig.phone.say("yes O1", T0 + 43 * 60)
+    rig.run(T0 + 44 * 60)
+    assert [d["op"] for d in rig.applied] == ["approve"] and rig.applied[0]["confirmed"] is True and rig.saved()["echo"] is None
+
+
+def test_a_labelled_yes_for_a_different_request_does_not_confirm_a_pending_restatement(home):
+    rig = Rig(home)
+    rig.candidates = [cand(context={**CTX}), cand(task_ref="odysseus:ready/o.md", task_id="o", scope="b" * 64, title="Other thing", context={**CTX})]
+    rig.run(T0)
+    rig.run(T0 + 2 * 60)
+    rig.phone.say("approve O1", T0 + 5 * 60)
+    rig.run(T0 + 6 * 60)
+    rig.phone.say("yes O2", T0 + 8 * 60)
+    rig.run(T0 + 9 * 60)
+    assert rig.applied == []                                         # O2 is protected too: it gets its own restatement, O1 stays unapproved
+
+
+def test_an_item_without_the_protection_flag_is_treated_as_protected(home):
+    rig = Rig(home)
+    rig.open_one()
+    state = rig.saved()
+    for item in state["items"].values():
+        item.pop("protected", None)
+    rig.state.write_text(json.dumps(state))
+    rig.phone.say("approve O1", T0 + 41 * 60 - 30)
+    rig.run(T0 + 41 * 60)
+    assert rig.applied == [] and rig.phone.sent[-1]["body"].startswith("Understood: approve")
+
+
+def test_the_bare_number_patterns_really_match():
+    for text in ("approve 2", "Approve #2.", "2 yes", "no 12", "later #3 please", "do it 2"):
+        assert ib._NUM_VERB.match(text) or ib._NUM_FIRST.match(text), text
+    for text in ("approve O2", "approve", "2", "approve two"):
+        assert not (ib._NUM_VERB.match(text) or ib._NUM_FIRST.match(text)), text
+
+
+# ---- a resolved request's whole thread is purged; what was not understood stays until reviewed
+
+def thread_rig(home):
+    rig = two_way_rig(home)
+    rig.candidates = [cand(task_ref="obsidian-phd:ready/x.md", task_id="x", scope="c" * 64, title="Glovebox shortlist")]
+    rig.open_one()
+    return rig
+
+
+def say_in(rig, text, at, mid):
+    rig.phone.say(text, at, mid=mid, topic=f"{BASE}/phd-approvals", tags=[])
+
+
+def test_the_whole_thread_of_a_resolved_request_is_deleted_five_minutes_later(home):
+    rig = thread_rig(home)
+    deleted = []
+    say_in(rig, "go ahead with the glovebox one", T0 + 41 * 60 - 30, "u1")
+    rig.verdicts = [{"target": "glovebox shortlist", "verdict": "yes"}]
+    run_with(rig, T0 + 41 * 60, deleted)
+    say_in(rig, "yes", T0 + 43 * 60, "u2")
+    run_with(rig, T0 + 44 * 60, deleted)
+    assert [d["op"] for d in rig.applied] == ["approve"] and deleted == []
+    run_with(rig, T0 + 46 * 60, deleted)
+    assert deleted == []                                           # still inside the five minutes
+    run_with(rig, T0 + 44 * 60 + ib.RESOLVED_PURGE_DELAY + 60, deleted)
+    ids = {m for _, m in deleted}
+    assert {"u1", "u2", "pub0"} <= ids and len(ids) == 5          # the package, both of the owner's messages and both acknowledgements
+    assert all(u.startswith(BASE) for u, _ in deleted)
+
+
+def test_a_labelled_reply_and_its_acknowledgement_are_purged_with_the_package(home):
+    rig = thread_rig(home)
+    deleted = []
+    say_in(rig, "no P1", T0 + 41 * 60 - 30, "n1")
+    run_with(rig, T0 + 41 * 60, deleted)
+    run_with(rig, T0 + 41 * 60 + ib.RESOLVED_PURGE_DELAY + 60, deleted)
+    assert {"n1", "pub0"} <= {m for _, m in deleted} and len(deleted) == 3
+
+
+def test_a_question_about_a_request_is_purged_with_its_thread_not_before(home):
+    rig = thread_rig(home)
+    deleted = []
+    say_in(rig, "P1?", T0 + 41 * 60 - 30, "q1")
+    run_with(rig, T0 + 41 * 60, deleted)
+    run_with(rig, T0 + 3 * 3600, deleted)
+    assert deleted == []                                           # the request is still open, so its thread stays
+    say_in(rig, "later P1", T0 + 3 * 3600 + 60, "l1")
+    run_with(rig, T0 + 3 * 3600 + 120, deleted)
+    run_with(rig, T0 + 3 * 3600 + 120 + ib.RESOLVED_PURGE_DELAY + 60, deleted)
+    assert {"q1", "l1", "pub0"} <= {m for _, m in deleted}
+
+
+def test_an_exchange_that_was_not_understood_stays_until_it_is_old_a_routine_one_goes_after_an_hour(home):
+    rig = Rig(home)
+    deleted = []
+    run_with(rig, T0, deleted)
+    rig.phone.say("blah blah something odd", T0 + 5 * 60, mid="x1", topic=f"{BASE}/alerts-topic-1234", tags=[])
+    rig.phone.say("pause", T0 + 6 * 60, mid="p1", topic=f"{BASE}/alerts-topic-1234", tags=[])
+    run_with(rig, T0 + 7 * 60, deleted)
+    kinds = {e["msg"]: e["kind"] for e in rig.saved()["loose"]}
+    assert sorted(kinds.values()) == ["done", "done", "open", "open"]
+    run_with(rig, T0 + 7 * 60 + ib.LOOSE_DONE_AFTER + 60, deleted)
+    gone = {m for _, m in deleted}
+    assert "p1" in gone and "x1" not in gone                      # the command exchange went; the one nobody understood stays
+    run_with(rig, T0 + 3 * 86400, deleted)
+    run_with(rig, T0 + 60 * 86400, deleted)
+    assert "x1" not in {m for _, m in deleted}                    # never timed out: it stays until a reviewer has handled it
+
+
+def test_every_owner_message_is_logged_with_what_became_of_it(home):
+    rig = thread_rig(home)
+    say_in(rig, "blah blah something odd", T0 + 41 * 60 - 40, "a1")
+    say_in(rig, "P1?", T0 + 41 * 60 - 30, "a2")
+    say_in(rig, "approve P9", T0 + 41 * 60 - 20, "a3")
+    say_in(rig, "approve P1", T0 + 41 * 60 - 10, "a4")
+    rig.run(T0 + 41 * 60)
+    got = {e["id"]: e["out"] for e in rig.saved()["log"]}
+    assert got == {"a1": "unclear", "a2": "asked", "a3": "not_open", "a4": "applied:approve"}
+    assert all(e["reviewed"] is False and e["text"] for e in rig.saved()["log"])
+
+
+def test_the_loose_and_log_lists_are_validated_when_read(home):
+    state = home / "inbox.json"
+    state.write_text(json.dumps({"owner": "operator", "channel": "c",
+                                 "loose": [{"url": f"{BASE}/t", "msg": "ok1", "t": 5, "kind": "open"}, {"url": f"{BASE}/t", "msg": "bad/id", "t": 5, "kind": "open"},
+                                           {"url": f"{BASE}/t", "msg": "ok2", "t": "x", "kind": "open"}, {"url": f"{BASE}/t", "msg": "ok3", "t": 5, "kind": "weird"}],
+                                 "log": [{"id": "m1", "t": 3, "text": "hello", "out": "unclear"}, {"id": 5, "t": 3, "text": "x", "out": "y"}, "junk",
+                                         {"id": "m2", "t": 4, "text": "x" * 500, "out": "o" * 90, "reviewed": 1}]}))
+    got = ib._read_state(state)
+    assert [e["msg"] for e in got["loose"]] == ["ok1"] and [e["id"] for e in got["log"]] == ["m1", "m2"]
+    assert len(got["log"][1]["text"]) == 200 and len(got["log"][1]["out"]) == 40 and got["log"][1]["reviewed"] is True
+
+
+def test_a_legacy_owner_message_without_a_topic_is_never_scheduled_for_deletion(home):
+    rig = Rig(home)
+    rig.open_one()
+    rig.phone.say("no O1", T0 + 41 * 60 - 30, mid="legacy1")        # one-way: the owner's message lives on a topic the backend cannot write
+    rig.run(T0 + 41 * 60)
+    assert "legacy1" not in {e["msg"] for e in rig.saved()["retire"]}
+
+
+def test_the_log_tells_the_truth_when_an_action_did_not_go_through(home):
+    rig = Rig(home)
+    rig.open_one()
+    rig.apply = lambda do, items, digest: (None, "error")
+    rig.phone.say("no O1", T0 + 41 * 60 - 30, mid="f1")
+    rig.run(T0 + 41 * 60)
+    assert [e["out"] for e in rig.saved()["log"]] == ["failed"]
+
+
+def test_a_reply_that_raised_is_still_logged_and_its_full_text_kept_in_an_append_only_file(home):
+    rig = Rig(home)
+    rig.open_one()
+    rig.parse = lambda text, open_items, echo: (_ for _ in ()).throw(RuntimeError("boom"))       # free text goes to the model, which fails
+    long = "no O1 " + "because " * 60
+    rig.phone.say(long, T0 + 41 * 60 - 30, mid="e1")
+    rig.run(T0 + 41 * 60)
+    assert [e["out"] for e in rig.saved()["log"]] == ["error"]
+    lines = [json.loads(l) for l in (home / "owner_messages.jsonl").read_text().splitlines()]
+    assert lines[-1]["id"] == "e1" and lines[-1]["out"] == "error" and lines[-1]["text"].startswith("no O1 because")
+    assert (home / "owner_messages.jsonl").stat().st_mode & 0o077 == 0
+
+
+def test_a_pending_confirmation_does_not_capture_an_unrelated_later_reply(home):
+    rig = Rig(home)
+    rig.open_one()
+    rig.phone.say("go ahead with the glovebox one", T0 + 41 * 60 - 30, mid="g1")
+    rig.verdicts = [{"target": "glovebox shortlist", "verdict": "yes"}]
+    rig.run(T0 + 41 * 60)
+    assert rig.saved()["echo"]
+    rig.phone.say("pause", T0 + 43 * 60, mid="g2", topic=f"{BASE}/alerts-topic-1234", tags=[])
+    rig.run(T0 + 44 * 60)
+    item = next(iter(rig.saved()["items"].values()))
+    assert not any(e["msg"] == "g2" for e in item.get("thread", [])) and any(e["msg"] == "g2" for e in rig.saved()["loose"])

@@ -308,7 +308,7 @@ def author(candidate: dict):
 
 
 def parse(text: str, open_items: list, echo):
-    names = {i["name"] for i in open_items}
+    names = {i["name"] for i in open_items} | {str(i["label"]).lower() for i in open_items if i.get("label")}
     return inbox.parse_reply(_model(inbox.reply_prompt(text, open_items, echo), "sonnet", 60.0), names)
 
 
@@ -359,7 +359,7 @@ def apply_factory(owner: str):
                           scope_sha256=item["scope"], actor="owner", via="phone-reply", reply_digest=digest,
                           rationale="owner reply on the phone")
             _cache["value"] = None
-            name = item.get("name") or "it"
+            name = (item.get("name") or "it") + (f" ({item['label']})" if item.get("label") else "")
             if item["kind"] == "delegation":
                 return ("Done: an Opus advisor can now approve routine work. Say 'stop advisor approvals' to undo."
                         if op == "approve" else ("Okay, you keep approving." if op == "decline" else "Okay, I will ask again in a week.")), "done"
