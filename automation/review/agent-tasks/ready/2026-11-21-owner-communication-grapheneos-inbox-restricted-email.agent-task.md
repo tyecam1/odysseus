@@ -111,3 +111,25 @@ The operator wants /lazyUsage to ask the **few genuinely necessary** questions, 
 ## Delivery and stopping
 
 Return source-linked evidence at `result_path`: minimal design decision and alternatives; exact backend/API reuse; mobile install/notification tests; safe sender/recipient configuration procedure without actual addresses/secrets in Git; test matrix and independent review; opt-in deployment/canary result; rollback; only the genuinely necessary human action(s). Deliver the **authenticated mobile text loop first**, then the optional locked email adapter and preference routing only if they preserve simplicity. If the owner has not provided the exact recipient or approved sender OAuth, **leave email disabled**, ship the secure mobile flow and list the small precise setup dependency. Do not claim live deployment or email capability from source code alone.
+
+## Plan (written 2026-11-26 by the controller; step 0 is to verify it against HEAD)
+**Goal in one line.** Close out the delivered phone inbox against this card and add the remaining piece: a disabled-by-default email adapter locked to one recipient.
+**Already done / do not redo:** the 2026-11-26 phone inbox (src/owner_inbox.py, src/owner_inbox_runtime.py, src/owner_alerts.py: ntfy alerts and plain-words replies); gate lifting through the owner ledger (src/owner_ledger.py); the Discord webhook in src/owner_decisions.py, kept as-is by owner decision; the advisor-approval worker, built but disabled.
+**Steps:**
+0. Grep HEAD for the inbox, alert, ledger and `build_cards` symbols and for the 2026-11-26 deployment evidence. Correct this plan and the already-done list.
+1. Read-only gap audit: map each Phase 1 and acceptance bullet to an existing test, recorded evidence or a gap. Bullets include binding to owner + card + revision + scope digest, clarification on an ambiguous yes, fresh confirmation on consequential gates, a generic push payload, a single outcome across devices, recovery after restart and ntfy/Discord duplicates. Proof: gap table.
+2. Close real gaps only, with deterministic tests (locate the inbox tests with grep). Add no new channel or approval path.
+3. Email adapter (new src/ module, standard library only, injected transport): sender pinned to the address named in the card; one recipient read from private deployment config; missing, malformed or unattested config means zero sends; the envelope and every MIME header that can carry a recipient are checked at the send boundary. Tests (fake transport): the card's injection matrix yields zero sends to any other address.
+4. Email is notification-only; replies stay in the authenticated inbox. Test: no code path feeds mail into gate handlers.
+5. Channel choice: a deterministic function that records its reason (terse -> inbox; long brief -> email only when live-enabled). Only explicit operator settings override it. Tests per branch.
+6. Write docs/runtime-work-packages/2026-11-21-owner-intervention-mobile-inbox-acceptance.md (inbox evidence, new tests, model used, rollback, owner debts). Run the full suite and stop.
+**Done when:**
+- Every card acceptance bullet maps to a passing test, evidence or a named owner debt.
+- Without attested config the adapter sends nothing, and the fake-transport matrix passes.
+- src/owner_decisions.py is unchanged. Any ntfy/Discord overlap is de-duplicated or listed for the owner to decide on the Discord switch.
+- No claim that the phone channel works rests on mocked tests.
+**Risks and stops:**
+- These are `protected_handoff` owner debts; never guess or provision them: the Strathclyde address, sender authorisation, the live email canary and any missing physical GrapheneOS evidence.
+- Do not enable the advisor-approval worker or change gate semantics.
+- This is security-sensitive: a GLM review only corroborates. Record the review lane and model.
+**Ordering note:** Parking uses the parallel-dispatch WIP contract if it is present. Acceptance lets the owner decide whether Discord decision cards are retired, which the agent-lobby card is waiting on.
