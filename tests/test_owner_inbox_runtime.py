@@ -302,3 +302,17 @@ def test_only_an_absent_or_none_class_is_advisor_eligible(db, frontier, monkeypa
                   scope_sha256=ib.DELEGATION_SCOPE, actor="owner", via="phone-reply")
     glue._cache["value"] = None
     assert len(glue._scan(OWNER)[1]) == 1 and glue.gather(OWNER) == []
+
+
+def test_the_cycle_runs_the_checklist_after_the_inbox_and_survives_its_failure(monkeypatch):
+    from src import owner_checklist as checklist
+    calls = []
+    monkeypatch.setattr(glue.inbox, "cycle", lambda *a, **k: "idle")
+    monkeypatch.setattr(checklist, "run", lambda owner, **k: calls.append(owner) or "idle")
+    assert glue.run_cycle("operator") == "idle" and calls == ["operator"]
+
+    def boom(owner, **k):
+        raise RuntimeError("down")
+
+    monkeypatch.setattr(checklist, "run", boom)
+    assert glue.run_cycle("operator") == "idle"             # the checklist can never stop the approval inbox
