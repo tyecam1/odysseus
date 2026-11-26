@@ -398,9 +398,16 @@ def digest_facts_factory(owner: str):
     return facts
 
 
+def _review_hook():
+    """The periodic review of what the owner wrote that was not acted on (it can only ask back and record; see owner_topic_review)."""
+    from src import owner_topic_review as topic_review
+    path = inbox.STATE_PATH.parent / "owner_requests.jsonl"
+    return lambda state, channel, send_fn, now_ts: topic_review.review_cycle(state, channel, send_fn, now_ts, lambda prompt: _model(prompt, "sonnet", 90.0), path)
+
+
 def run_cycle(owner: str) -> str:
     result = inbox.cycle(owner, gather=lambda: gather(owner), author=author, parse=parse, apply=apply_factory(owner),
-                         digest_facts=digest_facts_factory(owner))
+                         digest_facts=digest_facts_factory(owner), review=_review_hook())
     try:
         if ADVISOR_APPROVALS_READY:
             void_stale_approvals(owner)             # the kill switch stops NEW decisions, never the checking of approvals in force

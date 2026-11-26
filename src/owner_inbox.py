@@ -63,6 +63,8 @@ RESOLVED_PURGE_DELAY = 300               # a resolved request's whole thread goe
 LOOSE_DONE_AFTER = 3600                  # a routine exchange (a stop command, a question answered) goes after an hour; one that was
 #                                          NOT understood is never timed out: it stays until a reviewer has handled it
 RETIRE_PER_CYCLE = 12
+LOOSE_REVIEW_AFTER = 86400                # the review's own question or answer stays a day
+REVIEW_EVERY_SECONDS = 3 * 3600              # the periodic review of the owner's unhandled messages
 MAX_LOOSE = 200
 MAX_LOG = 150
 MAX_REPLY_CHARS = 400
@@ -390,7 +392,7 @@ def parse_author(text) -> Optional[dict]:
 
 def _empty_state() -> dict:
     return {"owner": None, "channel": None, "items": {}, "processed": [], "echo": None, "interrupts": [], "acks": [],
-            "last_digest_day": None, "started": None, "cursor": None, "last_ok": None, "published": [], "mode": None, "retire": [], "labels": {}, "loose": [], "log": []}
+            "last_digest_day": None, "started": None, "cursor": None, "last_ok": None, "published": [], "mode": None, "retire": [], "labels": {}, "loose": [], "log": [], "review_at": 0.0}
 
 
 def _num(value) -> bool:
@@ -442,6 +444,9 @@ def _read_state(path: Path) -> dict:
     if isinstance(data.get("labels"), dict):
         state["labels"] = {k: v for k, v in list(data["labels"].items())[:8] if isinstance(k, str) and re.fullmatch(r"[A-Z]", k)
                            and isinstance(v, int) and not isinstance(v, bool) and 0 < v <= 100000}
+    if _num(data.get("review_at")):
+        state["review_at"] = float(data["review_at"])
+
     def ref(e) -> bool:
         return isinstance(e, dict) and isinstance(e.get("url"), str) and len(e["url"]) <= 200 and isinstance(e.get("msg"), str) and bool(_MSG_ID.match(e["msg"]))
 
@@ -450,10 +455,13 @@ def _read_state(path: Path) -> dict:
                             "due": float(e["due"]) if _num(e.get("due")) else 0.0} for e in data["retire"][:MAX_RETIRE] if ref(e)]
     if isinstance(data.get("loose"), list):
         state["loose"] = [{"url": e["url"], "msg": e["msg"], "t": float(e["t"]), "kind": e["kind"]} for e in data["loose"][:MAX_LOOSE]
-                          if ref(e) and _num(e.get("t")) and e.get("kind") in ("open", "done")]
+                          if ref(e) and _num(e.get("t")) and e.get("kind") in ("open", "done", "review")]
     if isinstance(data.get("log"), list):
         state["log"] = [{"id": e["id"], "topic": e["topic"] if isinstance(e.get("topic"), str) else "", "t": float(e["t"]), "text": e["text"][:200],
-                         "out": e["out"][:40], "reviewed": bool(e.get("reviewed"))} for e in data["log"][-MAX_LOG:]
+                         "out": e["out"][:40], "reviewed": bool(e.get("reviewed")),
+                         "ack": e["ack"] if isinstance(e.get("ack"), str) and _MSG_ID.match(e["ack"]) else None,
+                         "tries": e["tries"] if isinstance(e.get("tries"), int) and not isinstance(e.get("tries"), bool) and 0 <= e["tries"] < 100 else 0}
+                        for e in data["log"][-MAX_LOG:]
                         if isinstance(e, dict) and isinstance(e.get("id"), str) and len(e["id"]) <= 80 and _num(e.get("t"))
                         and isinstance(e.get("text"), str) and isinstance(e.get("out"), str)]
     items = data.get("items")
@@ -813,6 +821,50 @@ def _direct(text: str, open_items: list, msg_time: Optional[float] = None) -> Op
     return None                       # a bare yes/no/later without a label keeps the confirmed flow: it may be answering something else
 
 
+_SPLIT = re.compile(r"\s*(?:[.;\n]+|\s&\s|,\s*|\band\b|\bthen\b)\s*", re.I)
+_BARE_LABEL = re.compile(rf"^\s*{_LBL}\s*$", re.I | re.A)
+MAX_MULTI = 4
+
+
+def _multi(text: str, open_items: list, msg_time: Optional[float] = None) -> Optional[dict]:
+    """Several labelled decisions in one message ("approve P2. approve P1", "approve O1 and O2", "approve O1, no O2"). It applies
+    only when EVERY part is a labelled decision that would apply at once on its own; otherwise nothing is applied and the owner is
+    told why (all or nothing). Anything else is not a multi-decision and falls through to the usual reading."""
+    parts = [p.strip() for p in _SPLIT.split(text) if p and p.strip()]
+    if not 2 <= len(parts) <= MAX_MULTI:
+        return None
+    decided, previous = [], None
+    for part in parts:
+        m = _VERB_FIRST.match(part) or _LABEL_FIRST.match(part)
+        if m:
+            previous = "approve" if m.group("a") else "no" if m.group("n") else "later"
+            decided.append((previous, m.group("label")))
+        elif previous and _BARE_LABEL.match(part):
+            decided.append((previous, _BARE_LABEL.match(part).group("label")))      # "approve P2 and P1": the second inherits the verb
+        else:
+            return None
+
+    def refuse(why: str) -> dict:
+        return {"say": f"I read {len(decided)} decisions but {why}, so I applied none. Send them one at a time, for example 'approve {decided[0][1].upper()}'.", "do": None, "dos": []}
+
+    seen, dos = set(), []
+    for verb, token in decided:
+        key = token.upper()
+        if key in seen:
+            return refuse(f"{key} appears twice")
+        seen.add(key)
+        found = _by_label(open_items, token)
+        if len(found) != 1:
+            return refuse(f"{key} is not open here (open here: {_labels_of(open_items)})")
+        item = found[0]
+        if msg_time is not None and item.get("sent_at") is not None and msg_time < int(item["sent_at"]):
+            return refuse(f"{key} was sent again after your message")
+        if verb == "approve" and (item.get("protected") is not False or item.get("kind") == "delegation"):
+            return refuse(f"approving {key} needs its own confirmation")
+        dos.append(_decision(verb, item)["do"])
+    return {"say": None, "do": None, "dos": dos}
+
+
 def _echo(state: dict, item: dict, now_ts: float) -> str:
     """Arm the one-step restatement for an approval (the caller arms it only after the message really reached the phone)."""
     line = plain(item.get("card_line") or item["name"], 60)
@@ -905,7 +957,8 @@ def _digest_text(facts: dict, items: list) -> tuple:
 
 def cycle(owner: str, *, gather: Callable, author: Callable, parse: Callable, apply: Callable,
           digest_facts: Callable, state_path: Optional[Path] = None, channel_path: Optional[Path] = None,
-          clock: Optional[Callable] = None, transport: Optional[dict] = None) -> str:
+          clock: Optional[Callable] = None, transport: Optional[dict] = None,
+          review: Optional[Callable] = None) -> str:
     """One pass: read replies, act on them, refresh the waiting items, send at most one interrupt and the digest.
     Never raises. `transport` may replace {"send", "fetch"} (tests)."""
     clock = clock or time.time
@@ -930,7 +983,7 @@ def cycle(owner: str, *, gather: Callable, author: Callable, parse: Callable, ap
             return status
         if channel["owner"] != owner:
             return "owner_changed"
-        return _cycle_locked(owner, channel, state_path, clock, gather, author, parse, apply, digest_facts, send_fn, fetch_fn, delete_fn)
+        return _cycle_locked(owner, channel, state_path, clock, gather, author, parse, apply, digest_facts, send_fn, fetch_fn, delete_fn, review)
     except Exception as exc:
         log.warning("owner inbox failed: %s", type(exc).__name__)
         return "error"
@@ -964,7 +1017,7 @@ def _say(channel, send_fn, state: dict, now_ts: float, text, health: Optional[di
     return delivered and clean
 
 
-def _cycle_locked(owner, channel, state_path, clock, gather, author, parse, apply, digest_facts, send_fn, fetch_fn, delete_fn) -> str:
+def _cycle_locked(owner, channel, state_path, clock, gather, author, parse, apply, digest_facts, send_fn, fetch_fn, delete_fn, review=None) -> str:
     now_ts = clock()
     state = _read_state(state_path)
     if state["owner"] != owner or state["channel"] != channel["fingerprint"]:
@@ -1070,7 +1123,22 @@ def _cycle_locked(owner, channel, state_path, clock, gather, author, parse, appl
         hidden = {k for k, i in state["items"].items() if i.get("state") == "open" and topic and i.get("topic") and i["topic"] != topic}
         view = {**state, "items": {k: v for k, v in state["items"].items() if k not in hidden}} if hidden else state
         try:
-            result = interpret(text, view, now_ts, parse, msg_time=message["time"])
+            multi = _multi(text, [i for i in view["items"].values() if i.get("state") == "open"], message["time"])
+            if multi is not None:
+                state["echo"] = view["echo"] = None         # like any other message, it ends a pending confirmation (also in the copy taken for this topic)
+                notes, ids, all_ok = [], [], True
+                for do in multi["dos"]:
+                    note, status_m = apply(do, view["items"], hashlib.sha256((text + str(do["item"])).encode()).hexdigest()[:16])
+                    notes.append(f"{view['items'][do['item']].get('label')}: {note}" if note else "")
+                    if status_m in ("done", "stale"):
+                        _after_action(do, state, now_ts)
+                    else:
+                        all_ok = False
+                    ids.append(do["item"])
+                result = {"say": multi["say"] or " ".join(n for n in notes if n)[:300], "do": None, "item": ids[0] if ids else None, "items": ids,
+                          "out": ("applied:multi" if all_ok else "failed") if ids else None}
+            else:
+                result = interpret(text, view, now_ts, parse, msg_time=message["time"])
             if view is not state:
                 state.update({k: v for k, v in view.items() if k != "items"})      # every change the interpreter made (a hidden request's echo is cleared)
                 if hidden and result["say"] == "Nothing is waiting on you right now.":
@@ -1159,9 +1227,16 @@ def _cycle_locked(owner, channel, state_path, clock, gather, author, parse, appl
             item.update(state="queued", retry_at=now_ts + SEND_RETRY_SECONDS)
             if now_ts in state["interrupts"]:
                 state["interrupts"].remove(now_ts)              # the slot is returned (one entry, not every package at that instant)
+    if review is not None and not quiet(now_ts) and now_ts - (float(state.get("review_at") or 0) if float(state.get("review_at") or 0) <= now_ts else 0.0) >= REVIEW_EVERY_SECONDS:
+        try:                                                # every few hours, what the owner wrote that was not acted on is reviewed
+            if review(state, channel, send_fn, now_ts) is not None:
+                state["review_at"] = now_ts                 # a pass with nothing to review makes no model call and is tried again next cycle
+        except Exception as exc:
+            log.warning("owner topic review failed: %s", type(exc).__name__)
+            state["review_at"] = now_ts
     for entry in list(state["loose"]):                      # an exchange that needs nothing more is deleted after a while
         age = now_ts - entry["t"]
-        if entry["kind"] == "done" and age > LOOSE_DONE_AFTER:
+        if (entry["kind"] == "done" and age > LOOSE_DONE_AFTER) or (entry["kind"] == "review" and age > LOOSE_REVIEW_AFTER):
             state["loose"].remove(entry)
             if len(state["retire"]) < MAX_RETIRE:
                 state["retire"].append({"url": entry["url"], "msg": entry["msg"], "tries": 0, "due": 0.0})
@@ -1230,7 +1305,7 @@ def _retire(state: dict, item: dict, now_ts: float = 0.0, delay: float = 0.0) ->
     item["thread"] = []
 
 
-_UNRESOLVED = ("I did not catch", "Which one", "I do not see", "Nothing is waiting", "Use the full label", "That request is waiting",
+_UNRESOLVED = ("I did not catch", "I read ", "Which one", "I do not see", "Nothing is waiting", "Use the full label", "That request is waiting",
                "More than one", "I will not approve in bulk", "That looks like a secret", "I can only approve or decline", "was sent again")
 
 
@@ -1264,17 +1339,23 @@ def _track(state: dict, message: dict, reply_ch: dict, ack, result: dict, text: 
     item_id = result.get("item") or do.get("item") or ((state.get("echo") or {}).get("item") if say.startswith("Understood:") else None)
     item = state["items"].get(item_id) if item_id else None
     if item is not None:
-        if item["state"] in ("answered", "withdrawn", "parked"):
-            for e in refs:
-                if len(state["retire"]) < MAX_RETIRE:
-                    state["retire"].append({**e, "tries": 0, "due": now_ts + RESOLVED_PURGE_DELAY})
+        group = [o for o in [state["items"].get(x) for x in (result.get("items") or [])] + [item] if o is not None]
+        still_open = [o for o in group if o["state"] not in ("answered", "withdrawn", "parked")]
+        if still_open:                                      # a decision that failed keeps the whole exchange until it is settled
+            for other in still_open:
+                other["thread"] = ((other.get("thread") or []) + [e for e in refs if e not in (other.get("thread") or [])])[-12:]
         else:
-            item["thread"] = ((item.get("thread") or []) + refs)[-12:]
+            queued = {(q["url"], q["msg"]) for q in state["retire"]}
+            for e in refs:
+                if (e["url"], e["msg"]) not in queued and len(state["retire"]) < MAX_RETIRE:
+                    state["retire"].append({**e, "tries": 0, "due": now_ts + RESOLVED_PURGE_DELAY})
     else:
         kind = "open" if any(say.startswith(p) for p in _UNRESOLVED) else "done"
         for e in refs:
             state["loose"] = (state["loose"] + [{**e, "t": now_ts, "kind": kind}])[-MAX_LOOSE:]
-    if do.get("op"):
+    if result.get("out"):
+        out = str(result["out"])[:40]
+    elif do.get("op"):
         out = ("applied:" + do["op"]) if status == "done" else ("stale" if status == "stale" else "failed")
     elif say.startswith("I did not catch"):
         out = "unclear"
@@ -1282,7 +1363,7 @@ def _track(state: dict, message: dict, reply_ch: dict, ack, result: dict, text: 
         out = "which"
     elif say.startswith(("I do not see", "Nothing is waiting", "That request is waiting")):
         out = "not_open"
-    elif say.startswith(("Use the full label", "More than one", "was sent")):
+    elif say.startswith(("Use the full label", "More than one", "was sent", "I read ")):
         out = "hint"
     elif say.startswith("Understood:"):
         out = "echo"
@@ -1294,7 +1375,8 @@ def _track(state: dict, message: dict, reply_ch: dict, ack, result: dict, text: 
 def _log_owner(state: dict, message: dict, text: str, out: str, now_ts: float, evidence=None, ack=None) -> None:
     stamp = float(message.get("time") or now_ts)
     state["log"] = (state["log"] + [{"id": str(message.get("id"))[:80], "topic": str(message.get("topic") or "")[:200], "t": stamp,
-                                     "text": text[:200], "out": out, "reviewed": False}])[-MAX_LOG:]
+                                     "text": text[:200], "out": out, "reviewed": False,
+                                     "ack": ack if isinstance(ack, str) and _MSG_ID.match(ack) else None}])[-MAX_LOG:]
     _evidence(evidence, {"id": str(message.get("id"))[:80], "topic": str(message.get("topic") or "")[:200], "t": stamp, "text": str(message.get("text") or text)[:2000],
                          "out": out, "ack": ack})
 

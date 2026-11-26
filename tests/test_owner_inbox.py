@@ -87,6 +87,7 @@ class Rig:
         self.channel = write_channel(home)
         self.state = home / "inbox.json"
         self.candidates, self.applied, self.parsed, self.verdicts = [cand()], [], [], []
+        self.review, self.deleted = None, []
         self.facts = {"advisor_decided": 0, "acceptances": 0, "run": "Last run stopped."}
         if digest is False:                 # most tests are about packages: today's digest is already out
             fingerprint = ib.load_channel(self.channel)[1]["fingerprint"]
@@ -108,7 +109,7 @@ class Rig:
         return ib.cycle("operator", gather=lambda: list(self.candidates), author=lambda c: fields(),
                         parse=self.parse, apply=self.apply, digest_facts=lambda: self.facts, state_path=self.state,
                         channel_path=self.channel, clock=lambda: self.now,
-                        transport={"send": self.phone.send, "fetch": self.phone.fetch})
+                        transport={"send": self.phone.send, "fetch": self.phone.fetch, "delete": lambda ch, url, msg: self.deleted.append((url, msg)) or True}, review=self.review)
 
     def open_one(self):
         self.run(T0)                      # first run: records, sends nothing
@@ -1880,15 +1881,17 @@ def test_a_label_picks_exactly_that_request_among_several(home):
     assert rig.applied == [{"op": "approve", "item": target["id"], "confirmed": True}]
 
 
-def test_two_labels_in_one_reply_or_free_text_are_not_read_by_code(home):
+def test_free_text_around_a_label_is_not_read_by_code_but_a_list_of_decisions_is(home):
     rig = Rig(home)
     rig.candidates = multi("odysseus:ready/a.md", "odysseus:ready/b.md")
     rig.run(T0)
     rig.run(T0 + 2 * 60)
-    rig.phone.say("approve O1 and O2", T0 + 5 * 60)
     rig.phone.say("yes O1 but only the docs part", T0 + 5 * 60 + 5)
     rig.run(T0 + 6 * 60)
-    assert rig.applied == [] and len(rig.parsed) == 2                                # both went to the model path, which asks, never approves
+    assert rig.applied == [] and len(rig.parsed) == 1                                # free text went to the model path, which asks, never approves
+    rig.phone.say("approve O1 and O2", T0 + 7 * 60)                                  # a plain list of labelled decisions is read by code
+    rig.run(T0 + 8 * 60)
+    assert [d["op"] for d in rig.applied] == ["approve", "approve"] and len(rig.parsed) == 1
 
 
 def test_a_bare_yes_still_needs_the_confirmed_flow_even_when_one_request_is_open(home):
@@ -2248,3 +2251,263 @@ def test_a_pending_confirmation_does_not_capture_an_unrelated_later_reply(home):
     rig.run(T0 + 44 * 60)
     item = next(iter(rig.saved()["items"].values()))
     assert not any(e["msg"] == "g2" for e in item.get("thread", [])) and any(e["msg"] == "g2" for e in rig.saved()["loose"])
+
+
+# ---- several labelled decisions in one message, and the periodic review
+
+def two_open(rig, contexts=({"risk": "medium"}, {"risk": "medium"})):
+    rig.candidates = [cand(task_ref=f"odysseus:ready/{n}.md", task_id=f"t{n}", scope=f"{n}" * 64, title=f"Thing {chr(97 + n)}", context=c) for n, c in enumerate(contexts)]
+    rig.run(T0)
+    rig.run(T0 + 2 * 60)
+    rig.phone.sent.clear()
+
+
+def test_two_labelled_decisions_in_one_message_both_apply(home):
+    rig = Rig(home)
+    two_open(rig)
+    rig.phone.say("approve O1. no O2", T0 + 5 * 60)
+    rig.run(T0 + 6 * 60)
+    assert [(d["op"], rig.saved()["items"][d["item"]]["label"]) for d in rig.applied] == [("approve", "O1"), ("decline", "O2")]
+    assert rig.parsed == [] and rig.phone.sent[-1]["body"].startswith("O1: Approved. O2: Declined.")
+    assert {i["state"] for i in rig.saved()["items"].values()} == {"answered"}
+
+
+def test_the_second_label_inherits_the_verb(home):
+    rig = Rig(home)
+    two_open(rig)
+    rig.phone.say("approve O1 and O2", T0 + 5 * 60)
+    rig.run(T0 + 6 * 60)
+    assert [d["op"] for d in rig.applied] == ["approve", "approve"]
+
+
+def test_multiple_decisions_are_all_or_nothing(home):
+    rig = Rig(home)
+    two_open(rig)
+    for n, text in enumerate(["approve O1. approve O9", "approve O1. approve O1", "approve O1 and no O1"]):
+        rig.phone.say(text, T0 + (5 + n) * 60, mid=f"z{n}")
+    rig.run(T0 + 10 * 60)
+    assert rig.applied == [] and rig.parsed == []
+    assert all(s["body"].startswith("I read 2 decisions but ") and "I applied none" in s["body"] for s in rig.phone.sent[-3:])
+
+
+def test_an_approval_of_a_protected_request_is_never_part_of_a_multi_decision(home):
+    rig = Rig(home)
+    two_open(rig, ({"risk": "medium"}, {}))                     # the second carries no decision-class facts: protected
+    rig.phone.say("approve O1. approve O2", T0 + 5 * 60)
+    rig.run(T0 + 6 * 60)
+    assert rig.applied == [] and "approving O2 needs its own confirmation" in rig.phone.sent[-1]["body"]
+    rig.phone.say("no O2. approve O1", T0 + 7 * 60, mid="z9")                   # a refusal is never protected
+    rig.run(T0 + 8 * 60)
+    assert [d["op"] for d in rig.applied] == ["decline", "approve"]
+
+
+def test_a_single_sentence_that_is_not_a_list_of_decisions_is_read_as_before(home):
+    rig = Rig(home)
+    two_open(rig)
+    rig.phone.say("approve O1 because it looks right. thanks", T0 + 5 * 60)
+    rig.run(T0 + 6 * 60)
+    assert rig.applied == [] and len(rig.parsed) == 1             # not a multi-decision: the model reads it, as before
+
+
+def reviewer(rig, answer, home):
+    from src import owner_topic_review as tr
+    calls = []
+
+    def ask(prompt):
+        calls.append(prompt)
+        return answer(prompt) if callable(answer) else answer
+    rig.review = lambda state, channel, send_fn, now: tr.review_cycle(state, channel, send_fn, now, ask, home / "owner_requests.jsonl")
+    return calls
+
+
+def say_unclear(rig, text, at, mid):
+    rig.phone.say(text, at - 30, mid=mid, topic=f"{BASE}/alerts-topic-1234", tags=[])
+    rig.run(at)
+
+
+def test_the_review_asks_back_with_the_exact_reply_and_applies_nothing(home):
+    rig = Rig(home)
+    rig.open_one()
+    calls = reviewer(rig, lambda p: json.dumps([{"id": "u1", "intent": "decision", "summary": "approve the glovebox request", "decisions": [{"label": "O1", "verb": "approve"}]}]), home)
+    say_unclear(rig, "approve the glovebox one please", T0 + 41 * 60, "u1")
+    assert rig.saved()["log"][0]["out"] == "unclear" and calls == []                    # five minutes of grace before anything is second-guessed
+    rig.run(T0 + 60 * 60)
+    assert len(calls) == 1 and rig.applied == []
+    assert "Did you mean: approve O1?" in rig.phone.sent[-1]["body"] and "Reply 'approve O1'" in rig.phone.sent[-1]["body"]
+    saved = rig.saved()
+    assert saved["log"][0]["reviewed"] is True and saved["review_at"] == T0 + 60 * 60
+    assert {"u1", saved["log"][0]["ack"]} <= {m for _, m in rig.deleted}                # the handled exchange (message and reply) is deleted
+    assert any(e["msg"] == "pub" + str(rig.phone.posted - 1) and e["kind"] == "review" for e in saved["loose"])      # the review's own answer stays a day
+
+
+def test_the_review_offers_two_decisions_as_one_reply_unless_one_is_protected(home):
+    rig = Rig(home)
+    two_open(rig)
+    both = json.dumps([{"id": "u2", "intent": "decision", "summary": "two approvals", "decisions": [{"label": "O1", "verb": "approve"}, {"label": "O2", "verb": "approve"}]}])
+    reviewer(rig, both, home)
+    say_unclear(rig, "approve thing a and the other one thing b", T0 + 41 * 60, "u2")
+    rig.run(T0 + 60 * 60)
+    assert "Did you mean: approve O1 and approve O2?" in rig.phone.sent[-1]["body"] and "Reply 'approve O1. approve O2'" in rig.phone.sent[-1]["body"]
+
+
+def test_a_change_request_is_recorded_as_a_numbered_owner_request(home):
+    rig = Rig(home)
+    rig.open_one()
+    reviewer(rig, lambda p: json.dumps([{"id": "u3", "intent": "change_request", "summary": "Check first whether the corpus task is already done", "decisions": []}]), home)
+    say_unclear(rig, "this may already be done, investigate first", T0 + 41 * 60, "u3")
+    rig.run(T0 + 60 * 60)
+    row = json.loads((home / "owner_requests.jsonl").read_text().splitlines()[-1])
+    assert row["id"] == "R1" and row["status"] == "open" and row["text"].startswith("this may already be done")
+    assert "Logged as R1: you wrote 'this may already be done, investigate first'" in rig.phone.sent[-1]["body"] and rig.applied == []
+    assert (home / "owner_requests.jsonl").stat().st_mode & 0o077 == 0
+
+
+def test_the_review_cannot_approve_and_ignores_labels_that_are_not_open(home):
+    from src import owner_topic_review as tr
+    state = {"items": {"a": {"state": "open", "label": "O1", "name": "x"}}, "log": []}
+    entries = [{"id": "m1", "text": "t", "out": "unclear", "t": 0}]
+    raw = 'sure: [{"id": "m1", "intent": "decision", "summary": "s", "decisions": [{"label": "O9", "verb": "approve"}, {"label": "o1", "verb": "delete"}, {"label": "o1", "verb": "approve"}, {"label": "O1", "verb": "no"}]}, {"id": "zz", "intent": "decision", "summary": "x"}]'
+    assert tr.parse_review(raw, entries, state) == {"m1": {"intent": "decision", "summary": "s", "decisions": [{"label": "O1", "verb": "approve"}]}}
+    assert tr.parse_review("not json", entries, state) is None
+
+
+def test_the_review_runs_only_when_something_needs_it_and_not_more_than_every_three_hours(home):
+    rig = Rig(home)
+    rig.open_one()
+    calls = reviewer(rig, lambda p: json.dumps([{"id": "u4", "intent": "note", "summary": "fyi", "decisions": []}]), home)
+    rig.run(T0 + 50 * 60)
+    assert calls == [] and rig.saved()["review_at"] == 0.0                              # nothing to review: no model call
+    say_unclear(rig, "just so you know, I am away tomorrow", T0 + 51 * 60, "u4")
+    rig.run(T0 + 60 * 60)
+    assert len(calls) == 1 and rig.saved()["log"][0]["reviewed"] is True
+    say_unclear(rig, "another thing nobody understands", T0 + 61 * 60, "u5")
+    rig.run(T0 + 90 * 60)
+    assert len(calls) == 1                                                                # less than three hours since the last pass
+    rig.run(T0 + 60 * 60 + 3 * 3600 + 60)
+    assert len(calls) == 2
+
+
+def test_unreadable_model_output_leaves_the_messages_unreviewed_and_untouched(home):
+    rig = Rig(home)
+    rig.open_one()
+    reviewer(rig, "I am sorry, I cannot do that", home)
+    say_unclear(rig, "something unclear here", T0 + 41 * 60, "u6")
+    rig.run(T0 + 60 * 60)
+    saved = rig.saved()
+    assert saved["log"][0]["reviewed"] is False and saved["retire"] == [] and rig.applied == []
+
+
+def test_the_review_can_be_switched_off(home, monkeypatch):
+    monkeypatch.setenv("ODYSSEUS_OWNER_REVIEW", "0")
+    rig = Rig(home)
+    rig.open_one()
+    calls = reviewer(rig, "[]", home)
+    say_unclear(rig, "something unclear here", T0 + 41 * 60, "u7")
+    rig.run(T0 + 60 * 60)
+    assert calls == []
+
+
+def test_a_multi_decision_ends_a_pending_confirmation_even_when_another_topic_has_open_requests(home):
+    rig = Rig(home)
+    write_routes(home, {"odysseus": "odysseus-approvals", "obsidian-phd": "phd-approvals"})
+    rig.candidates = [cand(task_ref=f"odysseus:ready/{n}.md", task_id=f"t{n}", scope=f"{n}" * 64, title=f"Thing {chr(97 + n)}") for n in range(3)] + \
+                     [cand(task_ref="obsidian-phd:ready/p.md", task_id="tp", scope="4" * 64, title="Thing p")]
+    rig.run(T0)
+    rig.run(T0 + 2 * 60)
+    odys = f"{BASE}/odysseus-approvals"
+    name = {i["label"]: i["name"] for i in rig.saved()["items"].values()}
+    rig.phone.say("go ahead with the first one", T0 + 5 * 60, mid="e1", topic=odys, tags=[])
+    rig.verdicts = [{"target": name["O1"], "verdict": "yes"}]
+    rig.run(T0 + 6 * 60)
+    assert rig.saved()["echo"]
+    rig.phone.say("approve O2 and O3", T0 + 8 * 60, mid="e2", topic=odys, tags=[])
+    rig.run(T0 + 9 * 60)
+    assert rig.saved()["echo"] is None
+    rig.phone.say("yes", T0 + 10 * 60, mid="e3", topic=odys, tags=[])
+    rig.run(T0 + 11 * 60)
+    assert len(rig.applied) == 2 and all(rig.saved()["items"][d["item"]]["label"] != "O1" for d in rig.applied)
+
+
+def test_a_multi_decision_with_a_failing_part_is_logged_failed_and_keeps_its_thread(home):
+    rig = Rig(home)
+    two_open(rig)
+    rig.apply = lambda do, items, digest: ("Approved.", "done") if do["op"] == "approve" else ("Could not save.", "error")
+    rig.phone.say("approve O1. no O2", T0 + 5 * 60, mid="mf")
+    rig.run(T0 + 6 * 60)
+    assert rig.saved()["log"][-1]["out"] == "failed"
+    rig.run(T0 + 20 * 60)
+    assert "mf" not in {m for _, m in rig.deleted}                   # one request is still open: the exchange stays
+
+
+def test_a_message_the_model_skipped_is_never_treated_as_handled(home):
+    rig = Rig(home)
+    rig.open_one()
+    reviewer(rig, "[]", home)
+    say_unclear(rig, "something unclear here", T0 + 41 * 60, "k1")
+    rig.run(T0 + 60 * 60)
+    entry = rig.saved()["log"][0]
+    assert entry["reviewed"] is False and entry["tries"] == 1 and rig.deleted == []
+    sent = len(rig.phone.sent)
+    rig.run(T0 + 5 * 3600)
+    rig.run(T0 + 9 * 3600)
+    rig.run(T0 + 13 * 3600)
+    assert rig.saved()["log"][0]["tries"] == 3 and len(rig.phone.sent) == sent and rig.deleted == []      # given up after three tries, never silently deleted
+
+
+def test_a_clarification_that_could_not_be_delivered_keeps_the_owners_message(home):
+    rig = Rig(home)
+    rig.open_one()
+    reviewer(rig, lambda p: json.dumps([{"id": "k2", "intent": "decision", "summary": "approve", "decisions": [{"label": "O1", "verb": "approve"}]}]), home)
+    say_unclear(rig, "approve the glovebox one please", T0 + 41 * 60, "k2")
+    rig.phone.refuse_sends = 1
+    rig.run(T0 + 60 * 60)
+    entry = rig.saved()["log"][0]
+    assert entry["reviewed"] is False and entry["tries"] == 1 and "k2" not in {m for _, m in rig.deleted}
+
+
+def test_an_unplaceable_message_is_asked_about_not_silently_dropped(home):
+    rig = Rig(home)
+    rig.open_one()
+    reviewer(rig, lambda p: json.dumps([{"id": "k3", "intent": "other", "summary": "unclear", "decisions": []}]), home)
+    say_unclear(rig, "hmm maybe the other thing", T0 + 41 * 60, "k3")
+    rig.run(T0 + 60 * 60)
+    assert "I could not tell what you meant by 'hmm maybe the other thing'" in rig.phone.sent[-1]["body"]
+
+
+def test_an_entry_the_owner_has_since_settled_is_tidied_without_a_question(home):
+    rig = Rig(home)
+    rig.open_one()
+    calls = reviewer(rig, "[]", home)
+    say_unclear(rig, "approve the glovebox one please", T0 + 41 * 60, "k4")
+    rig.phone.say("approve O1", T0 + 45 * 60, mid="k5", topic=f"{BASE}/alerts-topic-1234", tags=[])
+    rig.run(T0 + 46 * 60)
+    rig.run(T0 + 60 * 60)
+    assert calls == [] and rig.saved()["log"][0]["reviewed"] is True and "k4" in {m for _, m in rig.deleted}
+
+
+def test_a_later_decision_on_another_request_does_not_settle_an_earlier_unhandled_message(home):
+    rig = Rig(home)
+    two_open(rig)
+    calls = reviewer(rig, lambda p: json.dumps([{"id": "k7", "intent": "decision", "summary": "approve", "decisions": [{"label": "O1", "verb": "approve"}]}]), home)
+    say_unclear(rig, "approve the docs one", T0 + 41 * 60, "k7")
+    rig.phone.say("approve O2", T0 + 42 * 60, mid="k8", topic=f"{BASE}/alerts-topic-1234", tags=[])
+    rig.run(T0 + 43 * 60)
+    rig.run(T0 + 60 * 60)
+    assert len(calls) == 1 and "Did you mean: approve O1?" in rig.phone.sent[-1]["body"]
+
+
+def test_the_reviews_own_answer_stays_a_day_and_a_far_future_review_time_cannot_disable_it(home):
+    rig = Rig(home)
+    rig.open_one()
+    reviewer(rig, lambda p: json.dumps([{"id": "k6", "intent": "decision", "summary": "approve", "decisions": [{"label": "O1", "verb": "approve"}]}]), home)
+    say_unclear(rig, "approve the glovebox one please", T0 + 41 * 60, "k6")
+    data = rig.saved()
+    data["review_at"] = T0 + 10 ** 9
+    rig.state.write_text(json.dumps(data))
+    rig.run(T0 + 60 * 60)
+    pub_id = "pub" + str(rig.phone.posted - 1)
+    assert "Did you mean" in rig.phone.sent[-1]["body"]
+    rig.run(T0 + 4 * 3600)
+    assert pub_id not in {m for _, m in rig.deleted}
+    rig.run(T0 + 60 * 60 + 25 * 3600)
+    assert pub_id in {m for _, m in rig.deleted}
