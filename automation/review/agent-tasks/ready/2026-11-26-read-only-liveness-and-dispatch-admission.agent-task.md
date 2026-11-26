@@ -44,6 +44,30 @@ inputs:
   - docs/aoteru-model-host-routing-contract.md
 result_path: docs/runtime-work-packages/2026-11-26-liveness-and-admission.md
 ---
+
+## Plan (written 2026-11-26 by the controller; step 0 is to verify it against HEAD)
+**Goal in one line.** Replace the fixed read-only deadline with an inactivity timeout plus a ceiling that every layer agrees on, and settle advisory rows safely; admission control stays with the parallel-dispatch card.
+**Already done / do not redo:** Write leases, host admission, provider pacing (src/provider_usage.py), `max_paid_calls`, failure backoff and stall detection already exist and stay. A raise to 900 s was reverted after review because it conflicted with the HTTP watchdog, the CLI default and transport headroom, and could leave advisory rows `running`. Do not repeat it. Admission control belongs to the ready card `2026-11-21-lazyusage-parallel-window-aware-dispatch`.
+**Steps:**
+0. Grep src/, routes/ and companion/ for the 180/210/240 s values, transport headroom, activation deadline, advisory-row persistence, replay fence and stall detection. Read the reverted change and check the 2026-11-21 card. Correct this plan.
+1. Design (in the result doc): the inactivity window N, the absolute ceiling and each layer's bound. The layers are the HTTP watchdog (or a durable execution id the client polls), the CLI default, worker headroom including setup and cleanup, and the activation deadline recomputed after setup. Keep client bound > worker bound > setup + ceiling + cleanup. Get a cross-family design review before writing code.
+2. One function derives all bounds from N and the ceiling, behind a switch that defaults off. Tests: the invariant holds across configurations; with the switch off, current values are unchanged.
+3. Inactivity timer: backend output resets it, and the ceiling still applies. Fault tests (fake clock): a long read with continuous output completes past 180 s; a silent hang is killed after N.
+4. Advisory rows: make ownership explicit. Settle a row only once the backend PID is proven gone, including after exceptions before terminal persistence, and keep the replay fence. Fault tests: a killed worker leaves no `running` row; replay is still refused.
+5. Admission control (leases, per-host memory/GPU admission, provider pacing, failure backoff): write a design note under automation/review/ for the 2026-11-21 card; no implementation here.
+6. Write docs/runtime-work-packages/2026-11-26-liveness-and-admission.md (findings, design, fault-test output, actual model). Run full pytest and stop with the switch off.
+**Done when:**
+- The card's four fault tests and the switch-off regression test pass.
+- No admission-control code duplicates the 2026-11-21 card.
+- Full suite green.
+**Risks and stops:**
+- If the HTTP layer cannot be bounded consistently, use the durable-id poll and stop for review; never ship bounds that disagree.
+- Remove none of the safety limits that are not deadlines; touch no approval or delegation code.
+- If the 2026-11-21 card is already in progress, coordinate with it rather than fork it.
+**Ordering note:** Needs nothing first. The 2026-11-21 card should follow it, because parallel dispatch multiplies the advisory-row risk. Unblocks long read-only runs.
+
+---
+
 # Liveness timeouts and admission control
 
 ## Why

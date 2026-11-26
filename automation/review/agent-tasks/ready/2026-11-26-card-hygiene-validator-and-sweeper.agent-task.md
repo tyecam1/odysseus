@@ -43,6 +43,32 @@ inputs:
   - docs/aoteru-model-host-routing-contract.md
 result_path: docs/runtime-work-packages/2026-11-26-card-hygiene.md
 ---
+
+## Plan (written 2026-11-26 by the controller; step 0 is to verify it against HEAD)
+**Goal in one line.** Extend the existing card checkers to flag six metadata defects, and add a proposal-only sweeper, reviewer-attestation backfill and owner-load metric.
+**Already done / do not redo:** The agent-task/v2 card checkers already exist (locate with grep: `agent-task/v2`, `allowed_paths`). Extend them and never add a second validator. src/owner_ledger.py already records the owner decisions that lift gates, and the metric reads it. Tagged Sol call records and fallback-lane headers are the existing machine evidence.
+**Steps:**
+0. Grep HEAD for the checker, queue loader, parent/child fields, `execution_host`, `executor`, `due_date`, the digest builder and the ledger API. Correct this plan and log what you find.
+1. Checker: add six rules, each with a stable code and a one-line reason. Add optional fields `owner_gate_class` (the card's enum; a card without one routes to the advisor tier, never the owner), `host_required_reason` and `event_date`. Tests: one fixture card per defect fails with its code; a valid owner-class card passes untouched; `due_date` alone flags nothing.
+2. Executor rule: use the mechanical-only executor set from docs/aoteru-model-host-routing-contract.md or its code constant. Test: GLM-Flash is flagged on verification work, not on mechanical work.
+3. Sweeper (scripts/): read queues read-only and write one metadata patch plus reason per card under automation/review/card-hygiene/<repo>/. Test: on a copy of today's queue the defects are found and canonical hashes are unchanged.
+4. Attestation backfill from machine records only (tagged Sol records, fallback-lane headers, PR review records), citing record ids. Where no record exists, propose a bounded re-review. Test: prose-only evidence is refused.
+5. Owner-load metric from the ledger: open gates, settled by agent or advisor, settled by owner. Fixture test; hook it into the digest only through an existing extension point.
+6. Write docs/runtime-work-packages/2026-11-26-card-hygiene.md (step-0 findings, defect counts, test output, actual model used). Run the full pytest suite and stop.
+**Done when:**
+- Each defect class fails a fixture test; clean and valid owner-class cards pass.
+- The sweeper run changes zero canonical files (hash check) and writes only under automation/review/card-hygiene/.
+- Every attestation proposal cites a machine-record id.
+- Full suite green; the result doc names the model.
+**Risks and stops:**
+- If the new rules fail existing canonical cards, reject only new or changed cards and warn on the rest.
+- Never edit canonical cards; metadata PRs follow each repository's contract separately.
+- The gate class only routes work; never touch approval or delegation code.
+- An unreadable queue becomes a protected_handoff naming the path.
+**Ordering note:** Needs nothing first. Unblocks avenue-to-develop's unblocking children (repairs, host re-pins, attestations) and validates the Zotero read/write split.
+
+---
+
 # Card hygiene: stop cards defaulting to the owner or the wrong host
 
 ## Why

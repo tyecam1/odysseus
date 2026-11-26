@@ -43,6 +43,31 @@ inputs:
   - docs/aoteru-model-host-routing-contract.md
 result_path: docs/runtime-work-packages/2026-11-26-mechanical-verification.md
 ---
+
+## Plan (written 2026-11-26 by the controller; step 0 is to verify it against HEAD)
+**Goal in one line.** Write `verification_evidence` mechanically when every check passed at the exact commit, add pre-registered acceptance criteria, and ship advisor acceptance designed but switched off.
+**Already done / do not redo:** An existing verified path writes `verification_evidence` (locate with grep: `verification_evidence`, `verified_by`). Use it and never add a second writer. An advisor-approval worker is built but NOT enabled; leave it off and keep it separate. Tagged Sol records and fallback-lane headers identify reviewer models.
+**Steps:**
+0. Grep HEAD for the verified path, smoke and review records, CI-status reads and the card checker. Correct this plan.
+1. Evidence collector (a pure function of a SHA): CI conclusion, deterministic tests, a smoke check where deployed, and an approving review from another model family, all from machine records. Test: complete only when all are present; missing checks are named.
+2. Write only through the existing verified path: `result: pass`, commit, ref, and `verified_by` naming the actual check ids. Tests: a missing check writes nothing; a same-family or prose review is rejected.
+3. Commit binding: evidence is valid only for its SHA. Test: a changed commit invalidates it.
+4. Pre-registered criteria: optional `acceptance_criteria` on implementation cards. The checker warns when a new card has none, or when they post-date its first work commit. Fixture tests.
+5. Advisor acceptance: a design plus code behind a config switch that defaults OFF. It accepts only when every pre-registered criterion has recorded evidence. It always refuses material sent in the owner's name, physical-world results and canonical thesis claims. Tests: off refuses and writes nothing; the default is off; exclusions refuse even when on.
+6. Put the exact one-line owner question in the result doc ("May the advisor accept internal tools against pre-registered criteria and recorded evidence?"); do not send it.
+7. Write docs/runtime-work-packages/2026-11-26-mechanical-verification.md (findings, a read-only dry run over the four cards waiting on `verification_evidence`, actual model). Run full pytest and stop.
+**Done when:**
+- Evidence needs every check at the exact SHA, and a changed commit invalidates it (tests).
+- The switch defaults off, its path refuses while off, and the owner question is in the result doc.
+- Full suite green.
+**Risks and stops:**
+- Never enable the switch or the advisor-approval worker; touch no approval code beyond this card's path.
+- Write no real evidence for the waiting cards here; that comes after merge.
+- If CI status cannot be read from the lab without a new credential, record a protected_handoff.
+**Ordering note:** Benefits from card-hygiene attestations. Unblocks the four `verification_evidence` cards and avenue-to-develop's verification-debt tier; live advisor acceptance waits for the owner's yes.
+
+---
+
 # Mechanical verification and evidence-based acceptance
 
 ## Why

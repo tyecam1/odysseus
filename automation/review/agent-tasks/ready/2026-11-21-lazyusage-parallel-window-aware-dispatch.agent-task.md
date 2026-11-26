@@ -61,6 +61,31 @@ denied_paths:
 result_path: docs/runtime-work-packages/2026-11-21-lazyusage-parallel-window-aware-acceptance.md
 ---
 
+## Plan (written 2026-11-26 by the controller; step 0 is to verify it against HEAD)
+**Goal in one line.** Add an opt-in change to the existing lazyUsage activation: two child executions in flight, under a separate operator work-in-progress (WIP) cap of two cards.
+**Already done / do not redo:** provider-stated usage windows already gate dispatch (src/provider_usage.py, src/estate_router.py). Also in place: the advisor checkpoint, gate lifting through the owner ledger (src/owner_ledger.py), fail-closed handling of unknown usage, the `ungrounded_local_executor` rejection and repository write leases (src/estate_write_lane.py, src/park_lease_ops.py).
+**Steps:**
+0. Grep HEAD for `advance`, `_choose`, `_assess`, `in_flight_execution_id`, `EstateExecution` (core/database.py) and the lease and window-gate functions. Correct this plan and the already-done list.
+1. Take a read-only baseline from the backend DB: serial dispatch, idle time by cause, and which usage pools are provider-stated or unknown. Proof: cited queries.
+2. WIP reservation (core/database.py): a transactional reservation keyed on authenticated operator + canonical `repo_id/task_id`. `max_active_work_items_per_operator` is off by default and set to 2 for this operator. A card keeps its slot until its shipping gates pass. Tests: two workers on one card take one slot; a third card is refused even with an idle slot and expiring quota; restarts and parallel clients cannot oversubscribe; other operators are unaffected.
+3. Add a durable parked-unfinished state (blocker, evidence, recheck trigger). Parking a third card needs a logged operator exception. Tests: only a proven protected wait parks; parked cards re-admit before new cards and within the cap.
+4. Add `max_concurrent_executions` (default 1) in src/lazy_usage_runtime.py: per-child rows linked to the activation, and a unique `repo_id + task_id + revision` reservation persisted before any paid boundary. Tests: no double dispatch; a crash or restart with two children replays no paid call.
+5. `advance()` fills free slots and reconciles each child. The coordinator plan stays advisory; stop/pause fences every child; admission against `max_paid_calls`, `max_tokens` and deadlines is atomic; one write lease per repository. Tests: the card's regression and accounting lists, including the 2026-11-21 guard-removal review gate.
+6. The status surface (`am lazy status`; locate with grep) shows `active_items / cap`, parked count, stage and denial reason. Route test.
+7. Write docs/runtime-work-packages/2026-11-21-lazyusage-parallel-window-aware-acceptance.md (baseline, design, model used, test evidence, canary plan with read-only tasks first and rollback by setting concurrency to 1). Run the full suite and stop.
+**Done when:**
+- With the flag off, the existing suite passes unchanged.
+- All WIP and concurrency tests pass.
+- Status reports the WIP count and denial reasons.
+- The diff adds no scheduler, daemon, queue or activation type.
+**Risks and stops:**
+- If any change weakens the crash or stop fences, stop and report.
+- If HEAD has no authenticated operator identity, record the gap; do not invent one.
+- Do not touch approval/delegation code, owner-ledger semantics or local-routing guards. Canary and deploy are separate governed steps.
+**Ordering note:** Follows the deployed 2026-11-19 reliability work. Unblocks the canary, adaptive pacing, grounded local work and the parking contract the owner-communication card relies on.
+
+---
+
 # Parallel and window-aware /lazyUsage
 
 ## Problem and outcome
