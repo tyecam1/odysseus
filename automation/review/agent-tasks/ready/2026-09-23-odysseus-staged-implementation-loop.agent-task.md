@@ -45,6 +45,25 @@ duplicates: []
 notes: "Never run or spend /ultrareview unless the operator explicitly authorizes it."
 ---
 
+## Plan (drafted 2026-11-26 by GLM-5.3, same-family GLM and not a verdict; step 0 is to verify it against HEAD)
+**Goal in one line.** Close the three final contract gaps identified after `0238bc8` and run the remaining Odysseus stages (including Stage 6) through the Sol adjudication loop.
+**Already done / do not redo:** commit `0238bc8` exists and the three final contract gaps (spool/tombstone retention, ambiguous `worktree.prepare`, finalize/push semantics) have been identified.
+**Steps:**
+0. Grep HEAD of live `tyecam1/odysseus` for `docs/aoteru-multihost-execution-implementation-plan.md`, `ParkLease`, `EstateExecution`, `worktree.prepare`, `start(execution_id)`, `worktree_resolution=finalized`, and `0238bc8`; correct this plan.
+1. Draft the contract for each gap (retain worker-side tombstone/spool state until positively resolved; keep the exact `preparing` reservation protected pending idempotent probe via the same `lease_id`; choose and record one finalize/push semantic with a governed retry path for `pushed:false`); verified by updating the architecture plan and acceptance matrix — TO CONFIRM at step 0 where the acceptance matrix lives.
+2. Route the updated plan/matrix through the Sol adjudication loop before Stage 6 implementation; verified by the adjudication outcome recorded — TO CONFIRM at step 0 how adjudication is invoked.
+3. For each remaining stage: reconstruct live state, bound the stage, implement per the stage loop; verified against the stage's acceptance tests read at step 0.
+4. Re-check the operating invariants (one control plane, thin workers, no second authority) after each stage; verified against the invariant list in the card.
+**Done when:**
+- All three gaps closed per the card's definitions; plan and acceptance matrix updated and adjudicated.
+- A deleted terminal spool can never turn `start(execution_id)` into a new execution; unresolved prepare never releases the reservation; `pushed:false` always has a supported next action.
+- Invariants preserved; no worktree reuse across executions.
+**Risks and stops:**
+- High risk, approval required: do not run or spend `/ultrareview` without explicit operator approval — stop and record a protected_handoff.
+- Work from live repo state only; never trust stale task text over the repository.
+
+---
+
 # Odysseus staged implementation operating contract
 
 Work from the **live** `tyecam1/odysseus` state. Do not trust stale task text where it conflicts with the repository.

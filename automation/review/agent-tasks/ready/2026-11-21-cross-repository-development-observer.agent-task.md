@@ -60,6 +60,25 @@ denied_paths:
 result_path: docs/runtime-work-packages/2026-11-21-development-observer-pilot.md
 ---
 
+## Plan (drafted 2026-11-26 by GLM-5.3, same-family GLM and not a verdict; step 0 is to verify it against HEAD)
+**Goal in one line.** A passive, evidence-linked observer inside the existing Odysseus backend that diagnoses failed, repeated and stalled development across Odysseus, Misumi and PhD executions without duplicating any existing authority.
+**Already done / do not redo:** nothing recorded
+**Steps:**
+0. Grep HEAD for the named files/symbols (`/lazyUsage`, `src/prompt_evolution.py`, `src/agent_runs.py`, `evals/prompt-*`, `aoteru preflight`, the two named work packages); correct this plan.
+1. Read-only forensic inventory of `dev` HEAD: worker/service state, active leases, task queues, tracing and prompt-evaluation paths; run `aoteru preflight`; classify each source as live, Git-backed, partial or unavailable. Verified: inventory records coverage windows and join-key completeness.
+2. Build a reconciled backlog by owner repo: bucket, status, acceptance evidence, age, dependency, review debt, last meaningful transition, stale-state discrepancy; count cards separately from accepted, blocked, untriaged and verified work. Verified: every entry cross-checks against the live state from step 1.
+3. Build a chronological, source-linked retrospective of at least 12 real episodes (or all that exist), explicitly including PR #300, PR #296, #295/#300 and #301. Verified: each episode links to its source; no causal claim without evidence.
+4. Write the result to `docs/runtime-work-packages/2026-11-21-development-observer-pilot.md`. Verified: report exists and every claim carries a source link.
+**Done when:**
+- Stage 0 inventory, backlog reconciliation and retrospective are source-linked.
+- No new scheduler, verification-controller, prompt-initialiser or storage authority created.
+**Risks and stops:**
+- Live instrumentation (beyond the read-only audit) requires normal verification and deployment — TO CONFIRM at step 0; do not preempt near-shipping tasks.
+- External provider/PR/CI reads only where existing credentials and policy permit; credentials are owner-only — stop and record a protected_handoff if needed.
+- Domain mutations stay with owners; never merge cross-repo authorities.
+
+---
+
 # Development Observer: diagnose failure, re-verification, backlog and wasted work
 
 ## Decision and scope

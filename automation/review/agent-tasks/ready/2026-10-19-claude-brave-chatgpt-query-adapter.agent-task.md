@@ -66,6 +66,26 @@ duplicates: []
 notes: "Operator priority high (2026-10-19). This is accepted backlog delivery, but high priority does not waive AGENTS.md shipping-first selection or safety gates. Google Scholar Labs and ChatGPT browser queries remain planned until live proven. Current UK ChatGPT consumer terms prohibit automated/programmatic output extraction: fail closed and offer operator-mediated handoff unless an expressly permitted route is independently verified."
 ---
 
+## Plan (drafted 2026-11-26 by GLM-5.3, same-family GLM and not a verdict; step 0 is to verify it against HEAD)
+**Goal in one line.** Odysseus can ask a bounded question to ChatGPT through the operator's signed-in Brave via the existing Claude-in-Chrome connection, returning a provenance-labelled result without duplicating Scholar Labs work.
+**Already done / do not redo:** the Claude-in-Chrome browser connection, session-health checks, permission gates, retries and output envelope already exist and are shared from the Scholar Labs finding-retrieval work; do not rebuild them, the scheduler, researcher pipeline or task authority.
+**Steps:**
+0. Grep HEAD for `dev`, `AGENTS.md`, the Scholar Labs task and the older blocked ChatGPT Project bridge; correct this plan and reuse its project-selection, provenance, testing and injection requirements.
+1. Attest current Claude Code `--chrome`/`/chrome` plus the official extension in Brave locally (sign-in, extension version, browser selection, site access, native messaging); verified by a local success, not documentation claims.
+2. Implement the query contract (modes `chatgpt_chat`/`chatgpt_project`, exact URL/ID preference, quotas: one query per unresolved need, max three per parent task); verified by tests in allowed paths (TO CONFIRM locations at step 0).
+3. Verify current OpenAI UK terms on automated extraction before enabling it; if not clearly permitted, provide human-mediated copy/paste handoff returning `policy_blocked`; verified by a recorded terms check.
+4. Write closeout at automation/review/skills/2026-10-19-claude-brave-chatgpt-query-adapter.md with states `completed`, `policy_blocked`, `needs_operator_action`, auth state (exact name TO CONFIRM at step 0); verified by review.
+**Done when:**
+- Independent ChatGPT query admission works; the five-per-day Scholar quota is never decremented for ChatGPT calls.
+- Every result carries provider, mode, target, query hash, timestamp, method, warnings and provenance.
+- Unattended automated extraction is never presented as delivered if terms are unverified.
+**Risks and stops:**
+- `approval_required: true`: operator approval, sign-in, MFA/CAPTCHA and site permissions are owner-only; never read or export cookies, tokens, credentials, headers or local storage; never automate or bypass login, CAPTCHA, rate limits or anti-bot measures.
+- No endpoint reverse engineering, hidden scraping, bulk export or silent paid API fallback; do not delete/archive/mutate existing chats.
+- If terms or sign-in block progress, stop and record protected_handoff.
+
+---
+
 # Claude browser access to ChatGPT via Brave
 
 ## Goal

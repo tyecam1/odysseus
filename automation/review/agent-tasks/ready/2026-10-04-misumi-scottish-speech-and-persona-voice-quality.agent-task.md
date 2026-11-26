@@ -67,6 +67,27 @@ duplicates: []
 notes: "Activate as an early child of the persona-growth/background successor after the current convergence programme closes. Non-mutating benchmark preparation may proceed earlier if it does not interfere with current acceptance work. Do not park while a dependency-ready local benchmark or implementation packet exists."
 ---
 
+## Plan (drafted 2026-11-26 by GLM-5.3, same-family GLM and not a verdict; step 0 is to verify it against HEAD)
+**Goal in one line.** Misumi reliably transcribes the operator's natural Glasgow/Scottish speech and speaks with measurably more natural, characterful persona voices than the deployed baseline.
+**Already done / do not redo:** nothing recorded.
+**Steps:**
+0. Grep HEAD for the current deployed Whisper/faster-whisper baseline, any existing corpus/eval artifacts, and docs/misumi-speech-quality-closeout.md; correct this plan.
+1. Build the local-only Scottish-English corpus (~15–30 min of operator-consented recordings) covering the card's listed conditions (natural, standard, fast, quiet/mumbled, far-field, noisy, commands, false starts, household/persona/technical/Scots vocabulary); verified by hand-checked reference transcripts.
+2. Maintain bucket A (Glasgow speech) plus general-English regression bucket B and the specialist sub-buckets; verified by transcripts/evals existing for both.
+3. Re-verify availability, licences, runtime support and versions of the provisional candidates immediately before any download; verified by recorded checks preceding each download.
+4. Benchmark ASR on A and B; verified when a candidate materially improves A within agreed tolerance on B (else becomes conditional second-pass), with sub-buckets reported and no silent "Scotsification" of B.
+5. Upgrade persona TTS with compute-aware fallback; verified by evals against the deployed baseline (criteria TO CONFIRM at step 0); write closeout doc.
+**Done when:**
+- ASR and TTS are evaluated and documented separately, never confused.
+- Bucket A improves within tolerance on B; sub-buckets reported.
+- Closeout at docs/misumi-speech-quality-closeout.md holds only metadata, hashes, sanitized fixtures, aggregate results.
+**Risks and stops:**
+- Recordings need operator consent; raw audio stays local, never committed or uploaded without explicit operator approval; post-benchmark deletion is an operator decision.
+- Never automatically terminate user applications under GPU pressure.
+- Stop and record protected_handoff for any consent, upload or deletion question.
+
+---
+
 # Misumi Scottish speech recognition and persona voice quality
 
 ## Objective

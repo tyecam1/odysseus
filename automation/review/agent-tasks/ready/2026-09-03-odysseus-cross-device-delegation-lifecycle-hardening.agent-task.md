@@ -62,6 +62,23 @@ duplicates: []
 notes: "Do not solve this by extending timeouts, adding another task queue, or making Claude Remote Control authoritative for work state. PR #33 admission control is not currently shown defective: the four observed paid executions were sequential and non-overlapping. The defect is the operational ability to use a dispatch command as a pseudo-poll, plus a monitor lifecycle that can remain unresolved after authoritative execution has terminated."
 ---
 
+## Plan (drafted 2026-11-26 by GLM-5.3, same-family GLM and not a verdict; step 0 is to verify it against HEAD)
+**Goal in one line.** Eliminate ambiguous and indefinite waiting in cross-device delegation while preserving the authority chain `conversation/session -> Odysseus routing -> ParkLease -> EstateExecution`.
+**Already done / do not redo:** September 2026 acceptance run produced four real Codex executions under one ParkLease, each submitted only after the preceding execution finished; the one-non-terminal-execution-per-active-lease invariant was not disproven.
+**Steps:**
+0. Grep HEAD for the named files/symbols; correct this plan. No allowed paths are recorded on this card — confirm write scope and permitted work before editing.
+1. Audit existing HTTP, CLI, laptop-client and session surfaces; reuse the authoritative `GET /api/estate/run/{execution_id}` / `get_estate_execution()` lifecycle rather than creating parallel state. Verified by audit notes showing reuse, no parallel state.
+2. Add an authenticated read-only CLI/client command to inspect an execution by `execution_id`, with an optional bounded wait-to-terminal mode; keep `aoteru ask` documented never as polling. Verified by the command's help/docs.
+3. Make accepted/running responses expose the execution ID and canonical next status action; audit `LogicalSession`/Remote Control so held/refused/disconnected peers resolve to explicit bounded outcomes. Verified by inspection.
+4. Add deterministic regression coverage for the September incident and simulated cross-device/session failure modes, asserting the acceptance criteria (duplicate dispatch while non-terminal returns the same execution and no second worker; no further dispatch needed to observe; fresh dispatch after terminal creates a new execution; polling pattern cannot create sequential paid executions).
+**Done when:**
+- A clean bounded integration test proves every acceptance criterion without paid inference.
+**Risks and stops:**
+- No allowed paths and approval required (high risk): stop and record a protected_handoff rather than working around.
+- ParkLease stays the only repo-write authority; EstateExecution the only execution-lifecycle authority; paid-inference tests are out of scope.
+
+---
+
 # Harden Odysseus cross-device delegation and execution observation
 
 ## Objective

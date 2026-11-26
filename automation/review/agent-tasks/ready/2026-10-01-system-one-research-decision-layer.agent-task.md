@@ -63,6 +63,28 @@ duplicates: []
 notes: "Typed-decision models support bounded routing and ranking. They never replace evidence rules, scientific synthesis, authorial gates or human judgement. Vendor claims are hypotheses until reproduced on this estate."
 ---
 
+## Plan (drafted 2026-11-26 by GLM-5.3, same-family GLM and not a verdict; step 0 is to verify it against HEAD)
+**Goal in one line.** Implement a low-latency, capability-routed decision layer (Jev / CLM-8B / Laya) beneath generative research agents that ranks explicit candidate actions without generating claims or making authorial decisions.
+**Already done / do not redo:** nothing recorded.
+**Steps:**
+0. Grep HEAD for the named files/symbols; correct this plan. Locate the existing Odysseus router to extend (do not create a second router), and check whether `automation/review/models/2026-10-01-system-one-research-decision-layer.md` already exists.
+1. Implement the unified contract primitives — `choice`, `score`, `noul`, `rank` — returning provider/checkpoint identity, probability distribution, confidence, latency, usage/cost, placement, contract version and fallback/escalation reason. Verify via tests that unsupported primitives fail explicitly rather than being emulated by a generative model.
+2. Implement the eight `[0,1]` tuners (adversariality through stopping_pressure) with named profiles and per-run overrides. Verify via config-loading tests.
+3. Derive the six secondary behaviours deterministically (counterexample pressure, closest-prior pressure, claim conservatism, search breadth, comparator scrutiny, continuation threshold). Verify via tests proving derivation is deterministic and that provenance requirements, evidence ceilings, eligibility criteria and authorial gates are never modified by tuners.
+4. Extend the existing router's capability routing over Jev / CLM-8B / Laya hypotheses using hard eligibility plus measured task evidence, benchmarking all eligible routes on the same research decisions. Verify via benchmark results recorded for each route.
+5. Wire the high-value uses (next-action ranking, escalation gating, paper triage, best-of-N ranking, contract-adherence flagging). Verify via evals confirming triage is prioritisation only.
+**Done when:**
+- The decision layer ranks only explicit candidates;
+- primitives, tuners, derived behaviours and routing are implemented and tested;
+- all eligible routes are benchmarked on identical decisions;
+- no authorial Gate decisions, evidence ceilings or registered criteria are altered.
+**Risks and stops:**
+- `approval_required: true`: owner approval must precede execution; any remote provider (Jev) invocation involves external services and cost — stop and record a protected_handoff rather than proceeding;
+- do not bypass the existing router, leases or eligibility gates;
+- stay within the listed allowed paths only.
+
+---
+
 # System One research decision layer
 
 ## Goal
