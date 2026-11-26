@@ -204,3 +204,54 @@ def listing(db, owner: str, limit: int = 50) -> list:
 def escalated_scopes(db, owner: str) -> frozenset:
     """{(repo, task_id, scope_sha256)} an advisor judged to need the owner: they go to the phone, not to the advisor again."""
     return frozenset((_repo_of(d), d["task_id"], d["scope_sha256"]) for d in active(db, owner) if d.get("kind") == "escalate")
+
+
+def revoked_scopes(db, owner: str) -> frozenset:
+    """{(repo, task_id, scope_sha256)} whose NEWEST decision is a revoked approval: the owner took an approval back, so the
+    card must not go to an advisor again (it returns to the owner)."""
+    seen, out = set(), set()
+    for row in _rows(db, owner, ("active", "revoked")):
+        data = _data(row)
+        if not data or data.get("owner") != owner:
+            continue
+        key = (_repo_of(data), data.get("task_id"))
+        if key in seen:
+            continue
+        seen.add(key)
+        if row.status == "revoked" and data.get("kind") == "approval":
+            out.add((key[0], key[1], data.get("scope_sha256")))
+    return frozenset(out)
+
+
+def advisor_decisions_since(db, owner: str, since: datetime) -> int:
+    """Every advisor decision this owner has had made since `since`, whatever became of it (revoked and superseded rows
+    count too), so revoking or replacing a decision never gives its capacity back."""
+    count = 0
+    for row in _rows(db, owner, ("active", "revoked", "superseded")):
+        data = _data(row)
+        if data and data.get("owner") == owner and data.get("actor") == "advisor" and data.get("via") != "advisor-integrity-check":
+            created = _stamp(data.get("created"))
+            if created is not None and created >= since:
+                count += 1
+    return count
+
+
+def barred_cards(db, owner: str) -> tuple:
+    """(pairs, refs): the cards that must never go (back) to an advisor, from EVERY row in ANY status: anything an advisor
+    escalated, and any approval that was revoked. Keyed by (repo, task_id) AND by task_ref, so editing a scope or a task id
+    cannot reopen a card, and a later owner decision superseding the row does not either."""
+    pairs, refs = set(), set()
+    for row in _rows(db, owner, ("active", "revoked", "superseded")):
+        data = _data(row)
+        if not data or data.get("owner") != owner:
+            continue
+        if (data.get("kind") == "escalate" or (data.get("kind") == "approval" and row.status == "revoked")
+                or (data.get("actor") == "owner" and data.get("kind") in ("decline", "defer"))):
+            pairs.add((_repo_of(data), data.get("task_id")))
+            refs.add(str(data.get("task_ref") or ""))
+    return frozenset(pairs), frozenset(refs)
+
+
+def advisor_approvals(db, owner: str) -> list:
+    """The advisor approvals currently in force: [{task_ref, task_id, scope_sha256, reply_digest}]."""
+    return [d for d in active(db, owner) if d.get("actor") == "advisor" and d.get("kind") == "approval"]

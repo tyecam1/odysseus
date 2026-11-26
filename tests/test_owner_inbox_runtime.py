@@ -6,11 +6,12 @@ from src import owner_inbox as ib, owner_inbox_runtime as glue, owner_ledger as 
 from tests.test_lazy_usage_runtime import db, frontier  # noqa: F401  (fixtures)
 
 OWNER = "operator"
+DENIES = ["**/.env", "**/secrets/**", "**/*credential*", "**/*token*", "**/*password*"]
 
 
 def card(**over):
     return {"executor": "claude_subscription", "execution_mode": "implementation", "task_type": "implementation",
-            "risk_level": "medium", "allowed_paths": ["src/**", "tests/**"], **over}
+            "risk_level": "medium", "allowed_paths": ["docs/notes/**", "tests/notes/**"], "denied_paths": DENIES, **over}
 
 
 @pytest.mark.parametrize("over,ok", [
@@ -23,7 +24,10 @@ def card(**over):
     ({"allowed_paths": ["config/secrets/**"]}, False), ({"allowed_paths": ["src/credentials.py"]}, False),
     ({"allowed_paths": ["deploy/.env"]}, False), ({"allowed_paths": ["keys/id_rsa"]}, False), ({"allowed_paths": ["a\\b"]}, False),
     ({"allowed_paths": ["**"]}, False), ({"allowed_paths": ["*"]}, False), ({"allowed_paths": ["**/*.py"]}, False),
-    ({"allowed_paths": ["*.md"]}, False), ({"allowed_paths": ["src/*"]}, True),
+    ({"allowed_paths": ["*.md"]}, False), ({"allowed_paths": ["src/*"]}, False), ({"allowed_paths": ["docs/*"]}, True),
+    ({"allowed_paths": ["docs/notes/[ab].md"]}, False), ({"allowed_paths": ["docs/notes/{a,b}.md"]}, False),
+    ({"allowed_paths": ["src/owner_ledger.py"]}, False), ({"allowed_paths": ["AGENTS.md"]}, False), ({"allowed_paths": [".github/**"]}, False),
+    ({"allowed_paths": ["docs/**"], "denied_paths": []}, True), ({"allowed_paths": ["**/*.md"]}, False),
 ])
 def test_advisor_floor(over, ok):
     assert glue.advisor_floor(card(**over)) is ok
@@ -45,14 +49,15 @@ def test_card_facts_are_built_from_the_card_and_the_fingerprint_moves_with_anyth
 
 
 def gated(add, **meta):
-    record = add("g", write=True, approval_required=True, **meta)
+    record = add("g", write=True, approval_required=True, **{"denied_paths": DENIES, "allowed_paths": ["docs/notes/**"], **meta})
     snapshot = rt.refresh_frontier(["odysseus"])
     meta_now, _ = rt._contract(snapshot, record)
     return record, meta_now
 
 
 def debt(ref="odysseus:ready/g.md", **over):
-    return {"task_id": "g", "task_ref": ref, "gate": "owner_approval", "opened_at": "2026-11-20T10:00:00", **over}
+    from datetime import datetime, timezone
+    return {"task_id": "g", "task_ref": ref, "gate": "owner_approval", "opened_at": datetime.now(timezone.utc).isoformat(), **over}
 
 
 @pytest.fixture(autouse=True)
