@@ -136,8 +136,12 @@ def _load_channel(path: Path) -> tuple:
 
 
 def enabled_owner(channel_path: Optional[Path] = None) -> Optional[str]:
-    """The one owner this channel reports on, or None when no valid channel exists (the cheap pre-check)."""
-    status, channel = _load_channel(channel_path or CHANNEL_PATH)
+    """The one owner this channel reports on, or None when no valid channel exists (the cheap pre-check), or when approval
+    topics are configured: those carry required approvals only, so run, provider and heartbeat notices are never posted there."""
+    path = channel_path or CHANNEL_PATH
+    if (path.parent / "ntfy_approval_topics.json").exists():
+        return None
+    status, channel = _load_channel(path)
     return channel["owner"] if status == "ok" else None
 
 

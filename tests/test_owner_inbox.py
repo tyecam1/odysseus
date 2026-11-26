@@ -168,49 +168,8 @@ def test_the_name_is_built_by_code_from_the_verified_title():
 
 # ---- rationing
 
-def test_first_run_sends_nothing_and_an_item_must_wait_before_it_interrupts(home):
-    rig = Rig(home)
-    assert rig.run(T0) == "first_run"
-    assert rig.run(T0 + 10 * 60) == "idle" and not rig.phone.sent
-    assert rig.run(T0 + 31 * 60) == "interrupt"
-    sent = rig.phone.sent[0]
-    assert sent["priority"] == 4 and sent["title"] == "Approve: glovebox shortlist" and ib.fifteen_second_ok(sent["title"], sent["body"])
-    assert "Card: Glovebox shortlist, medium risk" in sent["body"]
 
 
-def test_only_one_package_is_open_at_a_time(home):
-    rig = Rig(home)
-    rig.candidates = [cand(), cand(task_ref="odysseus:ready/other.md", task_id="other", scope="b" * 64, title="Other thing")]
-    rig.open_one()
-    rig.run(T0 + 5 * 3600)                       # the gap has passed but the first is still unanswered
-    assert rig.phone.sent == []
-
-
-def test_two_interrupts_a_day_three_hours_apart(home):
-    rig = Rig(home)
-    rig.candidates = [cand(task_ref=f"odysseus:ready/t{i}.md", task_id=f"t{i}", scope=f"{i}" * 64, title=f"Thing {i}") for i in range(4)]
-    rig.run(T0)
-    rig.run(T0 + 31 * 60)
-    assert len(rig.phone.sent) == 1
-
-    def answer_open():
-        state = rig.saved()
-        for item in state["items"].values():
-            if item["state"] == "open":
-                item["state"], item["done_at"] = "answered", T0
-        rig.state.write_text(json.dumps(state))
-    answer_open()
-    assert rig.run(T0 + 2 * 3600) == "idle"                    # inside the three-hour gap
-    assert rig.run(T0 + 31 * 60 + 3 * 3600 + 5) == "interrupt"
-    answer_open()
-    assert rig.run(T0 + 31 * 60 + 7 * 3600) == "idle"          # a third in the same day is never sent
-    assert len(rig.phone.sent) == 2
-
-
-def test_a_clock_that_goes_backwards_does_not_free_the_daily_cap(home):
-    state = ib._empty_state()
-    state["interrupts"] = [T0 + 600, T0 + 1200]               # stamps from the "future"
-    assert ib.interrupt_allowed(state, T0) == "daily_cap"
 
 
 def test_quiet_hours_send_nothing(home):
@@ -272,23 +231,6 @@ def test_the_slot_is_reserved_durably_before_the_post(home):
     assert seen["state"]["interrupts"] and [i["state"] for i in seen["state"]["items"].values()] == ["open"]
 
 
-def test_the_digest_goes_once_a_day_after_0845_silently(home):
-    rig = Rig(home, digest=True)
-    rig.candidates = []
-    rig.run(datetime(2026, 11, 26, 8, 0, tzinfo=timezone.utc).timestamp())
-    assert rig.run(datetime(2026, 11, 26, 8, 40, tzinfo=timezone.utc).timestamp()) == "idle"
-    assert rig.run(datetime(2026, 11, 26, 8, 50, tzinfo=timezone.utc).timestamp()) == "digest"
-    assert rig.phone.sent[0]["priority"] == 2 and rig.phone.sent[0]["body"] == "Last run stopped."
-    assert rig.run(datetime(2026, 11, 26, 12, 0, tzinfo=timezone.utc).timestamp()) == "idle"
-    assert rig.run(datetime(2026, 11, 27, 9, 0, tzinfo=timezone.utc).timestamp()) == "digest"
-
-
-def test_a_quiet_day_is_one_line(home):
-    rig = Rig(home, digest=True)
-    rig.candidates, rig.facts = [], {}
-    rig.run(datetime(2026, 11, 26, 8, 0, tzinfo=timezone.utc).timestamp())
-    rig.run(datetime(2026, 11, 26, 9, 0, tzinfo=timezone.utc).timestamp())
-    assert rig.phone.sent[0]["body"] == "All quiet. Nothing needs you."
 
 
 def test_health_reports_a_recent_finished_cycle(home):
@@ -632,14 +574,17 @@ def test_send_and_fetch_use_the_pinned_address_with_basic_auth(monkeypatch):
     assert seen["url"].startswith("http://100.75.149.126:8091/reply-topic-1234/json?") and "since=all" in seen["url"]
 
 
-def test_a_timeout_after_the_post_keeps_the_reservation_so_it_is_never_sent_twice(home):
+def test_a_timeout_after_the_post_keeps_the_reservation_so_it_is_not_sent_twice_within_fifteen_minutes(home):
     rig = Rig(home)
     rig.run(T0)
     rig.phone.fail_sends = 1                                # the broker may have accepted it
     assert "interrupt_unconfirmed" in rig.run(T0 + 31 * 60)
     state = rig.saved()
     assert len(state["interrupts"]) == 1 and [i["state"] for i in state["items"].values()] == ["open"]
-    assert rig.run(T0 + 5 * 3600) == "idle" and rig.phone.sent == []
+    assert rig.run(T0 + 31 * 60 + 10 * 60) == "idle" and rig.phone.sent == []          # never twice inside the window
+    rig.run(T0 + 31 * 60 + ib.UNCONFIRMED_RESEND_SECONDS + 60)                          # then, if nothing came of it, once more
+    rig.run(T0 + 31 * 60 + ib.UNCONFIRMED_RESEND_SECONDS + 180)
+    assert len(rig.phone.sent) == 1
 
 
 def test_a_digest_whose_post_timed_out_is_not_repeated(home):
@@ -1322,3 +1267,173 @@ def test_the_cycle_asks_the_broker_only_for_messages_since_two_way_mode_started(
                  digest_facts=lambda: rig.facts, state_path=rig.state, channel_path=rig.channel, clock=lambda at=at: at,
                  transport={"send": rig.phone.send})
     assert seen == [str(int(T0)), str(int(T0))]
+
+
+# ---- every waiting approval is shown at once; the approval topics carry approvals and nothing else
+
+NEXT_MORNING = datetime(2026, 11, 27, 8, 31, tzinfo=timezone.utc).timestamp()
+NIGHT_TIME = datetime(2026, 11, 26, 21, 30, tzinfo=timezone.utc).timestamp()
+
+
+def many(n):
+    return [cand(task_ref=f"odysseus:ready/t{i}.md", task_id=f"t{i}", scope=f"{i}" * 64, title=f"Thing {i}") for i in range(n)]
+
+
+def test_the_first_cycle_only_records_and_a_waiting_approval_goes_out_the_next_minute(home):
+    rig = Rig(home)
+    assert rig.run(T0) == "first_run" and rig.phone.sent == []
+    assert rig.run(T0 + 2 * 60) == "interrupt"
+    sent = rig.phone.sent[0]
+    assert sent["priority"] == 4 and sent["title"] == "Approve: glovebox shortlist" and ib.fifteen_second_ok(sent["title"], sent["body"])
+    assert "Card: Glovebox shortlist, medium risk" in sent["body"]
+
+
+def test_every_waiting_approval_is_shown_at_once_and_none_is_held_back_by_an_open_one(home):
+    rig = Rig(home)
+    rig.candidates = many(4)
+    rig.run(T0)
+    rig.run(T0 + 2 * 60)
+    assert len(rig.phone.sent) == 4 and len({s["title"] for s in rig.phone.sent}) == 4
+    assert sorted(i["state"] for i in rig.saved()["items"].values()) == ["open"] * 4
+
+
+def test_a_long_queue_goes_out_over_a_few_cycles_not_one_at_a_time(home):
+    rig = Rig(home)
+    rig.candidates = many(8)
+    rig.run(T0)
+    rig.run(T0 + 2 * 60)
+    assert len(rig.phone.sent) == ib.MAX_PACKAGES_PER_CYCLE
+    rig.run(T0 + 3 * 60)
+    assert len(rig.phone.sent) == 8
+
+
+def test_there_is_no_daily_cap_and_no_gap_and_a_new_approval_goes_out_straight_away(home):
+    rig = Rig(home)
+    rig.candidates = many(3)
+    rig.run(T0)
+    rig.run(T0 + 2 * 60)
+    rig.candidates = many(5)                         # two more arrive minutes later
+    rig.run(T0 + 5 * 60)
+    rig.run(T0 + 7 * 60)
+    assert len(rig.phone.sent) == 5
+
+
+def test_quiet_hours_hold_the_approvals_until_morning_and_then_all_go_out(home):
+    rig = Rig(home)
+    rig.candidates = many(3)
+    rig.run(T0)
+    assert rig.run(NIGHT_TIME) == "idle" and rig.phone.sent == []
+    rig.run(NEXT_MORNING)
+    assert len(rig.phone.sent) == 3
+
+
+def test_no_digest_and_no_status_message_is_ever_posted(home):
+    rig = Rig(home, digest=True)
+    rig.candidates = []
+    for at in (T0, T0 + 3600, NEXT_MORNING, NEXT_MORNING + 86400):
+        rig.run(at)
+    assert rig.phone.sent == []
+    rig.candidates = many(1)
+    rig.run(NEXT_MORNING + 86400 + 3600)
+    rig.run(NEXT_MORNING + 86400 + 3700)
+    assert [s["title"].startswith("Approve:") for s in rig.phone.sent] == [True]
+
+
+def test_a_refused_package_is_retried_later_and_does_not_block_the_others(home):
+    rig = Rig(home)
+    rig.candidates = many(3)
+    rig.phone.refuse_sends = 1
+    rig.run(T0)
+    rig.run(T0 + 2 * 60)
+    assert len(rig.phone.sent) == 2                  # one refused, two went out
+    rig.run(T0 + 2 * 60 + ib.SEND_RETRY_SECONDS + 60)
+    assert len(rig.phone.sent) == 3
+
+
+def test_a_pending_confirmation_holds_new_packages_on_its_own_topic_only(home):
+    rig = two_way_rig(home)
+    rig.candidates = [cand(task_ref="obsidian-phd:ready/x.md", task_id="x", scope="c" * 64, title="Glovebox shortlist")]
+    rig.open_one()
+    rig.phone.say("go ahead with the glovebox one", T0 + 41 * 60 - 30, mid="e1", topic=f"{BASE}/phd-approvals", tags=[])
+    rig.verdicts = [{"target": "glovebox shortlist", "verdict": "yes"}]
+    rig.run(T0 + 41 * 60)
+    assert rig.saved()["echo"] and rig.saved()["echo"]["armed_at"] is not None
+    rig.phone.sent.clear()
+    rig.candidates += [cand(task_ref="obsidian-phd:ready/y.md", task_id="y", scope="d" * 64, title="Second phd thing"),
+                       cand(task_ref="misumi:ready/m.md", task_id="m", scope="e" * 64, title="Misumi thing")]
+    rig.run(T0 + 42 * 60)
+    rig.run(T0 + 43 * 60)
+    assert [s["url"] for s in rig.phone.sent] == [f"{BASE}/misumi-approvals"]               # the phd topic waits, misumi does not
+    rig.run(T0 + 41 * 60 + ib.ECHO_TTL_SECONDS + 120)
+    assert sorted(s["url"] for s in rig.phone.sent) == [f"{BASE}/misumi-approvals", f"{BASE}/phd-approvals"]
+
+
+def test_a_package_whose_post_timed_out_is_offered_once_more_if_nothing_came_of_it(home):
+    rig = Rig(home)
+    rig.phone.fail_sends = 1                                     # the post times out: the outcome is unknown
+    rig.run(T0)
+    assert "interrupt_unconfirmed" in rig.run(T0 + 2 * 60)
+    item = next(iter(rig.saved()["items"].values()))
+    assert item["state"] == "open" and item["unconfirmed_at"]
+    rig.run(T0 + 2 * 60 + ib.UNCONFIRMED_RESEND_SECONDS + 60)    # still unanswered: back to the queue
+    assert next(iter(rig.saved()["items"].values()))["state"] in ("queued", "open")
+    rig.run(T0 + 2 * 60 + ib.UNCONFIRMED_RESEND_SECONDS + 180)
+    assert len(rig.phone.sent) == 1 and next(iter(rig.saved()["items"].values()))["state"] == "open"
+    assert "unconfirmed_at" not in next(iter(rig.saved()["items"].values())) or not next(iter(rig.saved()["items"].values()))["unconfirmed_at"]
+
+
+def test_authoring_attempts_are_bounded_per_cycle(home):
+    rig = Rig(home)
+    rig.candidates = many(13)
+    authored = []
+
+    def author(candidate):
+        authored.append(candidate["task_id"])
+        return fields()
+
+    for at in (T0, T0 + 2 * 60):
+        ib.cycle("operator", gather=lambda: list(rig.candidates), author=author, parse=rig.parse, apply=rig.apply,
+                 digest_facts=lambda: rig.facts, state_path=rig.state, channel_path=rig.channel, clock=lambda at=at: at,
+                 transport={"send": rig.phone.send, "fetch": rig.phone.fetch})
+    assert len(authored) == ib.MAX_PACKAGES_PER_CYCLE and len(rig.phone.sent) == ib.MAX_PACKAGES_PER_CYCLE
+
+
+def test_a_broker_that_keeps_timing_out_cannot_make_a_package_repeat_forever(home):
+    rig = Rig(home)
+    rig.phone.fail_sends = 50                                    # every post times out
+    at = T0
+    rig.run(at)
+    for _ in range(8):
+        at += ib.UNCONFIRMED_RESEND_SECONDS + 120
+        rig.run(at)
+        rig.run(at + 60)
+    posts_attempted = 50 - rig.phone.fail_sends
+    assert posts_attempted == 2                                  # the first post and exactly one resend
+    assert next(iter(rig.saved()["items"].values()))["state"] in ("open", "parked")
+
+
+def test_the_fallback_never_posts_into_the_topic_a_pending_confirmation_owns(home):
+    rig = two_way_rig(home)
+    write_channel(home, topic="odysseus-approvals")                  # as in production: the home topic IS the odysseus approvals topic
+    write_routes(home, {"odysseus": "odysseus-approvals", "obsidian-phd": "phd-approvals", "misumi": "misumi-approvals"})
+    rig.candidates = [cand(task_ref="odysseus:ready/x.md", task_id="x", scope="c" * 64, title="Deploy it")]
+    rig.open_one()
+    rig.phone.say("go ahead with deploy", T0 + 41 * 60 - 30, mid="h1", topic=f"{BASE}/odysseus-approvals", tags=[])
+    rig.verdicts = [{"target": "deploy it", "verdict": "yes"}]
+    rig.run(T0 + 41 * 60)
+    assert rig.saved()["echo"]["armed_at"] is not None
+    rig.phone.sent.clear()
+    rig.candidates += [cand(task_ref="obsidian-phd:ready/y.md", task_id="y", scope="d" * 64, title="Phd thing")]
+    rig.phone.refuse_sends = 1                                    # the routed phd post is refused: the fallback target is the held home topic
+    rig.run(T0 + 42 * 60)
+    rig.run(T0 + 43 * 60)
+    assert all(s["url"] != f"{BASE}/odysseus-approvals" for s in rig.phone.sent) and rig.phone.sent == []     # refused, held, not posted
+
+
+def test_thirteen_open_requests_with_the_same_title_still_get_distinct_names(home):
+    rig = Rig(home)
+    rig.candidates = [cand(task_ref=f"odysseus:ready/t{i}.md", task_id=f"t{i}", scope=f"{i:x}" * 64, title="Same title") for i in range(13)]
+    for at in (T0, T0 + 2 * 60, T0 + 3 * 60, T0 + 4 * 60):
+        rig.run(at)
+    names = [i["name"] for i in rig.saved()["items"].values() if i["state"] == "open"]
+    assert len(names) == 13 and len(set(names)) == 13
