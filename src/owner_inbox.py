@@ -823,7 +823,15 @@ def _direct(text: str, open_items: list, msg_time: Optional[float] = None) -> Op
 
 _SPLIT = re.compile(r"\s*(?:[.;\n]+|\s&\s|,\s*|\band\b|\bthen\b)\s*", re.I)
 _BARE_LABEL = re.compile(rf"^\s*{_LBL}\s*$", re.I | re.A)
-MAX_MULTI = 4
+MAX_MULTI = 8
+_ZERO_LABEL = re.compile(r"(?:(?<=^)|(?<=[\s,;&(]))(#?)0([0-9]{1,4})(?=$|[\s,;.!?)])")      # a standalone token only: never inside a date, time or range
+
+
+def zero_as_o(text: str) -> str:
+    """On a phone keyboard the digit 0 and the letter O look alike: a number with a LEADING zero ("01", "#02") is never a real bare
+    number, so it is read as the Odysseus label (O1, #O2)."""
+    return _ZERO_LABEL.sub(lambda m: f"{m.group(1)}O{m.group(2)}", text)
+
 
 
 def _multi(text: str, open_items: list, msg_time: Optional[float] = None) -> Optional[dict]:
@@ -1114,7 +1122,7 @@ def _cycle_locked(owner, channel, state_path, clock, gather, author, parse, appl
         state["cursor"] = message["id"]
         if first or message["time"] < state["started"] - (0 if channel.get("routes") else 60):
             continue
-        text = clean_reply(message["text"])
+        text = zero_as_o(clean_reply(message["text"]))
         if not text:
             continue
         handled += 1
