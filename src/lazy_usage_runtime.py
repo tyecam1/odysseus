@@ -388,7 +388,7 @@ def _classify(record, meta):
         return "protected_handoff"
     if record["bucket"] == "review" or task_type in {"review", "independent-review"}:
         return "review"
-    if meta.get("approval_required") is True and not _approval_valid(meta):
+    if meta.get("approval_required") is True and not _approval_valid(meta, record.get("repo_id")):
         # Without an owner approval bound to this exact scope the gate is only
         # re-adjudicated; see `approval_scope` for the governed way past it.
         return "reconnaissance"
@@ -404,11 +404,31 @@ def approval_scope(meta):
     return hashlib.sha256(json.dumps(scope, sort_keys=True, default=str).encode()).hexdigest()
 
 
-def _approval_valid(meta):
-    """An `approval` block written by the owner in the card, bound to the current scope.
+# {(repo, task_id, scope_sha256)} the owner (or an advisor under a recorded delegation) approved in the decision ledger
+# (src/owner_ledger.py). Refreshed from the database at the top of every `advance`; empty (fail closed) when unreadable.
+_LEDGER_APPROVALS: frozenset = frozenset()
 
-    Only the owner edits the card (its directory is denied to every writer), so a model
-    cannot approve itself; any change to the covered scope invalidates the approval."""
+
+def refresh_owner_ledger(db, owner):
+    global _LEDGER_APPROVALS
+    try:
+        from src import owner_ledger
+        _LEDGER_APPROVALS = owner_ledger.approved_scopes(db, owner)
+    except Exception:
+        log.warning("owner decision ledger unreadable; no ledger approval is honoured")
+        _LEDGER_APPROVALS = frozenset()
+
+
+def _approval_valid(meta, repo_id=None):
+    """An approval bound to the card's CURRENT scope: either an `approval` block the owner wrote in the card, or an
+    approval row in the owner decision ledger for this repository, task id and exact scope digest (a caller that does
+    not know the repository gets card-written approvals only).
+
+    A model cannot approve itself: the card directory is denied to every writer, and the ledger is written only by
+    the owner's authenticated reply or by a recorded advisor delegation with its own guardrails. Any change to the
+    covered scope invalidates both forms."""
+    if repo_id and (str(repo_id), str(meta.get("task_id") or ""), approval_scope(meta)) in _LEDGER_APPROVALS:
+        return True
     approval = meta.get("approval")
     return (isinstance(approval, dict) and str(approval.get("status", "")).lower() == "approved"
             and isinstance(approval.get("approved_by"), str) and bool(approval["approved_by"].strip())
@@ -578,7 +598,7 @@ def _resolve_met_debts(run, task_ref, frontier):
             gate = _debt_gate(debt)
             if gate == "owner_acceptance" and verified_now:
                 continue                  # an older commit's acceptance is replaced by the newly verified one
-            if gate == "owner_approval" and _approval_valid(meta):
+            if gate == "owner_approval" and _approval_valid(meta, task_ref.split(":", 1)[0]):
                 continue
             if gate == "verification" and _verification_recorded(meta, debt.get("commit_sha")):
                 # The deterministic check is now on the card, so the finalised write is ready for the owner:
@@ -722,7 +742,7 @@ def _age_seconds(stamp):
         return float("inf")
 
 
-def _recent_blocker(run, ref, revision):
+def _recent_blocker(run, ref, revision, kind=None):
     """Why an unchanged revision should not be dispatched again right now."""
     cp = run.checkpoint
     debts = [d for d in cp.get("owed_reviews", []) if _task_key(d.get("task_ref") or "?:?") == _task_key(ref)]
@@ -735,7 +755,13 @@ def _recent_blocker(run, ref, revision):
         reset = datetime.fromisoformat(debt["retry_after"].replace("Z", "+00:00"))
         retry_due |= reset.tzinfo is not None and datetime.now(timezone.utc) >= reset
     if cp.get("attempted", {}).get(ref) == revision and not retry_due:
-        return "attempted_this_activation"
+        prior = (cp.get("ledger") or {}).get(ref) or {}
+        # A reconnaissance attempt does not use up an implementation: once the owner's approval turns the card from
+        # reconnaissance into an implementation, it is a different dispatch even though the card text is unchanged.
+        approved_since = (kind is not None and kind != "reconnaissance" and prior.get("kind") == "reconnaissance"
+                          and prior.get("revision") == revision and prior.get("outcome") == "awaiting_approval")
+        if not approved_since:
+            return "attempted_this_activation"
     entry = (cp.get("ledger") or {}).get(ref)
     if not entry or entry.get("revision") != revision:
         return None
@@ -774,7 +800,7 @@ def _assess(frontier, run, record):
     verdict = {"ref": record["ref"], "kind": kind, "delivers": write, "ok": False,
                "blocker": None, "revision": revision, "meta": meta, "body": body, "title": meta.get("title"),
                "scope": _write_scope(record["repo_id"], meta) if write else None}
-    verdict["blocker"] = _static_blocker(kind, meta, write) or _recent_blocker(run, record["ref"], revision)
+    verdict["blocker"] = _static_blocker(kind, meta, write) or _recent_blocker(run, record["ref"], revision, kind)
     if not verdict["blocker"] and write and _repo_lease_held(run, record["repo_id"]):
         verdict["blocker"] = "repo_lease_held"
     if verdict["blocker"]:
@@ -1654,6 +1680,7 @@ def advance(db, run_id):
     """
     run = _load(db, run_id)
     cp = run.checkpoint
+    refresh_owner_ledger(db, run.created_by)
     if run.state in TERMINAL:
         db.commit()
         return run_dict(run)
@@ -1736,6 +1763,11 @@ def advance(db, run_id):
             return _finish(db, run, "budget_exhausted", reason) if reason else _park(
                 db, run, "no eligible frontier; recheck on frontier, authority or provider change")
         record, meta, task, write, host, provider, revision, kind, scope = chosen
+        refresh_owner_ledger(db, run.created_by)            # the ledger as it is NOW, not as it was at the top of this advance
+        if (meta.get("approval_required") is True and kind in ("implementation", "evidence")      # the classes an approval unlocks
+                and not _approval_valid(meta, record["repo_id"])):
+            _checkpoint(run, phase="idle")
+            return _park(db, run, "approval withdrawn before dispatch; recheck")
         # The coordinator's decomposition/next_action stay checkpointed as
         # untrusted advisory evidence only (Sol review P1: never inject
         # model-generated instruction text into a worker objective).

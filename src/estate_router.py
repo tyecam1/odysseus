@@ -783,6 +783,9 @@ def resolve_alias(alias: str, host_id: Optional[str] = None) -> dict:
     return resolved
 
 
+RESERVED_TASK_CLASSES = frozenset({"owner_decision", "lazyusage_learning", "lazyusage_advisor_review"})
+
+
 def _record_decision(task: dict, *, host_id, executor, model_alias, concrete_model, status) -> str:
     """Telemetry is a side effect of routing, not the routing decision
     itself (P9 fault test: "partial result handling") — a caller who
@@ -805,11 +808,14 @@ def _record_decision(task: dict, *, host_id, executor, model_alias, concrete_mod
     raw_reason = task.get("nondelegation_reason")
     nondelegation_reason = raw_reason.strip() if _valid_nondelegation_reason(raw_reason) else None
     decision_id = str(uuid.uuid4())
+    task_class = task.get("task_class") or "unclassified"
+    if task_class in RESERVED_TASK_CLASSES:
+        task_class = "unclassified"          # owner-scoped records are written only by their own modules
     try:
         with get_db_session() as db:
             db.add(RoutingDecision(
                 id=decision_id,
-                task_class=task.get("task_class") or "unclassified",
+                task_class=task_class,
                 complexity=task.get("complexity"),
                 consequence=task.get("consequence"),
                 host_id=host_id or "none",

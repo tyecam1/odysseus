@@ -27,6 +27,11 @@ class Revocation(BaseModel):
     learning_id: str
 
 
+class DecisionRevocation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    decision_id: str
+
+
 class RunControl(BaseModel):
     model_config = ConfigDict(extra="forbid")
     run_id: str
@@ -90,6 +95,23 @@ def setup_lazy_usage_routes():
             if not advisor.revoke(db, body.learning_id, owner):
                 raise HTTPException(404, "learning not found or already revoked")
             return {"revoked": body.learning_id}
+
+    @router.get("/owner-decisions")
+    def owner_decisions_listing(request: Request, limit: int = 50):
+        """The owner decision ledger: approvals, declines and snoozes (by the owner or a delegated advisor), read-only."""
+        owner = _scope_owner(request, {"estate:read", "estate:execute"})
+        from src import owner_ledger
+        with get_db_session() as db:
+            return {"decisions": owner_ledger.listing(db, owner, limit)}
+
+    @router.post("/owner-decisions/revoke")
+    def revoke_decision(request: Request, body: DecisionRevocation):
+        owner = _scope_owner(request, {"estate:execute"})
+        from src import owner_ledger
+        with get_db_session() as db:
+            if not owner_ledger.revoke(db, body.decision_id, owner):
+                raise HTTPException(404, "decision not found or already revoked")
+            return {"revoked": body.decision_id}
 
     @router.get("/history")
     def history(request: Request, limit: int = 20):
