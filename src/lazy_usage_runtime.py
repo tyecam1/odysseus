@@ -29,11 +29,15 @@ from src.runtime_paths import get_app_root
 
 log = logging.getLogger(__name__)
 INITIALIZER = "estate-queue-priority-execution@v2"
-CEILINGS = {"max_seconds": 14400, "max_paid_calls": 12, "max_tool_calls": 150,
+# Wall-clock is not a constraint the owner cares about (2026-11-26): the real governors are the provider-stated usage
+# windows (`dispatch_block`), the paid-call tranche plus the advisor checkpoint, and the failure backoff. The ceiling
+# stays finite only so a stuck run cannot live forever. `max_paid_calls_total` is a backstop: the EFFECTIVE cap is
+# `max_paid_calls * (1 + advisor_checkpoints)` (see lazy_usage_advisor.total_cap), 36 at today's ceilings.
+CEILINGS = {"max_seconds": 604800, "max_paid_calls": 12, "max_tool_calls": 150,
             "max_no_delivery_turns": 8, "max_repeat_failures": 3, "max_tokens": 2_000_000,
             # The advisor checkpoint (src/lazy_usage_advisor.py): `max_paid_calls` is then a tranche. Both are OFF
             # (0) unless the owner's activation asks for them; the total is tranche x (1 + checkpoints) at most.
-            "advisor_checkpoints": 2, "max_advisor_calls": 3, "max_paid_calls_total": 36}
+            "advisor_checkpoints": 2, "max_advisor_calls": 3, "max_paid_calls_total": 120}
 # `paid_calls` counts worker/provider DISPATCHES, not model or token consumption. Where a
 # provider reports no usage (codex-write, plain advisory CLI output) the run is charged a
 # deliberately conservative estimate instead of zero, so the token ceiling still binds.
@@ -71,7 +75,8 @@ SETTLED_MAX = 400
 STAGES_MAX = 100
 HISTORY_RUNS = 10
 HISTORY_SCAN_ROWS = 500
-MAX_ASSESSED = 24
+MAX_ASSESSED = 120        # how far down the priority order the coordinator's evidence may look ...
+MAX_FEASIBLE_SHOWN = 24   # ... stopping once this many feasible candidates are found (so a long gated head costs nothing more)
 
 
 def _refresh_usage():
@@ -839,8 +844,10 @@ def _ordered(frontier, plan=None):
 
 def candidate_evidence(frontier, run):
     """Compact per-candidate feasibility for the coordinator (bounded, no prose)."""
-    out = []
+    out, feasible = [], 0
     for record in _ordered(frontier)[:MAX_ASSESSED]:
+        if feasible >= MAX_FEASIBLE_SHOWN:
+            break
         try:
             verdict = _assess(frontier, run, record)
         except Exception as exc:
@@ -853,6 +860,7 @@ def candidate_evidence(frontier, run):
                     "verification_route": verdict["meta"].get("verification_route"),
                     "approval_required": verdict["meta"].get("approval_required"),
                     "last_outcome": entry.get("outcome")})
+        feasible += 1 if verdict["ok"] else 0
     return out
 
 

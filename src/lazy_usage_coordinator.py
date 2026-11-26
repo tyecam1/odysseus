@@ -29,7 +29,7 @@ DEFAULT_POLICY = {"enabled": True,
                   "high_consequence_lanes": ["claude-sonnet", "glm-standard", "glm-flash"],
                   "min_paid_budget_remaining": 2}
 CALL_TIMEOUT_S = 120.0
-MAX_CANDIDATES = 15
+MAX_CANDIDATES = 24
 MAX_EXCLUDED = 12
 MAX_SELECTED = 12
 MAX_STEPS = 8
