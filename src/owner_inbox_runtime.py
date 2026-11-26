@@ -13,6 +13,7 @@ import threading
 import time
 from datetime import timedelta
 
+from scripts.agentic_context import owner_gate_tier
 from src import owner_inbox as inbox
 from src import owner_ledger as ledger
 
@@ -118,12 +119,14 @@ def _scan(owner: str):
         key = (ref.split(":", 1)[0], task_id, scope)
         if key in approved or key in held:
             continue
-        if advisor_floor(meta):
+        if owner_gate_tier(meta) == "advisor" and advisor_floor(meta):
             floor_waiting += 1
             if delegated and key not in escalated:
                 targets.append({"task_ref": ref, "task_id": task_id, "scope": scope, "meta": meta,
                                 "priority": str(meta.get("priority") or ""), "opened_at": str(debt.get("opened_at") or "")})
                 continue                     # the advisor decides it; it never reaches the phone unless it escalates
+        # Everything else reaches the owner: an explicit owner class, a card the floor excludes (high risk, human executor,
+        # protected paths), an escalated card, and EVERY card while delegation or the advisor worker is not in force.
         out.append({"kind": "approval", "task_ref": ref, "task_id": task_id, "scope": scope, "gate": "owner_approval",
                     "priority": str(meta.get("priority") or ""), "opened_at": str(debt.get("opened_at") or ""),
                     **card_facts(meta, body), "context": rt.decision_context(debt, frontier)})
@@ -261,13 +264,15 @@ def digest_facts_factory(owner: str):
             owed = rt.all_owed_reviews(db, owner)
             cards = od.build_cards(owed)
             cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
-            decided = sum(1 for d in ledger.active(db, owner) if d.get("actor") == "advisor" and d.get("kind") == "approval"
-                          and (ledger._stamp(d.get("created")) or cutoff) >= cutoff)
+            acceptances = sum(1 for c in cards if c["gate"] == "owner_acceptance")
+            load = ledger.owner_load(db, owner, open_gates=len(cards), since=cutoff)        # every waiting approval and acceptance
             run = db.query(LazyUsageRun).filter(LazyUsageRun.created_by == owner).order_by(LazyUsageRun.created_at.desc()).first()
             line = ""
             if run is not None:
                 line = f"Last run {run.state.replace('_', ' ')}."
-            return {"advisor_decided": decided, "acceptances": sum(1 for c in cards if c["gate"] == "owner_acceptance"), "run": line}
+            decided = sum(1 for d in ledger.active(db, owner) if d.get("actor") == "advisor" and d.get("kind") == "approval"
+                          and (ledger._stamp(d.get("created")) or cutoff) >= cutoff)
+            return {"owner_load": load, "advisor_decided": decided, "acceptances": acceptances, "run": line}
         finally:
             db.close()
     return facts

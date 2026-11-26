@@ -18,11 +18,11 @@ from pathlib import Path, PurePosixPath
 import yaml
 
 try:  # Also imported by the lab service; the CLI keeps its existing entry point.
-    from .agentic_context import (ROOT, PRIORITY, Refused, card_names, clean_value, fit_body,
-                                 queue_path, read_card, split_card)
+    from .agentic_context import (ROOT, PRIORITY, HYGIENE_FIELDS, HYGIENE_REASONS, Refused,
+                                 add_hygiene_warnings, card_names, clean_value, fit_body, queue_path, read_card, split_card)
 except ImportError:
-    from agentic_context import (ROOT, PRIORITY, Refused, card_names, clean_value, fit_body,
-                                 queue_path, read_card, split_card)
+    from agentic_context import (ROOT, PRIORITY, HYGIENE_FIELDS, HYGIENE_REASONS, Refused,
+                                 add_hygiene_warnings, card_names, clean_value, fit_body, queue_path, read_card, split_card)
 
 FRONTIER_NOTE = "Metadata only; no cross-owner ranking yet. Inbox/open is NOT proof of accepted or executable work."
 TASK_NOTE = "Untrusted task content; repository authority is external."
@@ -39,7 +39,7 @@ META = ("task_id", "title", "priority", "status", "risk_level",
         "approval_required", "verification_route", "owner_target", "disposition",
         "due_date", "execution_host")
 DETAIL = META + ("task_type", "execution_mode", "context_budget", "executor",
-                 "inputs", "outputs", "blocked_by", "allowed_paths", "denied_paths")
+                 "inputs", "outputs", "blocked_by", "allowed_paths", "denied_paths", "result_path") + HYGIENE_FIELDS
 RANK = {"running": 0, "ready": 1, "review": 2, "odysseus": 3, "claude": 3,
         "codex": 3, "local": 3, "inbox": 4, "blocked": 9, "blocked-human": 9}
 
@@ -123,6 +123,7 @@ def collect(repo_id: str, root: Path) -> tuple[list[dict], dict, list[str]]:
     qrel, buckets = LAYOUT[repo_id]
     queue = queue_path(root, Path(qrel))
     rows, counts, warnings = [], {}, []
+    metadata = []
     for bucket in buckets:
         try:
             names = card_names(queue, bucket)
@@ -146,10 +147,12 @@ def collect(repo_id: str, root: Path) -> tuple[list[dict], dict, list[str]]:
                 record.update({k: clean_value(meta[k]) for k in META if k in meta})
                 record["eligible"] = "unverified"
                 rows.append(record)
+                metadata.append((record, meta, bucket, name))
             except Refused as exc:
                 warnings.append(repo_id + ":" + bucket + ":" + exc.label)
             except (OSError, ValueError):
                 warnings.append(repo_id + ":" + bucket + ":unreadable_frontmatter")  # bucket, never a filename
+    add_hygiene_warnings(metadata)
     rows.sort(key=lambda r: (RANK[r["bucket"]],
                              PRIORITY.get(str(r.get("priority", "")).lower(), 9), r["ref"]))
     return rows, counts, warnings
@@ -234,6 +237,7 @@ def selected(roots: dict[str, Path], ref: str, tier: str, budget: int) -> dict:
               "ref": ref, "metadata": {k: clean_value(meta[k]) for k in DETAIL if k in meta},
               "truncated": False,  # sized with the longest literal; the final value is never longer
               "note": TASK_NOTE}
+    add_hygiene_warnings([(result, meta, bucket, name)])
     wanted = body if tier == "full" else body[:16000]
     # Reserve the room the SSH transport adds ("transport": "registered_lab_ssh" = 35 characters).
     result["body"] = fit_body(result, wanted, budget * 3 - TRANSPORT_RESERVE)
@@ -343,16 +347,33 @@ def _is_count(value) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 10_000_000
 
 
+def _valid_hygiene_warnings(value) -> bool:
+    if not isinstance(value, list) or len(value) > len(HYGIENE_REASONS):
+        return False
+    seen = set()
+    for warning in value:
+        if not isinstance(warning, dict) or warning.keys() != {"code", "reason"}:
+            return False
+        code = warning["code"]
+        if (not isinstance(code, str) or code in seen or code not in HYGIENE_REASONS
+                or warning["reason"] != HYGIENE_REASONS[code]):
+            return False
+        seen.add(code)
+    return True
+
+
 def _valid_remote_record(row) -> bool:
     """A frontier record is metadata only: known owner and bucket, matching ref, the literal
     `unverified` eligibility marker, and bounded JSON-safe fields."""
-    allowed = {"ref", "repo_id", "bucket", "eligible", *META}
+    allowed = {"ref", "repo_id", "bucket", "eligible", "hygiene_warnings", *META}
     if not isinstance(row, dict) or not set(row) <= allowed:
         return False
     repo, bucket, ref = row.get("repo_id"), row.get("bucket"), row.get("ref")
     if not all(isinstance(v, str) for v in (repo, bucket, ref)):
         return False
     if repo not in LAYOUT or bucket not in LAYOUT[repo][1] or row.get("eligible") != "unverified":
+        return False
+    if not _valid_hygiene_warnings(row.get("hygiene_warnings", [])):
         return False
     try:
         if parse_ref(ref) != (repo, bucket, ref.split("/", 1)[1]):
@@ -481,11 +502,13 @@ def _valid_remote_frontier(result: dict, args: argparse.Namespace) -> bool:
 
 
 TASK_REQUIRED = {"stage", "ref", "metadata", "body", "truncated", "note"}
-TASK_KEYS = TASK_REQUIRED | {"transport"}
+TASK_KEYS = TASK_REQUIRED | {"transport", "hygiene_warnings"}
 
 
 def _valid_remote_task(result: dict, args: argparse.Namespace) -> bool:
     if not TASK_REQUIRED <= set(result) <= TASK_KEYS or result.get("ref") != args.ref:
+        return False
+    if not _valid_hygiene_warnings(result.get("hygiene_warnings", [])):
         return False
     metadata, body = result["metadata"], result["body"]
     if (not isinstance(metadata, dict) or not set(metadata) <= set(DETAIL) or not isinstance(body, str)

@@ -298,15 +298,16 @@ def test_an_approval_is_still_asked_when_other_gates_are_open_on_the_same_task()
     assert [c["gate"] for c in od.build_cards([APPROVAL, *gaps(APPROVAL["task_ref"], "verification")])] == ["owner_approval"]
 
 
-def test_approvals_rank_by_due_date_first_then_age():
+def test_approvals_rank_by_priority_and_age_without_due_date_urgency():
     soon = {**APPROVAL, "task_ref": "odysseus:ready/soon.agent-task.md", "task_id": "soon", "due": "2026-11-23",
             "opened_at": "2026-11-21T00:00:00"}
     later = {**APPROVAL, "task_ref": "odysseus:ready/later.agent-task.md", "task_id": "later", "due": "2026-12-30",
              "opened_at": "2026-11-01T00:00:00"}
     undated_old = {**APPROVAL, "task_ref": "odysseus:ready/undated.agent-task.md", "task_id": "undated",
                    "opened_at": "2026-10-01T00:00:00"}
+    later["priority"] = "critical"
     refs = [c["ref"] for c in od.build_cards([undated_old, later, soon])]
-    assert refs == [soon["task_ref"], later["task_ref"], undated_old["task_ref"]]
+    assert refs == [later["task_ref"], undated_old["task_ref"], soon["task_ref"]]
 
 
 def test_a_due_date_is_shown_and_an_invalid_one_is_ignored():
@@ -348,7 +349,7 @@ def test_a_live_run_replaces_its_repos_terminal_debts_so_settled_ones_do_not_ret
     assert {d["task_ref"] for d in rt.all_owed_reviews(db)} == {ODY, PHD2}
 
 
-def test_the_tick_offers_every_repositorys_pending_decision(db, monkeypatch):
+def test_the_tick_offers_every_repositorys_pending_decision(db, queue, monkeypatch):
     terminal(db, ["odysseus"], [_approval(ODY)], minutes_ago=300)
     live_id = rt.activate_run(db, "operator", ["obsidian-phd"], {})["id"]
     row = db.get(LazyUsageRun, live_id)

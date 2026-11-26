@@ -495,6 +495,9 @@ def _digest_text(facts: dict, items: list) -> tuple:
     lines = []
     if needs or waiting:
         lines.append("Need you: " + (", ".join(needs) if needs else "nothing open") + (f" (+{waiting} queued)" if waiting else ""))
+    if load := facts.get("owner_load"):
+        lines.append(f"Owner gates: {load['open']} open. Settled in 24h: {load['agent_or_advisor']} by agent or advisor, "
+                     f"{load['owner']} by owner.")
     if facts.get("advisor_decided"):
         lines.append(f"Advisor decided {facts['advisor_decided']} (you can revoke any).")
     if facts.get("acceptances"):
