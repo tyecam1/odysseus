@@ -38,15 +38,18 @@ class Phone:
 
     def __init__(self):
         self.sent, self.inbox, self.fail_sends, self.refuse_sends = [], [], 0, 0
+        self.refuse_code = 403
 
     def send(self, channel, title, body, priority, *a, **k):
         if self.refuse_sends:
             self.refuse_sends -= 1
+            if isinstance(channel.get("_refused"), list):
+                channel["_refused"].append(self.refuse_code)
             return False                      # the server answered and refused
         if self.fail_sends:
             self.fail_sends -= 1
             raise OSError("timed out")        # outcome unknown
-        self.sent.append({"title": title, "body": body, "priority": priority})
+        self.sent.append({"title": title, "body": body, "priority": priority, "url": channel["url"]})
         return True
 
     def fetch(self, channel, since):
@@ -796,3 +799,289 @@ def test_a_cycle_whose_posts_were_refused_is_not_healthy(home):
     rig.run(T0 + 31 * 60)                                            # the interrupt is refused by the server
     state = rig.saved()
     assert state["last_ok"] == T0                                    # only the first, clean cycle counts
+
+
+# ---- per-repository approval topics (outgoing packages only; replies stay on the one reply topic)
+
+BASE = "http://100.75.149.126:8091"
+
+
+def write_routes(home, data):
+    (home / "ntfy_approval_topics.json").write_text(json.dumps(data))
+
+
+def first_package(rig):
+    rig.run(T0)
+    rig.run(T0 + 31 * 60)
+    return rig.phone.sent[0]
+
+
+@pytest.mark.parametrize("task_ref,topic", [("odysseus:ready/glove.md", "odysseus-approvals"),
+                                            ("obsidian-phd:ready/x.md", "phd-approvals"),
+                                            ("misumi:ready/m.md", "misumi-approvals")])
+def test_a_package_goes_to_its_repositorys_approval_topic(home, task_ref, topic):
+    rig = Rig(home)
+    write_routes(home, {"odysseus": "odysseus-approvals", "obsidian-phd": "phd-approvals", "misumi": "misumi-approvals"})
+    rig.candidates = [cand(task_ref=task_ref)]
+    assert first_package(rig)["url"] == f"{BASE}/{topic}"
+
+
+def test_a_repository_without_a_route_uses_the_shared_channel(home):
+    rig = Rig(home)
+    write_routes(home, {"odysseus": "odysseus-approvals"})
+    rig.candidates = [cand(task_ref="misumi:ready/m.md", task_id="m", scope="d" * 64, title="Misumi thing")]
+    assert first_package(rig)["url"] == f"{BASE}/alerts-topic-1234"
+
+
+@pytest.mark.parametrize("content", ["not json", "[1, 2]", "{\"odysseus\": 7}", "{\"odysseus\": \"../x\"}", "{\"odysseus\": \"ab\"}",
+                                     "{\"Odysseus\": \"odysseus-approvals\"}", "{\"odysseus\": \"reply-topic-1234\"}"])
+def test_a_missing_malformed_or_unsafe_route_file_changes_nothing(home, content):
+    rig = Rig(home)
+    (home / "ntfy_approval_topics.json").write_text(content)
+    assert first_package(rig)["url"] == f"{BASE}/alerts-topic-1234"
+
+
+def test_a_route_can_never_be_the_reply_topic(home):
+    write_channel(home)
+    write_routes(home, {"odysseus": "reply-topic-1234", "misumi": "misumi-approvals"})
+    status, channel = ib.load_channel(home / "ntfy_channel.json")
+    assert status == "ok" and channel["routes"] == {"misumi": f"{BASE}/misumi-approvals"}
+    assert channel["reply_url"] == f"{BASE}/reply-topic-1234"
+
+
+def test_routes_do_not_change_the_channel_fingerprint_so_state_carries_over(home):
+    write_channel(home)
+    before = ib.load_channel(home / "ntfy_channel.json")[1]["fingerprint"]
+    write_routes(home, {"odysseus": "odysseus-approvals"})
+    assert ib.load_channel(home / "ntfy_channel.json")[1]["fingerprint"] == before
+
+
+def test_the_delegation_package_keeps_the_shared_channel(home):
+    rig = Rig(home)
+    write_routes(home, {"odysseus": "odysseus-approvals"})
+    rig.candidates = [cand(kind="delegation", task_ref="policy:advisor-approvals", task_id=ib.DELEGATION_TASK_ID, scope=ib.DELEGATION_SCOPE, title="advisor approvals", priority="critical")]
+    assert first_package(rig)["url"] == f"{BASE}/alerts-topic-1234"
+
+
+def test_replies_are_still_read_from_the_one_reply_topic(home):
+    rig = Rig(home)
+    write_routes(home, {"odysseus": "odysseus-approvals"})
+    seen = []
+    real = rig.phone.fetch
+    rig.phone.fetch = lambda channel, since: (seen.append(channel["reply_url"]), real(channel, since))[1]
+    first_package(rig)
+    assert seen and set(seen) == {f"{BASE}/reply-topic-1234"}
+
+
+@pytest.mark.parametrize("content", ['{"odysseus": "reply-topic-1234\\n"}', '{"odysseus": "odysseus-approvals\\n"}',
+                                     '{"odysseus": "random-topic"}', '{"odysseus": "odysseus-approvals-extra"}',
+                                     '{"odysseus": "Odysseus-approvals"}', '{"odysseus\\n": "odysseus-approvals"}'])
+def test_the_names_are_an_allowlist_and_a_trailing_newline_is_not_a_name(home, content):
+    rig = Rig(home)
+    (home / "ntfy_approval_topics.json").write_text(content)
+    assert first_package(rig)["url"] == f"{BASE}/alerts-topic-1234"
+
+
+def test_a_route_file_that_is_a_link_a_pipe_or_a_directory_is_ignored(home):
+    write_channel(home)
+    real = home / "real.json"
+    real.write_text(json.dumps({"odysseus": "odysseus-approvals"}))
+    link = home / "ntfy_approval_topics.json"
+    link.symlink_to(real)
+    assert ib.load_channel(home / "ntfy_channel.json")[1]["routes"] == {}
+    link.unlink()
+    os.mkfifo(link)
+    assert ib.load_channel(home / "ntfy_channel.json")[1]["routes"] == {}     # returns at once: a pipe is never read
+    link.unlink()
+    link.mkdir()
+    assert ib.load_channel(home / "ntfy_channel.json")[1]["routes"] == {}
+
+
+def test_at_most_eight_routes_are_used(home):
+    write_channel(home)
+    write_routes(home, {f"repo{i}": f"repo{i}-approvals" for i in range(12)})
+    assert len(ib.load_channel(home / "ntfy_channel.json")[1]["routes"]) == 8
+
+
+def test_the_route_is_chosen_before_the_slot_is_spent(home):
+    """A package that cannot be addressed must not burn the day's interrupt: the lookup happens before the reservation."""
+    rig = Rig(home)
+    write_routes(home, {"odysseus": "odysseus-approvals"})
+    rig.run(T0)
+    rig.run(T0 + 31 * 60)
+    saved = rig.saved()
+    assert len(saved["interrupts"]) == 1 and rig.phone.sent[0]["url"] == f"{BASE}/odysseus-approvals"
+
+
+def test_a_refused_route_falls_back_to_the_shared_topic_so_nothing_is_blocked(home):
+    rig = Rig(home)
+    write_routes(home, {"odysseus": "odysseus-approvals"})
+    rig.phone.refuse_sends = 1                  # the broker answered 403 for the routed topic (no ACL grant)
+    rig.run(T0)
+    rig.run(T0 + 31 * 60)
+    assert [s["url"] for s in rig.phone.sent] == [f"{BASE}/alerts-topic-1234"] and len(rig.saved()["interrupts"]) == 1
+
+
+def test_if_the_shared_topic_refuses_too_the_slot_is_returned(home):
+    rig = Rig(home)
+    write_routes(home, {"odysseus": "odysseus-approvals"})
+    rig.phone.refuse_sends = 2
+    rig.run(T0)
+    rig.run(T0 + 31 * 60)
+    assert rig.phone.sent == [] and rig.saved()["interrupts"] == []
+
+
+@pytest.mark.parametrize("task_ref", ["", ":", "a:b:c", "ODYSSEUS:x", "odysseus", ":odysseus", "odysseus\n:x"])
+def test_odd_task_ref_shapes_use_the_shared_channel(home, task_ref):
+    rig = Rig(home)
+    write_routes(home, {"odysseus": "odysseus-approvals"})
+    rig.candidates = [cand(task_ref=task_ref)]
+    try:
+        assert first_package(rig)["url"] == f"{BASE}/alerts-topic-1234"
+    except IndexError:
+        pass                                    # a candidate without a usable task_ref may be withdrawn, never misrouted
+
+
+@pytest.mark.parametrize("name,ok", [("a" * 53 + "-approvals", True), ("a" * 55 + "-approvals", False)])
+def test_a_topic_longer_than_ntfy_allows_is_ignored(home, name, ok):
+    write_channel(home)
+    write_routes(home, {"odysseus": name})
+    routes = ib.load_channel(home / "ntfy_channel.json")[1]["routes"]
+    assert routes == ({"odysseus": f"{BASE}/{name}"} if ok else {})
+
+
+def test_a_route_file_over_the_size_limit_is_ignored(home):
+    write_channel(home)
+    (home / "ntfy_approval_topics.json").write_text(json.dumps({"odysseus": "odysseus-approvals"}) + " " * 5000)
+    assert ib.load_channel(home / "ntfy_channel.json")[1]["routes"] == {}
+
+
+def test_a_reply_topic_named_like_a_route_makes_the_channel_unusable(home):
+    write_channel(home, reply_topic="owner-approvals")
+    write_routes(home, {"odysseus": "odysseus-approvals"})
+    assert ib.load_channel(home / "ntfy_channel.json") == ("reply_topic_reserved_for_approvals", None)
+
+
+def test_load_channel_with_no_path_reads_the_default_channel_directory(home, monkeypatch):
+    path = write_channel(home)
+    write_routes(home, {"odysseus": "odysseus-approvals"})
+    monkeypatch.setattr(ib.oa, "CHANNEL_PATH", path)
+    assert ib.load_channel()[1]["routes"] == {"odysseus": f"{BASE}/odysseus-approvals"}
+
+
+def test_a_routed_send_posts_to_the_route_and_still_taps_through_to_the_reply_topic(home, monkeypatch):
+    status, channel = ib.load_channel(write_channel(home))
+    seen = {}
+
+    class Reply:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    class Opener:
+        def open(self, request, timeout=None):
+            seen["url"], seen["click"] = request.full_url, request.get_header("Click")
+            return Reply()
+
+    monkeypatch.setattr(ib, "_opener", lambda: Opener())
+    assert ib.send({**channel, "url": f"{BASE}/odysseus-approvals"}, "Approve: x", "body", 4)
+    assert seen == {"url": f"{BASE}/odysseus-approvals", "click": f"{BASE}/reply-topic-1234"}
+
+
+NIGHT = datetime(2026, 11, 26, 21, 0, 2, tzinfo=timezone.utc).timestamp()          # London == UTC in November
+
+
+def test_a_server_error_on_the_routed_topic_never_posts_a_second_copy(home):
+    rig = Rig(home)
+    write_routes(home, {"odysseus": "odysseus-approvals"})
+    rig.phone.refuse_sends, rig.phone.refuse_code = 1, 500       # not an access refusal: the message may have been stored
+    rig.run(T0)
+    rig.run(T0 + 31 * 60)
+    assert rig.phone.sent == [] and rig.saved()["interrupts"] == []
+
+
+def test_a_refused_route_never_falls_back_into_quiet_hours(home):
+    rig = Rig(home)
+    write_routes(home, {"odysseus": "odysseus-approvals"})
+    rig.run(T0)
+    real = rig.phone.send
+
+    def refused_at_night(channel, title, body, priority, *a, **k):
+        rig.now = NIGHT                                           # the attempt started before 21:00 and failed after it
+        return real(channel, title, body, priority, *a, **k)
+
+    rig.phone.refuse_sends, rig.phone.send = 1, refused_at_night
+    rig.run(T0 + 31 * 60)
+    assert rig.phone.sent == [] and rig.saved()["interrupts"] == []       # the slot is returned; the package waits for the morning
+
+
+def test_only_approval_cards_are_routed_so_a_policy_route_cannot_capture_the_delegation_package(home):
+    rig = Rig(home)
+    write_routes(home, {"policy": "misumi-approvals"})
+    rig.candidates = [cand(kind="delegation", task_ref="policy:advisor-approvals", task_id=ib.DELEGATION_TASK_ID,
+                           scope=ib.DELEGATION_SCOPE, title="advisor approvals", priority="critical")]
+    assert first_package(rig)["url"] == f"{BASE}/alerts-topic-1234"
+
+
+def test_a_route_file_that_others_can_write_or_that_nests_deeply_is_ignored_without_a_crash(home):
+    write_channel(home)
+    path = home / "ntfy_approval_topics.json"
+    path.write_text(json.dumps({"odysseus": "odysseus-approvals"}))
+    path.chmod(0o666)
+    assert ib.load_channel(home / "ntfy_channel.json")[1]["routes"] == {}
+    path.chmod(0o600)
+    assert ib.load_channel(home / "ntfy_channel.json")[1]["routes"] == {"odysseus": f"{BASE}/odysseus-approvals"}
+    path.write_text("[" * 1100 + "]" * 1100)
+    assert ib.load_channel(home / "ntfy_channel.json")[1]["routes"] == {}
+
+
+def test_the_fallback_works_through_the_real_send_when_the_broker_answers_403(home, monkeypatch):
+    """The refusal code must travel through the real `send` (not only the fake) for the fallback to fire."""
+    import urllib.error
+    rig = Rig(home)
+    write_routes(home, {"odysseus": "odysseus-approvals"})
+    posted = []
+
+    class Ok:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    class Opener:
+        def open(self, request, timeout=None):
+            posted.append(request.full_url)
+            if request.full_url.endswith("/odysseus-approvals"):
+                raise urllib.error.HTTPError(request.full_url, 403, "forbidden", {}, None)
+            return Ok()
+
+    monkeypatch.setattr(ib, "_opener", lambda: Opener())
+    rig.phone.send = ib.send
+    rig.run(T0)
+    rig.run(T0 + 31 * 60)
+    assert posted == [f"{BASE}/odysseus-approvals", f"{BASE}/alerts-topic-1234"] and len(rig.saved()["interrupts"]) == 1
+
+
+def test_a_server_error_through_the_real_send_never_falls_back(home, monkeypatch):
+    import urllib.error
+    rig = Rig(home)
+    write_routes(home, {"odysseus": "odysseus-approvals"})
+    posted = []
+
+    class Opener:
+        def open(self, request, timeout=None):
+            posted.append(request.full_url)
+            raise urllib.error.HTTPError(request.full_url, 500, "error", {}, None)
+
+    monkeypatch.setattr(ib, "_opener", lambda: Opener())
+    rig.phone.send = ib.send
+    rig.run(T0)
+    rig.run(T0 + 31 * 60)
+    assert posted == [f"{BASE}/odysseus-approvals"] and rig.saved()["interrupts"] == []

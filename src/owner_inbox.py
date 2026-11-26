@@ -289,6 +289,54 @@ def healthy(now_ts: Optional[float] = None, state_path: Optional[Path] = None, f
 
 # ---------------------------------------------------------------- transport (tailnet literal address, no proxy, no redirect)
 
+APPROVAL_ROUTES_FILE = "ntfy_approval_topics.json"
+_ROUTE_REPO = re.compile(r"[a-z0-9][a-z0-9-]{0,40}")                 # fullmatch: `$` would accept a trailing newline
+_ROUTE_TOPIC = re.compile(r"[a-z0-9][a-z0-9-]{1,53}-approvals")      # an allowlist (ntfy topics are at most 64 characters).
+# RULE: no reply or command topic anywhere in the estate may be named `*-approvals`; load_channel disables routing if the reply
+# topic itself looks like one.
+
+
+def _approval_routes(directory: Path, base: str, reply_topic: str) -> dict:
+    """{repository id: topic URL} for per-repository approval packages, from an optional file beside the channel file.
+    Anything unreadable, malformed or unsafe is ignored (those packages then use the shared channel), and a route can never
+    be the reply topic: the backend publishes to routes, so a route must never be read as the owner's voice."""
+    import stat
+    try:                           # never follow a link, never block on a pipe, and only a regular file is read
+        fd = os.open(directory / APPROVAL_ROUTES_FILE, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError as exc:
+        if exc.errno != 2:                                     # ENOENT is the normal "no routes configured"
+            log.warning("owner inbox: the approval routes file was refused (a link or unreadable); packages use the shared channel")
+        return {}
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o022:
+            log.warning("owner inbox: the approval routes file is not a private regular file; packages use the shared channel")
+            return {}
+        raw = os.read(fd, 4097)
+        if len(raw) > 4096:
+            log.warning("owner inbox: the approval routes file is too large; packages use the shared channel")
+            return {}
+        data = json.loads(raw)
+    except (OSError, ValueError, RecursionError):
+        log.warning("owner inbox: the approval routes file is unreadable; packages use the shared channel")
+        return {}
+    finally:
+        os.close(fd)
+    if not isinstance(data, dict):
+        log.warning("owner inbox: the approval routes file is not an object; packages use the shared channel")
+        return {}
+    out = {}
+    for repo, topic in list(data.items())[:8]:
+        if isinstance(repo, str) and isinstance(topic, str) and _ROUTE_REPO.fullmatch(repo) and _ROUTE_TOPIC.fullmatch(topic) \
+                and topic != reply_topic:
+            out[repo] = f"{base}/{topic}"
+        else:
+            log.warning("owner inbox: an approval route was ignored (unsafe name or the reply topic)")
+    if len(data) > 8:
+        log.warning("owner inbox: only the first 8 approval routes are used")
+    return out
+
+
 def load_channel(path: Optional[Path] = None) -> tuple:
     """(status, channel) where channel adds `reply_url` to the alert channel; the reply topic is mandatory and must
     differ from the publish topic (the backend can publish to the latter, so it must never be read as the owner's voice)."""
@@ -306,7 +354,10 @@ def load_channel(path: Optional[Path] = None) -> tuple:
     if channel["url"].rsplit("/", 1)[1] == topic:
         return "reply_topic_equals_publish_topic", None
     fingerprint = hashlib.sha256(f"{base}|{channel['url']}|{topic}|{channel['owner']}".encode()).hexdigest()[:16]
-    return "ok", {**channel, "reply_url": f"{base}/{topic}", "base": base, "fingerprint": fingerprint}
+    if _ROUTE_TOPIC.fullmatch(topic):
+        return "reply_topic_reserved_for_approvals", None            # a reply topic must never look like an approvals route
+    routes = _approval_routes(path.parent, base, topic)
+    return "ok", {**channel, "reply_url": f"{base}/{topic}", "base": base, "fingerprint": fingerprint, "routes": routes}
 
 
 def _auth(channel: dict) -> str:
@@ -326,7 +377,9 @@ def send(channel: dict, title: str, body: str, priority: int, timeout: float = S
     try:
         with _opener().open(request, timeout=timeout) as response:        # noqa: S310 - literal tailnet address
             return 200 <= response.status < 300
-    except urllib.error.HTTPError:
+    except urllib.error.HTTPError as exc:
+        if isinstance(channel.get("_refused"), list):
+            channel["_refused"].append(exc.code)
         return False            # the server answered and refused: a DEFINITE failure. A timeout or reset raises: AMBIGUOUS.
 
 
@@ -661,12 +714,20 @@ def _cycle_locked(owner, channel, state_path, clock, gather, author, parse, appl
     if item is not None:
         now_ts = clock()
         if not quiet(now_ts):                               # authoring can take a while: the quiet window is checked again
+            cand_ = candidates[item["id"]]
+            repo = str(cand_.get("task_ref") or "").split(":", 1)[0] if cand_.get("kind") == "approval" else ""
+            route = (channel.get("routes") or {}).get(repo)
+            refused = []
+            target = {**channel, "url": route, "_refused": refused} if route else channel         # chosen BEFORE the slot is spent
             item.update(state="open", sent_at=now_ts, ask=package[1].split("\n")[0])
             state["interrupts"] = (state["interrupts"] + [now_ts])[-MAX_PROCESSED:]
             _write_state(state_path, state)                 # the slot is spent before the post, so a lost write can never resend
             sent = False
             try:
-                sent = bool(send_fn(channel, package[0], package[1], 4))
+                sent = bool(send_fn(target, package[0], package[1], 4))
+                if not sent and route and set(refused) & {401, 403, 404} and not quiet(clock()):   # no grant for the routed topic
+                    log.warning("owner inbox: the routed approval topic refused the package; using the shared channel")
+                    sent = bool(send_fn(channel, package[0], package[1], 4))
             except Exception as exc:
                 # A timeout or reset is AMBIGUOUS: the broker may have accepted the post. The reservation is kept, so the
                 # worst case is one package the owner may not have seen (it stays open and shows in the digest), never two.
