@@ -771,3 +771,51 @@ def test_the_worker_closes_its_session_and_a_failure_inside_it_is_contained(db, 
 def test_the_test_session_can_never_reach_the_real_channel():
     assert str(oa._HOME).startswith(os.environ["AOTERU_ALERTS_HOME"])
     assert not (oa._HOME / "ntfy_channel.json").exists()
+
+
+def test_the_alert_sender_tags_every_post_as_the_agent(monkeypatch):
+    import urllib.request
+    from src import owner_alerts as oa
+    seen = {}
+
+    class Reply:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    class Opener:
+        def open(self, request, timeout=None):
+            seen["tags"] = request.get_header("Tags")
+            return Reply()
+
+    monkeypatch.setattr(urllib.request, "build_opener", lambda *a, **k: Opener())
+    assert oa._post({"user": "u", "password": "p", "url": "http://100.75.149.126:8091/x"}, {"Title": "t"}, "body", 5) == 200
+    assert seen["tags"] == "robot"
+
+
+def test_the_alert_sender_strips_caller_supplied_tag_headers(monkeypatch):
+    import urllib.request
+    from src import owner_alerts as oa
+    seen = {}
+
+    class Reply:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    class Opener:
+        def open(self, request, timeout=None):
+            seen["headers"] = {k.lower(): v for k, v in request.header_items()}
+            return Reply()
+
+    monkeypatch.setattr(urllib.request, "build_opener", lambda *a, **k: Opener())
+    oa._post({"user": "u", "password": "p", "url": "http://100.75.149.126:8091/x"}, {"Title": "t", "X-Tags": "evil", "Tags": "evil", "ta": "evil"}, "body", 5)
+    assert seen["headers"]["tags"] == "robot" and "x-tags" not in seen["headers"] and "ta" not in seen["headers"]

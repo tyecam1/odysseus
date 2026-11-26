@@ -144,7 +144,8 @@ def enabled_owner(channel_path: Optional[Path] = None) -> Optional[str]:
 def _post(channel: dict, headers: dict, body: str, timeout: float) -> int:
     token = base64.b64encode(f"{channel['user']}:{channel['password']}".encode()).decode()
     request = urllib.request.Request(channel["url"], data=body.encode("utf-8"), method="POST",
-                                     headers={**headers, "Authorization": "Basic " + token,
+                                     headers={**{k: v for k, v in headers.items() if k.lower() not in ("tags", "x-tags", "tag", "x-tag", "ta")},
+                                              "Tags": "robot", "Authorization": "Basic " + token,
                                               "User-Agent": "odysseus-owner-alerts"})
     # No proxy (a proxy would receive the credential), no redirect (the pinned host must not forward the payload).
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), od._NoRedirect)

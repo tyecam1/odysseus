@@ -50,6 +50,8 @@ class Phone:
             self.fail_sends -= 1
             raise OSError("timed out")        # outcome unknown
         self.sent.append({"title": title, "body": body, "priority": priority, "url": channel["url"]})
+        if isinstance(channel.get("_published"), list):
+            channel["_published"].append(f"pub{len(self.sent) - 1}")           # the broker's id for the post
         return True
 
     def fetch(self, channel, since):
@@ -58,8 +60,8 @@ class Phone:
         ids = [m["id"] for m in self.inbox]
         return list(self.inbox[ids.index(since) + 1:]) if since in ids else list(self.inbox)
 
-    def say(self, text, at, mid=None):
-        self.inbox.append({"id": mid or f"m{len(self.inbox)}", "time": at, "text": text})
+    def say(self, text, at, mid=None, **extra):
+        self.inbox.append({"id": mid or f"m{len(self.inbox)}", "time": at, "text": text, **extra})
 
 
 def cand(**over):
@@ -624,7 +626,7 @@ def test_send_and_fetch_use_the_pinned_address_with_basic_auth(monkeypatch):
     channel = {"url": "http://100.75.149.126:8091/alerts-topic-1234", "reply_url": "http://100.75.149.126:8091/reply-topic-1234",
                "user": "odysseus", "password": "pw", "owner": "operator"}
     assert ib.send(channel, "Approve: caf\u00e9 thing", "body", 4)
-    assert seen["url"] == channel["url"] and seen["headers"]["priority"] == "4" and seen["headers"]["click"] == channel["reply_url"]
+    assert seen["url"] == channel["url"] and seen["headers"]["priority"] == "4" and "click" not in seen["headers"] and seen["headers"]["tags"] == "robot"
     assert seen["headers"]["title"] == "Approve: caf thing" and seen["headers"]["authorization"].startswith("Basic ")
     assert [m["id"] for m in ib.fetch_replies(channel, "all")] == ["m1", "m2"]              # oldest first
     assert seen["url"].startswith("http://100.75.149.126:8091/reply-topic-1234/json?") and "since=all" in seen["url"]
@@ -808,6 +810,11 @@ BASE = "http://100.75.149.126:8091"
 
 def write_routes(home, data):
     (home / "ntfy_approval_topics.json").write_text(json.dumps(data))
+    state = home / "inbox.json"
+    if state.exists():                           # keep a rig's seeded state valid for the (possibly two-way) fingerprint
+        saved = json.loads(state.read_text())
+        saved["channel"] = ib.load_channel(home / "ntfy_channel.json")[1]["fingerprint"]
+        state.write_text(json.dumps(saved))
 
 
 def first_package(rig):
@@ -849,7 +856,7 @@ def test_a_route_can_never_be_the_reply_topic(home):
     assert channel["reply_url"] == f"{BASE}/reply-topic-1234"
 
 
-def test_routes_do_not_change_the_channel_fingerprint_so_state_carries_over(home):
+def test_routes_do_not_change_the_channel_fingerprint(home):
     write_channel(home)
     before = ib.load_channel(home / "ntfy_channel.json")[1]["fingerprint"]
     write_routes(home, {"odysseus": "odysseus-approvals"})
@@ -969,7 +976,7 @@ def test_load_channel_with_no_path_reads_the_default_channel_directory(home, mon
     assert ib.load_channel()[1]["routes"] == {"odysseus": f"{BASE}/odysseus-approvals"}
 
 
-def test_a_routed_send_posts_to_the_route_and_still_taps_through_to_the_reply_topic(home, monkeypatch):
+def test_a_routed_send_posts_to_the_route_tagged_as_the_agent_and_records_its_id(home, monkeypatch):
     status, channel = ib.load_channel(write_channel(home))
     seen = {}
 
@@ -982,14 +989,18 @@ def test_a_routed_send_posts_to_the_route_and_still_taps_through_to_the_reply_to
         def __exit__(self, *a):
             return False
 
+        def read(self, n=-1):
+            return b'{"id": "abc123", "event": "message"}'
+
     class Opener:
         def open(self, request, timeout=None):
-            seen["url"], seen["click"] = request.full_url, request.get_header("Click")
+            seen["url"], seen["tags"], seen["click"] = request.full_url, request.get_header("Tags"), request.get_header("Click")
             return Reply()
 
     monkeypatch.setattr(ib, "_opener", lambda: Opener())
-    assert ib.send({**channel, "url": f"{BASE}/odysseus-approvals"}, "Approve: x", "body", 4)
-    assert seen == {"url": f"{BASE}/odysseus-approvals", "click": f"{BASE}/reply-topic-1234"}
+    ids = []
+    assert ib.send({**channel, "url": f"{BASE}/odysseus-approvals", "_published": ids}, "Approve: x", "body", 4)
+    assert seen == {"url": f"{BASE}/odysseus-approvals", "tags": "robot", "click": None} and ids == ["abc123"]
 
 
 NIGHT = datetime(2026, 11, 26, 21, 0, 2, tzinfo=timezone.utc).timestamp()          # London == UTC in November
@@ -1085,3 +1096,229 @@ def test_a_server_error_through_the_real_send_never_falls_back(home, monkeypatch
     rig.run(T0)
     rig.run(T0 + 31 * 60)
     assert posted == [f"{BASE}/odysseus-approvals"] and rig.saved()["interrupts"] == []
+
+
+# ---- two-way approval topics: the owner's reply is typed where the request was posted
+
+def two_way_rig(home):
+    rig = Rig(home)
+    write_routes(home, {"odysseus": "odysseus-approvals", "obsidian-phd": "phd-approvals", "misumi": "misumi-approvals"})
+    return rig
+
+
+def test_the_backends_own_post_is_never_read_as_the_owners_voice(home):
+    rig = two_way_rig(home)
+    rig.run(T0)
+    rig.run(T0 + 31 * 60)
+    assert rig.phone.sent and "pub0" in rig.saved()["published"]
+    package = rig.phone.sent[0]
+    rig.phone.say(package["body"], T0 + 32 * 60, mid="pub0", topic=package["url"], tags=[])       # no tag: only the id gives it away
+    rig.phone.sent.clear()
+    rig.run(T0 + 41 * 60)
+    assert rig.parsed == [] and rig.phone.sent == []
+
+
+def test_a_message_carrying_the_agent_tag_is_never_a_reply(home):
+    rig = two_way_rig(home)
+    rig.run(T0)
+    rig.phone.say("go ahead", T0 + 60, mid="t1", topic=f"{BASE}/odysseus-approvals", tags=["robot"])
+    rig.run(T0 + 31 * 60)
+    assert rig.parsed == []
+
+
+def test_the_owner_types_where_the_request_is_and_the_answer_comes_back_to_that_topic(home):
+    rig = two_way_rig(home)
+    rig.candidates = [cand(task_ref="obsidian-phd:ready/x.md", task_id="x", scope="c" * 64, title="Glovebox shortlist")]
+    rig.open_one()
+    assert rig.saved()["items"]
+    rig.phone.say("go ahead with the glovebox one", T0 + 41 * 60 - 30, mid="o1", topic=f"{BASE}/phd-approvals", tags=[])
+    rig.verdicts = [{"target": "glovebox shortlist", "verdict": "yes"}]
+    rig.run(T0 + 41 * 60)
+    assert rig.phone.sent[-1]["body"].startswith("Understood: approve glovebox shortlist")
+    assert rig.phone.sent[-1]["url"] == f"{BASE}/phd-approvals"
+
+
+def test_switching_to_two_way_resets_the_replay_position_but_keeps_the_queue(home):
+    rig = Rig(home)
+    rig.open_one()                                                  # one-way: a package is open on the shared topic
+    before = rig.saved()
+    assert any(i["state"] == "open" for i in before["items"].values()) and before["interrupts"]
+    rig.phone.say("go ahead", T0 + 31 * 60 + 30, mid="fresh", topic=f"{BASE}/odysseus-approvals", tags=[])   # untagged, seconds old
+    write_routes(home, {"odysseus": "odysseus-approvals"})
+    rig.run(T0 + 32 * 60)
+    after = rig.saved()
+    assert rig.parsed == [] and after["mode"] == "two-way" and after["echo"] is None
+    assert all(i["state"] != "open" for i in after["items"].values())          # re-queued to be re-sent to its own topic
+    assert after["interrupts"] == before["interrupts"] and set(after["items"]) == set(before["items"])
+
+
+def test_a_first_cycle_whose_fetch_failed_is_still_the_first(home):
+    rig = Rig(home)
+    write_routes(home, {"odysseus": "odysseus-approvals"})
+    rig.phone.say("go ahead", T0 - 10, mid="seconds-old", topic=f"{BASE}/odysseus-approvals", tags=[])
+
+    def broken(channel, since):
+        raise OSError("down")
+
+    real, rig.phone.fetch = rig.phone.fetch, broken
+    rig.run(T0)
+    assert rig.saved()["started"] is None
+    rig.phone.fetch = real
+    rig.run(T0 + 60)
+    assert rig.parsed == []                                         # recorded without acting, because it is still the first
+
+
+def test_the_published_ids_are_persisted_bounded_and_validated(home):
+    state = home / "inbox.json"
+    ids = [f"id{i}" for i in range(ib.MAX_PUBLISHED + 50)] + [7, "x" * 200]
+    state.write_text(json.dumps({"owner": "operator", "channel": "c", "published": ids}))
+    got = ib._read_state(state)["published"]
+    assert len(got) == ib.MAX_PUBLISHED and got[-1] == f"id{ib.MAX_PUBLISHED + 49}" and all(isinstance(x, str) and len(x) <= 80 for x in got)
+
+
+def test_fetch_two_way_reads_every_topic_and_drops_the_backends_tagged_posts(home, monkeypatch):
+    status, channel = ib.load_channel(write_channel(home))
+    write_routes(home, {"odysseus": "odysseus-approvals", "misumi": "misumi-approvals"})
+    channel = ib.load_channel(home / "ntfy_channel.json")[1]
+    lines = {"odysseus-approvals": ['{"event":"message","id":"a1","time":100,"message":"mine","tags":["robot"]}',
+                                    '{"event":"message","id":"a2","time":300,"message":"owner one"}'],
+             "misumi-approvals": ['{"event":"message","id":"m1","time":200,"message":"owner two","tags":[]}', '{"event":"open"}'],
+             "alerts-topic-1234": []}                                                       # the home topic is read too
+
+    class Reply:
+        def __init__(self, text):
+            self.text = text
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self, n=-1):
+            return self.text.encode()
+
+    class Opener:
+        def open(self, request, timeout=None):
+            return Reply("\n".join(lines[request.full_url.split("/json")[0].rsplit("/", 1)[1]]))
+
+    monkeypatch.setattr(ib, "_opener", lambda: Opener())
+    got = ib.fetch_two_way(channel, "all")
+    assert [(m["id"], m["topic"].rsplit("/", 1)[1]) for m in got] == [("m1", "misumi-approvals"), ("a2", "odysseus-approvals")]
+
+
+def test_a_reply_must_come_from_the_topic_its_request_is_waiting_on(home):
+    rig = two_way_rig(home)
+    rig.candidates = [cand(task_ref="obsidian-phd:ready/x.md", task_id="x", scope="c" * 64, title="Glovebox shortlist")]
+    rig.open_one()
+    assert [i["topic"] for i in rig.saved()["items"].values() if i["state"] == "open"] == [f"{BASE}/phd-approvals"]
+    rig.phone.say("go ahead with the glovebox one", T0 + 41 * 60 - 30, mid="w1", topic=f"{BASE}/misumi-approvals", tags=[])
+    rig.verdicts = [{"target": "glovebox shortlist", "verdict": "yes"}]
+    rig.run(T0 + 41 * 60)
+    assert rig.parsed == [] and rig.phone.sent[-1]["url"] == f"{BASE}/misumi-approvals"
+    assert "own topic" in rig.phone.sent[-1]["body"] and rig.saved()["echo"] is None
+    rig.phone.say("go ahead with the glovebox one", T0 + 42 * 60, mid="w2", topic=f"{BASE}/phd-approvals", tags=[])
+    rig.run(T0 + 43 * 60)
+    assert rig.phone.sent[-1]["body"].startswith("Understood: approve glovebox shortlist") and rig.phone.sent[-1]["url"] == f"{BASE}/phd-approvals"
+
+
+def test_a_stop_command_works_from_any_topic_even_while_a_request_waits_elsewhere(home):
+    rig = two_way_rig(home)
+    rig.candidates = [cand(task_ref="obsidian-phd:ready/x.md", task_id="x", scope="c" * 64, title="Glovebox shortlist")]
+    rig.open_one()
+    rig.phone.say("stop advisor approvals", T0 + 40 * 60, mid="s1", topic=f"{BASE}/misumi-approvals", tags=[])
+    rig.phone.say("pause", T0 + 41 * 60, mid="s2", topic=f"{BASE}/odysseus-approvals", tags=[])
+    rig.run(T0 + 42 * 60)
+    assert [d["op"] for d in rig.applied] == ["stop_advisor", "pause_run"] and rig.parsed == []
+
+
+def test_a_yes_typed_on_another_topic_never_confirms_and_clears_the_pending_echo(home):
+    rig = two_way_rig(home)
+    rig.candidates = [cand(task_ref="obsidian-phd:ready/x.md", task_id="x", scope="c" * 64, title="Glovebox shortlist")]
+    rig.open_one()
+    rig.phone.say("go ahead with the glovebox one", T0 + 41 * 60 - 30, mid="a1", topic=f"{BASE}/phd-approvals", tags=[])
+    rig.verdicts = [{"target": "glovebox shortlist", "verdict": "yes"}]
+    rig.run(T0 + 41 * 60)
+    assert rig.saved()["echo"] is not None and rig.saved()["echo"]["armed_at"] is not None          # armed on the phd topic
+    rig.phone.say("yes", T0 + 43 * 60, mid="a2", topic=f"{BASE}/misumi-approvals", tags=[])           # the wrong topic
+    rig.run(T0 + 44 * 60)
+    assert rig.applied == [] and rig.saved()["echo"] is None
+    rig.phone.say("yes", T0 + 46 * 60, mid="a3", topic=f"{BASE}/phd-approvals", tags=[])              # now the echo is gone
+    rig.run(T0 + 47 * 60)
+    assert rig.applied == []
+
+
+def test_an_open_request_whose_topic_is_no_longer_polled_is_queued_again(home):
+    rig = two_way_rig(home)
+    rig.candidates = [cand(task_ref="obsidian-phd:ready/x.md", task_id="x", scope="c" * 64, title="Glovebox shortlist")]
+    rig.open_one()
+    assert [i["topic"] for i in rig.saved()["items"].values() if i["state"] == "open"] == [f"{BASE}/phd-approvals"]
+    write_routes(home, {"odysseus": "odysseus-approvals", "misumi": "misumi-approvals"})              # the phd route is gone
+    rig.run(T0 + 50 * 60)
+    states = [(i["state"], i.get("topic")) for i in rig.saved()["items"].values()]
+    assert states == [("queued", None)]
+
+
+@pytest.mark.parametrize("raw_tags,is_agent", [(None, False), ([], False), (["x"], False), (["robot"], True), (["Robot"], True), ("robot", True),
+                                              (["a"] * 33, True), ([1, "x"], True), ({"robot": 1}, True), (["ROBOT", "x"], True)])
+def test_tags_fail_closed(home, monkeypatch, raw_tags, is_agent):
+    status, channel = ib.load_channel(write_channel(home))
+    line = {"event": "message", "id": "m1", "time": 100, "message": "hello"}
+    if raw_tags is not None:
+        line["tags"] = raw_tags
+
+    class Reply:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self, n=-1):
+            return json.dumps(line).encode()
+
+    class Opener:
+        def open(self, request, timeout=None):
+            return Reply()
+
+    monkeypatch.setattr(ib, "_opener", lambda: Opener())
+    got = ib._fetch_topic(channel, f"{BASE}/odysseus-approvals", "all", 5)
+    assert (ib.AGENT_TAG in got[0]["tags"]) is is_agent
+
+
+def test_fetch_two_way_also_reads_the_home_topic_and_asks_only_for_what_is_new(home, monkeypatch):
+    write_channel(home, topic="odysseus-approvals")
+    write_routes(home, {"misumi": "misumi-approvals"})
+    channel = ib.load_channel(home / "ntfy_channel.json")[1]
+    asked = []
+
+    class Reply:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self, n=-1):
+            return b""
+
+    class Opener:
+        def open(self, request, timeout=None):
+            asked.append(request.full_url)
+            return Reply()
+
+    monkeypatch.setattr(ib, "_opener", lambda: Opener())
+    ib.fetch_two_way(channel, "1764147600")
+    assert sorted(u.split("/json")[0].rsplit("/", 1)[1] for u in asked) == ["misumi-approvals", "odysseus-approvals"]
+    assert all("since=1764147600" in u for u in asked)
+
+
+def test_the_cycle_asks_the_broker_only_for_messages_since_two_way_mode_started(home, monkeypatch):
+    rig = two_way_rig(home)
+    seen = []
+    monkeypatch.setattr(ib, "fetch_two_way", lambda channel, since: (seen.append(since), [])[1])
+    for at in (T0, T0 + 600):
+        ib.cycle("operator", gather=lambda: list(rig.candidates), author=lambda c: fields(), parse=rig.parse, apply=rig.apply,
+                 digest_facts=lambda: rig.facts, state_path=rig.state, channel_path=rig.channel, clock=lambda at=at: at,
+                 transport={"send": rig.phone.send})
+    assert seen == [str(int(T0)), str(int(T0))]

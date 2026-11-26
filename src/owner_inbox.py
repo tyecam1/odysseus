@@ -63,6 +63,8 @@ MAX_REPLIES_PER_CYCLE = 20
 MAX_ACKS_PER_DAY = 30
 MAX_ITEMS = 60
 MAX_PROCESSED = 200
+MAX_PUBLISHED = 400            # ids of the backend's own posts, so a shared two-way topic never reads them as the owner's voice
+AGENT_TAG = "robot"            # every backend post carries this ntfy tag (it renders as a robot emoji on the phone)
 SEND_TIMEOUT_SECONDS = 5
 FETCH_TIMEOUT_SECONDS = 5
 FETCH_MAX_BYTES = 256 * 1024
@@ -195,7 +197,7 @@ def parse_author(text) -> Optional[dict]:
 
 def _empty_state() -> dict:
     return {"owner": None, "channel": None, "items": {}, "processed": [], "echo": None, "interrupts": [], "acks": [],
-            "last_digest_day": None, "started": None, "cursor": None, "last_ok": None}
+            "last_digest_day": None, "started": None, "cursor": None, "last_ok": None, "published": [], "mode": None}
 
 
 def _num(value) -> bool:
@@ -242,12 +244,14 @@ def _read_state(path: Path) -> dict:
     for key in ("started", "cursor", "last_ok"):
         if _num(data.get(key)) or (key == "cursor" and _text(data.get(key), 80)):
             state[key] = data[key]
+    if data.get("mode") in ("one-way", "two-way"):
+        state["mode"] = data["mode"]
     items = data.get("items")
     if isinstance(items, dict):
         state["items"] = {k: v for k, v in list(items.items())[:MAX_ITEMS * 3] if _valid_item(k, v)}
-    for key in ("processed",):
+    for key, cap in (("processed", MAX_PROCESSED), ("published", MAX_PUBLISHED)):
         if isinstance(data.get(key), list):
-            state[key] = [x for x in data[key] if _text(x, 80)][-MAX_PROCESSED:]
+            state[key] = [x for x in data[key] if _text(x, 80)][-cap:]
     for key in ("interrupts", "acks"):
         if isinstance(data.get(key), list):
             state[key] = [x for x in data[key] if _num(x)][-MAX_PROCESSED:]
@@ -372,21 +376,30 @@ def send(channel: dict, title: str, body: str, priority: int, timeout: float = S
     request = urllib.request.Request(
         channel["url"], data=body.encode("utf-8"), method="POST",
         headers={"Title": plain(title, MAX_TITLE, ascii_only=True), "Priority": str(priority),
-                 "Click": channel["reply_url"], "Content-Type": "text/plain; charset=utf-8",
+                 "Tags": AGENT_TAG, "Content-Type": "text/plain; charset=utf-8",
                  "Authorization": _auth(channel), "User-Agent": "odysseus-owner-inbox"})
     try:
         with _opener().open(request, timeout=timeout) as response:        # noqa: S310 - literal tailnet address
-            return 200 <= response.status < 300
+            ok = 200 <= response.status < 300
+            ids, reader = channel.get("_published"), getattr(response, "read", None)
+            if ok and isinstance(ids, list) and reader is not None:
+                try:
+                    mid = json.loads(reader(16384)).get("id")
+                    if isinstance(mid, str) and mid:
+                        ids.append(mid[:40])
+                except (ValueError, AttributeError):
+                    pass                                   # the tag still marks the post as the backend's own
+            return ok
     except urllib.error.HTTPError as exc:
         if isinstance(channel.get("_refused"), list):
             channel["_refused"].append(exc.code)
         return False            # the server answered and refused: a DEFINITE failure. A timeout or reset raises: AMBIGUOUS.
 
 
-def fetch_replies(channel: dict, since: str, timeout: float = FETCH_TIMEOUT_SECONDS) -> list:
-    """Messages on the reply topic after `since` ('all' or a message id): [{id, time, text}], oldest first."""
+def _fetch_topic(channel: dict, url: str, since: str, timeout: float, mark_topic: bool = False) -> list:
+    """Messages on one topic after `since` ('all' or a message id): [{id, time, text, tags}], oldest first."""
     query = urllib.parse.urlencode({"poll": "1", "since": since})
-    request = urllib.request.Request(f"{channel['reply_url']}/json?{query}", method="GET",
+    request = urllib.request.Request(f"{url}/json?{query}", method="GET",
                                      headers={"Authorization": _auth(channel), "User-Agent": "odysseus-owner-inbox"})
     with _opener().open(request, timeout=timeout) as response:        # noqa: S310
         raw = response.read(FETCH_MAX_BYTES + 1)
@@ -400,7 +413,32 @@ def fetch_replies(channel: dict, since: str, timeout: float = FETCH_TIMEOUT_SECO
             continue
         if isinstance(msg, dict) and msg.get("event") == "message" and isinstance(msg.get("id"), str) \
                 and isinstance(msg.get("message"), str) and isinstance(msg.get("time"), (int, float)) and not isinstance(msg.get("time"), bool):
-            out.append({"id": msg["id"][:40], "time": float(msg["time"]), "text": msg["message"]})
+            raw_tags = msg.get("tags")
+            if raw_tags is None:
+                tags = []
+            elif isinstance(raw_tags, list) and len(raw_tags) <= 32 and all(isinstance(t, str) for t in raw_tags):
+                tags = [t.lower()[:20] for t in raw_tags]
+            else:
+                tags = [AGENT_TAG]                          # an unexpected shape is never the owner's voice
+            entry = {"id": msg["id"][:40], "time": float(msg["time"]), "text": msg["message"], "tags": tags}
+            if mark_topic:
+                entry["topic"] = url
+            out.append(entry)
+    return sorted(out, key=lambda m: m["time"])
+
+
+def fetch_replies(channel: dict, since: str, timeout: float = FETCH_TIMEOUT_SECONDS) -> list:
+    """Messages on the reply topic after `since` (the legacy one-way layout)."""
+    return _fetch_topic(channel, channel["reply_url"], since, timeout)
+
+
+def fetch_two_way(channel: dict, since: str, timeout: float = FETCH_TIMEOUT_SECONDS) -> list:
+    """What the owner may have typed on any two-way approval topic: every message on every route that does not carry the
+    backend's tag, oldest first, each marked with its topic. `since` is ignored: the broker's cache is short, and the caller
+    deduplicates by message id and never acts on a message older than the inbox's own start."""
+    out = []
+    for url in dict.fromkeys([*(channel.get("routes") or {}).values(), channel["url"]]):     # the home topic too
+        out += [m for m in _fetch_topic(channel, url, since, timeout, mark_topic=True) if AGENT_TAG not in m["tags"]]
     return sorted(out, key=lambda m: m["time"])
 
 
@@ -570,7 +608,7 @@ def cycle(owner: str, *, gather: Callable, author: Callable, parse: Callable, ap
     clock = clock or time.time
     state_path = state_path or STATE_PATH
     send_fn = (transport or {}).get("send", send)
-    fetch_fn = (transport or {}).get("fetch", fetch_replies)
+    fetch_fn = (transport or {}).get("fetch")
     try:
         state_path.parent.mkdir(parents=True, exist_ok=True)
         lock_fd = os.open(str(state_path) + ".lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
@@ -627,6 +665,31 @@ def _cycle_locked(owner, channel, state_path, clock, gather, author, parse, appl
     if state["owner"] != owner or state["channel"] != channel["fingerprint"]:
         state = _empty_state()                              # another owner or channel: nothing carries over
         state["owner"], state["channel"] = owner, channel["fingerprint"]
+    pub = []
+    channel = {**channel, "_published": pub}           # every post this cycle reports its id here
+
+    def save():
+        state["published"] = (state["published"] + pub)[-MAX_PUBLISHED:]
+        pub.clear()
+        _write_state(state_path, state)
+
+    mode = "two-way" if channel.get("routes") else "one-way"
+    if state.get("mode") != mode and not (state.get("mode") is None and mode == "one-way"):
+        # Switching layout: the replay position starts fresh (so nothing posted before now can act, and an armed echo cannot
+        # carry across), while the queue, the day's interrupts and the acknowledgement count are kept. Packages that were
+        # waiting on the old topic are queued again so they are re-sent to the topic they now belong to.
+        state.update(started=None, cursor=None, processed=[], echo=None)
+        for item in state["items"].values():
+            if item.get("state") == "open":
+                item.update(state="queued", seen_at=now_ts, sent_at=None, ask=None, retry_at=None, topic=None)
+    state["mode"] = mode
+    if channel.get("routes"):
+        polled = {*channel["routes"].values(), channel["url"]}
+        for item in state["items"].values():
+            if item.get("state") == "open" and item.get("topic") and item["topic"] not in polled:
+                item.update(state="queued", seen_at=now_ts, sent_at=None, ask=None, retry_at=None, topic=None)
+                if state.get("echo") and state["echo"].get("item") == item["id"]:
+                    state["echo"] = None
     first = state["started"] is None
     state["started"] = state["started"] or now_ts
     outcome = []
@@ -660,33 +723,47 @@ def _cycle_locked(owner, channel, state_path, clock, gather, author, parse, appl
     feed_ok = True
     health = {"sends_ok": True}                             # becomes False if any post this cycle failed or timed out
     try:
-        messages = fetch_fn(channel, "all" if state["cursor"] is None else str(state["cursor"]))
+        reader = fetch_fn or (fetch_two_way if channel.get("routes") else fetch_replies)
+        since = str(int(state["started"])) if channel.get("routes") else ("all" if state["cursor"] is None else str(state["cursor"]))
+        messages = reader(channel, since)
     except Exception as exc:
         log.warning("owner inbox poll failed: %s", type(exc).__name__)
         messages, feed_ok = [], False
+        if first:
+            state["started"] = None                         # nothing was recorded: the next cycle is still the first
     handled = 0
     for message in messages:
         if message["id"] in state["processed"]:
             continue
+        if message["id"] in state["published"] or AGENT_TAG in (message.get("tags") or []):
+            continue                                        # the backend's own post is never the owner's voice
         if handled >= MAX_REPLIES_PER_CYCLE:
             break                                           # the rest wait for the next cycle; the cursor stays behind them
         state["processed"] = (state["processed"] + [message["id"]])[-MAX_PROCESSED:]
         state["cursor"] = message["id"]
-        if first or message["time"] < state["started"] - 60:
+        if first or message["time"] < state["started"] - (0 if channel.get("routes") else 60):
             continue
         text = clean_reply(message["text"])
         if not text:
             continue
         handled += 1
+        reply_ch = {**channel, "url": message["topic"]} if message.get("topic") else channel   # answer where the owner typed
+        topic = message.get("topic")
+        hidden = {k for k, i in state["items"].items() if i.get("state") == "open" and topic and i.get("topic") and i["topic"] != topic}
+        view = {**state, "items": {k: v for k, v in state["items"].items() if k not in hidden}} if hidden else state
         try:
-            result = interpret(text, state, now_ts, parse, msg_time=message["time"])
+            result = interpret(text, view, now_ts, parse, msg_time=message["time"])
+            if view is not state:
+                state.update({k: v for k, v in view.items() if k != "items"})      # every change the interpreter made (a hidden request's echo is cleared)
+                if hidden and result["say"] == "Nothing is waiting on you right now.":
+                    result["say"] = "That request is waiting on its own topic. Answer it there."
             say = result["say"]
             if result["do"] is not None:
-                ack, status = apply(result["do"], state["items"], hashlib.sha256(text.encode()).hexdigest()[:16])
+                ack, status = apply(result["do"], view["items"], hashlib.sha256(text.encode()).hexdigest()[:16])     # a hidden request cannot be actioned
                 say = ack or say
                 if status in ("done", "stale"):
                     _after_action(result["do"], state, now_ts)
-            delivered = _say(channel, send_fn, state, now_ts, say, health)
+            delivered = _say(reply_ch, send_fn, state, now_ts, say, health)
             echo = state.get("echo")
             if echo and echo.get("armed_at") is None:
                 if delivered:
@@ -698,7 +775,7 @@ def _cycle_locked(owner, channel, state_path, clock, gather, author, parse, appl
             log.warning("owner inbox reply failed: %s", type(exc).__name__)
             state["echo"] = None
             health["sends_ok"] = False
-        _write_state(state_path, state)                   # each reply is durable before the next, so a crash replays at most one
+        save()                   # each reply is durable before the next, so a crash replays at most one
     # 3. at most one interrupt, reserved durably BEFORE it is posted
     reason = interrupt_allowed(state, now_ts)
     queued = sorted((i for i in state["items"].values() if i["state"] == "queued" and now_ts - i["seen_at"] >= BATCH_WAIT_SECONDS
@@ -719,15 +796,17 @@ def _cycle_locked(owner, channel, state_path, clock, gather, author, parse, appl
             route = (channel.get("routes") or {}).get(repo)
             refused = []
             target = {**channel, "url": route, "_refused": refused} if route else channel         # chosen BEFORE the slot is spent
-            item.update(state="open", sent_at=now_ts, ask=package[1].split("\n")[0])
+            item.update(state="open", sent_at=now_ts, ask=package[1].split("\n")[0], topic=target["url"])
             state["interrupts"] = (state["interrupts"] + [now_ts])[-MAX_PROCESSED:]
-            _write_state(state_path, state)                 # the slot is spent before the post, so a lost write can never resend
+            save()                 # the slot is spent before the post, so a lost write can never resend
             sent = False
             try:
                 sent = bool(send_fn(target, package[0], package[1], 4))
                 if not sent and route and set(refused) & {401, 403, 404} and not quiet(clock()):   # no grant for the routed topic
                     log.warning("owner inbox: the routed approval topic refused the package; using the shared channel")
                     sent = bool(send_fn(channel, package[0], package[1], 4))
+                    if sent:
+                        item["topic"] = channel["url"]
             except Exception as exc:
                 # A timeout or reset is AMBIGUOUS: the broker may have accepted the post. The reservation is kept, so the
                 # worst case is one package the owner may not have seen (it stays open and shows in the digest), never two.
@@ -747,7 +826,7 @@ def _cycle_locked(owner, channel, state_path, clock, gather, author, parse, appl
         title, body = _digest_text(digest_facts(), list(state["items"].values()))
         if fifteen_second_ok(title, body, digest=True):
             state["last_digest_day"] = day                  # reserved before the post, like an interrupt
-            _write_state(state_path, state)
+            save()
             try:
                 if send_fn(channel, title, body, 2):
                     outcome.append("digest")
@@ -759,7 +838,7 @@ def _cycle_locked(owner, channel, state_path, clock, gather, author, parse, appl
                 health["sends_ok"] = False
     if feed_ok and health["sends_ok"]:
         state["last_ok"] = clock()                          # a cycle that could not read the feed or post is not a healthy one
-    _write_state(state_path, state)
+    save()
     return ",".join(outcome) or ("first_run" if first else "idle")
 
 

@@ -407,6 +407,11 @@ def run_cycle(owner: str) -> str:
         advisor_step(owner)                          # after the owner's replies (a queued "stop advisor approvals" wins)
     except Exception as exc:
         log.warning("advisor approvals failed: %s", type(exc).__name__)
+    try:                                            # the owner's daily tick list (no authority; off unless its topic file exists)
+        from src import owner_checklist as checklist
+        checklist.run(owner, parse=lambda text, items: _model(checklist.parse_prompt(text, items), "sonnet", 60.0))
+    except Exception as exc:
+        log.warning("owner checklist failed: %s", type(exc).__name__)
     return result
 
 
