@@ -59,6 +59,15 @@ denied_paths:
   - "**/*credential*"
   - "**/*password*"
 result_path: docs/runtime-work-packages/2026-11-21-lazyusage-parallel-window-aware-acceptance.md
+verification_evidence:
+  - result: pass
+    commit_sha: ddb8226ca83fdeab64388faaa0dc9c20e1439105
+    ref: "docs/runtime-work-packages/2026-11-21-lazyusage-parallel-window-aware-acceptance.md (baseline/disposition document commit; controller check of 2026-11-26: file within allowed paths, Markdown only, all relative links resolve)"
+    verified_by: "controller (claude-sonnet-5-5), deterministic link and scope check on the lab"
+review_evidence:
+  - verdict: approve
+    reviewer_provider: claude-opus-5-5
+    ref: "cross-family review 2026-11-26, APPROVE_WITH_CONDITIONS; conditions recorded in docs/runtime-work-packages/2026-11-21-lazyusage-parallel-window-aware-acceptance.md and below"
 ---
 
 ## Plan (written 2026-11-26 by the controller; step 0 is to verify it against HEAD)
@@ -84,6 +93,13 @@ result_path: docs/runtime-work-packages/2026-11-21-lazyusage-parallel-window-awa
 - Do not touch approval/delegation code, owner-ledger semantics or local-routing guards. Canary and deploy are separate governed steps.
 **Ordering note:** Follows the deployed 2026-11-19 reliability work. Unblocks the canary, adaptive pacing, grounded local work and the parking contract the owner-communication card relies on.
 
+
+## Review conditions and the next dispatch (binding; the baseline stage is done)
+
+1. The disposition is corrected: only enabling concurrency above 1 (plan steps 4-5) and the canary are blocked at the execution boundary, because each advisory child holds only the controller PID and has no worker handle (the liveness design, merged and reviewed, specifies the fix). The WIP reservation, the durable parked state and the status surface (plan steps 2, 3 and 6) do not touch advisory launch or stop and are useful with one execution at a time, so they are NOT blocked.
+2. The shared Codex launch reservation rules out the two-write phase of the canary while Codex is the only qualified write lane. Rewrite the canary's write phase so it requires either a second qualified write lane or a separately reviewed per-child Codex reservation.
+3. Evidence nits to fix when the document is next touched: state the timestamp precision used (displayed gaps subtract to 27.507 and 41.277, sum 115.878, not 115.879); explain why four paid dispatches were charged for three children; record the author's actual model (step 7 and the latest-model rule); file the launch-after-stop window seen in the document's own fixture test as a defect against the liveness work.
+4. NEXT DISPATCH of this card: implement plan steps 2, 3 and 6 with the cap OFF by default. A transactional reservation keyed on `LazyUsageRun.created_by` plus canonical `repo_id/task_id`, taken at the existing card-admission boundary before the lease transaction; refuse opt-in when the principal is the `api-token` placeholder; release a slot only when `evidence_stages()` is complete at the exact revision; add the plan's tests and a status field. Leave steps 4-5 until advisory ownership has runtime and fault-test evidence.
 ---
 
 # Parallel and window-aware /lazyUsage
