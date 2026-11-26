@@ -1982,10 +1982,26 @@ def all_owed_reviews(db, owner=None):
     return list(merged.values())
 
 
+def _plan_extract(body) -> dict:
+    """The card's own plan in a bounded form: its one-line goal and the first few 'done when' and 'risks and stops' lines.
+    Plain text, shown to a model as data when it words the owner's question; never copied to the phone verbatim."""
+    text = str(body or "")
+    out = {}
+    m = re.search(r"\*\*Goal in one line\.\*\*\s*(.+)", text) or re.search(r"^##\s+(?:Outcome|Why)\s*\n+(.+?)(?:\n\s*\n|\Z)", text, re.M | re.S)
+    if m:
+        out["goal"] = " ".join(m.group(1).split())[:300]
+    for key, label in (("done", r"\*\*Done when:\*\*"), ("risks_text", r"\*\*Risks and stops:\*\*")):
+        m = re.search(label + r"\s*\n((?:[ \t]*[-*].+\n?)+)", text)
+        if m:
+            out[key] = [" ".join(line.strip().lstrip("-* ").split())[:200] for line in m.group(1).splitlines() if line.strip()][:3]
+    return out
+
+
 def decision_context(debt, frontier):
     """The few structured card fields that let the owner decide: what the task is, its type, priority, risk, its
-    write scope and how many paths are protected. A fixed allow-list: never the card body, a runtime error,
-    model output or any other front-matter field. Empty when the card cannot be read."""
+    write scope and how many paths are protected, plus a bounded extract of the card's own plan (goal, done-when and risk
+    lines). A fixed allow-list: never a runtime error, model output or any other front-matter field. Empty when the card
+    cannot be read."""
     ref = debt.get("task_ref") if isinstance(debt, dict) else None
     if not isinstance(ref, str) or ":" not in ref:
         return {}
@@ -1997,7 +2013,11 @@ def decision_context(debt, frontier):
     changed = bool(debt.get("gate") == "owner_approval" and recorded and approval_scope(meta) != recorded)
     notes = meta.get("notes")
     denied = [p for p in (meta.get("denied_paths") or []) if isinstance(p, str)]
-    return {"title": meta.get("title") if isinstance(meta.get("title"), str) else "",
+    try:
+        plan = _plan_extract(_contract(frontier, {"ref": ref})[1])
+    except Exception:
+        plan = {}
+    return {**plan, "title": meta.get("title") if isinstance(meta.get("title"), str) else "",
             **({"owner_gate_class": meta["owner_gate_class"]} if isinstance(meta.get("owner_gate_class"), str) else {}),
             "what": notes if isinstance(notes, str) else "", "kind": kind,
             "priority": str(meta.get("priority") or ""), "risk": str(meta.get("risk_level") or ""),

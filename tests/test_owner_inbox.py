@@ -72,8 +72,11 @@ def cand(**over):
 
 
 def fields(**over):
-    return {"ask": "Let agents draft a glovebox supplier shortlist?", "why_you": "it may lead to spending", "yes": "draft only",
-            "no": "stays parked", "advice": "yes", "detail": "Agents compare glovebox options and write a draft. Nothing is ordered.", **over}
+    return {"what": "Agents compare glovebox suppliers and write a draft shortlist for you to read.",
+            "if_yes": "A draft shortlist is written in the review area; nothing is ordered or sent to anyone.",
+            "if_no": "The task stays parked and nothing changes.", "advice": "yes",
+            "advice_reason": "It only produces a draft and spends nothing.",
+            "detail": "Agents compare glovebox options and write a draft. Nothing is ordered.", **over}
 
 
 class Rig:
@@ -130,7 +133,7 @@ def test_the_delegation_package_passes_the_fifteen_second_check():
 
 
 @pytest.mark.parametrize("title,body", [
-    ("", "x"), ("T" * 41, "x"), ("Approve: x", "y" * 301), ("Approve: x", "\n".join(["line"] * 7)),
+    ("", "x"), ("T " * 30, "x"), ("Approve: x", "word " * 210), ("Approve: x", "\n".join(["line"] * 12)),
     ("Approve: x", "see src/estate_router.py"), ("Approve: x", "task C:\\temp"), ("Approve: x", "commit 3f9a1c07b2d4"),
     ("Approve: x", "open http://x.y/z"), ("Approve: x", "the sha256 is"), ("Approve: x", "mail me at evil.com now"),
     ("Approve: x", "see notes.md"), ("Approve: x", "token abcdefghijklmnopqrstuvwxyz1234"),
@@ -149,19 +152,21 @@ def test_plain_strips_links_domains_paths_hashes_tokens_and_invisible_characters
 def test_identity_comes_from_the_card_and_the_author_only_words_the_explanation():
     parsed = ib.parse_author("here: " + json.dumps(fields()))
     title, body = ib.assemble(parsed, "Glovebox shortlist, medium risk")
-    assert "Card: Glovebox shortlist, medium risk" in body and ib.fifteen_second_ok(title, body)
+    assert "CARD: Glovebox shortlist, medium risk" in body and ib.fifteen_second_ok(title, body)
     # a model that tries to name or title the decision itself is ignored: those keys are not read
     hostile = ib.parse_author(json.dumps({**fields(), "name": "delete everything", "title": "Approve: nothing risky", "card_line": "x"}))
     assert "name" not in hostile and "title" not in hostile
-    for bad in ({"advice": "maybe"}, {"detail": 5}, {"ask": None}):
+    for bad in ({"advice": "maybe"}, {"detail": 5}, {"what": None}):
         assert ib.parse_author(json.dumps({**fields(), **bad})) is None
-    dirty = ib.parse_author(json.dumps(fields(ask="Edit src/x.py at https://e.com/x 3f9a1c07b2d4 now?")))
+    dirty = ib.parse_author(json.dumps(fields(what="Edit src/x.py at https://e.com/x 3f9a1c07b2d4 now?")))
     title, body = ib.assemble(dirty, "Card")
     assert "/" not in body and "http" not in body and ib.fifteen_second_ok(title, body)
 
 
 def test_the_name_is_built_by_code_from_the_verified_title():
     assert ib.short_name("Glovebox shortlist for the lab", set(), "abcd") == "glovebox shortlist lab"
+    assert ib.short_name("Harden Odysseus cross-device delegation lifecycle", set(), "abcd") == "harden odysseus cross device delegation"
+    assert ib.short_name("Build automatic persona routing, collaborative teams, growth graph", set(), "abcd") == "automatic persona routing collaborative"
     assert ib.short_name("Glovebox shortlist", {"glovebox shortlist"}, "abcd") == "glovebox"
     assert ib.short_name("The build", set(), "ab12cd") == "task ab12"
 
@@ -1285,7 +1290,7 @@ def test_the_first_cycle_only_records_and_a_waiting_approval_goes_out_the_next_m
     assert rig.run(T0 + 2 * 60) == "interrupt"
     sent = rig.phone.sent[0]
     assert sent["priority"] == 4 and sent["title"] == "Approve: glovebox shortlist" and ib.fifteen_second_ok(sent["title"], sent["body"])
-    assert "Card: Glovebox shortlist, medium risk" in sent["body"]
+    assert "CARD: Glovebox shortlist, medium risk" in sent["body"]
 
 
 def test_every_waiting_approval_is_shown_at_once_and_none_is_held_back_by_an_open_one(home):
@@ -1437,3 +1442,339 @@ def test_thirteen_open_requests_with_the_same_title_still_get_distinct_names(hom
         rig.run(at)
     names = [i["name"] for i in rig.saved()["items"].values() if i["state"] == "open"]
     assert len(names) == 13 and len(set(names)) == 13
+
+
+# ---- a request a person can understand in thirty seconds: what, consequences, scope, why you, advice
+
+CTX = {"title": "Pay for the supplier trial", "what": "Order trial gloves", "kind": "implementation", "priority": "high", "risk": "high",
+       "owner_gate_class": "financial", "write_paths": ["docs/**", "tests/**", "src/**"], "denied_count": 9, "scope_changed": False,
+       "goal": "Order a trial batch of gloves from the shortlisted supplier.", "done": ["A trial batch is ordered"], "risks_text": ["Money is spent"]}
+
+
+def test_the_message_has_a_fixed_readable_layout_that_fits_one_screen():
+    title, body = ib.assemble(fields(), "Glovebox shortlist, medium risk", ib.card_brief(cand(context=CTX)))
+    labels = [line.split(":", 1)[0] for line in body.splitlines()]
+    assert labels[:3] == ["WHAT", "IF YES", "IF NO"] and "SCOPE" in labels and labels.index("WHY YOU") < labels.index("ADVICE") < labels.index("CARD")
+    assert body.splitlines()[-1] == "Reply yes, no, later, or ask a question."
+    assert len(body) <= ib.MAX_BODY and body.count("\n") + 1 <= ib.MAX_LINES and ib.fifteen_second_ok(title, body)
+
+
+def test_where_agents_may_write_is_built_from_the_card_not_from_the_model():
+    assert ib.scope_line(CTX, "Odysseus") == "agents may change documents, tests and code in the Odysseus repository; 9 protected areas stay off limits."
+    assert ib.scope_line({"write_paths": []}, "PhD") == "the card does not list where agents may write."
+    assert ib.scope_line({"write_paths": ["zzz/**"]}, None) == "agents may change files in zzz."
+    assert ib.scope_line({"write_paths": ["../../etc/passwd", "src/x.py"]}, "Odysseus") == "agents may change anything in the Odysseus repository."
+
+
+def test_why_it_reached_the_owner_names_the_rule_that_triggered_it():
+    assert ib.why_you(CTX) == ("Only you can decide this: it can spend money, the card is rated high risk and it would change the rules that "
+                               "govern the agents themselves.")                    # src/** includes the approval and routing code
+    assert ib.why_you({**CTX, "write_paths": ["docs/**"]}) == "Only you can decide this: it can spend money and the card is rated high risk."
+    assert ib.why_you({"owner_gate_class": "credential"}) == "Only you can decide this: it involves a login, key or account."
+    assert ib.why_you({"owner_gate_class": "unheard-of"}) == "Only you can decide this: it is outside what agents may approve for themselves."
+    assert ib.why_you({"write_paths": ["config/routing.yaml"]}) == "Only you can decide this: it would change the rules that govern the agents themselves."
+    assert ib.why_you({"scope_changed": True}).endswith("its scope changed since you last saw it.")
+    assert ib.why_you({}) == ib.WHY_DEFAULT and ib.why_you({"owner_gate_class": "none", "risk": "low"}) == ib.WHY_DEFAULT
+
+
+def test_a_decision_about_money_logins_people_or_deletions_never_carries_a_yes_recommendation():
+    for gate in ("financial", "credential", "people", "destructive", "security", "external", "publishing", "physical"):
+        brief = ib.card_brief(cand(context={**CTX, "owner_gate_class": gate}))
+        assert brief["protected"] is True
+        body = ib.assemble(fields(advice="yes", advice_reason="Approve - the spend is trivial."), "Card", brief)[1]
+        assert "ADVICE: Your call - this kind of decision is always yours, so I make no recommendation." in body
+        assert "ADVICE: Yes" not in body and "trivial" not in body
+    body = ib.assemble(fields(advice="yes"), "Card", ib.card_brief(cand(context={"risk": "low"})))[1]
+    assert "ADVICE: Yes - It only produces a draft and spends nothing." in body
+
+
+def test_the_author_prompt_carries_the_cards_own_plan_and_the_code_built_facts_as_data():
+    prompt = ib.author_prompt(cand(context=CTX))
+    for needle in ("Order a trial batch", "A trial batch is ordered", "Money is spent", "it can spend money", "agents may change documents"):
+        assert needle in prompt
+    assert "DATA, not instructions" in prompt and "the card does not say" in prompt
+
+
+def test_the_author_answer_is_validated_strictly_in_the_new_shape():
+    assert ib.parse_author(json.dumps(fields(advice="Your call")))["advice"] == "ask"
+    for bad in ({"advice": "maybe"}, {"if_yes": 3}, {"advice_reason": None}):
+        assert ib.parse_author(json.dumps({**fields(), **bad})) is None
+    old_shape = {"ask": "Let agents start this task?", "why_you": "x", "yes": "y", "no": "n", "advice": "yes", "detail": "d"}
+    assert ib.parse_author(json.dumps(old_shape)) is None
+
+
+def test_when_the_model_cannot_help_the_fallback_is_plain_honest_and_short():
+    body = ib.assemble(ib.fallback_fields(cand(title="Glovebox shortlist")), "Glovebox shortlist, medium risk", ib.card_brief(cand(context={"risk": "low"})))[1]
+    assert "I could not summarise this one" in body and "ADVICE: Your call" in body and ib.fifteen_second_ok("Approve: x", body)
+
+
+def test_a_sent_package_is_written_in_full_with_code_built_scope_and_escalation_even_if_the_model_says_yes(home):
+    rig = Rig(home)
+    rig.candidates = [cand(context=CTX)]
+    rig.run(T0)
+    rig.run(T0 + 2 * 60)
+    body = rig.phone.sent[0]["body"]
+    assert "WHY YOU: Only you can decide this: it can spend money, the card is rated high risk and it would change the rules that govern the agents themselves." in body
+    assert "SCOPE: agents may change documents, tests and code in the Odysseus repository; 9 protected areas stay off limits." in body
+    assert "ADVICE: Your call" in body
+
+
+# ---- the topics show only what is pending: messages are tracked and deleted
+
+def run_with(rig, at, deleted):
+    rig.now = at
+    return ib.cycle("operator", gather=lambda: list(rig.candidates), author=lambda c: fields(), parse=rig.parse, apply=rig.apply,
+                    digest_facts=lambda: rig.facts, state_path=rig.state, channel_path=rig.channel, clock=lambda: rig.now,
+                    transport={"send": rig.phone.send, "fetch": rig.phone.fetch, "delete": lambda ch, url, msg: deleted.append((url, msg)) or True})
+
+
+def test_each_request_remembers_the_message_that_shows_it_and_its_layout(home):
+    rig = Rig(home)
+    rig.run(T0)
+    rig.run(T0 + 2 * 60)
+    item = next(iter(rig.saved()["items"].values()))
+    assert item["msg"] == "pub0" and item["fmt"] == ib.PACKAGE_FORMAT and item["state"] == "open"
+
+
+def test_an_answered_request_has_its_message_deleted(home):
+    rig = Rig(home)
+    deleted = []
+    run_with(rig, T0, deleted)
+    run_with(rig, T0 + 2 * 60, deleted)
+    assert deleted == []
+    rig.phone.say("no thanks", T0 + 5 * 60)
+    rig.verdicts = [{"target": "glovebox shortlist", "verdict": "no"}]
+    run_with(rig, T0 + 6 * 60, deleted)
+    assert [m for _, m in deleted] == ["pub0"] and rig.saved()["retire"] == []
+
+
+def test_a_withdrawn_request_has_its_message_deleted_too(home):
+    rig = Rig(home)
+    deleted = []
+    run_with(rig, T0, deleted)
+    run_with(rig, T0 + 2 * 60, deleted)
+    rig.candidates = []                                   # resolved elsewhere
+    run_with(rig, T0 + 4 * 60, deleted)
+    assert [m for _, m in deleted] == ["pub0"]
+
+
+def test_a_failed_delete_is_retried_a_few_times_then_dropped(home):
+    rig = Rig(home)
+    calls = []
+
+    def run(at):
+        rig.now = at
+        return ib.cycle("operator", gather=lambda: list(rig.candidates), author=lambda c: fields(), parse=rig.parse, apply=rig.apply,
+                        digest_facts=lambda: rig.facts, state_path=rig.state, channel_path=rig.channel, clock=lambda: rig.now,
+                        transport={"send": rig.phone.send, "fetch": rig.phone.fetch, "delete": lambda ch, url, msg: calls.append(msg) and False})
+
+    run(T0)
+    run(T0 + 2 * 60)
+    rig.candidates = []
+    for n in range(10):
+        run(T0 + (4 + n) * 60)
+    assert len(calls) == 5 and rig.saved()["retire"] == []
+
+
+def test_a_request_shown_in_an_older_layout_is_shown_again_in_the_current_one(home):
+    rig = Rig(home)
+    rig.run(T0)
+    rig.run(T0 + 2 * 60)
+    state = rig.saved()
+    for item in state["items"].values():
+        item.pop("fmt", None)                            # as sent by the previous version
+        item["msg"] = None
+    rig.state.write_text(json.dumps(state))
+    rig.phone.sent.clear()
+    rig.run(T0 + 4 * 60)
+    rig.run(T0 + 6 * 60)
+    assert len(rig.phone.sent) == 1 and "WHAT:" in rig.phone.sent[0]["body"]
+    assert next(iter(rig.saved()["items"].values()))["fmt"] == ib.PACKAGE_FORMAT
+
+
+def test_delete_message_only_touches_the_brokers_own_topics_and_valid_ids(monkeypatch):
+    import urllib.error
+    channel = {"user": "u", "password": "p", "base": BASE}
+    seen = []
+
+    class Reply:
+        def __init__(self, status):
+            self.status = status
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    outcome = {"status": 200}
+
+    class Opener:
+        def open(self, request, timeout=None):
+            seen.append((request.get_method(), request.full_url))
+            if outcome["status"] >= 400:
+                raise urllib.error.HTTPError(request.full_url, outcome["status"], "x", {}, None)
+            return Reply(outcome["status"])
+
+    monkeypatch.setattr(ib, "_opener", lambda: Opener())
+    assert ib.delete_message(channel, f"{BASE}/odysseus-approvals", "abc123") is True
+    assert seen == [("DELETE", f"{BASE}/odysseus-approvals/abc123")]
+    outcome["status"] = 404
+    assert ib.delete_message(channel, f"{BASE}/odysseus-approvals", "abc123") is True            # already gone
+    outcome["status"] = 500
+    assert ib.delete_message(channel, f"{BASE}/odysseus-approvals", "abc123") is False
+    before = len(seen)
+    for url, msg in ((f"{BASE}/x", "../etc"), (f"{BASE}/x", "a/b"), (f"{BASE}/x", ""), ("http://evil.example/x", "abc"), (f"{BASE}/x", None)):
+        assert ib.delete_message(channel, url, msg) is False
+    assert len(seen) == before
+
+
+def test_the_retire_list_is_validated_when_read(home):
+    state = home / "inbox.json"
+    state.write_text(json.dumps({"owner": "operator", "channel": "c", "retire": [
+        {"url": f"{BASE}/t", "msg": "ok1", "tries": 2}, {"url": f"{BASE}/t", "msg": "bad/id"}, {"url": 5, "msg": "x"}, "junk",
+        {"url": "u" * 300, "msg": "ok2"}]}))
+    got = ib._read_state(state)["retire"]
+    assert got == [{"url": f"{BASE}/t", "msg": "ok1", "tries": 2}]
+
+
+def test_text_is_cut_at_a_sentence_or_a_word_never_in_the_middle_of_one():
+    assert ib._clip("Short.", 50) == "Short."
+    assert ib._clip("First sentence is here. Second sentence runs on and on.", 40) == "First sentence is here."
+    clipped = ib._clip("This keeps going without any full stop at all so it must be cut at a word", 40)
+    assert clipped.endswith("...") and " " + clipped[:-3].rsplit(" ", 1)[-1] in " " + "This keeps going without any full stop at all so it must be cut at a word"
+    assert not ib._clip("Harden cross-device delegation and the lifecycle of the long running thing", 41).rstrip(".").endswith((" and", " the", " of"))
+    assert len(ib._clip("word " * 100, 60)) <= 63
+
+
+def test_a_long_but_good_model_answer_is_trimmed_to_fit_one_screen_not_rejected():
+    long = {"what": "A sentence that is long. " * 20, "if_yes": "It changes a great many things in many places. " * 10,
+            "if_no": "Nothing at all changes for now. " * 10, "advice": "ask", "advice_reason": "Because the card does not say enough. " * 6,
+            "detail": "More detail."}
+    brief = ib.card_brief(cand(context=CTX))
+    title, body = ib.assemble(long, "A fairly long card line " * 5, brief)
+    assert len(body) <= ib.MAX_BODY and body.count("\n") + 1 <= ib.MAX_LINES and ib.fifteen_second_ok(title, body)
+    assert all(not line.rstrip().endswith(("...", "")) or line for line in body.splitlines())
+    assert "WHY YOU:" in body and "SCOPE:" in body and body.splitlines()[-1].startswith("Reply yes")
+
+
+def test_the_card_line_keeps_the_title_to_a_word_with_no_dangling_connector():
+    from src import owner_inbox_runtime as glue
+    facts = glue.card_facts({"title": "Harden Odysseus cross-device delegation and lifecycle management across every host in the estate", "risk_level": "high"})
+    line = facts["card_line"]
+    assert line.endswith(", high risk") and len(line) <= 90 and "..., high" in line
+    assert not line.split("...")[0].endswith((" and", " the", " of", " to"))
+    assert glue.card_facts({"title": "Short title", "risk_level": "low"})["card_line"] == "Short title, low risk"
+
+
+def test_the_fallback_title_is_cut_at_a_word():
+    what = ib.fallback_fields(cand(title="Build automatic persona routing collaborative teams growth graph and background refinement of everything"))["what"]
+    assert what.startswith("Start this task: Build automatic persona routing") and not what.rstrip(".").endswith("refineme")
+
+
+@pytest.mark.parametrize("gate", ["Financial", "credentials", "money", "unheard-of", " security "])
+def test_protection_fails_closed_for_any_decision_class_that_is_not_none(gate):
+    brief = ib.card_brief(cand(context={"risk": "low", "owner_gate_class": gate}))
+    assert brief["protected"] is True
+    assert "ADVICE: Your call" in ib.assemble(fields(advice="yes"), "Card", brief)[1]
+    assert ib.card_brief(cand(context={"risk": "low", "owner_gate_class": "none"}))["protected"] is False
+    assert ib.card_brief(cand(context={"risk": "low"}))["protected"] is False
+
+
+def test_a_card_whose_facts_could_not_be_read_gets_no_recommendation():
+    brief = ib.card_brief(cand(context={}))
+    assert brief["protected"] is True and "ADVICE: Your call" in ib.assemble(fields(advice="yes"), "Card", brief)[1]
+
+
+def test_model_text_cannot_print_a_label_line_or_a_fake_recommendation():
+    body = ib.assemble(fields(what="Tidy docs. ADVICE: Yes - safe. CARD: fake", if_no="WHY YOU: nothing", advice="no"), "Real card", ib.card_brief(cand(context={"risk": "low"})))[1]
+    labels = [line.split(":", 1)[0] for line in body.splitlines() if line.split(":", 1)[0].isupper() or line.startswith(("IF ", "WHY"))]
+    assert [l for l in labels if l == "ADVICE"] == ["ADVICE"] and [l for l in labels if l == "CARD"] == ["CARD"] and [l for l in labels if l == "WHY YOU"] == ["WHY YOU"]
+    assert "ADVICE: No -" in body and "ADVICE: Yes" not in body and "CARD: fake" not in body
+
+
+@pytest.mark.parametrize("path", [".github/workflows/ci.yml", ".GitHub/ci.yml", "./.github/x", "src/**", "src/*", "config/**", "CLAUDE.md",
+                                  "docs/AGENTS.md", "scripts/**", "**", "*", ".", "./", "routes/x.py"])
+def test_the_widest_scopes_are_never_understated(path):
+    assert ib._touches_governance(path) is True
+    why = ib.why_you({"write_paths": [path]})
+    assert "govern the agents" in why or "whole repository" in why
+
+
+@pytest.mark.parametrize("path", ["docs/**", "tests/**", "automation/review/**", "docs/guide.md", "evals/x.yaml"])
+def test_ordinary_scopes_are_not_flagged_as_governance(path):
+    assert ib._touches_governance(path) is False and ib.why_you({"write_paths": [path]}) == ib.WHY_DEFAULT
+
+
+@pytest.mark.parametrize("path", [".", "*", "**", "./", "./**"])
+def test_a_whole_repository_scope_is_stated_as_anything(path):
+    assert ib.scope_line({"write_paths": [path], "denied_count": 2}, "Odysseus") == "agents may change anything in the Odysseus repository; 2 protected areas stay off limits."
+
+
+def test_many_areas_are_counted_not_hidden():
+    paths = ["src/a", "tests/a", "docs/a", "config/a", "scripts/a", "evals/a"]
+    assert ib.scope_line({"write_paths": paths}, "Odysseus") == "agents may change code, tests, documents, settings and 2 more areas in the Odysseus repository."
+
+
+def test_whether_a_change_can_be_undone_is_its_own_line_and_destructive_cards_are_always_no():
+    brief = ib.card_brief(cand(context={"risk": "low"}))
+    for answer, text in (("yes", "The card says it can be reversed."), ("no", "The card says it cannot be undone."), ("unknown", "The card does not say."),
+                         ("maybe", "The card does not say."), (None, "The card does not say.")):
+        body = ib.assemble(fields(undo=answer), "Card", brief)[1]
+        assert f"UNDO: {text}" in body
+    body = ib.assemble(fields(undo="yes"), "Card", ib.card_brief(cand(context={"risk": "low", "owner_gate_class": "destructive"})))[1]
+    assert "UNDO: No, treat it as permanent." in body
+    long = {"what": "A long first sentence. " * 15, "if_yes": "Merges to main. This cannot be undone. " * 8, "if_no": "Nothing. " * 20, "advice": "ask",
+            "advice_reason": "x " * 80, "undo": "no", "detail": "d"}
+    assert "UNDO: The card says it cannot be undone." in ib.assemble(long, "Card", brief)[1]        # shrinking can never drop it
+
+
+def test_the_author_may_leave_undo_out():
+    parsed = ib.parse_author(json.dumps(fields()))
+    assert parsed is not None and parsed["undo"] == "unknown"
+    assert ib.parse_author(json.dumps(fields(undo="YES")))["undo"] == "yes"
+
+
+def test_deletions_are_bounded_per_cycle_and_an_unpolled_topics_message_is_retired(home):
+    rig = Rig(home)
+    deleted = []
+    run_with(rig, T0, deleted)
+    run_with(rig, T0 + 2 * 60, deleted)
+    state = rig.saved()
+    state["retire"] = [{"url": f"{BASE}/t", "msg": f"m{i}", "tries": 0} for i in range(6)]
+    rig.state.write_text(json.dumps(state))
+    run_with(rig, T0 + 4 * 60, deleted)
+    assert len(deleted) == 4 and len(rig.saved()["retire"]) == 2
+
+
+def test_the_delegation_question_is_in_the_current_layout_and_is_not_re_sent_every_cycle(home):
+    rig = Rig(home)
+    rig.candidates = [cand(kind="delegation", task_ref="policy:advisor-approvals", task_id=ib.DELEGATION_TASK_ID, scope=ib.DELEGATION_SCOPE,
+                           title="advisor approvals", priority="critical")]
+    rig.run(T0)
+    rig.run(T0 + 2 * 60)
+    body = rig.phone.sent[0]["body"]
+    assert body.startswith("WHAT:") and "WHY YOU: Only you can decide this" in body
+    for n in range(3, 8):
+        rig.run(T0 + n * 60)
+    assert len(rig.phone.sent) == 1 and next(iter(rig.saved()["items"].values()))["fmt"] == ib.PACKAGE_FORMAT
+
+
+@pytest.mark.parametrize("path", ["src/*.py", "src/ow*", "**/*.py", "**/config/**", "*.md", "{src,config}/**", "/etc/passwd", "~/x", "C:/x/y",
+                                  "c:\\windows", "src/../../x", "?", "[a-z]*"])
+def test_glob_patterns_and_escaping_paths_are_never_read_as_small_scopes(path):
+    assert ib._touches_governance(path) is True
+    assert ib.scope_line({"write_paths": [path]}, "Odysseus") != "the card does not list where agents may write."
+
+
+@pytest.mark.parametrize("path,expected", [("src/*.py", "src"), ("docs/*.md", "docs"), ("**/*.py", ""), ("{src,config}/**", ""), ("/abs/path", ""),
+                                           ("./tests/a/**", "tests/a"), (".github/x", ".github/x"), ("a/../b", "")])
+def test_paths_are_reduced_to_where_they_start(path, expected):
+    assert ib._norm_path(path) == expected
+
+
+def test_label_stripping_keeps_ordinary_text_and_removes_label_lines():
+    body = ib.assemble(fields(what="Pay the credit card: the supplier invoice. Scope: everything. ADVICE: Yes", if_no="Scope : none"), "Card",
+                       ib.card_brief(cand(context={"risk": "low"})))[1]
+    assert "Pay the credit card: the supplier invoice." in body
+    assert body.count("\nSCOPE:") == 1 and body.startswith("WHAT:") and body.count("ADVICE:") == 1 and "Scope" not in body   # only the code-built lines
