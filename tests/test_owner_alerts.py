@@ -819,3 +819,16 @@ def test_the_alert_sender_strips_caller_supplied_tag_headers(monkeypatch):
     monkeypatch.setattr(urllib.request, "build_opener", lambda *a, **k: Opener())
     oa._post({"user": "u", "password": "p", "url": "http://100.75.149.126:8091/x"}, {"Title": "t", "X-Tags": "evil", "Tags": "evil", "ta": "evil"}, "body", 5)
     assert seen["headers"]["tags"] == "robot" and "x-tags" not in seen["headers"] and "ta" not in seen["headers"]
+
+
+def test_the_alert_sender_stays_silent_when_approval_topics_are_configured(tmp_path):
+    import json as _json
+    from src import owner_alerts as oa
+    tmp_path.chmod(0o700)
+    channel = tmp_path / "ntfy_channel.json"
+    channel.write_text(_json.dumps({"kind": "ntfy", "base_url": "http://100.75.149.126:8091", "topic": "alerts-topic-1234",
+                                    "user": "odysseus", "password": "pw", "owner": "operator", "reply_topic": "reply-topic-1234"}))
+    channel.chmod(0o600)
+    assert oa.enabled_owner(channel) == "operator"
+    (tmp_path / "ntfy_approval_topics.json").write_text('{"odysseus": "odysseus-approvals"}')
+    assert oa.enabled_owner(channel) is None            # the approval topics carry approvals only

@@ -47,9 +47,9 @@ _HOME = Path(os.environ.get("AOTERU_ALERTS_HOME") or Path.home() / ".aoteru")
 STATE_PATH = _HOME / "owner_inbox_state.json"
 LOCAL_TZ = "Europe/London"
 
-MAX_INTERRUPTS_PER_DAY = 2
-MIN_GAP_SECONDS = 3 * 3600
-BATCH_WAIT_SECONDS = 30 * 60            # an item must have been waiting this long before it may interrupt
+MAX_PACKAGES_PER_CYCLE = 5               # authoring is bounded per cycle, so a long queue goes out over a few cycles
+BATCH_WAIT_SECONDS = 60                  # an item settles for a minute, then every waiting approval is shown at once
+UNCONFIRMED_RESEND_SECONDS = 15 * 60     # a package whose delivery is unknown is offered once more if nothing came of it
 SEND_RETRY_SECONDS = 30 * 60            # after a failed send the item waits this long before it is tried again
 QUIET_START, QUIET_END = 21 * 60, 8 * 60 + 30        # minutes after local midnight
 DIGEST_AT = 8 * 60 + 45
@@ -460,21 +460,9 @@ def quiet(now_ts: float) -> bool:
 
 
 def interrupt_allowed(state: dict, now_ts: float) -> str:
-    """'' when an interrupt may go out now, else the reason it may not. A stamp from the future (a clock that went
-    backwards) still counts, so rolling the clock back never frees the cap."""
-    if quiet(now_ts):
-        return "quiet_hours"
-    recent = [t for t in state.get("interrupts", []) if _num(t) and now_ts - t < 86400]
-    if len(recent) >= MAX_INTERRUPTS_PER_DAY:
-        return "daily_cap"
-    if recent and now_ts - max(recent) < MIN_GAP_SECONDS:
-        return "gap"
-    if any(i.get("state") == "open" for i in state["items"].values()):
-        return "one_open"
-    echo = state.get("echo")
-    if echo and echo.get("armed_at") is not None and now_ts < echo.get("expires", 0):
-        return "echo_pending"
-    return ""
+    """'' when a package may go out now, else the reason it may not. Every waiting approval is shown at once (the owner asked
+    for that); only quiet hours hold them, and they go out when the window ends."""
+    return "quiet_hours" if quiet(now_ts) else ""
 
 
 def item_key(candidate: dict) -> str:
@@ -719,6 +707,9 @@ def _cycle_locked(owner, channel, state_path, clock, gather, author, parse, appl
         elif item["state"] == "open" and now_ts - item.get("sent_at", now_ts) > PARK_AFTER_SECONDS:
             item["state"] = "parked"                        # silence is never consent; it only stops being offered
             item["done_at"] = now_ts
+        elif item["state"] == "open" and item.get("unconfirmed_at") and now_ts - item["unconfirmed_at"] > UNCONFIRMED_RESEND_SECONDS:
+            item.update(state="queued", seen_at=now_ts - BATCH_WAIT_SECONDS, sent_at=None, ask=None, retry_at=None,
+                        unconfirmed_at=None, topic=None, resends=1)   # the post may never have arrived: a duplicate is harmless, a missing approval is not
     # 2. replies (a first run only records what is already on the topic: older words answer nothing we asked)
     feed_ok = True
     health = {"sends_ok": True}                             # becomes False if any post this cycle failed or timed out
@@ -776,66 +767,61 @@ def _cycle_locked(owner, channel, state_path, clock, gather, author, parse, appl
             state["echo"] = None
             health["sends_ok"] = False
         save()                   # each reply is durable before the next, so a crash replays at most one
-    # 3. at most one interrupt, reserved durably BEFORE it is posted
-    reason = interrupt_allowed(state, now_ts)
+    # 3. every waiting approval is shown at once (only quiet hours hold them), each slot reserved durably BEFORE its post.
+    #    Authoring is bounded per cycle, so a long queue goes out over a few cycles. No digest and no status message is ever
+    #    posted: the approval topics carry required approvals and nothing else.
     queued = sorted((i for i in state["items"].values() if i["state"] == "queued" and now_ts - i["seen_at"] >= BATCH_WAIT_SECONDS
                      and now_ts >= (i.get("retry_at") or 0)), key=lambda i: rank(i))
-    item = package = None
-    if not reason:
-        for pending in queued[:3]:                          # an item that cannot be worded must never starve the ones behind it
-            package = _package(candidates[pending["id"]], pending, author, state)
-            if package is not None:
-                item = pending
-                break
-            pending["retry_at"] = clock() + 6 * 3600
-    if item is not None:
+    echo = state.get("echo")
+    held_topic = None                                       # a pending confirmation owns its topic's next "yes": nothing new lands there
+    if echo and echo.get("armed_at") is not None and now_ts < echo.get("expires", 0):
+        held_topic = state["items"].get(echo.get("item"), {}).get("topic")
+    attempts = 0
+    for item in queued:
+        if attempts >= MAX_PACKAGES_PER_CYCLE or interrupt_allowed(state, clock()):
+            break                                           # every authoring attempt counts, so a failing author cannot stall the cycle
+        cand_ = candidates[item["id"]]
+        repo = str(cand_.get("task_ref") or "").split(":", 1)[0] if cand_.get("kind") == "approval" else ""
+        route = (channel.get("routes") or {}).get(repo)
+        if held_topic and (route or channel["url"]) == held_topic:
+            continue
+        attempts += 1
+        package = _package(cand_, item, author, state)
+        if package is None:                                 # an item that cannot be worded must never starve the ones behind it
+            item["retry_at"] = clock() + 6 * 3600
+            continue
         now_ts = clock()
-        if not quiet(now_ts):                               # authoring can take a while: the quiet window is checked again
-            cand_ = candidates[item["id"]]
-            repo = str(cand_.get("task_ref") or "").split(":", 1)[0] if cand_.get("kind") == "approval" else ""
-            route = (channel.get("routes") or {}).get(repo)
-            refused = []
-            target = {**channel, "url": route, "_refused": refused} if route else channel         # chosen BEFORE the slot is spent
-            item.update(state="open", sent_at=now_ts, ask=package[1].split("\n")[0], topic=target["url"])
-            state["interrupts"] = (state["interrupts"] + [now_ts])[-MAX_PROCESSED:]
-            save()                 # the slot is spent before the post, so a lost write can never resend
-            sent = False
-            try:
-                sent = bool(send_fn(target, package[0], package[1], 4))
-                if not sent and route and set(refused) & {401, 403, 404} and not quiet(clock()):   # no grant for the routed topic
-                    log.warning("owner inbox: the routed approval topic refused the package; using the shared channel")
-                    sent = bool(send_fn(channel, package[0], package[1], 4))
-                    if sent:
-                        item["topic"] = channel["url"]
-            except Exception as exc:
-                # A timeout or reset is AMBIGUOUS: the broker may have accepted the post. The reservation is kept, so the
-                # worst case is one package the owner may not have seen (it stays open and shows in the digest), never two.
-                log.warning("owner inbox send outcome unknown: %s", type(exc).__name__)
-                sent = True
-                health["sends_ok"] = False
-                outcome.append("interrupt_unconfirmed")
-            if sent:
-                outcome.append("interrupt")
-            else:                                           # the server answered and refused: a definite failure, slot returned
-                health["sends_ok"] = False
-                item.update(state="queued", retry_at=now_ts + SEND_RETRY_SECONDS)
-                state["interrupts"] = [t for t in state["interrupts"] if t != now_ts]
-    # 4. the daily digest, once, after it is allowed
-    day = _local(now_ts).date().isoformat()
-    if state["last_digest_day"] != day and DIGEST_AT <= minutes_of_day(now_ts) < QUIET_START and not first:
-        title, body = _digest_text(digest_facts(), list(state["items"].values()))
-        if fifteen_second_ok(title, body, digest=True):
-            state["last_digest_day"] = day                  # reserved before the post, like an interrupt
-            save()
-            try:
-                if send_fn(channel, title, body, 2):
-                    outcome.append("digest")
-                else:
-                    health["sends_ok"] = False
-                    state["last_digest_day"] = None
-            except Exception as exc:                        # ambiguous outcome: the marker stays, the digest is not repeated
-                log.warning("owner inbox digest outcome unknown: %s", type(exc).__name__)
-                health["sends_ok"] = False
+        if quiet(now_ts):                                   # authoring can take a while: the quiet window is checked again
+            break
+        refused = []
+        target = {**channel, "url": route, "_refused": refused} if route else channel         # chosen BEFORE the slot is spent
+        item.update(state="open", sent_at=now_ts, ask=package[1].split("\n")[0], topic=target["url"])
+        state["interrupts"] = (state["interrupts"] + [now_ts])[-MAX_PROCESSED:]
+        save()                     # the slot is spent before the post, so a lost write can never resend
+        sent = False
+        try:
+            sent = bool(send_fn(target, package[0], package[1], 4))
+            if not sent and route and set(refused) & {401, 403, 404} and not quiet(clock()) and channel["url"] != held_topic:
+                log.warning("owner inbox: the routed approval topic refused the package; using the shared channel")
+                sent = bool(send_fn(channel, package[0], package[1], 4))
+                if sent:
+                    item["topic"] = channel["url"]
+        except Exception as exc:
+            # A timeout or reset is AMBIGUOUS: the broker may have accepted the post. The reservation is kept, so the worst
+            # case is one package the owner may not have seen (it stays open), never two.
+            log.warning("owner inbox send outcome unknown: %s", type(exc).__name__)
+            sent = True
+            if not item.get("resends"):
+                item["unconfirmed_at"] = now_ts                 # offered once more if nothing comes of it; never a second time
+            health["sends_ok"] = False
+            outcome.append("interrupt_unconfirmed")
+        if sent:
+            outcome.append("interrupt")
+        else:                                               # the server answered and refused: a definite failure, retried later
+            health["sends_ok"] = False
+            item.update(state="queued", retry_at=now_ts + SEND_RETRY_SECONDS)
+            if now_ts in state["interrupts"]:
+                state["interrupts"].remove(now_ts)              # the slot is returned (one entry, not every package at that instant)
     if feed_ok and health["sends_ok"]:
         state["last_ok"] = clock()                          # a cycle that could not read the feed or post is not a healthy one
     save()
