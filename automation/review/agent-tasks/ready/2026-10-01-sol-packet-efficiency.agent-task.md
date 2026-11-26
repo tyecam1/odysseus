@@ -61,6 +61,27 @@ duplicates: []
 notes: "Optimise useful work per Sol invocation, not raw token consumption. Larger packets must remain coherent, bounded and independently auditable. Do not batch tasks merely to spend quota or collapse verification that requires independent contexts."
 ---
 
+## Plan (drafted 2026-11-26 by GLM-5.3, same-family GLM and not a verdict; step 0 is to verify it against HEAD)
+**Goal in one line.** Increase useful scientific/engineering decisions obtained per scarce Sol invocation by batching compatible unresolved work into bounded, well-formed packets.
+**Already done / do not redo:** nothing recorded.
+**Steps:**
+0. Grep HEAD for the named files/symbols; correct this plan. Confirm which of the allowed paths (`config/**`, `src/**`, `routes/**`, `evals/**`, `tests/**`, `docs/**`, `automation/review/**`) already contain packet-related code, and whether `automation/review/models/2026-10-01-sol-packet-efficiency.md` exists or is partial.
+1. Instrument the primary metrics listed in the card (Sol invocations per session; tokens per invocation; accepted decisions/verifications per invocation and per 1k Sol tokens; follow-up rate; correction rate; latency/quota consumption) with a baseline capture. Verify by producing a measured baseline, not an estimate.
+2. Implement the four packet classes (decision, verification, collision/adversarial, gate) with per-item ID, question, evidence pointers and acceptance criterion. Verify via unit tests asserting every item remains separately attributable.
+3. Implement the six conjunctive admission rules and the do-not-batch vetoes as explicit checks before dispatch. Verify via negative tests that independent-fresh-context and urgency requirements cannot be accidentally batched.
+4. Add machine-readable per-item decisions plus shared synthesis, and follow-up only on unresolved/high-consequence disagreement. Verify by evals showing `accepted consequential decisions / Sol invocation` (and per token) improve without increased correction or missed-defect rates.
+**Done when:**
+- A quantified fragmentation baseline exists for recent Sol usage;
+- packet vocabulary and admission rules exist and are exercised;
+- per-item decisions are attributable and telemetry records them;
+- batching measurably increases accepted decisions per invocation/token without quality regression.
+**Risks and stops:**
+- `approval_required: true`: obtain owner approval before execution; no Sol call may be made without it, since each consumes scarce quota (owner-controlled resource);
+- work only within the listed allowed paths; no mega-packets across unrelated domains;
+- stop and record a protected_handoff if any step requires credentials, provider accounts, or authority outside the allowed paths.
+
+---
+
 # Sol packet efficiency
 
 ## Goal

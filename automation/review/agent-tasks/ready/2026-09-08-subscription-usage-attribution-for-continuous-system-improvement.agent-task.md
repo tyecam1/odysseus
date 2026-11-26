@@ -75,6 +75,25 @@ duplicates: []
 notes: "Prefer machine-readable or local usage telemetry over browser dashboards. Browser access is a fallback only when no simpler reliable source exists. The deterministic continuous-improvement loop remains network-free. Never automate credential entry, extract cookies/tokens, or store private account/billing identifiers."
 ---
 
+## Plan (drafted 2026-11-26 by GLM-5.3, same-family GLM and not a verdict; step 0 is to verify it against HEAD)
+**Goal in one line.** Determine how much Claude, OpenAI/Codex, and z.ai/GLM subscription capacity recurring system-improvement functions consume, and propose routing changes improving value per constrained unit without reducing research quality.
+**Already done / do not redo:** nothing recorded
+**Steps:**
+0. Grep HEAD for the result path and any existing telemetry/usage files; correct this plan.
+1. For each provider, discover the usable usage source per the hierarchy (local telemetry → CLI/status output → authorised connector → authenticated webpage → manual observation); record source, signal, granularity, window, machine-readability. Verified by a per-provider capability table with timestamps.
+2. Recover the function taxonomy from actual recent repository activity; test at minimum the recurring functions listed in the card. Verified by categories traced to real repo activity.
+3. Attribute consumption per function using each provider's native signal; never compare raw units across providers; separate measured deltas from inference; assign high/medium/low confidence. Verified by per-attribution confidence labels and recorded reset windows.
+4. Where defensible, express consumption as percentage of the relevant allowance/window; state explicitly where a signal is too coarse for function-level attribution. Verified by the coarse-signal statement existing where applicable.
+5. Write analysis and justified routing/cadence/batching/context/escalation recommendations to `automation/review/system-efficiency/2026-09-08-subscription-usage-attribution.md`.
+**Done when:**
+- Every recurring system-improvement function from the card is tested and attributed with confidence, or coarseness stated.
+- Attribution evidence supports concrete efficiency changes without reducing research quality.
+**Risks and stops:**
+- Fallback webpages requiring reauthentication, MFA, CAPTCHA, or credential entry: stop and require manual operator authentication; record a protected_handoff rather than automating login or extracting session secrets.
+- approval_required: true — confirm approval before acting.
+
+---
+
 # Subscription usage attribution for continuous agentic system improvement
 
 ## Objective

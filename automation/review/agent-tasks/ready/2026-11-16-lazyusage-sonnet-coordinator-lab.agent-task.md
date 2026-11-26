@@ -66,6 +66,25 @@ denied_paths:
 result_path: docs/runtime-work-packages/2026-11-16-lazyusage-sonnet-coordinator-lab.md
 ---
 
+## Plan (drafted 2026-11-26 by GLM-5.3, same-family GLM and not a verdict; step 0 is to verify it against HEAD)
+**Goal in one line.** Deploy Claude Sonnet 5.5 as the bounded planning/decomposition/synthesis coordinator for opt-in /lazyUsage on the lab backend, consulting independently qualified Codex, GLM and Opus routes only when the routing contract authorises it.
+**Already done / do not redo:** PRs #277–#279 merged 2026-11-10/11 with a real lab deployment and restart/disconnect controls recorded; a real queued write-task delivery and a Sol recheck of the final delta were still owed in the latest acceptance report. `src/lazy_usage_runtime.py` loops deterministically through queue/frontier selection dispatching only qualified routes.
+**Steps:**
+0. Grep HEAD for `src/lazy_usage_runtime.py`, `lazy_usage_runs` persistence and deployed SHA vs HEAD; correct this plan.
+1. Reconcile live HEAD, deployed SHA and current run state; confirm whether the owed queued write-task delivery and Sol recheck are still open. Verified: reconciliation recorded, no gate claimed closed on the old report.
+2. Establish which consultation routes actually exist on the lab (ChatGPT-authenticated Codex CLI/worker route, Z.AI GLM, Opus) under the current routing contract. Verified: per-route availability recorded.
+3. Check the unmodified official Claude Code CLI (or explicitly permitted API route) for Sonnet against current provider terms and lab/university policy for durable headless use; stop that route with its exact blocker if unsupported. Verified: written go/no-go.
+4. Implement the coordinator inside the existing runtime, preserving the deterministic dispatch loop; no new harness, daemon, queue, agent memory or scheduler. Verified: Odysseus remains sole authoritative orchestrator.
+5. Record results at the result path.
+**Done when:**
+- Sonnet proposes bounded plans and interprets evidence only; it cannot self-authorise dispatch, select unqualified providers or mutate task state from prose
+- Existing lifecycle, persistence, owner queues, leases, budgets and stop/resume controls remain authoritative
+**Risks and stops:**
+- No Claude.ai credential intermediation, impersonation, profile/token copying or unapproved API charges; no ChatGPT UI scraping
+- Opus/Sol/Fable premium review requires a documented per-review operator exception; lab `claude-glm` has only candidate read-only support — record a protected_handoff rather than work around
+
+---
+
 # Sonnet cognitive coordination for persistent /lazyUsage
 
 ## Operator objective

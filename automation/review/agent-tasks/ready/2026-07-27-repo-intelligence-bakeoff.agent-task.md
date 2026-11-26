@@ -65,6 +65,24 @@ duplicates: []
 notes: "Run in isolated environments. No persistent MCP or hook installation is authorised. PR-2 repair: execution_mode normalised from isolated-evaluation to implementation (the governed write-scope class); isolation constraints stay in force via this notes field and the acceptance criteria below."
 ---
 
+## Plan (drafted 2026-11-26 by GLM-5.3, same-family GLM and not a verdict; step 0 is to verify it against HEAD)
+**Goal in one line.** Measure whether RepoWise, Graphify and native repository intelligence (GitHub/git/search) materially improve agent orientation, change planning and architecture diagnosis across the three repositories.
+**Already done / do not redo:** RepoWise and Graphify are recorded `defer-until` in `automation/review/platform-evaluations/external-pattern-register.yaml` because licence, version and single-repository identity evidence is absent.
+**Steps:**
+0. Grep HEAD for the named files (`automation/review/platform-evaluations/external-pattern-register.yaml`, `automation/review/platform-evaluations/repo-intelligence-bakeoff.md`); correct this plan.
+1. Quarantine-first discovery pass: verify licence, version and single-repository identity for RepoWise and Graphify. Verified: evidence recorded in the register clears the `defer-until` entries; otherwise the bake-off does not run.
+2. Run the comparison on clones or derived outputs only: native GitHub/git/search, Graphify code-only output, RepoWise read-only indexing, on at least ten held-out questions answered blind. Verified: blind answers are scored for correctness, provenance, stale-edge rate, setup time, context reduction, update cost, privacy, dependency footprint and operator usefulness, and are rebuildable.
+3. Write the report to `automation/review/platform-evaluations/repo-intelligence-bakeoff.md`. Verified: it may reject both tools, and any proposed adoption names exact mode, repo, update cadence and removal path.
+4. Confirm no persistent skill, hook, MCP or service was installed and outputs are excluded from canonical authority. Verified: post-run inspection.
+**Done when:**
+- Verification preceded the pilot; all acceptance criteria in the card are met and evidenced in the report.
+**Risks and stops:**
+- Approval is required for this task — stop and record a protected_handoff until owner approval is given.
+- External tool acquisition, setup and any licence questions are owner-external actions; do not work around the register's defer-until rule.
+- No persistent installs during the bake-off; clones/derived outputs only.
+
+---
+
 ## PREREQUISITE — added by adjudication round R2 (2026-07-30)
 
 This bake-off MUST NOT run until licence, version and single-repository

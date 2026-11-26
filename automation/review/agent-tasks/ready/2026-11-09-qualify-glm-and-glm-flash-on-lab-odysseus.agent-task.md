@@ -75,6 +75,26 @@ duplicates: []
 notes: "Operator-requested enablement. This is the missing operational qualification of the existing GLM candidate/failover work, not a new model router. Shipping-first applies: admit as an unblock for accepted work, not optional model optimisation."
 ---
 
+## Plan (drafted 2026-11-26 by GLM-5.3, same-family GLM and not a verdict; step 0 is to verify it against HEAD)
+**Goal in one line.** Make standard GLM and GLM Flash genuinely executable through the Odysseus backend on the lab Linux worker, with correct attribution, alongside a healthy Codex default.
+**Already done / do not redo:** PR #38 (candidate-only GLM paid executor) was closed unmerged 2026-10-21; PR #130 merged the quota policy, not execution; PR #133 documented a host-local Linux launcher/credential experiment without proving prompt passage, model identity, exit status or dispatch; `config/models.yaml` and `src/estate_router.py` currently expose only Codex.
+**Steps:**
+0. Grep HEAD for `config/models.yaml`, `src/estate_router.py`, the PR #38 candidate diff and `aoteru preflight`; correct this plan.
+1. Reconcile live `dev`, PR #38's diff and existing model/provider/estate/worker APIs; run `aoteru preflight` or backend equivalent and respect the recommendation. Verified: recommendation recorded.
+2. On the lab Linux worker, verify entitlement for standard GLM and GLM Flash, and test a distinct sentinel prompt with stdin explicitly managed, exit code checked, parseable output. Verified: exact route availability recorded, not assumed.
+3. Add the smallest provider adapter(s) to the central paid-provider registry, estate-worker dispatch and /api/estate/run path; make GLM and GLM Flash independently addressable with correct provider, model, host and usage attribution. Verified: distinct qualification records.
+4. Exercise read-only calls first; for code-writing, use the existing active repo lease, approved write scope, isolated worktree and worker lifecycle. Verified: bypass attempts rejected.
+5. Write findings to the result-path doc. TO CONFIRM at step 0 whether recent merged code already satisfies any item.
+**Done when:**
+- Standard GLM and GLM Flash independently addressable for qualification, Codex still the healthy default
+- No new queue, router, lease owner, execution database or parallel credentials mechanism
+- Sentinel prompt passes with checked exit code and verified model identity
+**Risks and stops:**
+- Credentials stay in approved permission-scoped host storage, never Git, logs, argv or payloads; no copying Windows DPAPI blobs; no renewal/scope broadening without operator action
+- If model currency cannot be attested, fail closed and record a protected_handoff
+
+---
+
 # Make GLM and GLM Flash runnable in Odysseus on the lab PC
 
 ## Current evidence and exact gap

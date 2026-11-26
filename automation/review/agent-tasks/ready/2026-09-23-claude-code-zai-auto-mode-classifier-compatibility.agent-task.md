@@ -61,6 +61,27 @@ duplicates: []
 notes: "Existing September task updated 2026-11-09 for newly blocking v2.1.319 regression. Historical task details remain in Git history. Laptop interactive Auto Mode only; lab Odysseus GLM worker qualification has a separate owner."
 ---
 
+## Plan (drafted 2026-11-26 by GLM-5.3, same-family GLM and not a verdict; step 0 is to verify it against HEAD)
+**Goal in one line.** Restore real, safety-classified Auto Mode on the `claude-glm` and `claude-glm-flash` Windows launchers, broken after Claude Code v2.1.319, with the smallest reversible provider-specific fix.
+**Already done / do not redo:** the earlier September warning about chargeable separate classifiers is owned by the original September task — do not create another queue item.
+**Steps:**
+0. Grep HEAD for `claude-glm`, `claude-glm-flash`, the result path, and prior task/result evidence; correct this plan.
+1. Reproduce: resolve full command chains and isolated environment variables via `Get-Command -All`, script inspection, and effective process settings; capture version, model, endpoint host, `/status` Auto Mode state, safe tool execution, and redacted classifier debug for both GLM commands plus the native `claude` baseline. Verified by captured redacted outputs.
+2. Verify upstream contract from current Claude Code release notes/Auto Mode docs and Z.AI issues; distinguish confirmed behaviour from hypothesis. Verified by documented contract findings.
+3. Test current-version local classification in an ephemeral child-process environment: `CLAUDE_CODE_AUTO_MODE_SERVER=0`, and if needed `CLAUDE_CODE_AUTO_MODE_MODEL` with verified current model IDs; classify the failure (launcher/env, server-gateway, model format, classifier parsing, platform gating). Verified by real classifier decisions and error logs.
+4. If needed, trial `@anthropic-ai/claude-code@2.1.318` isolated to GLM entry points only; verify safety-classified decisions, then document an isolated pin with update/removal path. Verified by classifier behaviour, not just startup.
+5. Implement the least-complex verified option and write results to `automation/review/2026-09-23-claude-code-zai-auto-mode-classifier-compatibility.md`; test `claude-glm` independently of `claude-glm-flash`.
+**Done when:**
+- Both GLM launchers execute safe autonomous operations with correct safety classification, verified by reproduction.
+- Native `claude` launcher and each model's identity/authentication unaffected.
+**Risks and stops:**
+- Never expose secrets; redact all debug output.
+- No global downgrade; leave the normal `claude` installation untouched.
+- Not lab-host GLM qualification and no Odysseus in the network request path.
+- Cost-free server-side classification is optional; if Auto Mode cannot be restored, `acceptEdits` plus explicit permissions only as tightly scoped fallback (TO CONFIRM at step 0).
+
+---
+
 # Restore Claude Code Auto Mode for Z.AI launchers
 
 ## Observed failure

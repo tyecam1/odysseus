@@ -26,6 +26,25 @@ related_tasks:
   - 2026-09-13-operating-contract-model-role-evaluation-system
 ---
 
+## Plan (drafted 2026-11-26 by GLM-5.3, same-family GLM and not a verdict; step 0 is to verify it against HEAD)
+**Goal in one line.** Recheck blocked/ready/human-gated cards and autonomously resolve, reroute or retire them, qualifying Opus-medium adjudication only within existing authority.
+**Already done / do not redo:** nothing recorded beyond the preference already written in Odysseus `AGENTS.md` and `START-AGENTIC.md` (opus at medium effort; no new router, model pin or protected-approval bypass).
+**Steps:**
+0. Grep HEAD for `AGENTS.md`, `START-AGENTIC.md`, the `2026-09-01-human-attention-wip-autonomous-dispatch` task, the model-role evaluation task, and `blocked`/`ready` queues across Odysseus, Misumi and PhD; correct this plan.
+1. Inventory blocked/ready/human-gated cards; compare file location, declared status, live dependencies/PRs, permissions, runtime availability, acceptance evidence. Test: inventory exists with evidence pointer per card; no stale `blocked_reason` assumed.
+2. Classify each card into one of the six tags with evidence pointer and next recheck event. Test: every inventoried card carries tag + pointer; `executor: human` not treated as proof.
+3. Ship the smallest legal remedy inside each owner queue (fix access/configuration, retrieve evidence, close/reclassify stale cards). Test: queue updates match acceptance evidence; cross-repo access stays read-only.
+4. Check live provider/CLI/model-currency evidence for an authenticated `opus` medium-effort route; if none, record the qualification gap and implement the minimum compliant integration under the existing router. Test: no claim that the Codex-only paid router supports Opus; Opus calls de-duplicated on work-item ID plus evidence revision.
+5. Run a pilot sample covering the five required cases with qualified independent verification. Test: results and evidence recorded per owner.
+**Done when:**
+- Every stale/genuine card is resolved, rerouted, retired or classified `protected_human_gate` with a minimal decision packet only after no permitted route suffices
+- Opus qualification either demonstrated via an authorised route or the integration gap explicitly recorded
+**Risks and stops:**
+- Writes inside Misumi/PhD owner repositories are owner-only: stop and record a protected_handoff
+- Never fabricate consent, permissions, safety clearance or research claims; protected approvals are owner-only
+
+---
+
 # Autonomous blocker reconciliation and bounded Opus adjudication
 
 ## Operator instruction
