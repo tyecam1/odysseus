@@ -62,6 +62,30 @@ duplicates: []
 notes: "Optional backend only. MarkItDown output remains extraction support material."
 ---
 
+## Plan (written 2026-11-26 by the controller; step 0 is to verify it against HEAD)
+**Goal in one line.** First verify upstream MarkItDown's identity, licence and version. Pilot it as an optional per-format extraction backend only after that check passes and the dependency is approved.
+**Already done / do not redo:** nothing for the pilot itself. MarkItDown is recorded as `defer-until` in automation/review/platform-evaluations/external-pattern-register.yaml. The unblock note is automation/review/blocker-reconciliation/2026-11-09-odysseus-blocked-cards.md.
+**Steps:**
+0. Check which named paths exist at HEAD after the obsidian-PhD migration (Scripts/automation/pdf_extract.py, automation/docs/*, the register, the unblock note) and where the current extraction adapters live (grep). If they sit outside allowed_paths, stop and report the mismatch; do not edit the card.
+1. Quarantine-first upstream check, with no install: canonical repository, licence, version, package name, dependencies, and any network, cloud or plugin features. The local wrapper being present is not provenance. Record sources in automation/review/extraction-backends/markitdown-upstream-verification.md. If no web-capable read-only lane is available, stop and list the missing evidence.
+2. MarkItDown is a new third-party dependency and the card is approval_required. Record its footprint and security notes, raise a precise owner debt, propose (do not apply) the register update, and stop until approved.
+3. After approval: build a frozen corpus from synthetic or existing test fixtures (no vault paths), with ordinary and malformed DOCX, PPTX, XLSX, HTML and EPUB files, hashed in a manifest under automation/review/extraction-backends/. Test: hash check.
+4. Add an optional adapter where step 0 found the registry. It uses the narrowest local-file call and refuses URL conversion and plugins. A missing backend or unsupported format fails visibly. Output is labelled extraction support material and carries file hash, converter version, options, warnings and source path. No canonical write. Tests: one fake-converter test per property.
+5. Add a harness that compares MarkItDown with the current adapters on headings, tables, links, alt text, metadata, runtime and failures, writing automation/review/extraction-backends/markitdown-pilot-results.json. Test: schema check with fake backends.
+6. Write automation/review/extraction-backends/markitdown-pilot-report.md (per-format improvements and regressions, dependency and security footprint, format-specific recommendation, operator decision, model used). Run the full suite and stop for human verification.
+**Done when:**
+- The upstream verification note cites a source for every claim, or the stop reason is recorded.
+- No dependency was installed without approval.
+- Fake-converter tests prove provenance, labelling, network refusal and visible failure.
+- The report names which formats improve and which regress.
+**Risks and stops:**
+- If verification fails or is ambiguous, keep `defer-until` and stop. The pilot cannot supply its own admission evidence.
+- Never touch denied vault paths or write canonical records.
+- Any doubt about the licence or security becomes an owner debt, not a workaround.
+**Ordering note:** Needs upstream verification, dependency approval and capability-path convergence for the migrated paths. Unblocks a per-format adoption decision.
+
+---
+
 ## PREREQUISITE — added by register round S1 (2026-07-31)
 
 This pilot MUST NOT run until licence, version and single-repository

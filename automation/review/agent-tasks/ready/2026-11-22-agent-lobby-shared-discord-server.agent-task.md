@@ -51,6 +51,31 @@ inputs:
 result_path: docs/agent-lobby/charter.md
 ---
 
+## Plan (written 2026-11-26 by the controller; step 0 is to verify it against HEAD)
+**Goal in one line.** Deliver the reviewed Stage 0 design and a design for a notes ledger mirrored to the existing webhook, with no code, account or token.
+**Already done / do not redo:** src/owner_decisions.py sends decision cards to the private webhook (kept as-is; notes reuse it only later). The 2026-11-26 phone inbox (src/owner_inbox.py, src/owner_alerts.py) owns owner alerts. The lazyUsage ledgers and owed-review debts are the record of work.
+**Steps:**
+0. Grep HEAD for the webhook sender and de-duplication in src/owner_decisions.py, the inbox modules and each card input (evals/prompt-applications/, evals/prompt-evolution/, docs/aoteru-model-host-routing-contract.md, the observer and local-agent-lab cards, and obsidian-PhD PR 695 if readable). Record what is missing and correct this plan.
+1. docs/agent-lobby/capability-map.md: each existing capability, its authoritative record and a non-overlap verdict for each proposed use. Check: every cited path exists at HEAD.
+2. docs/agent-lobby/literature.md: confirm each candidate source at its origin (authors, year, venue, link). Mark unconfirmed claims and do not use them.
+3. docs/agent-lobby/threat-model.md: prompt injection carried in notes, agent impersonation, leakage of secrets, personal data or the webhook URL, confusion with decision cards, cost and noise, with one mitigation each.
+4. docs/agent-lobby/notes-ledger-design.md: fields (agent, model, run or session id, repository, pointer, NOTE label, disposition), size and rate limits, retention, an off switch that defaults to off, authenticated API read and write, a mirror posted server-side through the existing sender only, de-duplication and rollback. Design only: src/ is outside allowed_paths.
+5. docs/agent-lobby/charter.md: authority rules, intake rule, success measures, stop rule and open owner decisions. Also draft a follow-up implementation package under automation/review/ that names candidate src paths and tests.
+6. Independent cross-family review of the charter, threat model and design. Record the model and fix real findings.
+7. Add the review evidence to the charter, run the full suite and stop.
+**Done when:**
+- Every proposed use cites the capability it does not duplicate.
+- Every literature claim is confirmed or marked unverified.
+- The review record names its model and outcome.
+- No account, token or channel was created, and no webhook URL was read or copied.
+**Risks and stops:**
+- These are `protected_handoff` owner debts: a Discord server, bot or token, agents reading Discord, custody of the webhook URL and the Misumi household trial.
+- Do not edit src/owner_decisions.py or the inbox modules.
+- Examples carry no secrets, personal data, household audio or research evidence.
+**Ordering note:** Implementation waits for the owner-communication card's acceptance (whether Discord decision cards are retired, and de-duplication) and for promotion of the follow-up package. Unblocks the owner's Stage 4 Misumi decision.
+
+---
+
 # Agent lobby: persistent agent notes for the owner and every agent
 
 ## Outcome

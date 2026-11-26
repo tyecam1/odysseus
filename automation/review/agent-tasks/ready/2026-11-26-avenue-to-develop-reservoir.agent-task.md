@@ -43,6 +43,32 @@ inputs:
   - docs/aoteru-model-host-routing-contract.md
 result_path: docs/runtime-work-packages/2026-11-26-avenue-to-develop.md
 ---
+
+## Plan (written 2026-11-26 by the controller; step 0 is to verify it against HEAD)
+**Goal in one line.** When nothing is dispatchable, have the planner propose unblocking children first, then reservoir work, in a fixed order under guardrails, and triage the inbox read-only.
+**Already done / do not redo:** src/lazy_usage_coordinator.py and src/lazy_usage_runtime.py already order by priority only. src/prompt_library.py already gates challenger prompts (`register_child`, `promote`). The sibling cards own the mechanisms (card hygiene, Zotero snapshot, mechanical verification); this card only creates and orders their children.
+**Steps:**
+0. Grep HEAD for the frontier builder, inbox buckets, `blocked_by`, skip reasons, de-duplication, PR records and the digest. Correct this plan.
+1. Inbox triage (read-only): classify each inbox card as ready, needs a scope, duplicate, superseded or owner-class, using the existing checker and deterministic matching. Write proposals under automation/review/triage/<repo>/. Test: a fixture inbox hits every class; canonical hashes are unchanged.
+2. Unblocking children: when the dispatchable set is empty, map each `blocked_by` or skip reason to a child (Zotero snapshot request, attestation backfill, card repair, host re-pin, failure diagnosis), ordered by parent priority. Test on a fully gated fixture.
+3. Reservoir next, in this order: verification debt on merged work; flaky-test and documentation drift; challenger prompts through the prompt library; read-only retrospectives; preparation for owner-labour cards. Priority is the only ordering within a tier. Test the order.
+4. Guardrails: refuse items that cite no blocker or metric; de-duplicate against existing cards; hold self-generated work for any repository that already has three unmerged self-generated PRs; internal repositories only. One test for each.
+5. Pre-emption: owner-originated cards displace self-generated ones at the next advisor checkpoint, never mid-execution. Test.
+6. A weekly digest line listing self-generated items, added through an existing digest extension point. Test the line.
+7. Write docs/runtime-work-packages/2026-11-26-avenue-to-develop.md (findings, a read-only dry run over a copy of today's frontier, actual model). Run full pytest and stop.
+**Done when:**
+- A gated fixture queue yields unblocking candidates, then reservoir candidates, in the stated order.
+- The three-PR cap holds and an uncited item is refused.
+- Triage writes only under automation/review/triage/ (hash check).
+- Full suite green.
+**Risks and stops:**
+- Never promote triage proposals here. The advisor tier accepts them, and each repository's propose/review/ratify path promotes them.
+- If a sibling card is unmerged, emit its child as a proposal citing that card; do not implement it here.
+- The three-PR cap comes from the card; add no other caps, deadlines or scheduler.
+**Ordering note:** Can land first, emitting children as proposals only; full value follows the three sibling cards. Unblocks continuous agent work.
+
+---
+
 # An avenue to develop
 
 ## Why
