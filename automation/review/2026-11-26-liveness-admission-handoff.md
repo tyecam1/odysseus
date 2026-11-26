@@ -1,0 +1,8 @@
+# Liveness handoff to the parallel-dispatch card
+
+[2026-11-21-lazyusage-parallel-window-aware-dispatch](agent-tasks/ready/2026-11-21-lazyusage-parallel-window-aware-dispatch.agent-task.md) owns parallel dispatch and its canary. At `c0c3354a` the card was ready and the lab activation ledger showed no active claim for it. The [read-only liveness design](../../docs/runtime-work-packages/2026-11-26-liveness-and-admission.md) is pending independent review. Its proposed execution ownership is a dependency for scaling concurrent advisories.
+
+- Use the existing lease authority for governed writes. Reserve and observe each child by its durable execution ID and card revision. A missing acknowledgement keeps that ID fenced until the worker proves the outcome. Treat an advisory row with unknown process state as unresolved when accounting for host and provider occupancy.
+- Apply existing host capability, memory and GPU admission before launch, including shared-resource contention with already admitted work. Enforce the November 21 card's own canary limits and operator-level WIP rules through its authorized implementation.
+- Apply `src/provider_usage.py` admission to the verified provider/account pool. Keep rolling and weekly limits, `max_paid_calls`, failure backoff, and stall detection. Unknown allowance or usage stays unknown, and retries from a different execution ID cannot replace an uncertain result.
+- Exercise the crash, lost response and replay cases with two independently observed children. Include a sibling that completes while the other loses its worker, then show that only proven quiescence releases occupancy for the lost child. Verify the same-card and same-repo protections and record real concurrency evidence under the owning card.
