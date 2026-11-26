@@ -43,6 +43,15 @@ inputs:
   - AGENTS.md
   - docs/aoteru-model-host-routing-contract.md
 result_path: docs/runtime-work-packages/2026-11-26-liveness-and-admission.md
+verification_evidence:
+  - result: pass
+    commit_sha: 14d2e1901b88f90852d5e0492b57373f149097e5
+    ref: "automation/review/2026-11-26-liveness-admission-handoff.md + docs/runtime-work-packages/2026-11-26-liveness-and-admission.md (design commit; controller check of 2026-11-26: files within allowed paths, Markdown only, all relative links resolve)"
+    verified_by: "controller (claude-sonnet-5-5), deterministic link and scope check on the lab"
+review_evidence:
+  - verdict: approve
+    reviewer_provider: claude-opus-5-5
+    ref: "cross-family design review 2026-11-26, APPROVE_WITH_CONDITIONS; conditions recorded in docs/runtime-work-packages/2026-11-26-liveness-and-admission.md and below"
 ---
 
 ## Plan (written 2026-11-26 by the controller; step 0 is to verify it against HEAD)
@@ -66,6 +75,19 @@ result_path: docs/runtime-work-packages/2026-11-26-liveness-and-admission.md
 - If the 2026-11-21 card is already in progress, coordinate with it rather than fork it.
 **Ordering note:** Needs nothing first. The 2026-11-21 card should follow it, because parallel dispatch multiplies the advisory-row risk. Unblocks long read-only runs.
 
+
+## Design review conditions (binding; plan step 1 is done and approved with these)
+
+1. Lost-acknowledgement recovery needs a CLIENT-generated idempotency key (UUIDv4) sent with the submit, stored unique on the execution row with a payload hash: same key and hash returns the existing row, same key with a different hash is 409, and a resubmission never charges `max_paid_calls` twice. Test it.
+2. Polling is used only when the submit response explicitly says polling is supported; otherwise use the legacy bounds and never resubmit automatically (an older server or a rollback would otherwise spend twice). Roll back in this order: switch off, let in-flight ids reach a terminal state, then revert code. Schema changes are additive; test that the old reconciler leaves new-format rows alone.
+3. N = 180 s is unproven for Codex: before opting Codex in, measure the longest silent gap between output events in real lab Codex runs, using the exact invocation through a pipe (not a pty), and set N above it with margin. Start with Codex only; GLM and Claude are refused before admission until a reviewed streaming adapter exists.
+4. Cite the activation stall-detection threshold and add it to the ordering invariant: either it exceeds T, or it reads activity from the row. Do not repeat the conflict that got 365a6c76 reverted.
+5. Stage it smaller for one lab host. Drop for stage 1: the dedicated runner, the cgroup, new principal binding. Instead run the provider in its own session (setsid); record host, boot_id, PID and /proc start time on the row; settle by conditional update in `finally` once the process group is empty; a restarted control plane's reconciler kills the orphaned group and records an interrupted run with unknown usage. A changed boot_id counts as proof the process is gone (otherwise unresolved rows hold occupancy forever and can deadlock the parallel-dispatch card). Existing route auth plus unguessable ids suffices. Add a cgroup only if a test shows descendants escaping the process group. Liveness mode is Linux lab only; the Windows home worker is refused before admission.
+6. State what drives the run after submit returns (the control-plane thread holding the transport) and add a fault test that restarts the control plane mid-run, not only one that kills the runner.
+7. Anchor the transport bound: the transport timeout is the remaining W measured from durable admission, plus 15 s. Keep the submit request short (30 s or less); H need not appear in the CLI formula.
+8. Make the status claims evidence-backed: commit the bound-arithmetic script and its values or drop the claim; cite the file and function of the claim-or-abort and quiescence primitives or mark them unverified; record the author's actual model from Codex's `model:` line; reconcile the card showing `ready` while a lease and execution exist for it.
+
+Start at plan step 2, staged smaller as condition 5 says, behind the default-off switch.
 ---
 
 # Liveness timeouts and admission control
