@@ -17,7 +17,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 TASK_CLASS = "owner_decision"
-KINDS = ("approval", "decline", "defer")
+KINDS = ("approval", "decline", "defer", "escalate")        # escalate: an advisor found the owner is needed
 ACTORS = ("owner", "advisor")
 DEFAULT_DEFER_DAYS = 7
 MAX_DEFER_DAYS = 30
@@ -182,3 +182,8 @@ def listing(db, owner: str, limit: int = 50) -> list:
         if len(out) >= max(1, min(limit, 200)):
             break
     return out
+
+
+def escalated_scopes(db, owner: str) -> frozenset:
+    """{(repo, task_id, scope_sha256)} an advisor judged to need the owner: they go to the phone, not to the advisor again."""
+    return frozenset((_repo_of(d), d["task_id"], d["scope_sha256"]) for d in active(db, owner) if d.get("kind") == "escalate")

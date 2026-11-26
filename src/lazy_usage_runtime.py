@@ -2013,9 +2013,33 @@ def _context_provider():
     return provide
 
 
+def _inbox_active() -> bool:
+    """True when the phone inbox (src/owner_inbox.py) is configured AND has finished a cycle recently: it then replaces the
+    Discord decision cards and the alert channel's "decisions waiting" line and heartbeat, so the owner is not told the same
+    thing twice, and a broken inbox never silences the channels that still work."""
+    try:
+        from src import owner_inbox, owner_inbox_runtime
+        status, channel = owner_inbox.load_channel()
+        return owner_inbox_runtime.enabled() and status == "ok" and owner_inbox.healthy(fingerprint=channel["fingerprint"])
+    except Exception:
+        return False
+
+
+def _offer_owner_inbox():
+    """Best-effort: one background cycle of the phone inbox (replies, at most one package, the daily digest)."""
+    try:
+        from src import owner_inbox_runtime
+        return owner_inbox_runtime.offer()
+    except Exception:
+        log.warning("owner inbox offer failed")
+        return None
+
+
 def _offer_owner_decisions(db):
     """Best-effort: send the owner's pending decision cards (approvals, acceptances) to the private channel,
     each once, at most hourly. It can never affect the run: any failure is swallowed."""
+    if _inbox_active():
+        return
     try:
         from src import owner_decisions
         owner_decisions.notify(all_owed_reviews(db), context=_context_provider())
@@ -2074,7 +2098,7 @@ def _deliver_owner_alerts(owner):
             providers[name] = estate_router.provider_allows_dispatch(name)
         except Exception:
             providers[name] = {"state": "unknown"}          # unreadable health is unknown, never "ok"
-    owner_alerts.notify(owed, views, providers, expected_owner=owner)
+    owner_alerts.notify(owed, views, providers, expected_owner=owner, inbox=_inbox_active())
 
 
 def lifecycle_tick():
@@ -2085,6 +2109,7 @@ def lifecycle_tick():
         run = db.query(LazyUsageRun).filter(LazyUsageRun.state.notin_(TERMINAL)).first()
         if run is None:
             _offer_owner_alerts(db)
+            _offer_owner_inbox()
             return None
         run_id = run.id
         db.commit()
@@ -2094,6 +2119,7 @@ def lifecycle_tick():
         view = advance(db, run_id)
         _offer_owner_decisions(db)
         _offer_owner_alerts(db)
+        _offer_owner_inbox()
         return view
     finally:
         db.close()

@@ -184,7 +184,7 @@ def _age_seconds(finished_at, now: datetime):
     return (now - when).total_seconds()
 
 
-def build_events(owed_reviews, runs, providers, now: datetime) -> list:
+def build_events(owed_reviews, runs, providers, now: datetime, decisions: bool = True) -> list:
     """Owner-attention events, most urgent first. Each carries a dedupe key that changes when the situation does."""
     events = []
     for name, health in sorted((providers or {}).items()):
@@ -217,7 +217,7 @@ def build_events(owed_reviews, runs, providers, now: datetime) -> list:
             # the owner reads the exact reason from `am lazy status`.
             events.append({"key": f"pause:{run_id}:{_digest(run.get('pause_reason'))}", "priority": 3,
                            "text": f"lazyUsage run {short} paused and needs a look. See am lazy status."})
-    cards = od.build_cards(owed_reviews or [])
+    cards = od.build_cards(owed_reviews or []) if decisions else []     # the phone inbox owns decisions when it is on
     if cards:
         approvals = sum(1 for c in cards if c["gate"] == "owner_approval")
         accepts = len(cards) - approvals
@@ -260,7 +260,7 @@ def _compose(events: list) -> tuple:
 
 def notify(owed_reviews, runs, providers, *, state_path: Optional[Path] = None, channel_path: Optional[Path] = None,
            post: Optional[Callable] = None, clock: Optional[Callable] = None,
-           expected_owner: Optional[str] = None) -> str:
+           expected_owner: Optional[str] = None, inbox: bool = False) -> str:
     """Send what is new, within the cooldown and the daily cap. Returns a short status; never raises.
 
     `expected_owner` is the owner whose data the caller gathered. It is checked against the channel actually used
@@ -279,7 +279,7 @@ def notify(owed_reviews, runs, providers, *, state_path: Optional[Path] = None, 
             fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             return "busy"
-        return _notify_locked(owed_reviews, runs, providers, clock, state_path, channel_path, post, expected_owner)
+        return _notify_locked(owed_reviews, runs, providers, clock, state_path, channel_path, post, expected_owner, inbox)
     except Exception as exc:
         log.warning("owner alert failed: %s", type(exc).__name__)
         return "error"
@@ -330,7 +330,7 @@ def _save(state_path: Path, state: dict, clock: Callable) -> bool:
         return False
 
 
-def _notify_locked(owed_reviews, runs, providers, clock, state_path, channel_path, post, expected_owner):
+def _notify_locked(owed_reviews, runs, providers, clock, state_path, channel_path, post, expected_owner, inbox=False):
     now_ts = clock()
     if now_ts < _persist_blocked_until:
         return "state_unwritable"
@@ -344,12 +344,14 @@ def _notify_locked(owed_reviews, runs, providers, clock, state_path, channel_pat
         return "cooldown"
     sent_today = sum(1 for k, v in state.items() if k.startswith(_SEND) and now_ts - v < 86400)
     now = datetime.fromtimestamp(now_ts, tz=timezone.utc)
-    fresh = [e for e in build_events(owed_reviews, runs, providers, now) if e["key"] not in state]
+    fresh = [e for e in build_events(owed_reviews, runs, providers, now, decisions=not inbox) if e["key"] not in state]
     capped = bool(fresh) and sent_today >= DAILY_CAP
     if capped:
         fresh = []                              # capped events wait for tomorrow; the heartbeat can still go
     heartbeat = False
     if not fresh:
+        if inbox:
+            return "nothing_new"                # the inbox's daily digest replaces the heartbeat
         # quiet days only: the clock restarts at the last successful delivery of any kind
         if now_ts - max(state.get(_HEARTBEAT, 0.0), state.get(_LAST, 0.0)) < HEARTBEAT_SECONDS:
             return "daily_cap" if capped else "nothing_new"
