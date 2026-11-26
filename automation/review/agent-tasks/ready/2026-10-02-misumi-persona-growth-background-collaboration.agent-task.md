@@ -79,6 +79,26 @@ supersedes: []
 duplicates: []
 notes: "This is the next critical Misumi/Odysseus programme after the active 2026-10-01 long-horizon convergence task is formally closed. Do not run overlapping mutations before that closeout. Once activated, it becomes the default number-one background programme until its completion boundary is met. Existing persona, ingestion and evaluation cards are inputs/acceptance owners to reconcile, not reasons to create parallel duplicate systems."
 ---
+## Plan (written 2026-11-26 by the controller; step 0 is to verify it against HEAD)
+**Goal in one line.** Reconcile this largely-delivered programme card against HEAD, surface the remaining operator gates as precise owner debts, and write the closeout — a reconciliation plan, not a rebuild.
+**Already done / do not redo:** Misumi programme applications -02 to -12 are delivered (automatic lead-persona routing live, adaptation loop with ratification/rollback, v0.2 policy ratified with a kill switch). A MISUMI_PROGRAMME.md queue exists and its terminal reconciliation recorded that no executable items remain except operator gates. Do not re-plan or re-implement routing, teams, GUI rooms, growth graph, distillation or ingestion.
+**Steps:**
+0. At HEAD, map every part of this card — stages 0–11, the 15-item completion boundary, the transferred acceptance criteria, the 2026-10-16 intelligence/demo ambitions and the 2026-10-17 Instagram Saved amendment — to delivered evidence in Misumi/Odysseus or to an open operator gate, using MISUMI_PROGRAMME.md and applications -02 to -12. Output: a delivered/open matrix under `automation/review/`. If any section has neither evidence nor a gate, mark it undelivered — verify at HEAD, do not guess.
+1. Spot-verify the "delivered" claims the matrix rests on by running the existing test suites (routing, evaluation, GUI state, ingestion); confirm no claim is document-only. A claim that fails verification becomes an open item, not a rebuild.
+2. For each open operator gate, write one precise owner debt: what decision, why it is human-only, the exact options. No agent self-approval of persona identity, authority, household consent or canonical promotion.
+3. Reconcile the stale predecessor cards the card itself names (the four superseded Misumi acceptance-owner cards, the ChatGPT/Instagram ingestion cards, PR #36 and PR #35) so none remain ambiguously open or duplicated.
+4. Write the closeout at `docs/misumi-persona-growth-background-programme-closeout.md` and obtain independent review at `automation/review/misumi-persona-growth-sol-verification.md` (Sol first; same-family GLM labelled as such if Sol is unavailable). Stop condition: no unresolved material issue.
+**Done when:**
+- Every card criterion is marked delivered-with-evidence or open-operator-gate; nothing is done on document-only grounds.
+- Each gate has an owner debt; no executable engineering item hides inside the closeout.
+- The closeout states how the estate continues this as routine background operation without a new hand-written programme.
+**Risks and stops:**
+- If step 0 finds genuinely undelivered executable work, plan one bounded child packet for it; do not reopen the whole programme.
+- Canonical persona/household promotion keeps its existing ratify gates; a GLM-only review is never presented as Sol sign-off.
+**Ordering note:** Pure reconciliation; needs only HEAD readability and one review lane. Must not create overlapping mutations with any active convergence work.
+
+---
+
 
 # Misumi persona growth, automatic collaboration and background refinement programme
 
