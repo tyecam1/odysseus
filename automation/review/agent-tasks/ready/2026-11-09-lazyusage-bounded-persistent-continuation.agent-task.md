@@ -60,6 +60,26 @@ denied_paths:
   - "**/*.pdf"
 result_path: docs/runtime-work-packages/2026-11-09-lazyusage-lab-persistence-acceptance.md
 ---
+## Plan (written 2026-11-26 by the controller; step 0 is to verify it against HEAD)
+**Goal in one line.** Complete the single unproven item — WRITE-lane live acceptance of the already-deployed durable /lazyUsage backend — without rebuilding any delivered runtime.
+**Already done / do not redo:** coordinator, durable runs surviving service restarts, budgets, park/resume, provider-limit parking, one-shot finalisation with recover path, window-aware dispatch and the delivery ledger are delivered and live on the lab (PRs #282 to #294 merged and deployed). Live run 0e999131 is parked only on the Codex weekly pool, which the controller state says resets 2026-11-27 21:13 GMT — that is a provider limit, not a defect. Do not re-implement, re-review or re-merge any of it.
+**Steps:**
+0. Verify at HEAD: PRs #282–#294 merged on `dev`, the deployed lab service version, the status of run 0e999131, and which queued tasks are write-lane eligible. If the live service does not match merged state, stop and report the mismatch; do not edit delivered code.
+1. After the Codex reset (verify the actual reset time; never assume), resume 0e999131 or start one laptop-initiated activation that selects and completes at least one low-risk real eligible WRITE-lane queued task through the owning repo's preflight, lease, deterministic tests and independent verification (V3 route; no same-family GLM self-approval). Stop condition: correct status transition plus prompt-application trace in the delivery ledger.
+2. Persistence proof on that same run: disconnect the laptop and confirm the lab job continues; restart the existing Odysseus service during the controlled run and confirm checkpoint recovery with no duplicate mutation, tool call or paid dispatch. Test: compare ledger/delivery counts before and after.
+3. Governance spot-checks on live runs: a genuine protected human-only gate, Sol-quota parking while other independent work proceeds, unqualified GLM write refusal, stale HEAD/lease collision rejection, operator stop and budget exhaustion. Each check passes only with a recorded evidence event.
+4. Write acceptance evidence, honest limitations and rollback state at result_path `docs/runtime-work-packages/2026-11-09-lazyusage-lab-persistence-acceptance.md`, naming service version, activation state and the actual task outcome. No unfinished run is labelled shipped.
+**Done when:**
+- One real write-lane task is delivered end-to-end from a client-disconnected, restart-surviving activation, with independent verification recorded.
+- Every persistence and governance check has live evidence, or a precise blocker is written down.
+- result_path reflects live deployment, not just merged code.
+**Risks and stops:**
+- If the reset does not restore capacity, park with a truthful retry condition; never manufacture a qualification or route unqualified GLM writes.
+- If live acceptance exposes a genuine architecture blocker, record it exactly and keep the bounded manual /lazyUsage route; no second harness, no new privileged service, no auto-start, no silent budget renewal.
+**Ordering note:** Step 1 is gated on the Codex pool reset (2026-11-27 21:13 GMT per controller state; verify). Steps 0, 3 preparation and 4 scaffolding can proceed now.
+
+---
+
 
 # Persistent /lazyUsage inside Odysseus, lab-first
 

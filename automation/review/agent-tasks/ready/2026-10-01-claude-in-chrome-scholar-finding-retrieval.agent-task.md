@@ -68,6 +68,28 @@ supersedes:
 duplicates: []
 notes: "This task narrows the stale Scholar gateway into high-value finding-targeted discovery. Full-text acquisition remains a separate governed capability. Do not scrape Scholar, bypass rate limits/challenges, extract browser credentials, or treat snippets as evidence."
 ---
+## Plan (written 2026-11-26 by the controller; step 0 is to verify it against HEAD)
+**Goal in one line.** Attest the live Claude-in-Chrome surface and a compliant Scholar operating mode first, then implement the finding-targeted retrieval skill in bounded phases, stopping on any missing prerequisite.
+**Already done / do not redo:** nothing for this card — controller state says no part is implemented. The superseded August Scholar gateway task and the obsidian-PhD Scholar policy are inputs to reconcile, not authorities to keep or extend.
+**Steps:**
+0. Verify at HEAD: branch `claude/scholar-finding-retrieval-20261001` on `dev`, and that the named inputs exist (the 2026-09-02 browser-bridge task, the 2026-10-19 Brave/ChatGPT adapter card, `tyecam1/obsidian-PhD:automation/config/google_scholar_policy.yaml` and the two obsidian-PhD skill references). Missing input → stop and report; do not invent a policy source.
+1. Capability attestation on the laptop, human-supervised: confirm the official Claude-in-Chrome extension is actually installed, connected and usable from the real Claude worker surface (the two support.claude.com articles in inputs). Fetch current scholar.google.com robots.txt and help pages and record the permitted operating mode in result_path `automation/review/skills/2026-10-01-claude-in-chrome-scholar-finding-retrieval.md`. Stop condition: extension missing or no compliant mode → record the blocker and stop; no Playwright/Selenium fallback, no scraper.
+2. This card is `approval_required`: present the attested mode, the five-fresh-prompts-per-day quota policy and the account/prompt-injection risks to the owner, and stop until the live phase is approved.
+3. Migrate the shared Scholar quota/usage policy into Odysseus `config/` (single authority) and define the finding_request skill contract with only `purpose` and `target_finding` mandatory. Test: config schema and quota-accounting unit tests, zero live calls.
+4. Build the Phase 2 mocked fixtures (success, no results, challenge/rate limit, changed page structure, partial load, misleading snippet, Zotero duplicate, no-progress expansion). Test: all pass deterministically offline.
+5. One operator-observed live attestation query (Phase 3) against a known paper: bounded single query, no bulk traversal, no credential exposure, provenance recorded. Any challenge/quota state fails visibly; no bypass.
+6. Held-out evaluation (Phase 4), research-controller admission hook (Phase 5), then Phase 6 independent verification writing `automation/review/skills/2026-10-01-claude-in-chrome-scholar-finding-retrieval-verification.md`, ending in human verification (V2 route).
+**Done when:**
+- Attestation and a bounded compliant mode are documented before any live Scholar use.
+- Snippets can never become evidence: candidates require metadata verification outside Scholar and `needs_full_text` marking; no match is reported as bounded search failure, never field-wide absence.
+- Fixtures, one operator-observed live query and independent verification all pass, or the precise stop is recorded.
+**Risks and stops:**
+- Missing extension, ambiguous Scholar policy, or any CAPTCHA/challenge stops the live phase — no credential extraction, no alternate scraping route, no proxy/rotation.
+- Do not expand into full-text acquisition, Zotero mutation or a second literature pipeline; the Brave/ChatGPT adapter card shares the browser surface but stays separate.
+**Ordering note:** Steps 1–2 gate everything; nothing live happens before attestation and owner approval.
+
+---
+
 
 # Claude-in-Chrome Scholar finding retrieval
 
