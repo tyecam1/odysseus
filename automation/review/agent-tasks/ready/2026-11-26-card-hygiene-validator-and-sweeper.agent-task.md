@@ -42,6 +42,15 @@ inputs:
   - AGENTS.md
   - docs/aoteru-model-host-routing-contract.md
 result_path: docs/runtime-work-packages/2026-11-26-card-hygiene.md
+verification_evidence:
+  - result: pass
+    commit_sha: fb9ef772549943e724ecf888aee12e3e97a8bba6
+    ref: "docs/runtime-work-packages/2026-11-26-card-hygiene.md; full lab pytest suite on the fixed branch: 10571 passed, 47 skipped, 5 xfailed (and 10543 passed on the unmodified worker commit); the delivery landed as the worker's commit plus controller fixes, PR on dev"
+    verified_by: "controller (claude-sonnet-5-5): full lab pytest suite plus focused suites on the delivered code"
+review_evidence:
+  - verdict: approve
+    reviewer_provider: claude-opus-5-5
+    ref: "cross-family review 2026-11-26 in two passes: CHANGES_REQUIRED on the worker commit, then APPROVE_WITH_CONDITIONS on the controller fixes; findings and follow-ups in docs/runtime-work-packages/2026-11-26-card-hygiene.md"
 ---
 
 ## Plan (written 2026-11-26 by the controller; step 0 is to verify it against HEAD)
@@ -67,6 +76,10 @@ result_path: docs/runtime-work-packages/2026-11-26-card-hygiene.md
 - An unreadable queue becomes a protected_handoff naming the path.
 **Ordering note:** Needs nothing first. Unblocks avenue-to-develop's unblocking children (repairs, host re-pins, attestations) and validates the Zotero read/write split.
 
+
+## Delivery status and follow-ups (binding for the next dispatch)
+
+Plan steps 0-6 are delivered and reviewed (see the result document's review section). The next dispatch of this card, if any, does ONLY the accepted follow-ups listed there (stale `priority` on debts, count of container cards in the other repositories, client/validator version note, unproven sweeper sources, fill the author's actual model) and must not change who the owner is asked or touch approval and delegation code.
 ---
 
 # Card hygiene: stop cards defaulting to the owner or the wrong host

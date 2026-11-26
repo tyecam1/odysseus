@@ -90,6 +90,27 @@ def test_an_advisor_decision_records_its_model_and_stays_distinguishable(db):
     assert db.query(RoutingDecision).filter_by(task_class=ledger.TASK_CLASS).one().concrete_model == "claude-opus-5-5"
 
 
+def test_owner_load_counts_active_card_settlements_for_this_owner_in_the_window(db, monkeypatch):
+    now = ledger._now()
+    monkeypatch.setattr(ledger, "_now", lambda: now - timedelta(days=2))
+    put(db, kind="decline", task_id="old")
+    monkeypatch.setattr(ledger, "_now", lambda: now)
+    put(db, task_id="advised", actor="advisor", model="claude-opus-5-5")
+    put(db, kind="decline", task_id="declined")
+    put(db, kind="defer", task_id="deferred")
+    put(db, kind="escalate", task_id="escalated", actor="advisor", model="claude-opus-5-5")
+    put(db, task_ref="policy:advisor-approvals", task_id="delegation")
+    put(db, owner="other-owner", task_id="other")
+    revoked = put(db, task_id="revoked")
+    assert ledger.revoke(db, revoked, "operator")
+    from src.owner_inbox import _digest_text
+    load = ledger.owner_load(db, "operator", open_gates=3, since=now - timedelta(days=1))
+    assert load == {"open": 3, "agent_or_advisor": 1, "owner": 1}
+    assert _digest_text({"owner_load": load}, [])[1] == (
+        "Owner gates: 3 open. Settled in 24h: 1 by agent or advisor, 1 by owner."
+    )
+
+
 def test_rationale_is_plain_bounded_text(db):
     put(db, rationale="<b>ok</b>\n`rm -rf`\x00" + "x" * 900)
     text = ledger.listing(db, "operator")[0]["rationale"]

@@ -64,7 +64,7 @@ def fresh_cache():
 
 def test_a_high_risk_approval_reaches_the_phone_and_the_delegation_question_does_not(db, frontier, monkeypatch):  # noqa: F811
     add, _ = frontier
-    gated(add, risk_level="high")
+    gated(add, risk_level="high", owner_gate_class="security")
     monkeypatch.setattr(rt, "all_owed_reviews", lambda db_, owner: [debt()])
     out = glue.gather(OWNER)
     assert [c["kind"] for c in out] == ["approval"]                    # nothing the advisor could decide, so no delegation ask
@@ -72,7 +72,7 @@ def test_a_high_risk_approval_reaches_the_phone_and_the_delegation_question_does
     assert out[0]["card_line"] == "g, high risk"                       # identity from the card, not from a model
 
 
-def test_while_the_advisor_worker_is_not_shipped_nobody_is_asked_to_delegate_and_floor_cards_stay_on_the_phone(db, frontier, monkeypatch):  # noqa: F811
+def test_while_the_advisor_worker_is_not_shipped_nobody_is_asked_to_delegate_and_unclassified_cards_stay_on_the_phone(db, frontier, monkeypatch):  # noqa: F811
     add, _ = frontier
     gated(add, risk_level="medium", executor="claude_subscription")
     monkeypatch.setattr(rt, "all_owed_reviews", lambda db_, owner: [debt()])
@@ -83,6 +83,40 @@ def test_while_the_advisor_worker_is_not_shipped_nobody_is_asked_to_delegate_and
     glue._cache["value"] = None
     assert [c["kind"] for c in glue.gather(OWNER)] == ["approval"]     # even a recorded delegation hides nothing yet
     assert glue.advisor_step(OWNER) == []
+
+
+def test_an_unclassified_high_risk_card_reaches_the_phone(db, frontier, monkeypatch):  # noqa: F811
+    add, _ = frontier
+    gated(add, risk_level="high")                                       # no owner_gate_class, and the advisor floor excludes it
+    monkeypatch.setattr(rt, "all_owed_reviews", lambda db_, owner: [debt()])
+    monkeypatch.setattr(glue, "ADVISOR_APPROVALS_READY", True)
+    assert [c["kind"] for c in glue.gather(OWNER)] == ["approval"]
+
+
+def test_an_unclassified_card_reaches_the_phone_after_the_owner_declines_delegation(db, frontier, monkeypatch):  # noqa: F811
+    add, _ = frontier
+    gated(add, risk_level="medium", executor="claude_subscription")
+    monkeypatch.setattr(rt, "all_owed_reviews", lambda db_, owner: [debt()])
+    monkeypatch.setattr(glue, "ADVISOR_APPROVALS_READY", True)
+    ledger.record(db, owner=OWNER, kind="decline", task_ref="policy:advisor-approvals", task_id=ib.DELEGATION_TASK_ID,
+                  scope_sha256=ib.DELEGATION_SCOPE, actor="owner", via="phone-reply")
+    glue._cache["value"] = None
+    assert [c["kind"] for c in glue.gather(OWNER)] == ["approval"]
+
+
+def test_an_escalated_unclassified_card_comes_back_to_the_owner_and_an_explicit_owner_class_never_goes_to_the_advisor(db, frontier, monkeypatch):  # noqa: F811
+    add, _ = frontier
+    record, meta = gated(add, risk_level="medium", executor="claude_subscription")
+    monkeypatch.setattr(rt, "all_owed_reviews", lambda db_, owner: [debt()])
+    monkeypatch.setattr(glue, "ADVISOR_APPROVALS_READY", True)
+    ledger.record(db, owner=OWNER, kind="approval", task_ref="policy:advisor-approvals", task_id=ib.DELEGATION_TASK_ID,
+                  scope_sha256=ib.DELEGATION_SCOPE, actor="owner", via="phone-reply")
+    glue._cache["value"] = None
+    assert glue.gather(OWNER) == [] and len(glue._scan(OWNER)[1]) == 1       # delegated and eligible: the advisor's, not the phone's
+    ledger.record(db, owner=OWNER, kind="escalate", task_ref="odysseus:ready/g.md", task_id="g",
+                  scope_sha256=rt.approval_scope(meta), actor="advisor", model="claude-opus-5-5", via="advisor-delegation")
+    glue._cache["value"] = None
+    assert [c["kind"] for c in glue.gather(OWNER)] == ["approval"]           # escalated: back to the owner
 
 
 def test_a_floor_eligible_approval_triggers_the_delegation_question_once(db, frontier, monkeypatch):  # noqa: F811
@@ -99,7 +133,7 @@ def test_a_floor_eligible_approval_triggers_the_delegation_question_once(db, fro
 
 def test_the_scan_cache_is_per_owner(db, frontier, monkeypatch):  # noqa: F811
     add, _ = frontier
-    gated(add, risk_level="high")
+    gated(add, risk_level="high", owner_gate_class="security")
     monkeypatch.setattr(rt, "all_owed_reviews", lambda db_, owner: [debt()] if owner == OWNER else [])
     assert len(glue.gather(OWNER)) == 1
     assert glue.gather("someone-else") == []
@@ -107,7 +141,7 @@ def test_the_scan_cache_is_per_owner(db, frontier, monkeypatch):  # noqa: F811
 
 def test_a_decided_card_is_not_asked_again(db, frontier, monkeypatch):  # noqa: F811
     add, _ = frontier
-    _, meta = gated(add, risk_level="high")
+    _, meta = gated(add, risk_level="high", owner_gate_class="security")
     monkeypatch.setattr(rt, "all_owed_reviews", lambda db_, owner: [debt()])
     ledger.record(db, owner=OWNER, kind="defer", task_ref="odysseus:ready/g.md", task_id="g",
                   scope_sha256=rt.approval_scope(meta), actor="owner", via="phone-reply")
@@ -223,3 +257,43 @@ def test_alerts_stop_repeating_decisions_and_the_heartbeat_when_the_inbox_owns_t
     now = datetime(2026, 11, 26, 12, 0, tzinfo=timezone.utc)
     assert any(e["text"].startswith("Needs you") for e in oa.build_events(owed, [], {}, now))
     assert not any(e["text"].startswith("Needs you") for e in oa.build_events(owed, [], {}, now, decisions=False))
+
+
+def test_the_digests_open_count_is_every_waiting_gate_not_just_what_reaches_the_phone(db, frontier, monkeypatch):  # noqa: F811
+    add, _ = frontier
+    gated(add, risk_level="medium", executor="claude_subscription")
+    monkeypatch.setattr(rt, "all_owed_reviews", lambda db_, owner: [debt()])
+    monkeypatch.setattr(glue, "ADVISOR_APPROVALS_READY", True)
+    ledger.record(db, owner=OWNER, kind="approval", task_ref="policy:advisor-approvals", task_id=ib.DELEGATION_TASK_ID,
+                  scope_sha256=ib.DELEGATION_SCOPE, actor="owner", via="phone-reply")
+    glue._cache["value"] = None
+    assert glue.gather(OWNER) == []                                     # the advisor's, so nothing for the phone ...
+    facts = glue.digest_facts_factory(OWNER)()
+    assert facts["owner_load"]["open"] == 1                              # ... but the gate is still open and the digest says so
+
+
+@pytest.mark.parametrize("cls", ["money", "credential", "external_write", "other_people", "destructive", "security",
+                                 "contract_conflict", "physical_labour", "mony", "Money", "anything-else", "", 0])
+def test_an_explicit_or_unrecognised_gate_class_never_reaches_the_advisor(db, frontier, monkeypatch, cls):  # noqa: F811
+    add, _ = frontier
+    gated(add, risk_level="medium", executor="claude_subscription", owner_gate_class=cls)      # floor-eligible, delegated, NOT escalated
+    monkeypatch.setattr(rt, "all_owed_reviews", lambda db_, owner: [debt()])
+    monkeypatch.setattr(glue, "ADVISOR_APPROVALS_READY", True)
+    ledger.record(db, owner=OWNER, kind="approval", task_ref="policy:advisor-approvals", task_id=ib.DELEGATION_TASK_ID,
+                  scope_sha256=ib.DELEGATION_SCOPE, actor="owner", via="phone-reply")
+    glue._cache["value"] = None
+    assert glue._scan(OWNER)[1] == []
+    assert [c["kind"] for c in glue.gather(OWNER)] == ["approval"]
+
+
+@pytest.mark.parametrize("cls", [None, "none"])
+def test_only_an_absent_or_none_class_is_advisor_eligible(db, frontier, monkeypatch, cls):  # noqa: F811
+    add, _ = frontier
+    extra = {} if cls is None else {"owner_gate_class": cls}
+    gated(add, risk_level="medium", executor="claude_subscription", **extra)
+    monkeypatch.setattr(rt, "all_owed_reviews", lambda db_, owner: [debt()])
+    monkeypatch.setattr(glue, "ADVISOR_APPROVALS_READY", True)
+    ledger.record(db, owner=OWNER, kind="approval", task_ref="policy:advisor-approvals", task_id=ib.DELEGATION_TASK_ID,
+                  scope_sha256=ib.DELEGATION_SCOPE, actor="owner", via="phone-reply")
+    glue._cache["value"] = None
+    assert len(glue._scan(OWNER)[1]) == 1 and glue.gather(OWNER) == []

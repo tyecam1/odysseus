@@ -155,6 +155,23 @@ def approved_scopes(db, owner: str) -> frozenset:
     return frozenset((_repo_of(d), d["task_id"], d["scope_sha256"]) for d in active(db, owner) if d.get("kind") == "approval")
 
 
+def owner_load(db, owner: str, *, open_gates: int, since: datetime) -> dict:
+    """Count current card settlements in the digest window, excluding policy decisions and temporary holds."""
+    counts = {"open": open_gates, "agent_or_advisor": 0, "owner": 0}
+    for decision in active(db, owner):
+        if _repo_of(decision) == "policy" or decision.get("kind") not in {"approval", "decline"}:
+            continue
+        created = _stamp(decision.get("created"))
+        if created is None or created < since:
+            continue
+        actor = decision.get("actor")
+        if actor == "owner":
+            counts["owner"] += 1
+        elif actor in ("agent", "advisor"):
+            counts["agent_or_advisor"] += 1
+    return counts
+
+
 def held_scopes(db, owner: str) -> frozenset:
     """{(repo, task_id, scope_sha256)} the owner declined or snoozed: not asked again until it expires or the scope changes."""
     return frozenset((_repo_of(d), d["task_id"], d["scope_sha256"]) for d in active(db, owner) if d.get("kind") in ("decline", "defer"))

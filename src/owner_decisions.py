@@ -62,7 +62,7 @@ def build_cards(owed_reviews: list) -> list:
 
     An acceptance is only asked once nothing else is owed on that task: while verification, independent
     review or recovery is still open it is the agent's job, and asking would invite the owner to accept
-    unverified work. Approvals rank by due date, then age."""
+    unverified work. Approval dates are displayed as context."""
     open_agent_gates = {}
     for debt in owed_reviews or []:
         # Any debt on the task that is not an owner gate is the agent's to close first, including a legacy
@@ -96,7 +96,10 @@ def build_cards(owed_reviews: list) -> list:
                       "scope_digest": (_HEX.match(str(debt.get("scope_sha256") or "")) or [""])[0][:12],
                       "options": options, "default": "If no reply I skip it and continue other work.",
                       "due": due, "opened_at": str(debt.get("opened_at") or "")})
-    cards.sort(key=lambda c: (OWNER_GATES.index(c["gate"]), c["due"] or "9999-99-99", c["opened_at"], c["ref"]))
+    from scripts.agentic_context import PRIORITY
+    cards.sort(key=lambda c: (OWNER_GATES.index(c["gate"]),
+                              PRIORITY.get(str(c["debt"].get("priority") or "").lower(), 9),
+                              c["opened_at"], c["ref"]))
     return cards
 
 

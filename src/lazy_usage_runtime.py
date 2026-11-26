@@ -650,6 +650,8 @@ def _static_blocker(kind, meta, write):
     """Feasibility facts that need no routing: authority, tools and deliverables."""
     if kind == "protected_handoff":
         return "protected_handoff"
+    if str(meta.get("execution_mode") or "").lower() == "container":
+        return "non_executable_container"
     if meta.get("blocked_by") or meta.get("protected_gate"):
         return "protected_gate"
     if meta.get("requires_zotero") is True:
@@ -1479,6 +1481,7 @@ def _observe(db, run):
     now = utcnow_naive().isoformat()
     base = {"task_id": run.checkpoint["current_task_id"], "task_ref": task_ref, "execution_id": execution_id,
             "provider": None, "error": None, "retry_after": None, "opened_at": now,
+            "priority": card.get("priority"),
             "due": str(card.get("due_date") or "")[:10],
             "author_provider": run.checkpoint.get("dispatch_provider") or "local",
             "commit_sha": (finalization or {}).get("commit_sha")}
@@ -1995,6 +1998,7 @@ def decision_context(debt, frontier):
     notes = meta.get("notes")
     denied = [p for p in (meta.get("denied_paths") or []) if isinstance(p, str)]
     return {"title": meta.get("title") if isinstance(meta.get("title"), str) else "",
+            **({"owner_gate_class": meta["owner_gate_class"]} if isinstance(meta.get("owner_gate_class"), str) else {}),
             "what": notes if isinstance(notes, str) else "", "kind": kind,
             "priority": str(meta.get("priority") or ""), "risk": str(meta.get("risk_level") or ""),
             "write_paths": _allowed_paths(meta), "denied_count": len(denied), "scope_changed": changed,
