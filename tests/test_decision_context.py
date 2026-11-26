@@ -210,3 +210,15 @@ def test_the_decisions_route_returns_only_public_card_fields(db):
     assert set(body) == {"run_id", "cards", "message"}
     assert set(body["cards"][0]) == {"key", "gate", "ref", "title", "why", "options", "default", "due", "opened_at", "scope_digest"}
     assert all(isinstance(v, str) for v in body["cards"][0].values())
+
+
+def test_the_plan_extract_is_a_bounded_summary_of_the_cards_own_plan():
+    from src import lazy_usage_runtime as rt
+    body = ("## Plan (x)\n**Goal in one line.** Make the thing faster for everyone.\n**Steps:**\n0. x\n**Done when:**\n- It is faster\n- Tests pass\n"
+            "- A third line\n- A fourth line\n**Risks and stops:**\n- Never touch the live data\n- Stop on any credential need\n\n---\n# Title\n")
+    got = rt._plan_extract(body)
+    assert got == {"goal": "Make the thing faster for everyone.", "done": ["It is faster", "Tests pass", "A third line"],
+                   "risks_text": ["Never touch the live data", "Stop on any credential need"]}
+    assert rt._plan_extract("no plan here") == {} and rt._plan_extract(None) == {}
+    assert rt._plan_extract("## Outcome\n\nA short outcome paragraph.\n\n## Rules")["goal"] == "A short outcome paragraph."
+    assert len(rt._plan_extract("**Goal in one line.** " + "word " * 400)["goal"]) <= 300

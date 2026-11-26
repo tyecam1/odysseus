@@ -91,12 +91,12 @@ def card_facts(meta: dict, body: str = "") -> dict:
     import hashlib
     import json
     risk = inbox.plain(meta.get("risk_level") or "unrated", 12)
-    title = inbox.plain(meta.get("title") or "", 40)
+    title = inbox._clip(inbox.plain(meta.get("title") or "", 300), 64)
     keys = ("title", "notes", "task_type", "execution_mode", "risk_level", "executor", "priority", "allowed_paths",
             "denied_paths", "outputs", "result_path", "execution_host", "requires_web", "requires_mcp")
     fp = hashlib.sha256(json.dumps({**{k: meta.get(k) for k in keys}, "body": hashlib.sha256(str(body or "").encode()).hexdigest()},
                                    sort_keys=True, default=str).encode()).hexdigest()
-    return {"card_line": f"{title}, {risk} risk"[:60], "fp": fp, "title": inbox.plain(meta.get("title") or "", 90)}
+    return {"card_line": f"{title}, {risk} risk"[:90], "fp": fp, "title": inbox.plain(meta.get("title") or "", 90)}
 
 
 def _patient(debt: dict) -> bool:
