@@ -3,10 +3,9 @@
 The coordinator is ONE advisory planning call per unchanged frontier state,
 never a second scheduler: lazy_usage_runtime keeps every dispatch, budget,
 lease, verification and stop/resume decision, and the central estate router
-keeps provider/model authority. Lane selection is usage-aware by design —
-each turn picks the cheapest adequate lane from live provider health, host
-executor qualification and the run's remaining budgets, and skips the call
-entirely when too little paid budget remains to leave room for a real task
+keeps provider/model authority. Lane selection prefers Sonnet and checks
+live provider health, host executor qualification and remaining budgets. It
+skips the call when too little paid budget remains to leave room for a task
 dispatch. Model output is strictly validated (schema and bounds) and only
 advises queue order plus a bounded decomposition for the primary task.
 Every failure fails closed to the existing deterministic loop.
@@ -19,13 +18,13 @@ import os
 
 from src import estate_router
 
-LANES = ("glm-flash", "claude-sonnet", "glm-standard")
-# lane -> (paid provider, GLM launcher variant or None)
-LANE_ROUTES = {"glm-flash": ("glm", "flash"), "glm-standard": ("glm", None),
-               "claude-sonnet": ("claude", None)}
-LANE_EXECUTOR = {"glm-flash": "glm", "glm-standard": "glm", "claude-sonnet": "claude"}
+LANE_EXECUTOR = {"glm-flash": "glm-flash", "glm-standard": "glm", "claude-sonnet": "claude"}
+# The CLI still launches the rolling alias. The owning task requires this
+# effective release before its output can influence the queue.
+SONNET_COORDINATOR_MODEL = "claude-sonnet-5-5"
+PROVIDER_USAGE_ATTESTATION = "provider-usage-response"
 DEFAULT_POLICY = {"enabled": True,
-                  "routine_lanes": ["glm-flash", "claude-sonnet", "glm-standard"],
+                  "routine_lanes": ["claude-sonnet", "glm-flash", "glm-standard"],
                   "high_consequence_lanes": ["claude-sonnet", "glm-standard", "glm-flash"],
                   "min_paid_budget_remaining": 2}
 CALL_TIMEOUT_S = 120.0
@@ -39,6 +38,7 @@ MAX_NEXT_ACTION_CHARS = 120
 PROMPT = """You are the bounded cognitive coordinator for one Odysseus lazy-usage turn.
 You advise only: you have no dispatch authority, no tools and no repository access.
 Order the candidate owner tasks for THIS turn and outline execution of the first.
+Your order breaks ties within the same queue bucket and owner priority.
 
 Rules: shipping-first (near-complete, unblocking or safety-gated work first);
 prefer the cheapest adequate qualified route; respect protected gates, owner
@@ -102,13 +102,27 @@ def usage_tokens(usage, estimate):
     return 0, max(estimate, total)
 
 
-def _meter_tokens(run, result):
-    """Measured provider tokens when fully reported, else a conservative estimate for a completed call."""
+def _meter_tokens(run, result, reserved=False):
+    """Meter one coordinator/advisor call against its token budget. With a dispatch reservation (the
+    coordinator pre-charges the estimate before the call, so spend survives a crash mid-call):
+    measured usage replaces the estimate, a result reporting the call definitely did not execute
+    releases the reservation, and anything else keeps it — a fragment reporting MORE than the
+    estimate books the excess in full (Sol review of #297). Without a reservation (the advisor lane
+    meters only calls that returned, with definite refusals already filtered out): measured usage
+    books the real total and a fragment books at least the estimate."""
     measured, assumed = usage_tokens(result.get("provider_usage"), COORDINATOR_TOKEN_ESTIMATE)
     if measured:
-        _charge(run, tokens_measured=measured)
-    if assumed:
-        _charge(run, tokens_assumed=assumed)
+        _charge(run, tokens_measured=measured,
+                tokens_assumed=-COORDINATOR_TOKEN_ESTIMATE if reserved else 0)
+    elif reserved and (result.get("executed") is False
+                       or (not result.get("ok") and estate_router._provider_outcome(result).get("state")
+                           in {"quota_exhausted", "rate_limited"})):
+        _charge(run, tokens_assumed=-COORDINATOR_TOKEN_ESTIMATE)
+    elif reserved:
+        if assumed != COORDINATOR_TOKEN_ESTIMATE:      # a fragment above the estimate books the excess
+            _charge(run, tokens_assumed=assumed - COORDINATOR_TOKEN_ESTIMATE)
+    else:
+        _charge(run, tokens_assumed=assumed)           # the advisor lane books at least the estimate
 
 
 def _charge(run, **counts):
@@ -132,7 +146,7 @@ def policy():
     for key in ("routine_lanes", "high_consequence_lanes"):
         lanes = configured.get(key)
         if (isinstance(lanes, list) and lanes and
-                all(isinstance(lane, str) and lane in LANES for lane in lanes)):
+                all(isinstance(lane, str) and lane in LANE_EXECUTOR for lane in lanes)):
             merged[key] = list(dict.fromkeys(lanes))
     floor = configured.get("min_paid_budget_remaining")
     if type(floor) is int and floor >= 0:
@@ -159,8 +173,16 @@ def _qualified_executors():
                  if h.get("host_id") == host_id and h.get("eligible")), [])
 
 
+def _lane_qualified(lane, executors):
+    if lane not in LANE_EXECUTOR or LANE_EXECUTOR[lane] not in executors:
+        return False
+    # General advisory qualification does not attest this release or the
+    # coordinator's unattended permission and billing boundary.
+    return lane != "claude-sonnet" or lane in executors
+
+
 def select_lane(run, *, high_consequence):
-    """Usage-aware lane choice: cheapest adequate qualified lane for this turn."""
+    """Apply the estate's lane order to this run's qualified and healthy executors."""
     configured = policy()
     budgets, counters = _budgets(run), run.counters or {}
     from src import lazy_usage_advisor as advisor
@@ -174,13 +196,13 @@ def select_lane(run, *, high_consequence):
     qualified = _qualified_executors()
     considered = []
     for lane in order:
-        if lane not in LANES:
+        if lane not in LANE_EXECUTOR:
             continue
         considered.append(lane)
-        if LANE_EXECUTOR[lane] not in qualified:
+        if not _lane_qualified(lane, qualified):
             continue
         # Read-only health check: no launch_timeout means no attempt is reserved.
-        health = estate_router.provider_allows_dispatch(LANE_ROUTES[lane][0])
+        health = estate_router.provider_allows_dispatch(LANE_EXECUTOR[lane])
         if not health.get("allowed"):
             continue
         return {"lane": lane, "reason": "lane selected", "considered": considered}
@@ -302,6 +324,20 @@ def coordinator_step(db, run, frontier, digest, evidence=None):
         return None
     key = plan_key(digest, cp)
     if cp.get("coordinator_key") == key and isinstance(cp.get("coordinator_order"), list):
+        lane = cp.get("coordinator_lane")
+        if lane == "claude-sonnet" and (
+                cp.get("coordinator_model") != SONNET_COORDINATOR_MODEL
+                or cp.get("coordinator_model_attestation") != PROVIDER_USAGE_ATTESTATION):
+            _checkpoint(run, coordinator_skip="sonnet_5_5_unattested")
+            db.commit()
+            return None
+        if not _lane_qualified(lane, _qualified_executors()):
+            _checkpoint(run, coordinator_skip="coordinator_lane_unqualified")
+            db.commit()
+            return None
+        if cp.get("coordinator_skip"):
+            _checkpoint(run, coordinator_skip=None)
+            db.commit()
         # Persisted plan for an unchanged frontier state; restart-safe reuse.
         return {"order": cp["coordinator_order"], "primary": cp.get("coordinator_primary"),
                 "decomposition": cp.get("coordinator_decomposition") or [],
@@ -313,13 +349,18 @@ def coordinator_step(db, run, frontier, digest, evidence=None):
         _checkpoint(run, coordinator_skip="digest_already_attempted")
         db.commit()
         return None
+    counters = run.counters or {}
+    used_tokens = counters.get("tokens_measured", 0) + counters.get("tokens_assumed", 0)
+    if used_tokens + COORDINATOR_TOKEN_ESTIMATE > _budgets(run)["max_tokens"]:
+        _checkpoint(run, coordinator_skip="coordinator_token_headroom")
+        db.commit()
+        return None
     choice = select_lane(run, high_consequence=high_consequence(cp, run.counters))
     lane = choice["lane"]
     if lane is None:
         _checkpoint(run, coordinator_skip=choice["reason"], coordinator_key=None)
         db.commit()
         return None
-    provider, variant = LANE_ROUTES[lane]
     prompt = build_prompt(frontier, run, evidence)
     remaining_seconds = _budgets(run)["max_seconds"] - (utcnow_naive() - run.started_at).total_seconds()
     if remaining_seconds <= 0:
@@ -329,44 +370,44 @@ def coordinator_step(db, run, frontier, digest, evidence=None):
     # Charge BEFORE the call so spent accounting survives a crash mid-call.
     # The attempted-digest fence in the same commit guarantees exactly one
     # coordinator call per frontier digest even across crashes.
-    _charge(run, paid_calls=1, tool_calls=1)
+    _charge(run, paid_calls=1, tool_calls=1, tokens_assumed=COORDINATOR_TOKEN_ESTIMATE)
     _checkpoint(run, coordinator_skip=None, coordinator_lane=lane, coordinator_key=None,
-                coordinator_attempted_key=key)
+                coordinator_attempted_key=key, coordinator_model=None,
+                coordinator_model_attestation=None, coordinator_usage=None)
     db.commit()
     try:
-        if provider == "glm":
-            kwargs = {"variant": variant} if variant else {}
-            result = estate_router.execute_glm(prompt, timeout=min(CALL_TIMEOUT_S, remaining_seconds), **kwargs)
-        else:
-            result = estate_router.execute_claude(prompt, timeout=min(CALL_TIMEOUT_S, remaining_seconds))
+        execute = {"claude": estate_router.execute_claude, "glm": estate_router.execute_glm,
+                   "glm-flash": estate_router.execute_glm_flash}[LANE_EXECUTOR[lane]]
+        result = execute(prompt, timeout=min(CALL_TIMEOUT_S, remaining_seconds))
     except Exception:
         _checkpoint(run, coordinator_skip="provider_exception")
         db.commit()
         return None
+    _meter_tokens(run, result, reserved=True)
     if not result.get("ok"):
-        # A dispatched call that failed after the model may have run still consumed tokens; only an
-        # explicit provider refusal (nothing ran) is free. The dispatch itself was charged above.
-        if estate_router._provider_outcome(result).get("state") not in {"quota_exhausted", "rate_limited"}:
-            _meter_tokens(run, result)
         # The executor recorded provider health itself; keep the reason bounded.
         _checkpoint(run, coordinator_skip="provider_failed_" + str(result.get("error_code") or "unknown")[:60])
         db.commit()
         return None
     # Real spend remains evidence even when the model's plan is invalid.
-    _meter_tokens(run, result)
     _checkpoint(run, coordinator_usage=result.get("provider_usage"),
-                coordinator_model=result.get("concrete_model"))
+                coordinator_model=result.get("concrete_model"),
+                coordinator_model_attestation=result.get("model_attestation"))
+    if lane == "claude-sonnet" and (
+            result.get("provider") != "claude" or result.get("model_unverified") is not False
+            or result.get("concrete_model") != SONNET_COORDINATOR_MODEL
+            or result.get("model_attestation") != PROVIDER_USAGE_ATTESTATION):
+        _checkpoint(run, coordinator_skip="sonnet_5_5_unattested")
+        db.commit()
+        return None
     plan = parse_plan(result.get("output"), {r["ref"] for r in _candidates(frontier, evidence)})
     if plan is None:
-        _checkpoint(run, coordinator_skip="plan_validation_failed",
-                    coordinator_model=result.get("concrete_model"))
+        _checkpoint(run, coordinator_skip="plan_validation_failed")
         db.commit()
         return None
     _checkpoint(run, coordinator_key=key, coordinator_order=plan["order"],
                 coordinator_primary=plan["primary"], coordinator_decomposition=plan["decomposition"],
-                coordinator_next_action=plan["next_action"], coordinator_lane=lane,
-                coordinator_model=result.get("concrete_model"),
-                coordinator_usage=result.get("provider_usage"),
+                coordinator_next_action=plan["next_action"],
                 coordinator_high_consequence=high_consequence(cp, run.counters))
     db.commit()
     return plan

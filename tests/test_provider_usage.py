@@ -271,6 +271,13 @@ def test_execute_claude_isolated_config_dir_and_neutral_cwd(tmp_path, monkeypatc
         captured.update(kwargs)
         return FakeProc()
 
+    def fake_run(args, **kwargs):
+        captured["auth_args"] = args
+        captured["auth_kwargs"] = kwargs
+        return subprocess.CompletedProcess(args, 0, json.dumps({
+            "loggedIn": True, "authMethod": "claude.ai", "apiProvider": "firstParty", "subscriptionType": "pro"}))
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
     monkeypatch.setattr(subprocess, "Popen", fake_popen)
     monkeypatch.setattr(P, "home", classmethod(lambda cls: tmp_path))
     real_creds = tmp_path / ".claude" / ".credentials.json"
@@ -296,4 +303,8 @@ def test_execute_claude_isolated_config_dir_and_neutral_cwd(tmp_path, monkeypatc
     assert json.loads((config_dir / "settings.json").read_text()) == {"disableAllHooks": True}
     assert (config_dir / ".credentials.json").is_symlink()
     assert str(captured["cwd"]).endswith("claude-lane/cwd")
+    # the pre-inference auth attestation runs under the SAME stub env and neutral cwd
+    assert captured["auth_args"] == [str(launcher), "auth", "status"]
+    assert P(captured["auth_kwargs"]["env"]["CLAUDE_CONFIG_DIR"]) == config_dir
+    assert str(captured["auth_kwargs"]["cwd"]).endswith("claude-lane/cwd")
     assert P(captured["cwd"]).is_dir()

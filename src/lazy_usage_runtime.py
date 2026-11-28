@@ -860,12 +860,12 @@ def _assess(frontier, run, record):
 
 
 def _ordered(frontier, plan=None):
+    order = plan.get("order") if plan else None
+    rank = {ref: i for i, ref in enumerate(order)} if isinstance(order, list) else {}
+    # Advisory order breaks ties within the owner queue and its priority.
     rows = sorted(frontier["records"], key=lambda r: (
-        portfolio.RANK[r["bucket"]], portfolio.PRIORITY.get(str(r.get("priority", "")).lower(), 9), r["ref"]))
-    if plan and isinstance(plan.get("order"), list):
-        # Coordinator advice reorders candidates; every gate is unchanged.
-        rank = {ref: i for i, ref in enumerate(plan["order"])}
-        rows.sort(key=lambda r: rank.get(r["ref"], len(rank)))
+        portfolio.RANK[r["bucket"]], portfolio.PRIORITY.get(str(r.get("priority", "")).lower(), 9),
+        rank.get(r["ref"], len(rank)), r["ref"]))
     return [r for r in rows if r["bucket"] not in {"inbox", "blocked", "blocked-human"}
             and str(r.get("status", "")).lower() not in TASK_TERMINAL]
 
