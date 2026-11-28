@@ -92,6 +92,8 @@ hosts:
       enabled: true
       transport: local
       qualified_executors: [deterministic, local, codex, codex-write, glm, claude]
+      # `claude-sonnet` additionally requires exact 5.5 and unattended
+      # permission/billing evidence for the opted-in coordinator route.
       # Tools a card may require (`requires_web`, `requires_mcp`, `requires_zotero`); /lazyUsage
       # refuses a card whose requirement the selected host does not declare. Only what is
       # evidenced is listed: outbound HTTPS was probed from this host on 2026-11-19 (GitHub 200,
@@ -100,7 +102,7 @@ hosts:
       qualification_evidence:
         - docs/aoteru-lm4-production-canary-evidence.md
         - docs/aoteru-p12-active-estate-convergence-evidence.md
-        - docs/runtime-work-packages/2026-11-16-lazyusage-sonnet-coordinator-lab.md  # glm read-only advisory (incl. flash launcher), live-attested 2026-11-16
+        - docs/runtime-work-packages/2026-11-16-lazyusage-sonnet-coordinator-lab.md  # historical advisory evidence; Flash requires its own qualification
         - docs/runtime-work-packages/2026-11-18-claude-sonnet-lane-usage-collection.md  # claude subscription advisory lane, live-attested 2026-11-18
     tailscale: true  # cap/is-admin, cap/is-owner, cap/ssh on this node's identity
     inventoried_at: "2026-08-19"

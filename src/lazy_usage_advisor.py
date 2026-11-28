@@ -451,7 +451,7 @@ def run_checkpoint(db, run):
         if result is not None:
             refused = estate_router._provider_outcome(result).get("state") in {"quota_exhausted", "rate_limited"}
             if not refused and result.get("executed") is not False:
-                coordinator._meter_tokens(run, result)
+                coordinator._meter_tokens(run, result, reserved=False)
         cp_now = run.checkpoint or {}
         return (run.state == "paused" and cp_now.get("next_action") == "advisor_review"
                 and cp_now.get("pause_reason") == "advisor checkpoint" and state(run).get("attempted_key") == key)

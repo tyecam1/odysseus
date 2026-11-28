@@ -1858,6 +1858,10 @@ def execute_claude(objective: str, *, timeout: float = 120.0, role: str = "sonne
     if not isinstance(objective, str) or not objective.strip():
         return {**base, "ok": False, "executed": False, "error_code": "nonzero_exit",
                 "error": "claude objective must be a non-empty string"}
+    base_url = os.getenv("ANTHROPIC_BASE_URL", "").rstrip("/")
+    if base_url and base_url != "https://api.anthropic.com":
+        return {**base, "ok": False, "executed": False, "error_code": "auth_failed",
+                "error": "Claude subscription lane requires the first-party Anthropic endpoint"}
     health = provider_allows_dispatch("claude", launch_timeout=timeout) if os.getenv("DATABASE_URL") else {
         "allowed": False, "reason": "provider claude: authoritative DATABASE_URL required", "state": "unknown"}
     if not health["allowed"]:
@@ -1891,16 +1895,37 @@ def execute_claude(objective: str, *, timeout: float = 120.0, role: str = "sonne
                 link.symlink_to(Path.home() / ".claude" / ".credentials.json")
             except OSError:
                 pass  # typed auth_failed below if the login is unreachable
+        lane_env = {**os.environ, "CLAUDE_CONFIG_DIR": str(config_dir)}
+        try:
+            auth = subprocess.run(
+                [str(launcher), "auth", "status"], stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+                timeout=min(5.0, timeout), cwd=lane_cwd, env=lane_env,
+            )
+            status = json.loads(auth.stdout) if auth.returncode == 0 else None
+        except (ValueError, subprocess.TimeoutExpired):
+            status = None
+        if (not isinstance(status, dict) or status.get("loggedIn") is not True
+                or status.get("authMethod") != "claude.ai" or status.get("apiProvider") != "firstParty"
+                or not isinstance(status.get("subscriptionType"), str)
+                or not status["subscriptionType"].strip() or status.get("apiKeySource")):
+            outcome["error_code"] = "auth_failed"
+            return {**base, "ok": False, "executed": False, "error_code": "auth_failed",
+                    "error": "Claude Code did not attest a first-party Claude subscription login"}
+        remaining = timeout - (time.monotonic() - started)
+        if remaining <= 0:
+            outcome["error_code"] = "timeout"
+            return {**base, "ok": False, "executed": False, "error_code": "timeout",
+                    "error": "Claude Code deadline elapsed before inference"}
         proc = subprocess.Popen(
             [str(launcher), "--print", "--output-format", "json", "--model", _claude_model_alias() if role == "sonnet" else role,
              "--max-turns", "1",
-             "--disallowedTools", "Bash,Write,Edit,NotebookEdit,WebFetch,WebSearch,Task,Skill,Agent,TodoWrite,Read,Grep,Glob",
+             "--tools", "", "--disallowedTools", "*",
              "--strict-mcp-config", "--disable-slash-commands", "--no-session-persistence"],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, start_new_session=True, cwd=lane_cwd,
-            env={**os.environ, "CLAUDE_CONFIG_DIR": str(config_dir)},
+            text=True, start_new_session=True, cwd=lane_cwd, env=lane_env,
         )
-        stdout, stderr = proc.communicate(input=objective, timeout=timeout)
+        stdout, stderr = proc.communicate(input=objective, timeout=remaining)
         for token in objective.split():
             stderr = re.sub(re.escape(token), "\ue000", stderr, flags=re.I)
         stderr = stderr[:2000]
