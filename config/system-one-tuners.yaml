@@ -1,0 +1,29 @@
+version: 1
+profiles:
+  contribution:
+    adversariality: 0.45
+    novelty_priority: 0.8
+    exploration: 0.75
+    evidence_strictness: 0.8
+    prior_art_pressure: 0.85
+    attribution_pressure: 0.7
+    industrial_grounding: 0.7
+    stopping_pressure: 0.4
+  red-team:
+    adversariality: 0.95
+    novelty_priority: 0.65
+    exploration: 0.65
+    evidence_strictness: 0.95
+    prior_art_pressure: 0.9
+    attribution_pressure: 0.9
+    industrial_grounding: 0.65
+    stopping_pressure: 0.5
+  consolidation:
+    adversariality: 0.55
+    novelty_priority: 0.35
+    exploration: 0.25
+    evidence_strictness: 0.9
+    prior_art_pressure: 0.65
+    attribution_pressure: 0.8
+    industrial_grounding: 0.75
+    stopping_pressure: 0.8

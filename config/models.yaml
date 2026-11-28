@@ -324,3 +324,21 @@ economic_ladder:
     mechanism: sol-class
   - rung: 6
     mechanism: opus-class
+
+# Native research decision protocols. These entries describe integration
+# candidates. Only reviewed held-out bindings can enable production calls.
+system_one:
+  adapters:
+    jev:
+      enabled: false
+      placement: remote
+      primitives: [choice, score, noul]
+    clm-8b:
+      enabled: false
+      placement: local
+      primitives: [choice, score, noul, rank]
+    laya:
+      enabled: false
+      placement: local
+      primitives: [choice, score, noul]
+  bindings: []

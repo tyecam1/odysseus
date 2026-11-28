@@ -2787,3 +2787,204 @@ from src.estate_write_lane import (  # noqa: E402
     reconcile_stale_estate_executions,
     recover_execution_lease,
 )
+
+
+# Research requests have an explicit finite response space. They do not enter
+# run_task's generative fallback or acquire repository write authority.
+_SYSTEM_ONE_TASKS = {
+    "next-action": {"choice"},
+    "information-gain": {"noul"},
+    "escalation": {"noul"},
+    "paper-triage": {"choice", "rank"},
+    "closest-prior": {"choice", "rank"},
+    "claim-ceiling-risk": {"score"},
+    "attribution-risk": {"noul"},
+    "stopping": {"noul"},
+    "contract-adherence": {"choice", "score", "noul"},
+    "best-of-n": {"choice", "rank"},
+}
+_RESEARCH_ACTIONS = frozenset({
+    "counterexample-search", "closest-prior-search", "search", "comparator-check",
+    "industrial-comparator-search", "extract", "attribution-check", "synthesise", "verify", "stop",
+})
+
+
+def research_decision_providers() -> dict:
+    """Return configured native capabilities and switches without probing providers."""
+    adapters = _load_yaml("models").get("system_one", {}).get("adapters", {})
+    return {provider: {"enabled": entry.get("enabled") is True, "placement": entry["placement"],
+                       "primitives": list(entry["primitives"])} for provider, entry in adapters.items()}
+
+
+def research_decision(task_class, decision, *, parent_run_id, profile="contribution",
+                      overrides=None, language="en", max_latency_ms=1000,
+                      high_consequence=False, conflicting_evidence=False,
+                      verification_required=False, max_brier=1.0, min_accuracy=0.0):
+    """Request advisory prioritisation with held-out, host-scoped bindings.
+
+    Trusted research callers construct the finite request and supply the
+    consequence flags from their governed workflow. This entry point does
+    not execute actions, record evidence decisions or invoke hosted Jev.
+    """
+    from src.system_one import CONTRACT, Decision, DecisionError, configured_adapter, derive_behaviour, tuner_vector
+
+    if not isinstance(task_class, str) or task_class not in _SYSTEM_ONE_TASKS or not isinstance(decision, Decision):
+        raise DecisionError("Expected a recognised research task class and a typed Decision")
+    if decision.primitive not in _SYSTEM_ONE_TASKS[task_class]:
+        raise DecisionError("Primitive is unsupported for this research task")
+    if task_class == "next-action" and set(decision.keys) - _RESEARCH_ACTIONS:
+        raise DecisionError("Next-action recommendations require recognised research workflow steps")
+    if not isinstance(parent_run_id, str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", parent_run_id):
+        raise DecisionError("A bounded parent run identifier is required")
+    if type(max_latency_ms) is not int or max_latency_ms <= 0:
+        raise DecisionError("A positive millisecond budget is required")
+    if not 0 <= max_brier <= 1 or not 0 <= min_accuracy <= 1:
+        raise DecisionError("Expected quality constraints in [0, 1]")
+    tuners = tuner_vector(_load_yaml("system-one-tuners"), profile, overrides)
+    behaviour = derive_behaviour(tuners)
+    spec = _load_yaml("models").get("system_one", {})
+    answer = None
+    route = None
+    if high_consequence or conflicting_evidence or verification_required:
+        reason = "governed_verification_required"
+    else:
+        reason = "no_adequate_system_one_route"
+        bindings = [item for item in spec.get("bindings", ()) if item.get("task_class") == task_class]
+        if bindings:
+            host = current_host_id()
+            hosts = {item["host_id"]: item for item in eligible_hosts() if item["eligible"]}
+            eligible = []
+            for item in bindings:
+                adapter = spec.get("adapters", {}).get(item.get("provider"), {})
+                if (host is None or host not in hosts or item.get("host") != host
+                        or adapter.get("enabled") is not True or adapter.get("placement") != "local"
+                        or item.get("primitive") != decision.primitive
+                        or decision.primitive not in adapter.get("primitives", ())
+                        or item.get("contract") != CONTRACT or language not in item.get("languages", ())
+                        or decision.size_bytes > item.get("max_request_bytes", 0)
+                        or not item.get("min_options", 256) <= len(decision.keys) <= item.get("max_options", 0)
+                        or not 0 < item.get("p95_latency_ms", 0) <= max_latency_ms
+                        or not 0 <= item.get("brier", -1) <= min(max_brier, item.get("brier_ceiling", -1))
+                        or not max(min_accuracy, item.get("accuracy_floor", 2)) <= item.get("accuracy", -1) <= 1
+                        or not 1 / len(decision.keys) <= item.get("min_confidence", 0) <= 1
+                        or "local" not in hosts[host].get("qualified_executors", ())
+                        or item.get("reviewed") is not True or not item.get("held_out_evidence")):
+                    continue
+                eligible.append((item, adapter))
+            if eligible:
+                route, adapter = min(eligible, key=lambda pair: (
+                    pair[0]["p95_latency_ms"], pair[0]["brier"], -pair[0]["accuracy"], pair[0]["provider"],
+                ))
+                try:
+                    native = configured_adapter(route["provider"], adapter["placement"], adapter["primitives"],
+                                                route["model"], route["checkpoint"], route["endpoint"])
+                    answer = native.decide(decision, timeout=max_latency_ms / 1000)
+                    reason = answer.escalation_reason
+                    if answer.latency_ms > max_latency_ms:
+                        reason = "latency_budget_exceeded"
+                except DecisionError as exc:
+                    reason = str(exc)
+
+    confidence_floor = route["min_confidence"] if route else None
+    continuation = behaviour["continuation_threshold"]
+    priorities = {}
+    selected = None
+    if answer and reason is None:
+        if answer.confidence < confidence_floor or list(answer.probabilities.values()).count(answer.confidence) > 1:
+            reason = "low_confidence"
+        else:
+            priorities = dict(answer.probabilities)
+            if task_class == "next-action":
+                for action, pressure in (
+                    ("counterexample-search", behaviour["counterexample_pressure"]),
+                    ("closest-prior-search", behaviour["closest_prior_pressure"]),
+                    ("search", behaviour["search_breadth"]),
+                    ("comparator-check", behaviour["comparator_scrutiny"]),
+                    ("industrial-comparator-search", tuners["industrial_grounding"]),
+                    ("verify", behaviour["claim_conservatism"]),
+                ):
+                    if action in priorities:
+                        priorities[action] *= 0.75 + 0.5 * pressure
+            selected = max(priorities, key=priorities.__getitem__)
+            if answer.probabilities[selected] < confidence_floor:
+                reason, selected = "low_confidence_after_prioritisation", None
+            elif (task_class == "information-gain" and decision.primitive == "noul"
+                  and answer.probabilities["true"] < continuation):
+                reason, selected = "continuation_threshold_not_met", None
+
+    decision_id = _record_decision({"task_class": f"research-system-one:{task_class}"},
+                                   host_id=route["host"] if route else None,
+                                   executor="system-one" if route else "none", model_alias=None,
+                                   concrete_model=answer.model if answer else None,
+                                   status="escalated" if reason else "advisory")
+    trace = {
+        "decision_id": decision_id, "parent_run_id": parent_run_id, "task_class": task_class,
+        "profile": profile, "tuner_version": 1, "tuner_vector": tuners, "decision_contract": CONTRACT,
+        "role": "verifier" if task_class in {"contract-adherence", "claim-ceiling-risk", "attribution-risk"} else "planner",
+        "provider": route.get("provider") if route else None,
+        "model": answer.model if answer else None, "checkpoint": answer.checkpoint if answer else None,
+        "candidate_set_hash": decision.candidate_hash,
+        "probabilities": [answer.probabilities[key] for key in decision.keys] if answer else None,
+        "selected_action": decision.keys.index(selected) if selected is not None else None,
+        "thresholds": {"confidence": confidence_floor, "continuation": continuation},
+        "gate_flags": {"high_consequence": bool(high_consequence), "conflicting_evidence": bool(conflicting_evidence),
+                       "verification_required": bool(verification_required)},
+        "placement": answer.placement if answer else None,
+        "latency_ms": answer.latency_ms if answer else None, "usage": answer.usage if answer else None,
+        "estimated_cost_usd": answer.estimated_cost_usd if answer else None,
+        "downstream_outcome": None, "verifier_agreement": None, "human_agreement": None,
+    }
+    stored = _update_decision_outcome(
+        decision_id, status="escalated" if reason else "advisory", deterministic_gate="typed_decision",
+        latency_ms=round(answer.latency_ms) if answer else None, escalated=reason is not None,
+        escalation_reason=(reason or "advisory") + " |system_one=" + json.dumps(trace, separators=(",", ":")),
+    )
+    if selected is not None and not stored:
+        reason, selected = "decision_telemetry_unavailable", None
+        trace["selected_action"] = None
+    ranked = sorted(priorities, key=priorities.__getitem__, reverse=True) if selected is not None else []
+    return {"answer": answer, "selected": selected, "ranked": ranked, "advisory_only": True,
+            "escalation_reason": reason, "telemetry": trace, "telemetry_persisted": stored}
+
+
+def record_research_decision_outcome(decision_id: str, parent_run_id: str, *,
+                                     downstream_outcome=None, verifier_agreement=None, human_agreement=None) -> bool:
+    """Attach observed outcomes from trusted callers to the original advisory trace."""
+    from core.database import RoutingDecision, get_db_session
+    from src.system_one import CONTRACT, DecisionError
+
+    if downstream_outcome not in (None, "used", "overridden", "rejected", "escalated"):
+        raise DecisionError("Unknown downstream outcome")
+    if any(value is not None and type(value) is not bool for value in (verifier_agreement, human_agreement)):
+        raise DecisionError("Agreement must be observed as a boolean")
+    observed = {"downstream_outcome": downstream_outcome, "verifier_agreement": verifier_agreement,
+                "human_agreement": human_agreement}
+    with get_db_session() as db:
+        row = db.get(RoutingDecision, decision_id, with_for_update=True)
+        if row is None or not row.task_class.startswith("research-system-one:"):
+            return False
+        prior = row.escalation_reason or ""
+        prefix, separator, encoded = prior.partition(" |system_one=")
+        if not separator:
+            return False
+        try:
+            trace = json.loads(encoded)
+        except ValueError:
+            return False
+        if not isinstance(trace, dict):
+            return False
+        if trace.get("parent_run_id") != parent_run_id or trace.get("decision_contract") != CONTRACT:
+            return False
+        if downstream_outcome == "used" and trace.get("selected_action") is None:
+            return False
+        for key, value in observed.items():
+            if value is not None:
+                if trace.get(key) is not None and trace[key] != value:
+                    return False
+                trace[key] = value
+        updated = prefix + separator + json.dumps(trace, separators=(",", ":"))
+        # Compare and swap covers SQLite, where SELECT FOR UPDATE is ignored.
+        changed = db.query(RoutingDecision).filter(RoutingDecision.id == decision_id,
+                                                   RoutingDecision.escalation_reason == prior).update(
+            {RoutingDecision.escalation_reason: updated}, synchronize_session=False)
+        return changed == 1
