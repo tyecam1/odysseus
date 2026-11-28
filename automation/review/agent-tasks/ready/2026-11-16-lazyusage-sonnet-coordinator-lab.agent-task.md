@@ -124,3 +124,10 @@ Deploy **Claude Sonnet 5.5 as the bounded planning, decomposition, progress-reco
 - Live queued work delivers with authentic verification, trace, status reconciliation and rollback. Final report distinguishes implemented, deployed, proven and owed.
 
 Do not broaden the deployment into a comparative harness exercise. Ship the smallest valid vertical slice first, with later provider enablement strictly dependent on existing qualifications.
+
+## Controller evidence record (2026-11-28)
+
+- **independent review + verification evidence** (by claude-opus-5-5 via controller, read-only, 2026-11-28): claude-opus-5-5 reviewed the REJECTED commit 129540ec (never merged; not an ancestor of dev): **CHANGES_REQUIRED — the rejection is confirmed and justified.** The diff deletes the live-proven hook canary (`settings.json` `disableAllHooks` write, credentials symlink, `CLAUDE_CONFIG_DIR` override) and inverts its test, replacing evidenced isolation with unevidenced `--safe-mode --restricted` flags while re-exposing the operator's real user config. Retake-worthy parts (owner-priority fence, token reservation/reconciliation) are listed in the receipt. A new delivery needs a fresh review; no verification can be recorded for a rejected commit.
+- Commit: `129540ec (rejected)`
+- Full findings: `automation/review/agent-tasks/review-receipts/REVIEW-opus-4debts-20261128.md` (Opus 5.5).
+- Owner acceptance of this card remains a separate human gate; nothing here closes it.

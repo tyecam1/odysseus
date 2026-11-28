@@ -120,3 +120,10 @@ notes: "Operator-requested enablement. This is the missing operational qualifica
 - Preflight, status, health and fallback distinguish provider outage from worker outage; Codex remains preferred while healthy and existing lease/verification rules survive switching.
 - Relevant regression suites pass; deployed lab paths are re-tested after restart; evidence and rollback recorded at `result_path`. Task remains unfinished until these real-path proofs exist.
 - If one provider route requires a genuinely protected human credential/account action, provide only the exact action and evidence, continue independent work, and leave that route unqualified. Never weaken security to claim completion.
+
+## Controller evidence record (2026-11-28)
+
+- **independent review + verification evidence** (by claude-opus-5-5 via controller, read-only, 2026-11-28): claude-opus-5-5 reviewed commit d7304448 (merged PR #297, with #301): **APPROVE_WITH_CONDITIONS** — good fail-closed routing (glm-flash remaps onto the glm launch reservation; implementation-vs-review roles enforced), honest docs (EPERM socket, Flash unqualified, rollback owed). Condition recorded: the partial `provider_usage` P1 that GLM's first pass missed was charged as a measured total and is fixed only by #301, so this record cites both. 104 deterministic tests pass (`test_glm_readonly_provider.py`, 2026-11-28). Card acceptance stays open: Flash qualification, real HTTP canary, failover, rollback.
+- Commit: `d7304448`
+- Full findings: `automation/review/agent-tasks/review-receipts/REVIEW-opus-4debts-20261128.md` (Opus 5.5).
+- Owner acceptance of this card remains a separate human gate; nothing here closes it.
