@@ -1,0 +1,105 @@
+# Development cases reconstructed from existing J1 verification summaries.
+# The source resolves the historical outcome. Independent review of each
+# reconstruction is required before moving a research unit into held-out.
+cases:
+  - id: next-action-author-boundary
+    research_unit: j1-gate45-packet-v3
+    split: development
+    task_class: next-action
+    primitive: choice
+    source: evals/prompt-applications/j1-long-horizon-method-loop/2026-09-29-j1-long-horizon-method-loop-03.yaml
+    adjudication: The source-repair run documented that remaining groups were access-limited or author-controlled.
+    state: Both newly available texts were checked. Outstanding evidence groups require lawful access or author judgement.
+    question: Which next step should the agent prioritise?
+    candidates:
+      verify: Escalate the unresolved author-controlled dependencies with source and access details.
+      synthesise: Turn the remaining source gaps into substantive statements in the draft.
+    expected: verify
+    requires_governance: true
+  - id: primary-source-priority
+    research_unit: j1-workforce-residual
+    split: development
+    task_class: paper-triage
+    primitive: choice
+    source: evals/prompt-applications/j1-long-horizon-method-loop/2026-09-29-j1-long-horizon-method-loop-04.yaml
+    adjudication: Continuation 36 inspected the open full text to close a figure-level evidence gap while other texts remained access-limited.
+    state: A figure-level comparison remains unresolved. One record contains accessible publisher figures and the other has an abstract with no figure data.
+    question: Which record should receive full-text inspection priority for the comparison?
+    candidates:
+      abstract-only: Abstract-tier workforce lead, with no results figures available.
+      publisher-figures: Publisher full text with the relevant results figures.
+    expected: publisher-figures
+  - id: closest-prior-occupancy
+    research_unit: j1-prior-occupancy-packet-24
+    split: development
+    task_class: closest-prior
+    primitive: choice
+    source: evals/prompt-applications/j1-long-horizon-method-loop/2026-09-29-j1-long-horizon-method-loop-02.yaml
+    adjudication: The independent packet summary identified Brouwer 2015 as the strongest collision.
+    state: Compare priors by conceptual overlap with the central synthesis. A direct prior occupancy case and a comparative sample-design anchor are available.
+    question: Which lead should receive the closest-prior check first?
+    candidates:
+      sample-design: QB1, a case anchor for the unit and denominator of the comparison.
+      direct-overlap: Brouwer 2015, a case with potential occupancy of the synthesis itself.
+    expected: direct-overlap
+  - id: ceiling-proposition-one
+    research_unit: j1-proposition-review-packet-29
+    split: development
+    task_class: claim-ceiling-risk
+    primitive: score
+    source: evals/prompt-applications/j1-long-horizon-method-loop/2026-09-30-j1-long-horizon-method-loop-01.yaml
+    adjudication: The proposition-level review explicitly recorded P1 as supported as a hypothesis.
+    state: The available material supports posing a proposition for investigation. Its proposed empirical test has design defects.
+    question: Which evidence level should the reviewer flag as supported for this proposition?
+    candidates:
+      - No documented basis to investigate
+      - Documented hypothesis with empirical verification pending
+      - Demonstrated proposition
+    expected: '1'
+    requires_governance: true
+  - id: headline-attribution
+    research_unit: j1-intervention-replay-sample
+    split: development
+    task_class: attribution-risk
+    primitive: noul
+    source: evals/prompt-applications/j1-long-horizon-method-loop/2026-09-30-j1-long-horizon-method-loop-02.yaml
+    adjudication: Audit treated design or outlook statements separately from measured attribution claims.
+    state: A paper headline reports a benefit, but the text only proposes a future benefit and contains no isolating contrast for it.
+    question: Does using the headline as evidence of attributable benefit require verification?
+    expected: 'true'
+    requires_governance: true
+  - id: fixed-stopping-rule
+    research_unit: j1-intervention-replay-sample
+    split: development
+    task_class: stopping
+    primitive: noul
+    source: evals/prompt-applications/j1-long-horizon-method-loop/2026-09-30-j1-long-horizon-method-loop-02.yaml
+    adjudication: The trace marked the sample as below its cap with the unchanged-block test still unperformed.
+    state: The run reached 49 of the 80-study cap with no unchanged-block check. Provider quota interrupted processing.
+    question: Has the registered scientific stopping condition been demonstrated?
+    expected: 'false'
+    requires_governance: true
+  - id: invalid-evidence-packet-independence
+    research_unit: j1-review-packet-25
+    split: development
+    task_class: contract-adherence
+    primitive: noul
+    source: evals/prompt-applications/j1-long-horizon-method-loop/2026-09-29-j1-long-horizon-method-loop-03.yaml
+    adjudication: The report recorded that the required withholding could not be mechanically honoured when the complete file was displayed.
+    state: The independent reviewer is asked to answer before seeing a section of a file, but the read operation displays the complete file.
+    question: Is there a material risk of violating reviewer independence?
+    expected: 'true'
+    requires_governance: true
+  - id: alternate-denominators
+    research_unit: j1-qb1-source-recheck
+    split: development
+    task_class: best-of-n
+    primitive: rank
+    source: evals/prompt-applications/j1-long-horizon-method-loop/2026-09-29-j1-long-horizon-method-loop-02.yaml
+    adjudication: The source recheck corrected sample and trial counts, and the independent check confirmed the source-derived baseline facts.
+    state: The paper's analysis uses 12 groups and gives trial totals of 928 and 705.
+    question: Which extraction should be inspected first for the comparison?
+    candidates:
+      - Uses the source's 12 analysis groups and reports both trial totals.
+      - Substitutes a 36-person within-subject sample for the reported analysis groups.
+    expected: Uses the source's 12 analysis groups and reports both trial totals.
