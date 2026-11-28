@@ -266,3 +266,10 @@ Do not integrate all three merely for symmetry if one adds no distinct capabilit
 - synthetic benchmark volume without a routing decision;
 - custom training before zero-shot evidence;
 - parallel calls to every provider on every decision.
+
+## Controller verification record (2026-11-28)
+
+- **verification_evidence**: result: pass. ref: merged PR #342 (squash `d54d709`), task commits `452b8544` + `17fc891d`, lazyUsage run `21fdcdc0`. verified_by: controller (deterministic) — full lab suite on the delivery branch 10978 passed, 47 skipped, 5 xfailed (2026-11-28); targeted: test_system_one.py 8 passed, router/models/config regressions 131-135 passed.
+- **review_evidence**: recorded. claude-opus-5-5 (cross-family to the Codex author), read-only, 2026-11-28: APPROVE_WITH_CONDITIONS — no gate bypass, additive fail-closed router, inert stock config, no secrets. Both conditions discharged (per-suite test figure in the model note; self-attested-tuners rule recorded). Full receipt: `automation/review/agent-tasks/review-receipts/REVIEW-opus-system-one-20261128.md`.
+- **Standing rule from the review**: `reviewed`/`held_out_evidence` fields in `config/system-one-tuners.yaml` are self-attested; the first binding change to that file must cite review evidence naming the change.
+- **Owner acceptance remains open** (human gate): live capability behaviour (a real Jev/CLM-8B/Laya routing decision on the lab), and any deployment decision. Nothing in this record closes them.
