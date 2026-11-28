@@ -138,3 +138,10 @@ Deliver: (a) source/coverage inventory and actual backlog baseline; (b) reproduc
 - Leveson, *CAST/STPA*: use systemic causal analysis for consequential cross-layer failures, not naive blame or a single 'root cause'. https://www.mit.stamp-institute.com/handbooks
 
 The design must explicitly distinguish observation, plausible explanation, verified mechanism, and experimentally supported improvement.
+
+## Controller evidence record (2026-11-28)
+
+- **independent review + verification evidence** (by claude-opus-5-5 via controller, read-only, 2026-11-28): claude-opus-5.5 reviewed lab commit a6f5d34c (merged PR #309): **APPROVE_WITH_CONDITIONS** — docs-only, in scope, read-only discipline in the reproduction SQL (`mode=ro`, `query_only`, ROLLBACK), secrets excluded; figures internally consistent but unverified against live state. Condition recorded: the earlier GLM-5.3 APPROVE existed only as PR-body text with no durable receipt; this receipt now provides one. Card acceptance stays open per its own deferral rules.
+- Commit: `a6f5d34c`
+- Full findings: `automation/review/agent-tasks/review-receipts/REVIEW-opus-4debts-20261128.md` (Opus 5.5).
+- Owner acceptance of this card remains a separate human gate; nothing here closes it.

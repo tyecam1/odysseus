@@ -118,3 +118,10 @@ The lab's GLM execution remains **read-only and not production-qualified** pendi
 The backend run ends or pauses only for a recorded terminal state: authorised work exhausted, explicit operator stop, verified budget limit, genuine protected approval, or no currently qualified route with a bounded event-based recheck. Persist pending work and review debt; never label an incomplete task shipped. A finished activation does **not** automatically start another billable activation.
 
 This task is shipped only after the real, lab-hosted, client-independent, restart-resilient backend loop is demonstrated and deployed. If existing Odysseus service architecture cannot perform it without a major redesign, record that precise technical blocker and preserve the current bounded manual /lazyUsage route rather than adding another harness.
+
+## Controller evidence record (2026-11-28)
+
+- **independent review + verification evidence** (by claude-opus-5-5 via controller, read-only, 2026-11-28): claude-opus-5-5 reviewed commits 14bdc71d/522f30e8 (merged PR #295): **APPROVE** — the exit-zero-prose verification hole is genuinely closed (`worker_finalize_attested` dropped, `verify_attempt` no longer accepts prose), docs state not-shipped and every ledger row says owed. Deterministic suites passed on the current lab tree (10,969 on 2026-11-26). The card's own remaining acceptance (a real end-to-end write-lane activation with live governance demos) is still owed and gated on provider quota.
+- Commit: `14bdc71d, 522f30e8`
+- Full findings: `automation/review/agent-tasks/review-receipts/REVIEW-opus-4debts-20261128.md` (Opus 5.5).
+- Owner acceptance of this card remains a separate human gate; nothing here closes it.
